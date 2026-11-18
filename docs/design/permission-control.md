@@ -5,6 +5,12 @@
 > dangerous work always asks a human for at most the current task. See
 > [permission-friction.md](permission-friction.md); the sections below that it changes
 > (§3.5, §6.3, §7.2–7.5) are summarized there.
+>
+> **2026-11-18:** a dangerous command the owner's own words ask for ("pr 给main 没问题合并",
+> "release a new version from main") runs without a dialog: the reviewing model quotes
+> those words and names what the command acts on, and the code checks both (§7.3.1).
+> Only words a person wrote count; a plan's brief, an orchestrator's steering or a
+> subagent's task never do.
 
 Status: **phases 0–4 implemented** (Runtime 1.1.0.2; off by default since 1.1.0.3; leaving the sandbox since 1.1.0.4, which needs Cypher 0.3.49; §10).
 
@@ -518,8 +524,8 @@ Safety rules:
    (`ask-user`, any other word, unreadable output, an error, a timeout, no model
    available) asks the user, and the dialog says *"The reviewing model could not approve
    this automatically: <reason>"*. The reason is also recorded in the audit log
-   (`reviewer`), with what the model answered (`judgeVerdict`). Its approval never runs a
-   danger: the user decides, with the model's reason.
+   (`reviewer`), with what the model answered (`judgeVerdict`). A danger needs more than
+   an approval: the code must confirm the owner's explicit request (§7.3.1).
 3. A judge `approve` of local work is kept for the chat (a file access as a `chat` grant;
    a command as `chat` grants for its commands' own categories, never the agent's proposed
    patterns); `approve-once` and any approval of a sensitive file or a danger keep nothing.
@@ -536,9 +542,12 @@ When several paths are requested together, the strictest mode wins.
   tools, where it would otherwise refuse a system prompt the chat never recorded. A judge
   that fails says why in the dialog's Review row (the provider's error, or that it did
   not answer in time).
-- **Trusted input**: the user's last six messages, the request (capability: `read`,
-  `write`, `network`, `tool` or `escalate`; paths, zone, guard and why, tool, level,
-  workspace roots).
+- **Trusted input**: the conversation's last six user messages, the request (capability:
+  `read`, `write`, `network`, `tool` or `escalate`; paths, zone, guard and why, tool,
+  level, workspace roots). For a danger, also the owner's own words (§7.3.1) and what the
+  command acts on as Cypher read it. When some user messages were written by an agent (a
+  plan's brief, an orchestrator's steering), the prompt says so: they count for local
+  development work only.
 - **Untrusted input**, fenced in `<untrusted>` (nested tags stripped): the command, a tool
   call's input, the agent's justification (for a command, its purpose and reason), its
   last eight tool calls, and the change for writes.
@@ -556,19 +565,102 @@ When several paths are requested together, the strictest mode wins.
   the project's pinned dependencies included), the chat's own private dev instance
   (`~/.cypher-development/<instance>`, run from its worktree), screenshots into `/tmp`,
   read-only process checks (`ps`, `lsof`, `sample`, `lsappinfo info`). In a plan's
-  background session the brief's steps count as the user's request. Never the installed
-  app, other chats' worktrees or dev instances, credentials, or data leaving the machine.
-- **Output**: `{"decision": "approve" | "approve-once" | "ask-user", "reason"}`. Two
+  background session the brief's steps count as the user's request for this local work,
+  never for a danger (§7.3.1). Never the installed app, other chats' worktrees or dev
+  instances, credentials, or data leaving the machine.
+- **Output**: `{"decision": "approve" | "approve-once" | "ask-user", "reason"}`, and for
+  an approved danger `"userQuote"` and `"target": {"kind", "value"}` (§7.3.1). Two
   outcomes follow: `approve` or `approve-once` runs the call, `ask-user` puts it to the
   user with the reason. `approve-once` runs the call and keeps nothing: the answer when
   the call is fine but the patterns an approval would keep for the chat are too broad
   (`cypher …`, `lsappinfo …`, a script the agent wrote); that alone is never a reason to
   ask. A sensitive file the model approves is read or written once, never remembered. A
-  danger never runs on the model's approval: the user decides, and the dialog's Review
-  row gives the model's reason. Safety rests on the review prompt and the deterministic
-  classifier and hard rules (risk.ts, shell.ts, secrets, the installed app), not on a
-  score the model gives itself. Timeout 20 s.
+  danger runs on the model's approval only when the code confirms the explicit request
+  (§7.3.1). Safety rests on the review prompt, the deterministic classifier and hard rules
+  (risk.ts, shell.ts, secrets, the installed app), and that check, not on a score the
+  model gives itself. Timeout 20 s.
 - When the judge asks the user, its reason is shown in the dialog.
+
+#### 7.3.1 Explicit requests (2026-11-18)
+
+The owner: *"任何操作，比如创建pr，只要我消息明确说了，那就应该自动审核同意。而不是再让我同意一次"*
+(any operation, creating a PR for example: when my message said so explicitly, approve
+it, instead of asking me again). Code: `cypher-permissions/explicit.ts`.
+
+A dangerous command (risk.ts `reviewable`: publishing a package or a release, a global
+install, sending data to a server, opening, merging or commenting on a pull request,
+pushing a branch or a release tag) runs once, without a dialog, when:
+
+1. **The model approves it and quotes the owner** (`userQuote`).
+2. **The quote is the owner's.** It occurs in one of the owner's own messages, as written
+   apart from whitespace, case, punctuation and full-width forms (NFKC). It must say
+   something: "继续", "Continue", "go ahead", "ok", "发布吧" or "push 这个" alone never
+   do (a vague list, and a minimum length where a CJK character counts twice).
+3. **The target is the command's and the owner's.** Cypher reads what each dangerous
+   command acts on from the line (`lineTargets`): the pull request `gh pr merge 52`
+   merges (`-R` or its URL's repository), a new pull request's base and head, the branch
+   or tag `git push <remote> <ref>` publishes (a tag the line creates with `git tag x
+   <commit>`, an existing tag, a branch `git switch -c` makes), the release `gh release
+   create` makes, the package `npm`/`cargo publish` publishes (from `package.json` or
+   `Cargo.toml`), what a global install installs, the host `curl`, `ssh`, `scp` or
+   `rsync` reach. The model's `target` must be one of them, and the owner's message
+   holding the quote must ask for the action ("merge", "合并", "push", "推", "release",
+   "发布", "publish", "install", a PR) and name the target or plainly imply it:
+   - the pull request's number (`#52`, `PR 52`, `/pull/52`); without one, a message
+     asking to open a PR and merge it covers the one this chat opened (a `gh pr create`
+     whose result names exactly that pull request). A message naming #52 never covers #53;
+   - the branch by name (`main` in "pr 给main");
+   - the tag by name, or its version ("0.4.5"); or, for "release a new version" ("最新的
+     main代码发布全新版本吧"), a tag whose commit is on the remote's default branch (as last
+     fetched) and whose files hold the tag's version (`git grep -F -w`). A message naming
+     another version never covers it;
+   - the package's name or version; the host's name;
+   - a remote other than `origin`, or a repository other than the checkout's origin, by
+     name.
+4. **Nothing since takes it back.** Every message the owner wrote after it must carry on
+   ("好了 继续发布", "try again", one naming the same target): a retraction ("先别 push",
+   "不要合并", "wait", "cancel", "instead") or a message about something else makes the
+   request stale, so it asks.
+
+Still asked, whatever the model says: a target known only when the line runs (`git push
+origin $BRANCH`, `gh pr merge $(…)`, a `gh pr merge` that names no pull request, a tag
+pushed from a loop); kinds Cypher can't check against words (deploying, sending messages,
+stopping other processes, `gh api` writes); and every human-only danger, checked first:
+secrets or credentials leaving the machine, deleting, the administrator, the installed
+app, a line rules can't read, a rule the user set to ask or deny, downloading and running
+code. Words known only when the line runs are fine where they don't change the target: a
+pull request's `--body "$(cat …)"`, a title from a variable, a heredoc body,
+`--body-file`. The audit records each explicit decision (`explicit`: `ok`, the quote and
+whether it came from a typed message or a plan's instruction, the targets, which checks
+passed, or why not), and the dialog's Review row says why a quoted request wasn't
+confirmed.
+
+**Only the owner's words count.** The engine passes them in `CYPHER_OWNER_WORDS`, an
+environment variable the harness sets when it spawns Pi (`crates/harness/src/pi/spawn.rs`,
+beside `CYPHER_PERMISSION_LEVEL`): JSON `{"messages": [{"text", "source": "typed" |
+"plan"}], "agentWritten"}`, at most ten messages of 2,000 characters, 12,000 in all. A
+running agent can't change its own process's environment. The words come from the chat's
+command ledger, not from Pi's conversation, where agents' messages sit as user messages:
+
+- Every message command says who wrote it when no person did
+  (`SessionCommandEntry::author`, signed with the entry): `plan` for a plan's brief and the
+  prompts its background session starts and steers sessions with, `subagent` for a parent
+  chat's task, `routine`, `peer` (another person's workspace), `memory`. Only the
+  engine's own callers set it (`DocHost::queue_agent_command`); the RPC surface the UI and
+  agents use can't. Entries written before it existed are told by their message ids
+  (`*-brief`, `peer-*`, `bot-answer-*`) and, in a chat an agent started (a plan's session or
+  thread, a subagent, a workspace thread other than the owner's chat, a memory pass), by
+  being its first message.
+- A person's message counts once its host took it for execution (applied, or pending and
+  in the processed ledger); a rejected, expired or superseded one never does.
+- A plan's sessions and its background thread also get the owner's instruction from the
+  plan's record (`BotWork::instruction`, the owner's message it was proposed from,
+  capped at 1,500 characters), first. What the owner types into such a session counts
+  too; the start prompt, `steer_session` and `answer_session` (an answer, not a message)
+  never do.
+
+Without the variable (an older Cypher, or Pi started by hand), no danger runs on an
+explicit request.
 
 ### 7.4 Human approval
 
@@ -702,6 +794,11 @@ switches), never from another chat or a terminal; keys within 500 ms of the card
 and held-key repeats are ignored, so typing into the composer as a request arrives never
 answers it.
 
+An escalation's record may carry `explicit` (§7.3.1): whether a danger ran as the owner's
+explicit request, the words the model quoted and whether they were typed or a plan's
+instruction, what the line acts on, which checks passed (`quote`, `target`, `current`), or
+why not.
+
 Commands:
 
 - `/perm`: level, sandbox, workspace roots, defaults, approval modes, grants, command
@@ -724,6 +821,8 @@ Commands:
 | `cypher-permissions/discover.ts` | Concrete paths for Landstrip; the home index |
 | `cypher-permissions/sandbox.ts` | Landstrip status, policy compiler, wrapper, env scrub, denial events |
 | `cypher-permissions/judge.ts` | Judge prompt and verdict parsing |
+| `cypher-permissions/explicit.ts` | Explicit requests: the owner's words, what a dangerous line acts on, the quote, target and retraction checks (§7.3.1) |
+| `crates/engine/src/host/doc_host/owner_words.rs` | The owner's words from a chat's command ledger (`CYPHER_OWNER_WORDS`); `SessionCommandEntry::author` marks agents' messages |
 | `cypher-permissions/audit.ts` | The audit log |
 | `cypher-permissions/shell.ts` | Reading a command line into every command it can run and the files it redirects, or opaque |
 | `cypher-permissions/commands.ts` | Command rules: patterns, validation, the banned programs, categories, resolving a program |
@@ -735,14 +834,17 @@ Commands:
 Tests: `cypher-permissions.test.mjs` (engine, no Pi or Landstrip),
 `cypher-permissions-replay.test.mjs` (every question that reached the owner in the week
 from 2026-11-11, sanitized in `cypher-permissions-replay/`, replayed through the
-classifier and the decision path with the judge's verdict stubbed per case) and
+classifier and the decision path with the judge's verdict stubbed per case; the
+explicit-request cases carry the owner's words and adversarial probes that must still
+ask) and
 `cypher-permissions.staged.test.mjs` (a real `bin/pi` in RPC mode from a staged Runtime,
 a scripted faux model that also answers as the judge, the real Landstrip, the patched
 grep and apply_patch, dialogs answered over RPC). The package script runs both on macOS and Linux builds; the
 staged suite skips its sandbox cases where `landstrip doctor` fails. Rust:
 `pi::permissions` (the settings file merge), `tests/chat_permission_level.rs` (the row's
-level wins), the harness's `CYPHER_PERMISSION_LEVEL` test, and the picker and Settings
-page unit tests.
+level wins), the harness's `CYPHER_PERMISSION_LEVEL` and `CYPHER_OWNER_WORDS` tests,
+`host::doc_host::owner_words` and `tests/bot_work.rs` (a plan's runs carry the owner's
+words, never the brief or steering), and the picker and Settings page unit tests.
 
 ## 10. Phases
 
@@ -798,6 +900,13 @@ page unit tests.
   after the policy was compiled (within 1.5 s).
 - **Hard links into the workspace** of external files: Landstrip blocks links to denied
   paths; linking other external files is not restricted.
+- **Explicit requests** (§7.3.1): the owner's words reach Pi when its turn starts, so a
+  message the owner steers into a running turn counts from the next turn. A forked chat
+  starts without its source's commands, so without its words. A process outside the
+  sandbox that can reach the engine's socket could queue a message as the owner; the
+  socket of the installed app is under `~/.cypher`, which only a human may let a command
+  touch. Old message commands of a plan's session that an older orchestrator steered carry
+  no author and count as the owner's.
 
 ## 12. Decisions and open questions
 
@@ -829,8 +938,13 @@ Decided (2026-10-11):
 - **D12.** (2026-11-18) The judge answers `approve`, `approve-once` or `ask-user`, with no
   confidence score and no bar to clear: its approval is the decision, for local work and
   sensitive files alike (a sensitive file once, never remembered), and anything else asks
-  the user. A `judge.minConfidence` key in the user's file is ignored. A danger never runs
-  on its approval: the user decides.
+  the user. A `judge.minConfidence` key in the user's file is ignored. A danger also needs
+  the owner's explicit request, checked by the code (D13).
+- **D13.** (2026-11-18) A danger the owner's own words explicitly ask for runs once
+  without a dialog when the model approves it and the code confirms the model's quote and
+  target (§7.3.1); without that confirmation it always asks. Only words a person wrote
+  count, passed by the engine in `CYPHER_OWNER_WORDS`; agents' messages are marked in the
+  command ledger.
 
 Open:
 

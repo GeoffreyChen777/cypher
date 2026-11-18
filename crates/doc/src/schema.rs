@@ -551,6 +551,9 @@ impl SessionDoc {
         if let Some(sent_at) = entry.sent_at {
             fields.push(("sentAt", sent_at.into()));
         }
+        if let Some(author) = &entry.author {
+            fields.push(("author", author.as_str().into()));
+        }
         fields.push((
             "status",
             serde_json::to_value(entry.status)?

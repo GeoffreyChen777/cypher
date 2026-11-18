@@ -413,7 +413,7 @@ impl Bots {
             model_options: Default::default(),
             sandbox: p::SandboxLevel::ReadOnly,
         });
-        self.inner.doc_host.queue_command(
+        self.inner.doc_host.queue_agent_command(
             &thread.id,
             SessionCommandPayload::Run {
                 request: RunRequest {
@@ -434,6 +434,7 @@ impl Bots {
                 message_id: format!("{work_id}-brief"),
                 agent_prompt: None,
             },
+            cypher_doc::command_author::PLAN,
         )?;
         Ok(())
     }

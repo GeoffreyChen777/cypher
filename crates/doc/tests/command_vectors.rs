@@ -83,6 +83,7 @@ fn written_run() -> BTreeMap<String, LoroValue> {
         resolution: None,
         sent_at: Some(1_700_000_000_000),
         dismissed: false,
+        author: None,
     };
     doc.queue_signed_command("chat-7", &entry, |_| Some([0x5a; 64]))
         .unwrap();

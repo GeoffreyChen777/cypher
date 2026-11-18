@@ -28,6 +28,8 @@ import {
 import { globBase } from "./glob.ts";
 import { GRANT_ENTRY, GrantStore, newGrant, REVOKE_ENTRY, ROOT_ENTRY } from "./grants.ts";
 import type { Grant, GrantScope } from "./grants.ts";
+import { checkExplicit, describeTarget, lineTargets, repoName } from "./explicit.ts";
+import type { ExplicitClaim, ExplicitFacts, ExplicitResult, LineTargets, OwnerWords, TargetFacts } from "./explicit.ts";
 import { conversationContext, judgePrompt, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
 import type { JudgeRequest } from "./judge.ts";
 import { isUnder, PathContext } from "./paths.ts";
@@ -186,6 +188,8 @@ interface Review {
   reason: string;
   state: "approved" | "asked" | "unavailable" | "paused";
   audit?: Pick<AuditRecord, "judgeVerdict">;
+  /** What the model quoted and named, for a danger (explicit.ts checks it). */
+  claim?: ExplicitClaim;
 }
 
 type ElevateOutcome = { allowed: true; scope: Scope; by: Grant["approvedBy"] } | { allowed: false; reason: string; abort?: boolean };
@@ -366,6 +370,8 @@ export interface PermissionsInit {
   landstrip?: LandstripStatus;
   /** Scratch space that counts as workspace; the temp directories by default (tests keep their fixtures out). */
   scratch?: readonly string[];
+  /** The owner's own words, as the engine passed them (`CYPHER_OWNER_WORDS`); undefined when it passed none. */
+  ownerWords?: OwnerWords;
 }
 
 function gitRoots(cwd: string): { top?: string; gitDirs: string[]; gitDir?: string; common?: string } {
@@ -443,6 +449,12 @@ export class Permissions {
   /** A command prefix from the settings runs before every command (it may export variables). */
   shellPrefix = false;
   private readonly levelEnv: string | undefined;
+  /**
+   * The owner's own words (explicit.ts): what a person typed in this chat,
+   * and the instruction a plan carries out. The only text a danger may run
+   * on without a dialog. Undefined when the engine passed none.
+   */
+  ownerWords: OwnerWords | undefined;
   private cwd: string;
   private extraRoots: string[] = [];
   private baseRoots: string[] = [];
@@ -474,6 +486,7 @@ export class Permissions {
     this.chatId = init.chatId;
     this.home = init.home ?? homedir();
     this.levelEnv = init.levelEnv;
+    this.ownerWords = init.ownerWords;
     this.cwd = init.cwd;
     this.audit = new AuditLog(init.agentDir, init.chatId);
     this.grants = new GrantStore(init.chatId);
@@ -832,7 +845,7 @@ export class Permissions {
     const paused = this.judgePaused();
     if (paused) return { decision: "ask-user", once: false, reason: paused, state: "paused" };
     const { userMessages, recentToolCalls } = conversationContext(ctx.branch());
-    const judgeRequest: JudgeRequest = { ...request, level: this.level, workspaceRoots: this.roots, userMessages, recentToolCalls };
+    const judgeRequest: JudgeRequest = { ...request, level: this.level, workspaceRoots: this.roots, userMessages, recentToolCalls, ownerWords: this.ownerWords };
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -870,6 +883,7 @@ export class Permissions {
       reason: verdict.reason,
       state: verdict.decision === "approve" ? "approved" : "asked",
       audit: { judgeVerdict: verdict.kind },
+      ...(verdict.quote || verdict.targets ? { claim: { quote: verdict.quote, targets: verdict.targets } } : {}),
     };
   }
 
@@ -1328,8 +1342,8 @@ export class Permissions {
    *
    * - dangerous: a human, every task: run once, or allow its patterns until
    *   the user's next message. A danger short of the most sensitive
-   *   (risk.ts `reviewable`) goes to the reviewing model first, whose
-   *   answer the human sees: its approval alone never runs a danger;
+   *   (risk.ts `reviewable`) goes to the reviewing model first, which may run
+   *   it once when the user's own message asks for exactly it;
    * - local: the reviewing model, which remembers its approval for the chat;
    *   else a human: once, or always in this project by patterns for similar
    *   commands (the agent's, then each other command's category).
@@ -1444,14 +1458,16 @@ export class Permissions {
       }
       // Model first for what is not dangerous: it may run the command, and
       // remembers its approval for this chat. A danger short of the most
-      // sensitive (risk.ts `reviewable`): the model reviews it, but the user
-      // decides, with its reason.
-      const reviewable =
-        dangerous &&
-        !onceOnly &&
-        line.parsed.kind !== "opaque" &&
-        // Every word of it known before it runs: the model sees the command, not what `$(…)` makes of it.
-        line.assessments!.every((assessment, index) => assessment.tier !== "danger" || (assessment.reviewable === true && !line.commands[index].words.includes(UNKNOWN)));
+      // sensitive (risk.ts `reviewable`) whose targets the line names: it may
+      // run once, when the owner's own words ask for exactly it, which
+      // explicit.ts checks against the model's quote and target. Otherwise
+      // the user decides, with the reason.
+      const humanOnly = dangerous ? this.humanOnly(line) : undefined;
+      const targets: LineTargets | undefined = dangerous && humanOnly === undefined ? this.lineTargets(line) : undefined;
+      const unknownTarget = targets && "unknown" in targets ? targets.unknown : undefined;
+      const reviewable = dangerous && humanOnly === undefined && unknownTarget === undefined;
+      if (humanOnly !== undefined) audit.explicit = { ok: false, reason: `only you can approve this: ${humanOnly}`, targets: [], passed: [] };
+      else if (unknownTarget) audit.explicit = { ok: false, reason: `${unknownTarget}, so Cypher can't check it against your words`, targets: [], passed: [] };
       let review: string | undefined;
       if (mode === "assisted" && (!dangerous || reviewable)) {
         const purpose = [proposal.label && `Purpose: ${proposal.label}`, proposal.reason && `Reason: ${proposal.reason}`].filter(Boolean).join("\n");
@@ -1468,19 +1484,26 @@ export class Permissions {
             tier: line.tier,
             tierReason: line.kind,
             remembers: memo.map((pattern) => describePattern(pattern.match)),
+            ...(targets && "targets" in targets ? { targets: targets.targets.map((target) => describeTarget(target)) } : {}),
           },
           ctx,
         );
         audit.judge = verdict.state;
         Object.assign(audit, verdict.audit);
-        if (verdict.decision === "approve" && !dangerous) {
+        let explicit: ExplicitResult | undefined;
+        if (dangerous && targets && (verdict.decision === "approve" || verdict.claim)) {
+          explicit = checkExplicit(verdict.claim ?? {}, targets, this.ownerWords, ctx.branch(), this.explicitFacts());
+          audit.explicit = explicit;
+        }
+        if (verdict.decision === "approve" && (!dangerous || explicit?.ok)) {
           // `approve-once`: this call runs, and nothing is remembered.
           const kept = verdict.once ? [] : memo;
           for (const pattern of kept) this.addCommandGrant(pattern, "chat", "judge", label);
-          finish({ decision: "allow", decidedBy: "judge", reason: verdict.reason, scope: kept.length ? "chat" : "once", prompted: false });
+          const reason = explicit?.ok ? `${verdict.reason} (your words: "${explicit.quote}")` : verdict.reason;
+          finish({ decision: "allow", decidedBy: "judge", reason, scope: kept.length ? "chat" : "once", prompted: false });
           return { ok: true, scope: "once", by: "judge", ...(onceOnly ? { onceOnly } : {}) } as const;
         }
-        review = verdict.decision === "approve" ? `It found your request, but only you can run a danger: ${verdict.reason}` : verdict.reason;
+        review = verdict.decision === "approve" && explicit && !explicit.ok ? `It found your request, but Cypher couldn't confirm it: ${explicit.reason}.` : verdict.reason;
         audit.reviewer = review;
       }
       if (!ctx.hasUI) {
@@ -1489,7 +1512,10 @@ export class Permissions {
         return { ok: false, reason } as const;
       }
       const lines: string[] = [];
-      if (dangerous && line.kind) lines.push(fact("Note", `Dangerous: it ${homeRelative(line.kind, this.home)}.${reviewable ? "" : " This always asks."}`));
+      if (dangerous && line.kind) {
+        const asks = humanOnly !== undefined ? " This always asks." : unknownTarget ? ` It asks: ${unknownTarget}.` : "";
+        lines.push(fact("Note", `Dangerous: it ${homeRelative(line.kind, this.home)}.${asks}`));
+      }
       if (proposal.label) lines.push(fact("Purpose", proposal.label));
       lines.push(fact("Command", command));
       for (const pattern of patterns) lines.push(fact("Pattern", describePattern(pattern.match)));
@@ -1542,6 +1568,90 @@ export class Permissions {
         }
       }
     });
+  }
+
+  /**
+   * Why a dangerous line is a human's alone, whatever the owner said: a
+   * danger risk.ts keeps from the model (secrets, deleting, the
+   * administrator, the installed app…), a line rules can't read, a rule
+   * the user set to ask or deny, an option that runs a program here, code
+   * it downloads and runs, or a redirection the sandbox wouldn't allow.
+   */
+  private humanOnly(line: LineAssessment): string | undefined {
+    if (line.parsed.kind === "opaque") return `it uses ${line.parsed.reason}, which rules can't check`;
+    if (line.key === "download-run") return "it downloads code and runs it";
+    const rules = this.commandRules();
+    for (const [index, item] of line.commands.entries()) {
+      const assessment = line.assessments![index];
+      if (assessment.tier === "danger" && assessment.reviewable !== true) return assessment.kind ?? "a danger only you can approve";
+      if (item.inert) continue;
+      const held = rules.find((rule) => rule.decision !== "allow" && matchesQuietly(rule.match, item.words, true));
+      if (held) return `\`${describePattern(held.match)}\` is set to ${held.decision === "deny" ? "never run" : "always ask"}`;
+      const vouch = ruleCannotVouch(item.words);
+      if (vouch) return vouch;
+    }
+    const redirect = line.commands.map((item) => this.redirectProblem(item)).find(Boolean);
+    return redirect;
+  }
+
+  /** What a dangerous line's commands act on (explicit.ts), or why that is known only when it runs. */
+  lineTargets(line: LineAssessment): LineTargets {
+    return lineTargets(
+      line.commands.map((item, index) => ({ words: item.words, cwd: item.cwd, danger: line.assessments![index].tier === "danger" })),
+      this.targetFacts(),
+    );
+  }
+
+  private targetFacts(): TargetFacts {
+    return {
+      git: (dir) => this.gitAt(dir),
+      tagExists: (dir, name) => this.tagExists(dir, name),
+      readFile: (path) => {
+        try {
+          return readFileSync(path, "utf8");
+        } catch {
+          return undefined;
+        }
+      },
+    };
+  }
+
+  private explicitFacts(): ExplicitFacts {
+    return { originRepo: (dir) => this.originRepo(dir), release: (dir, commit, version) => this.releaseFacts(dir, commit, version) };
+  }
+
+  /** A tag of that name exists in the repository at `dir`. */
+  tagExists(dir: string, name: string): boolean {
+    if (name === UNKNOWN || name.startsWith("-")) return false;
+    return spawnSync("git", ["-C", dir, "rev-parse", "-q", "--verify", `refs/tags/${name}`], { stdio: "ignore", timeout: 3000 }).status === 0;
+  }
+
+  /** The `owner/name` of the repository `origin` points at in `dir`. */
+  originRepo(dir: string): string | undefined {
+    const result = spawnSync("git", ["-C", dir, "remote", "get-url", "origin"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000 });
+    return result.status === 0 ? repoName(result.stdout.trim()) : undefined;
+  }
+
+  /**
+   * Whether a release tag's commit is on the remote's default branch (as
+   * last fetched), and holds the tag's version in its files: "release a
+   * new version" then covers a tag of that version there and no other.
+   */
+  releaseFacts(dir: string, commit: string, version: string): { onDefault?: boolean; hasVersion?: boolean } {
+    const git = (...args: string[]) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 });
+    if (commit === UNKNOWN || commit.startsWith("-")) return {};
+    const resolved = git("rev-parse", "-q", "--verify", `${commit}^{commit}`);
+    if (resolved.status !== 0) return {};
+    const sha = resolved.stdout.trim();
+    let onDefault: boolean | undefined;
+    for (const branch of this.gitAt(dir)?.defaults ?? []) {
+      const ref = `refs/remotes/origin/${branch}`;
+      if (git("rev-parse", "-q", "--verify", ref).status !== 0) continue;
+      onDefault = git("merge-base", "--is-ancestor", sha, ref).status === 0;
+      if (onDefault) break;
+    }
+    const grep = git("grep", "-q", "-F", "-w", "-e", version, sha, "--");
+    return { onDefault, hasVersion: grep.status === 0 ? true : grep.status === 1 ? false : undefined };
   }
 
   /** A chat or task grant to run commands like these outside the sandbox. */

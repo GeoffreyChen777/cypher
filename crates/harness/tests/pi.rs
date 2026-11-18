@@ -252,6 +252,7 @@ fn run_profiles_spawn_exact_args() {
     let remembering = RunHostContext {
         chat_id: Some("session".into()),
         memory_prompt: Some("<memory>…</memory>".into()),
+        owner_words: None,
         ..Default::default()
     };
     assert_eq!(
@@ -268,6 +269,7 @@ fn run_profiles_spawn_exact_args() {
     let remembering_child = RunHostContext {
         chat_id: Some("child-chat".into()),
         memory_prompt: Some("<memory>…</memory>".into()),
+        owner_words: None,
         profile: RunProfile::Child(ChildRunEnv {
             system_prompt: "You review code.".into(),
             tools: vec!["read".into()],
@@ -298,6 +300,7 @@ fn run_profiles_spawn_exact_args() {
     let child = RunHostContext {
         chat_id: Some("child-chat".into()),
         memory_prompt: None,
+        owner_words: None,
         profile: RunProfile::Child(ChildRunEnv {
             system_prompt: "You review code.".into(),
             tools: vec!["read".into(), "send_message".into()],
@@ -343,6 +346,7 @@ fn run_profiles_spawn_exact_args() {
         let bot = RunHostContext {
             chat_id: Some("bot-chat".into()),
             memory_prompt: None,
+            owner_words: None,
             profile: RunProfile::Bot(BotRunEnv {
                 bot_id: "bot-1".into(),
                 origin,
@@ -399,6 +403,7 @@ fn run_profiles_spawn_exact_args() {
                 &RunHostContext {
                     chat_id: Some("bot-chat".into()),
                     memory_prompt: None,
+                    owner_words: None,
                     profile: RunProfile::Bot(BotRunEnv {
                         bot_id: "bot-1".into(),
                         origin: BotOrigin::Owner,
@@ -434,6 +439,7 @@ fn run_profiles_spawn_exact_args() {
                     &RunHostContext {
                         chat_id: Some("bot-chat".into()),
                         memory_prompt: None,
+                        owner_words: None,
                         profile: RunProfile::Bot(BotRunEnv {
                             bot_id: "bot-1".into(),
                             origin: BotOrigin::Owner,
@@ -459,6 +465,7 @@ fn run_profiles_spawn_exact_args() {
     let empty = RunHostContext {
         chat_id: Some("bot-chat".into()),
         memory_prompt: None,
+        owner_words: None,
         profile: RunProfile::Bot(BotRunEnv {
             bot_id: "bot-1".into(),
             origin: BotOrigin::Peer,
@@ -553,6 +560,44 @@ fn the_chat_sandbox_level_reaches_the_permission_extension() {
     assert_eq!(level(&probe), Some(None));
 }
 
+/// The owner's own words reach the permission extension through the run's
+/// environment, which the agent can't change; a run without them clears any
+/// the engine itself inherited.
+#[test]
+fn the_owner_words_reach_the_permission_extension() {
+    let harness = harness();
+    let words = |cmd: &tokio::process::Command| {
+        cmd.as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "CYPHER_OWNER_WORDS")
+            .map(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+    };
+    let json =
+        r#"{"messages":[{"text":"pr 给main 没问题合并","source":"plan"}],"agentWritten":true}"#;
+    let request = request("scenario:happy");
+    let host = RunHostContext {
+        chat_id: Some("session".into()),
+        owner_words: Some(json.into()),
+        ..Default::default()
+    };
+    let cmd = harness
+        .spawn_run_command(Some(&request.cwd), &host, None, &request)
+        .expect("run command builds");
+    assert_eq!(words(&cmd), Some(Some(json.to_string())));
+    for host in [
+        RunHostContext::default(),
+        RunHostContext {
+            owner_words: Some(String::new()),
+            ..Default::default()
+        },
+    ] {
+        let cmd = harness
+            .spawn_run_command(Some(&request.cwd), &host, None, &request)
+            .expect("run command builds");
+        assert_eq!(words(&cmd), Some(None), "cleared, never inherited");
+    }
+}
+
 /// A subagent's file-tool denials tell it to call `request_permission`, and
 /// Pi registers no tool its `--tools` allowlist leaves out.
 #[test]
@@ -562,6 +607,7 @@ fn subagents_with_file_tools_can_request_permission() {
         let host = RunHostContext {
             chat_id: Some("child-chat".into()),
             memory_prompt: None,
+            owner_words: None,
             profile: cypher_harness::RunProfile::Child(cypher_harness::ChildRunEnv {
                 system_prompt: String::new(),
                 tools: tools.iter().map(|tool| tool.to_string()).collect(),
@@ -2582,6 +2628,7 @@ fn a_bot_working_directly_gets_its_roots_and_level() {
     let host = RunHostContext {
         chat_id: Some("bot-chat".into()),
         memory_prompt: None,
+        owner_words: None,
         profile: RunProfile::Bot(BotRunEnv {
             bot_id: "bot-1".into(),
             origin: BotOrigin::Owner,

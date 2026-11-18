@@ -2462,6 +2462,7 @@ fn run_command(
         resolution: Some("nope".into()),
         sent_at: Some(issued_at),
         dismissed: false,
+        author: None,
     }
 }
 

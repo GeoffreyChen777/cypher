@@ -388,13 +388,14 @@ impl Memory {
             .request_from_chat_row(&chat.id, &prompt)
             .ok_or_else(|| EngineError::Other("the pass chat has no row".into()))
             .and_then(|request| {
-                self.inner.doc_host.queue_command(
+                self.inner.doc_host.queue_agent_command(
                     &chat.id,
                     SessionCommandPayload::Run {
                         request,
                         message_id: new_id(),
                         agent_prompt: None,
                     },
+                    cypher_doc::command_author::MEMORY,
                 )
             });
         if let Err(err) = queued {

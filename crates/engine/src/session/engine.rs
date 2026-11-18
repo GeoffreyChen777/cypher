@@ -40,7 +40,7 @@ use cypher_proto::{
 
 use crate::EngineError;
 use crate::bots::profile::UnattendedStop;
-use crate::host::doc_host::{ChatDocHandle, DocHost};
+use crate::host::doc_host::{ChatDocHandle, ChatOrigin, DocHost};
 use crate::registry::HarnessRegistry;
 use crate::session::journal::RunJournal;
 use crate::util::{new_id, now_ms};
@@ -1209,6 +1209,36 @@ impl SessionsEngine {
     }
 }
 
+/// How a chat began, for the owner's words (`CYPHER_OWNER_WORDS`): an agent
+/// started it when it is a subagent, a workspace thread other than the
+/// owner's own chat (an orchestration, a routine, a peer's question), or a
+/// session a plan started. A plan's sessions and its background thread
+/// carry the owner's instruction from the plan's record.
+fn chat_origin(
+    ws: &crate::host::workspace_host::WorkspaceHost,
+    chat: &cypher_proto::Chat,
+) -> ChatOrigin {
+    let records = ws.read_bot_records();
+    let work = records
+        .started_by(&chat.id)
+        .map(|(work, _)| work)
+        .or_else(|| {
+            records
+                .work
+                .iter()
+                .find(|work| work.thread_chat_id.as_deref() == Some(chat.id.as_str()))
+        });
+    ChatOrigin {
+        agent_started: chat.child.is_some()
+            || chat
+                .bot
+                .as_ref()
+                .is_some_and(|marker| !marker.is_owner_chat())
+            || work.is_some(),
+        instruction: work.map(|work| work.instruction.clone()),
+    }
+}
+
 /// The input bridge of an unattended run (docs/design/agent-bots.md §8).
 /// Nobody can answer, so every question and approval is denied on the spot
 /// (an empty answer list reads as cancelled to ask_user and as "no approval
@@ -1737,10 +1767,13 @@ impl Inner {
     fn host_context(&self, chat_id: &str) -> RunHostContext {
         let mut profile = RunProfile::Root;
         let memory = self.memory.get();
+        let mut origin = ChatOrigin::default();
         if let Some(ws) = self.workspace()
             && let Ok(Some(chat)) = ws.chat(chat_id)
         {
+            origin = chat_origin(&ws, &chat);
             if let Some(pass) = memory.and_then(|m| m.run_env(chat_id)) {
+                origin.agent_started = true;
                 profile = RunProfile::Memory(pass);
             } else if let Some(bot) = crate::bots::profile::bot_env(&ws, &chat) {
                 profile = RunProfile::Bot(bot);
@@ -1748,10 +1781,19 @@ impl Inner {
                 profile = RunProfile::Child(self.child_env(chat_id, child));
             }
         }
+        // The owner's own words, for the permission check: what a person
+        // sent in this chat and the plan's instruction, never an agent's.
+        let owner_words = if self.is_ephemeral(chat_id) {
+            None
+        } else {
+            self.doc_host()
+                .and_then(|host| host.owner_words_env(chat_id, &origin))
+        };
         RunHostContext {
             chat_id: Some(chat_id.to_string()),
             profile,
             memory_prompt: memory.and_then(|m| m.prompt_for(chat_id)),
+            owner_words,
         }
     }
 

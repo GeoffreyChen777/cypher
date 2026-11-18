@@ -51,6 +51,7 @@ import { DENIAL_TEXT, parseDenials, scrubEnv, wrapCommand, writePolicyFile } fro
 import { isUnder } from "./cypher-permissions/paths.ts";
 import { permissionControlEnabled } from "./cypher-permissions/config.ts";
 import { describePattern } from "./cypher-permissions/commands.ts";
+import { OWNER_WORDS_ENV, parseOwnerWords } from "./cypher-permissions/explicit.ts";
 
 const FS_HOOK = Symbol.for("cypher.permissions.fs");
 const APPLY_PATCH = "apply_patch";
@@ -70,6 +71,8 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
         chatId: process.env.CYPHER_CHAT_ID || undefined,
         cwd: ctx.cwd,
         levelEnv: process.env.CYPHER_PERMISSION_LEVEL,
+        // What the owner wrote, as the engine knows it (agent-written briefs and steering left out).
+        ownerWords: parseOwnerWords(process.env[OWNER_WORDS_ENV]),
       });
       permissions.appendEntry = (type, data) => pi.appendEntry(type, data);
       permissions.reload(ctx.cwd, ctx.sessionManager?.getBranch() ?? []);

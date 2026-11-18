@@ -293,6 +293,7 @@ mod tests {
             resolution: None,
             sent_at: None,
             dismissed: false,
+            author: None,
         }
     }
 

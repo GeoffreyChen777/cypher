@@ -114,6 +114,7 @@ fn queue_run_with(
             resolution: None,
             sent_at: None,
             dismissed: false,
+            author: None,
         })
         .expect("queue command");
 }

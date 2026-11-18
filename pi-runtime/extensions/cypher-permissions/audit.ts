@@ -43,6 +43,19 @@ export interface AuditRecord {
   judge?: "approved" | "asked" | "unavailable" | "paused";
   /** What the reviewing model answered: approve and remember, approve once, ask the user, or nothing readable. */
   judgeVerdict?: "approve" | "approve-once" | "ask-user" | "unreadable";
+  /**
+   * A danger the owner's own words may ask for (explicit.ts): whether it ran
+   * as their explicit request, the words the model quoted and where they
+   * were, what the line acts on, which checks passed, and why not.
+   */
+  explicit?: {
+    ok: boolean;
+    reason?: string;
+    quote?: string;
+    quoteSource?: "typed" | "plan";
+    targets: string[];
+    passed: string[];
+  };
 }
 
 export class AuditLog {

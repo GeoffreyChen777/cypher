@@ -357,6 +357,7 @@ fn command(chat: &str, issued_by: &str, signer: Option<&DeviceTrust>) -> Command
         resolution: None,
         sent_at: None,
         dismissed: false,
+        author: None,
     };
     doc.queue_signed_command(chat, &entry, |bytes| signer.and_then(|s| s.sign(bytes)))
         .unwrap();

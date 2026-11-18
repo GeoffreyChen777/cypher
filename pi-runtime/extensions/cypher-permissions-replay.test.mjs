@@ -9,6 +9,11 @@
 // result does not depend on what this host has installed), and the process
 // facts each `kill` case records.
 //
+// A case may carry the owner's own words (what the engine passes in
+// CYPHER_OWNER_WORDS), the conversation as Pi stored it, the git facts a
+// release tag needs, and probes: the same request with an adversarial
+// verdict, which must still ask (explicit.ts).
+//
 // REPLAY_REPORT=1 prints a table of every case instead of failing on the first difference.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -77,7 +82,9 @@ function lastAudit() {
   return JSON.parse(lines.at(-1));
 }
 
-async function replay(item) {
+async function replay(item, probe) {
+  const verdict = probe ? probe.verdict : item.verdict;
+  const command = probe?.command ?? item.command;
   const cwd = expand(item.cwd);
   const permissions = new Permissions({ agentDir, chatId: "chat-replay", cwd, home, landstrip: { available: true, binary: "/nonexistent/landstrip" }, scratch: [tmp] });
   permissions.appendEntry = () => {};
@@ -85,6 +92,15 @@ async function replay(item) {
   const processes = processFacts(item);
   permissions.ownsProcesses = processes.owns;
   permissions.processFacts = processes.facts;
+  const owner = probe && "owner" in probe ? probe.owner : item.owner;
+  permissions.ownerWords = owner ? { messages: owner.messages, agentWritten: owner.agentWritten === true } : undefined;
+  permissions.releaseFacts = (_dir, commit, version) => {
+    const facts = item.release?.[commit];
+    return facts ? { onDefault: facts.onDefault, hasVersion: facts.versions.includes(version) } : {};
+  };
+  permissions.originRepo = () => undefined;
+  const user = (item.user ?? ["(the owner's request; not in the audit)"]).map((content) => ({ type: "message", message: { role: "user", content } }));
+  const branch = [...user, ...JSON.parse(expand(JSON.stringify(item.branch ?? [])))];
   const judged = [];
   const dialogs = [];
   const ctx = {
@@ -97,16 +113,16 @@ async function replay(item) {
       },
       notify() {},
     },
-    branch: () => [{ type: "message", message: { role: "user", content: "(the owner's request; not in the audit)" } }],
+    branch: () => branch,
     complete: async (_system, prompt) => {
       judged.push(prompt);
-      return item.verdict ? JSON.stringify(item.verdict) : '{"decision":"ask-user","reason":"no verdict for this case"}';
+      return verdict ? JSON.stringify(verdict) : '{"decision":"ask-user","reason":"no verdict for this case"}';
     },
   };
   const before = permissions.grants.all().length;
   let result;
   if (item.capability === "escalate") {
-    result = await permissions.requestEscalation(expand(item.command), { label: "replay" }, ctx);
+    result = await permissions.requestEscalation(expand(command), { label: "replay" }, ctx);
   } else if (item.tool === "request_permission") {
     result = await permissions.requestPermission({ capability: item.capability, paths: item.paths.map(expand) }, ctx);
   } else {
@@ -120,7 +136,7 @@ async function replay(item) {
   else if (audit.decidedBy === "judge") outcome = remembered ? "approve-remember" : "approve-once";
   else outcome = `auto-${audit.decidedBy}`;
   const plain = (text) => text?.replaceAll(home, "@HOME@").replaceAll(tmp, "/tmp");
-  return { outcome, tier: audit.tier, kind: plain(audit.kind), judged: judged.length > 0, audit, onceOnly: plain(audit.onceOnly), missingVerdict: judged.length > 0 && !item.verdict };
+  return { outcome, tier: audit.tier, kind: plain(audit.kind), judged: judged.length > 0, audit, onceOnly: plain(audit.onceOnly), explicit: plain(audit.explicit?.reason), missingVerdict: judged.length > 0 && !verdict };
 }
 
 test("replay: the owner's questions from the audit, with the reviewing model's verdicts stubbed", async () => {
@@ -139,18 +155,26 @@ test("replay: the owner's questions from the audit, with the reviewing model's v
     if (want.tier && got.tier !== want.tier) failures.push(`#${item.id} [${item.group}]: tier ${got.tier}, expected ${want.tier} (${got.kind ?? ""})`);
     if (want.kind && !new RegExp(want.kind).test(got.kind ?? "")) failures.push(`#${item.id} [${item.group}]: kind ${got.kind}, expected /${want.kind}/`);
     if (got.judged && got.audit.judgeVerdict === undefined) failures.push(`#${item.id}: the audit lacks the model's verdict`);
+    if (want.outcome.startsWith("approve") && got.tier === "danger" && got.audit.explicit?.ok !== true) failures.push(`#${item.id}: a danger approved without the owner's explicit request in the audit`);
+    for (const probe of item.probes ?? []) {
+      const tried = await replay(item, probe);
+      rows.push({ item, got: tried, probe });
+      if (tried.outcome !== probe.expect.outcome) failures.push(`#${item.id} probe "${probe.why}": ${tried.outcome}, expected ${probe.expect.outcome} (${tried.explicit ?? ""})`);
+      if (probe.expect.reason && !(tried.explicit ?? "").includes(probe.expect.reason)) failures.push(`#${item.id} probe "${probe.why}": the audit says "${tried.explicit}", expected "${probe.expect.reason}"`);
+    }
   }
   if (report) {
-    for (const { item, got } of rows) {
-      console.log([`#${item.id}`, item.group ?? "-", item.recorded.tier ?? "-", got.tier, got.outcome, got.judged ? "judged" : "-", (got.kind ?? "").slice(0, 70), (got.onceOnly ?? "").slice(0, 60)].join("\t"));
+    for (const { item, got, probe } of rows) {
+      console.log([`#${item.id}${probe ? ` probe: ${probe.why}` : ""}`, item.group ?? "-", item.recorded.tier ?? "-", got.tier, got.outcome, got.judged ? "judged" : "-", (got.kind ?? "").slice(0, 70), (got.onceOnly ?? "").slice(0, 60), got.explicit ?? ""].join("\t"));
     }
     const summary = new Map();
-    for (const { item, got } of rows) {
+    for (const { item, got, probe } of rows) {
+      if (probe) continue;
       const key = `${item.group ?? "-"}\t${got.outcome}`;
       summary.set(key, (summary.get(key) ?? 0) + 1);
     }
     console.log([...summary].sort().map(([key, n]) => `${String(n).padStart(4)}  ${key}`).join("\n"));
-    writeFileSync(join(tmpdir(), "cypher-replay-report.json"), JSON.stringify(rows.map(({ item, got }) => ({ id: item.id, group: item.group, outcome: got.outcome, tier: got.tier, kind: got.kind, judged: got.judged, onceOnly: got.onceOnly })), null, 1));
+    writeFileSync(join(tmpdir(), "cypher-replay-report.json"), JSON.stringify(rows.map(({ item, got, probe }) => ({ id: item.id, probe: probe?.why, group: item.group, outcome: got.outcome, tier: got.tier, kind: got.kind, judged: got.judged, onceOnly: got.onceOnly, explicit: got.explicit })), null, 1));
     return;
   }
   assert.deepEqual(failures, []);

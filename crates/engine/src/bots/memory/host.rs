@@ -404,13 +404,14 @@ impl Bots {
                 .await),
         }
         .and_then(|(request, agent_prompt)| {
-            self.inner.doc_host.queue_command(
+            self.inner.doc_host.queue_agent_command(
                 &session,
                 SessionCommandPayload::Run {
                     request,
                     message_id: new_id(),
                     agent_prompt,
                 },
+                cypher_doc::command_author::ROUTINE,
             )
         });
         if let Err(err) = queued {

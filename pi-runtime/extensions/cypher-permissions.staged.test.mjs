@@ -85,7 +85,7 @@ export default function (pi) {
  * Run one turn. `answers` are picked, in order, for the approval dialogs.
  * Returns the tool results by call order and the dialogs that were shown.
  */
-async function turn(steps, { answers = [], level = "workspace-write", judge, extraExtensions = [], api, cwd = workspace } = {}) {
+async function turn(steps, { answers = [], level = "workspace-write", judge, extraExtensions = [], api, cwd = workspace, ownerWords } = {}) {
   const scriptFile = join(scratch, `script-${Math.random().toString(36).slice(2)}.json`);
   writeFileSync(scriptFile, JSON.stringify(steps));
   const child = spawn(
@@ -110,6 +110,8 @@ async function turn(steps, { answers = [], level = "workspace-write", judge, ext
         CYPHER_PERMISSION_LEVEL: level,
         CYPHER_CHAT_ID: "chat-e2e",
         GITHUB_TOKEN: "ghp_secret",
+        // What the engine passes: the owner's own words (explicit.ts).
+        ...(ownerWords ? { CYPHER_OWNER_WORDS: JSON.stringify(ownerWords) } : {}),
       },
       stdio: ["pipe", "pipe", "pipe"],
     },
@@ -301,6 +303,33 @@ test("assisted: the judge approves an external write without a dialog; protected
   assert.match(escalated.dialogs[0].title, /fsmonitor/);
   assert.equal(escalated.results[0].isError, true);
   assert.doesNotMatch(readFileSync(join(workspace, ".git", "config"), "utf8"), /fsmonitor/);
+});
+
+test("explicit request: the owner's own words, passed by the engine, let the model run a danger they asked for", { skip }, async () => {
+  const git = (...args) => spawnSync("git", ["-c", "user.email=a@b", "-c", "user.name=a", ...args], { encoding: "utf8" });
+  const remote = join(scratch, "explicit-remote.git");
+  const repo = join(home, "Developer", "explicit");
+  git("init", "-q", "--bare", "-b", "main", remote);
+  git("init", "-q", "-b", "main", repo);
+  git("-C", repo, "commit", "-q", "--allow-empty", "-m", "ship it");
+  git("-C", repo, "remote", "add", "origin", remote);
+  const step = [{ tool: "bash", args: { command: "git push -q origin main", escalate: { label: "Push main", reason: "the owner asked" } } }];
+  const approve = JSON.stringify({ decision: "approve", reason: "The owner asked to push main.", userQuote: "把 main 推到 origin", target: { kind: "branch", value: "main" } });
+
+  // Without the owner's words, the same approval asks.
+  const without = await turn(step, { cwd: repo, judge: approve, answers: ["Deny"] });
+  assert.equal(without.dialogs.length, 1);
+  assert.match(without.dialogs[0].title, /didn't pass your own words/);
+  assert.notEqual(git("--git-dir", remote, "rev-parse", "-q", "--verify", "main").status, 0, "nothing pushed");
+
+  // With them, it runs once, without a dialog.
+  const owned = await turn(step, { cwd: repo, judge: approve, ownerWords: { messages: [{ text: "把 main 推到 origin", source: "typed" }], agentWritten: false } });
+  assert.equal(owned.dialogs.length, 0);
+  assert.equal(owned.results[0].isError, false, owned.results[0].text);
+  assert.match(owned.results[0].text, /Ran outside the sandbox \(approved once by the reviewing model/);
+  assert.equal(git("--git-dir", remote, "rev-parse", "main").stdout.trim(), git("-C", repo, "rev-parse", "HEAD").stdout.trim());
+  const audit = readFileSync(join(agentDir, "permission-audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line)).filter((record) => record.command === "git push -q origin main");
+  assert.deepEqual(audit.at(-1).explicit, { ok: true, quote: "把 main 推到 origin", targets: ["branch main on origin"], passed: ["quote", "target", "current"], quoteSource: "typed" });
 });
 
 test("model first: the judge runs local work outside the sandbox and may read a sensitive file; dangerous commands skip it", { skip }, async () => {
