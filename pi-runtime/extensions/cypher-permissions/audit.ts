@@ -41,6 +41,8 @@ export interface AuditRecord {
   choice?: string;
   /** The reviewing model: approved, asked, or unavailable. */
   judge?: "approved" | "asked" | "unavailable" | "paused";
+  /** What the reviewing model answered: approve and remember, approve once, ask the user, or nothing readable. */
+  judgeVerdict?: "approve" | "approve-once" | "ask-user" | "unreadable";
 }
 
 export class AuditLog {
@@ -109,6 +111,8 @@ export class AuditLog {
     if (once.length) lines.push("Why no rule could be kept:", ...once.map(([why, n]) => `  ${String(n).padStart(4)}  ${why}`));
     const judge = count(records, (record) => record.judge);
     if (judge.length) lines.push(`Reviewing model: ${judge.map(([state, n]) => `${state} ${n}`).join(", ")}.`);
+    const answers = count(records, (record) => record.judgeVerdict);
+    if (answers.length) lines.push(`Its answers: ${answers.map(([answer, n]) => `${answer} ${n}`).join(", ")}.`);
     const waits = asked.map((record) => record.latencyMs).filter((ms): ms is number => typeof ms === "number").sort((a, b) => a - b);
     if (waits.length) lines.push(`Time a question waited: median ${Math.round(waits[Math.floor(waits.length / 2)] / 1000)} s.`);
     return lines.join("\n");

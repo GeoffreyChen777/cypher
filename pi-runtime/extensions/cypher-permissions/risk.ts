@@ -53,7 +53,7 @@ export interface Assessment {
  * setup, anything that can run code later, and what the line leaves unknown.
  */
 const HUMAN_ONLY_KIND =
-  /secret|credential|keys|environment|administrator|how this machine runs|scheduled jobs|disk|raw data|delet|drops|discards|removes|rewrites|force-push|run a program|runs? code later|access to this machine|Cypher's own data|protected target|known only when it runs|cannot tell|downloads? code/i;
+  /secret|credential|keys|environment|administrator|how this machine runs|scheduled jobs|disk|raw data|delet|drops|discards|removes|rewrites|force-push|run a program|runs? code later|access to this machine|Cypher's own data|installed Cypher|protected target|known only when it runs|cannot tell|downloads? code/i;
 /** Subcommands that delete, or that reach credentials, keys, secrets or ownership. */
 const HUMAN_ONLY_VERB =
   /^(delete|destroy|remove|rm|rmi|rb|purge|prune|terminate|uninstall|unpublish|yank|reset|down|deregister|revoke|drop)([-:].*)?$|^.+:(delete|destroy|remove|purge)$|^(login|logout|adduser|signin|signout|token|tokens|owner|access|team|auth|secret|secrets|variable|variables|env|ssh-key|gpg-key|deploy-key|match|cert|sigh|pem|configure|credential|credentials|key|keys)$/i;
@@ -87,10 +87,22 @@ export interface RiskCommand {
   cwd: string | undefined;
   reads: readonly string[];
   writes: readonly string[];
+  /** Words it carries besides its own: values assigned in front of it, its wrappers' words. */
+  carried?: readonly string[];
 }
 
 /** What `kill`, `pkill` and `killall` would stop. */
 export type KillTarget = { pids: number[] } | { pgrep: string[] };
+
+/** What can be told about the processes a kill would stop (each undefined when it cannot be). */
+export interface ProcessFacts {
+  /** Every one carries this chat's marker: it started them, or they descend from its commands. */
+  owned?: boolean;
+  /** Every one runs in the chat's project folders (its working directory). */
+  inRoots?: boolean;
+  /** One is the installed Cypher app's (its program or folder). */
+  installedApp?: boolean;
+}
 
 export interface GitFacts {
   /** The branch checked out, if any. */
@@ -111,6 +123,10 @@ export interface RiskFacts extends PackFacts {
   inspect: readonly string[][];
   /** Whether every target is a process this chat started; undefined when that cannot be told. */
   ownsProcesses(target: KillTarget): boolean | undefined;
+  /** More about the targets: where they run, whose they are. Without it, only `ownsProcesses`. */
+  processFacts?(target: KillTarget): ProcessFacts;
+  /** A canonical path that is the installed Cypher app or its data (not a chat's worktree). */
+  installedApp?(path: string): boolean;
   /** The repository at a directory (undefined: none, or not known). */
   git(dir: string): GitFacts | undefined;
   /** A directory inside the chat's workspace. */
@@ -203,9 +219,20 @@ export function redirectDanger(command: Pick<RiskCommand, "reads" | "writes" | "
   return undefined;
 }
 
+/** Programs that send a file named `@file` (`curl -d @f`, `-F x=@f`, `http x=@f`). */
+const SENDS_AT_FILES = /^(curl|http|https|xh)$/;
+
 function pathDanger(command: RiskCommand, view: CommandView, facts: RiskFacts): string | undefined {
   const redirected = redirectDanger(command, facts);
   if (redirected) return redirected;
+  if (SENDS_AT_FILES.test(view.program)) {
+    for (const word of view.args) {
+      const file = /^(?:[^=@\s]*=)?@([^;]+)/.exec(word)?.[1];
+      if (!file || file === "-") continue;
+      const classification = facts.classify(file, command.cwd);
+      if (classification?.zone === "sensitive") return `sends a secret (${file})`;
+    }
+  }
   const words = view.args;
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
@@ -379,11 +406,58 @@ function killAssessment(view: CommandView, facts: RiskFacts): Assessment | undef
   const target = killTarget(view);
   if (target === "harmless") return { tier: "inspect", kind: "checks whether processes are running", outside: true };
   if (target === undefined) return { tier: "local", kind: "stops processes known only when it runs" };
-  const owned = facts.ownsProcesses(target);
-  if (owned === true) return { tier: "inspect", kind: "stops processes this chat started", outside: true };
-  if (owned === false) return { tier: "danger", kind: "stops processes this chat did not start" };
+  const known = facts.processFacts?.(target) ?? { owned: facts.ownsProcesses(target) };
+  // Its own, even when they run the installed Runtime's node (the agent's PATH finds it first).
+  if (known.owned === true) return { tier: "inspect", kind: "stops processes this chat started", outside: true };
+  if (known.installedApp) return { tier: "danger", kind: "stops the installed Cypher app's processes" };
+  // Started in the chat's folders (its dev instance, a test server), perhaps through `env -i` or before an engine restart: the model decides.
+  if (known.inRoots === true) return { tier: "local", kind: "stops processes running in this chat's project folders" };
+  if (known.owned === false) return { tier: "danger", kind: "stops processes this chat did not start" };
   // macOS hides the environment of its own binaries; nothing matched a name.
   return { tier: "danger", kind: "stops processes it cannot tell are this chat's" };
+}
+
+/** A path into `~/.cypher` or the app bundle written inside a word or a script's text (`python3 -c "open('~/.cypher/…')"`). */
+const INSTALLED_MENTION = /(?:~|\$HOME|\$\{HOME\})\/\.cypher(?![\w.-])(?:\/[^\s'"`;,|&<>()]*)?|\/Applications\/Cypher\.app(?![\w.-])/g;
+
+/** The first path in `text` that is the installed app or its data (not a worktree, not the chat's own folder). */
+function installedMention(text: string, facts: RiskFacts, home: string | undefined): string | undefined {
+  if (!facts.installedApp || home === undefined) return undefined;
+  for (const match of text.split(home).join("~").matchAll(INSTALLED_MENTION)) {
+    const mention = match[0];
+    if (mention.startsWith("/Applications/")) return mention;
+    const classification = facts.classify(`${home}${mention.replace(/^(~|\$HOME|\$\{HOME\})/, "")}`, undefined);
+    if (classification && facts.installedApp(classification.path)) return mention;
+  }
+  return undefined;
+}
+
+/**
+ * Touching the installed Cypher app (`/Applications/Cypher.app`, its data in
+ * `~/.cypher` outside the chats' worktrees, its Runtime): a human decides,
+ * whatever the user said. A chat's own dev instance lives elsewhere
+ * (`~/.cypher-development`).
+ */
+function installedAppDanger(command: RiskCommand, facts: RiskFacts): string | undefined {
+  const installed = facts.installedApp;
+  if (!installed) return undefined;
+  const home = facts.classify("~", undefined)?.path;
+  const named = (path: string) => `touches the installed Cypher app or its data (${path})`;
+  if (command.cwd !== undefined) {
+    const cwd = facts.classify(command.cwd, undefined);
+    if (cwd && installed(cwd.path)) return named(command.cwd);
+  }
+  for (const word of [...command.words, ...command.reads, ...command.writes, ...(command.carried ?? [])]) {
+    if (word === UNKNOWN) continue;
+    if (pathWords([word]).length || command.reads.includes(word) || command.writes.includes(word)) {
+      const classification = facts.classify(word, command.cwd);
+      if (classification && installed(classification.path)) return named(word);
+    }
+    // Inside a script or an option's value.
+    const inside = installedMention(word, facts, home);
+    if (inside) return named(inside);
+  }
+  return undefined;
 }
 
 /** `git push` publishes: to a default or protected branch, tags, force, deletes. */
@@ -645,6 +719,7 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
   if (kill?.tier === "danger") return reviewable(kill, view);
   const danger =
     pathDanger(command, view, facts) ??
+    installedAppDanger(command, facts) ??
     destroyDanger(command, view, facts) ??
     copyDanger(command, view, facts) ??
     protectedTarget(view, facts) ??
@@ -718,6 +793,12 @@ export function downloadsAndRuns(commands: readonly { words: readonly string[]; 
  * `ssh host` would run). Words with `$` are known only when it runs.
  */
 export function assessOpaque(line: string, facts: RiskFacts): Assessment {
+  // Its words with `$` are unknown: look for the installed app in its text instead.
+  const installed = installedMention(line, facts, facts.installedApp ? facts.classify("~", undefined)?.path : undefined);
+  if (installed) {
+    const kind = `touches the installed Cypher app or its data (${installed})`;
+    return { tier: "danger", kind, key: kind };
+  }
   const segments: string[][] = [];
   const pieces = line.split(/;|&&|\|\||\||&|\(|\)|`|\$\(|\n|<|>/);
   for (const piece of pieces) {

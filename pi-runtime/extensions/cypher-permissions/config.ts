@@ -38,7 +38,7 @@ export interface PermissionsConfig {
   levels: Record<LevelName, LevelMatrix>;
   /** Keyed `<zone>.<capability>`, `protected.write`, `network`, `tools`, `escalate`. */
   approval: Record<string, ApprovalMode>;
-  judge: { model: string | null; timeoutMs: number; minConfidence: number };
+  judge: { model: string | null; timeoutMs: number };
   ask: { timeoutMs: number | null };
   sensitive: string[];
   protected: string[];
@@ -350,7 +350,7 @@ export function defaultConfig(agentDir?: string): PermissionsConfig {
     defaultLevel: "standard",
     levels: structuredClone(DEFAULT_LEVELS),
     approval: { ...DEFAULT_APPROVAL },
-    judge: { model: null, timeoutMs: 20_000, minConfidence: 0.8 },
+    judge: { model: null, timeoutMs: 20_000 },
     ask: { timeoutMs: null },
     sensitive: [...DEFAULT_SENSITIVE],
     protected: [...DEFAULT_PROTECTED],
@@ -444,9 +444,6 @@ export function mergeUserConfig(base: PermissionsConfig, raw: unknown): Permissi
   if (isObject(raw.judge)) {
     if (typeof raw.judge.model === "string" || raw.judge.model === null) config.judge.model = raw.judge.model || null;
     if (typeof raw.judge.timeoutMs === "number" && raw.judge.timeoutMs > 0) config.judge.timeoutMs = raw.judge.timeoutMs;
-    if (typeof raw.judge.minConfidence === "number") {
-      config.judge.minConfidence = Math.min(1, Math.max(0.5, raw.judge.minConfidence));
-    }
   }
   if (isObject(raw.ask)) {
     const timeout = raw.ask.timeoutMs;

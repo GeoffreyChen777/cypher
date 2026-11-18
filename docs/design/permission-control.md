@@ -202,7 +202,7 @@ the file is self-guarded). Every field is optional; lists take `{ "add": [], "re
     "tools": "assisted",
     "escalate": "assisted"
   },
-  "judge": { "model": null, "timeoutMs": 20000, "minConfidence": 0.8 },
+  "judge": { "model": null, "timeoutMs": 20000 },
   "ask": { "timeoutMs": null },
   "sensitive": { "add": [], "remove": [] },
   "protected": { "add": [], "remove": [] },
@@ -505,7 +505,7 @@ is unavailable on this device: …"). `/perm` shows the error.
 |---|---|
 | `deny` | Rejected at once; the agent is told the access is not available |
 | `ask` | A human decides |
-| `assisted` | The judge first. It has two answers: approve automatically (once), or ask the user. It never rejects |
+| `assisted` | The judge first. It has three answers: approve and remember for the chat, approve this call once, or ask the user. It never rejects |
 
 Safety rules:
 
@@ -513,14 +513,17 @@ Safety rules:
    commands outside the sandbox included, is `assisted` by default (2026-10-15: the model
    judges first, so the user is asked only about what it cannot approve); the user's file
    or Settings can set any kind back to `ask` or `deny`.
-2. The judge never rejects. Its only answers are `approve` and `ask-user`; anything but a
-   confident `approve` (unsure, low confidence, any other word, unreadable output, an
-   error, a timeout, no model available) asks the user, and the dialog says *"The
-   reviewing model could not approve this automatically: <reason>"*. The reason is also
-   recorded in the audit log (`reviewer`).
-3. Judge approvals are `once`. Only a human creates `chat` or `always` grants or command
-   rules; a command the judge ran outside the sandbox leaves none, and its result says
-   `approved once by the reviewing model`.
+2. The judge never rejects. Its only answers are `approve`, `approve-once` and
+   `ask-user`, and its approval is the decision (D12). Anything but an approval
+   (`ask-user`, any other word, unreadable output, an error, a timeout, no model
+   available) asks the user, and the dialog says *"The reviewing model could not approve
+   this automatically: <reason>"*. The reason is also recorded in the audit log
+   (`reviewer`), with what the model answered (`judgeVerdict`). Its approval never runs a
+   danger: the user decides, with the model's reason.
+3. A judge `approve` of local work is kept for the chat (a file access as a `chat` grant;
+   a command as `chat` grants for its commands' own categories, never the agent's proposed
+   patterns); `approve-once` and any approval of a sensitive file or a danger keep nothing.
+   Only a human creates `always` grants or command rules.
 
 When several paths are requested together, the strictest mode wins.
 
@@ -548,9 +551,23 @@ When several paths are requested together, the strictest mode wins.
   or service the user did not mention; downloading and running code; changing the
   permission setup.
 - **Never sent**: contents of files being read.
-- **Output**: `{"decision": "approve" | "ask-user", "reason", "confidence"}`. It approves
-  only on `approve` with confidence ≥ `judge.minConfidence` (0.8); a less confident
-  `approve` asks the user ("Not sure enough to approve on its own: …"). Timeout 20 s.
+- **What serves the request** (2026-11-18): checking development work the user asked
+  for, even outside the project folders: building and testing it (scripts that download
+  the project's pinned dependencies included), the chat's own private dev instance
+  (`~/.cypher-development/<instance>`, run from its worktree), screenshots into `/tmp`,
+  read-only process checks (`ps`, `lsof`, `sample`, `lsappinfo info`). In a plan's
+  background session the brief's steps count as the user's request. Never the installed
+  app, other chats' worktrees or dev instances, credentials, or data leaving the machine.
+- **Output**: `{"decision": "approve" | "approve-once" | "ask-user", "reason"}`. Two
+  outcomes follow: `approve` or `approve-once` runs the call, `ask-user` puts it to the
+  user with the reason. `approve-once` runs the call and keeps nothing: the answer when
+  the call is fine but the patterns an approval would keep for the chat are too broad
+  (`cypher …`, `lsappinfo …`, a script the agent wrote); that alone is never a reason to
+  ask. A sensitive file the model approves is read or written once, never remembered. A
+  danger never runs on the model's approval: the user decides, and the dialog's Review
+  row gives the model's reason. Safety rests on the review prompt and the deterministic
+  classifier and hard rules (risk.ts, shell.ts, secrets, the installed app), not on a
+  score the model gives itself. Timeout 20 s.
 - When the judge asks the user, its reason is shown in the dialog.
 
 ### 7.4 Human approval
@@ -715,7 +732,10 @@ Commands:
 | `crates/ui/src/composer/slash_menu.rs`, `slash.rs` | `/permissions` in the composer's `/` menu |
 | `crates/ui/src/pickers/` (`PERMISSION_LEVELS`, `PickerKind::Permissions`) | The level names; the Full access shield and its menu |
 
-Tests: `cypher-permissions.test.mjs` (engine, no Pi or Landstrip) and
+Tests: `cypher-permissions.test.mjs` (engine, no Pi or Landstrip),
+`cypher-permissions-replay.test.mjs` (every question that reached the owner in the week
+from 2026-11-11, sanitized in `cypher-permissions-replay/`, replayed through the
+classifier and the decision path with the judge's verdict stubbed per case) and
 `cypher-permissions.staged.test.mjs` (a real `bin/pi` in RPC mode from a staged Runtime,
 a scripted faux model that also answers as the judge, the real Landstrip, the patched
 grep and apply_patch, dialogs answered over RPC). The package script runs both on macOS and Linux builds; the
@@ -806,6 +826,11 @@ Decided (2026-10-11):
   remembered for the chat) and is kept per project when a human approves it, dangerous
   work (and protected writes) always asks a human, for the task at most. D10's "model
   first" now excludes dangerous work.
+- **D12.** (2026-11-18) The judge answers `approve`, `approve-once` or `ask-user`, with no
+  confidence score and no bar to clear: its approval is the decision, for local work and
+  sensitive files alike (a sensitive file once, never remembered), and anything else asks
+  the user. A `judge.minConfidence` key in the user's file is ignored. A danger never runs
+  on its approval: the user decides.
 
 Open:
 

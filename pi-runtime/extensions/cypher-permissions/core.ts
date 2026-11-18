@@ -7,7 +7,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { constants, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { open, mkdir, access as fsAccess, stat as fsStat, readdir as fsReaddir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
@@ -39,7 +39,7 @@ import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from
 import { benignEnv, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
 import { assessCommand, assessOpaque, downloadsAndRuns, redirectDanger, TIER_RANK } from "./risk.ts";
-import type { Assessment, GitFacts, KillTarget, RiskFacts, Tier } from "./risk.ts";
+import type { Assessment, GitFacts, KillTarget, ProcessFacts, RiskFacts, Tier } from "./risk.ts";
 import { INSPECT, inspectMatches, viewOf } from "./packs.ts";
 import { parseShell, UNKNOWN } from "./shell.ts";
 import type { ParsedLine, SimpleCommand } from "./shell.ts";
@@ -170,9 +170,6 @@ const ALWAYS_IN = "Always in ";
 /** Dangerous work: until the user's next message. */
 const TASK = "Allow for this task";
 
-/** How sure the reviewing model must be to approve a danger. */
-const DANGER_CONFIDENCE = 0.9;
-
 /** A reviewing model that failed to sign in (an expired session, a missing key). */
 const AUTH_FAILURE = /authenticat|unauthori[sz]ed|\b401\b|\b403\b|expired|log ?in|sign ?in|credential|api key|forbidden/i;
 
@@ -181,6 +178,15 @@ export const PROCESS_MARKER = "CYPHER_AGENT_CHAT";
 
 /** How long an approval lasts: a grant's scope, or a rule for this project, or an existing grant or rule. */
 export type Scope = GrantScope | "project" | "rule";
+
+/** How a review went: the decision, whether an approval keeps nothing, and the model's answer for the audit. */
+interface Review {
+  decision: "approve" | "ask-user";
+  once: boolean;
+  reason: string;
+  state: "approved" | "asked" | "unavailable" | "paused";
+  audit?: Pick<AuditRecord, "judgeVerdict">;
+}
 
 type ElevateOutcome = { allowed: true; scope: Scope; by: Grant["approvedBy"] } | { allowed: false; reason: string; abort?: boolean };
 
@@ -277,6 +283,39 @@ function processEnvironment(pid: number): string | undefined {
   return words.some((word) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) ? words.join("\n") : undefined;
 }
 
+/** The installed app on macOS. */
+const INSTALLED_APP = "/Applications/Cypher.app";
+
+/** A process's program and working directory, each undefined when it cannot be read. */
+function processPlace(pid: number): { program?: string; cwd?: string } {
+  if (process.platform === "linux") {
+    const link = (name: string) => {
+      try {
+        return readlinkSync(`/proc/${pid}/${name}`);
+      } catch {
+        return undefined;
+      }
+    };
+    return { program: link("exe"), cwd: link("cwd") };
+  }
+  const run = (program: string, args: string[]) => {
+    const result = spawnSync(program, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000 });
+    return result.status === 0 ? result.stdout : undefined;
+  };
+  // `lsof -Fn` prints `p<pid>`, then `fcwd`/`ftxt` and `n<path>` per file.
+  const files = run("lsof", ["-a", "-p", String(pid), "-d", "cwd,txt", "-Fn"]) ?? "";
+  let cwd: string | undefined;
+  let program: string | undefined;
+  let fd: string | undefined;
+  for (const line of files.split("\n")) {
+    if (line.startsWith("f")) fd = line.slice(1);
+    else if (line.startsWith("n") && fd === "cwd") cwd ??= line.slice(1);
+    else if (line.startsWith("n") && fd === "txt") program ??= line.slice(1);
+  }
+  program ??= run("ps", ["-o", "comm=", "-p", String(pid)])?.trim();
+  return { program: program && isAbsolute(program) ? program : undefined, cwd };
+}
+
 const ESCALATE_HINT =
   "If the command needs what the sandbox withholds (files outside the project folders, credentials, keys, the keychain, other processes, system services), run it again with `escalate`: a reviewing model or the user decides whether it runs outside the sandbox.";
 
@@ -295,6 +334,8 @@ interface LineCommand extends SimpleCommand {
   inert: boolean;
   /** The wrappers that only run it (`nohup`, `timeout 30`). */
   wrappers: string[];
+  /** Values assigned in front of it and its wrappers' words. */
+  carried: string[];
 }
 
 const DIRECTORY_BUILTINS: ReadonlySet<string> = new Set(["cd", "pushd", "popd"]);
@@ -786,11 +827,10 @@ export class Permissions {
   private async review(
     request: Omit<JudgeRequest, "level" | "workspaceRoots" | "userMessages" | "recentToolCalls">,
     ctx: RequestContext,
-    minConfidence = this.config.judge.minConfidence,
-  ): Promise<{ decision: "approve" | "ask-user"; reason: string; state: "approved" | "asked" | "unavailable" | "paused" }> {
-    if (!ctx.complete) return { decision: "ask-user", reason: "No reviewing model is available here.", state: "unavailable" };
+  ): Promise<Review> {
+    if (!ctx.complete) return { decision: "ask-user", once: false, reason: "No reviewing model is available here.", state: "unavailable" };
     const paused = this.judgePaused();
-    if (paused) return { decision: "ask-user", reason: paused, state: "paused" };
+    if (paused) return { decision: "ask-user", once: false, reason: paused, state: "paused" };
     const { userMessages, recentToolCalls } = conversationContext(ctx.branch());
     const judgeRequest: JudgeRequest = { ...request, level: this.level, workspaceRoots: this.roots, userMessages, recentToolCalls };
     const controller = new AbortController();
@@ -815,16 +855,22 @@ export class Permissions {
     if (text === undefined) {
       if (timedOut) {
         this.noteReview("timeout");
-        return { decision: "ask-user", reason: `The reviewing model did not answer within ${Math.round(this.config.judge.timeoutMs / 1000)} seconds.`, state: "unavailable" };
+        return { decision: "ask-user", once: false, reason: `The reviewing model did not answer within ${Math.round(this.config.judge.timeoutMs / 1000)} seconds.`, state: "unavailable" };
       }
       const short = failure && failure.length > 200 ? `${failure.slice(0, 200)}…` : failure;
       if (failure && AUTH_FAILURE.test(failure)) this.noteReview("auth", short);
       const why = short ? `: ${short}` : ".";
-      return { decision: "ask-user", reason: `The reviewing model failed${why}`, state: "unavailable" };
+      return { decision: "ask-user", once: false, reason: `The reviewing model failed${why}`, state: "unavailable" };
     }
     this.noteReview("ok");
-    const verdict = parseVerdict(text, minConfidence);
-    return { ...verdict, state: verdict.decision === "approve" ? "approved" : "asked" };
+    const verdict = parseVerdict(text);
+    return {
+      decision: verdict.decision,
+      once: verdict.once,
+      reason: verdict.reason,
+      state: verdict.decision === "approve" ? "approved" : "asked",
+      audit: { judgeVerdict: verdict.kind },
+    };
   }
 
   private async elevate(
@@ -888,9 +934,10 @@ export class Permissions {
         ctx,
       );
       base.judge = verdict.state;
+      Object.assign(base, verdict.audit);
       if (verdict.decision === "approve") {
-        // Remembered for the chat, so the same access is not reviewed again; a secret only once.
-        const scope = sensitive ? "once" : "chat";
+        // Remembered for the chat, so the same access is not reviewed again; a secret, or an approval of this call alone, only once.
+        const scope = sensitive || verdict.once ? "once" : "chat";
         finish({ decision: "allow", decidedBy: "judge", reason: verdict.reason, scope, prompted: false });
         return { allowed: true, scope, by: "judge" };
       }
@@ -1102,7 +1149,12 @@ export class Permissions {
   }
 
   private parse(command: string): ParsedLine {
-    return parseShell(command, this.home, { assignable: (name) => this.assignable(name), prefixAllowed: benignEnv });
+    return parseShell(command, this.home, {
+      assignable: (name) => this.assignable(name),
+      prefixAllowed: benignEnv,
+      // An exported value is followed for later words; `export` itself never runs outside by a rule (`ruleCannotVouch`).
+      exportable: (name) => !SHELL_VARIABLES.test(name) && !/proxy/i.test(name),
+    });
   }
 
   /**
@@ -1118,7 +1170,16 @@ export class Permissions {
     const moves = (command: SimpleCommand) => DIRECTORY_BUILTINS.has(command.words[0] ?? "");
     // A `cd` in a loop moves every command of the loop, before it too.
     const movesInLoop = commands.some((command) => command.loop && moves(command));
+    // A subshell starts where the line's shell is, and its `cd` stays in it.
+    let outside: string | undefined = cwd;
+    let group: number | undefined;
     for (const command of commands) {
+      if (command.subshell !== group) {
+        // Entering one from the line's shell, or leaving one (for the line, or the next subshell).
+        if (group === undefined) outside = here;
+        else here = outside;
+        group = command.subshell;
+      }
       if (command.loop && movesInLoop) here = undefined;
       const unwrapped = unwrap(command.words);
       const wrapped = unwrapped && unwrapped.wrappers.every((wrapper) => this.systemProgram(wrapper, here)) ? unwrapped : undefined;
@@ -1127,6 +1188,8 @@ export class Permissions {
         ...command,
         words,
         env: [...command.env, ...(wrapped?.env ?? [])],
+        // The values in front of it and its wrappers' words: they can name the installed app too (`CYPHER_DATA_DIR=~/.cypher cmd`).
+        carried: [...(command.envValues ?? []), ...(wrapped ? command.words.slice(0, command.words.length - words.length) : [])],
         wrappers: wrapped?.wrappers ?? [],
         cwd: here,
         inert: isInert(words) || this.harmlessFilter(words, here),
@@ -1265,8 +1328,8 @@ export class Permissions {
    *
    * - dangerous: a human, every task: run once, or allow its patterns until
    *   the user's next message. A danger short of the most sensitive
-   *   (risk.ts `reviewable`) goes to the reviewing model first, which may run
-   *   it once when the user's own message asks for exactly it;
+   *   (risk.ts `reviewable`) goes to the reviewing model first, whose
+   *   answer the human sees: its approval alone never runs a danger;
    * - local: the reviewing model, which remembers its approval for the chat;
    *   else a human: once, or always in this project by patterns for similar
    *   commands (the agent's, then each other command's category).
@@ -1381,8 +1444,8 @@ export class Permissions {
       }
       // Model first for what is not dangerous: it may run the command, and
       // remembers its approval for this chat. A danger short of the most
-      // sensitive (risk.ts `reviewable`): it may run it once, when the user's
-      // own message asks for exactly it. Otherwise the user decides, with its reason.
+      // sensitive (risk.ts `reviewable`): the model reviews it, but the user
+      // decides, with its reason.
       const reviewable =
         dangerous &&
         !onceOnly &&
@@ -1407,15 +1470,17 @@ export class Permissions {
             remembers: memo.map((pattern) => describePattern(pattern.match)),
           },
           ctx,
-          dangerous ? Math.max(this.config.judge.minConfidence, DANGER_CONFIDENCE) : undefined,
         );
         audit.judge = verdict.state;
-        if (verdict.decision === "approve") {
-          for (const pattern of memo) this.addCommandGrant(pattern, "chat", "judge", label);
-          finish({ decision: "allow", decidedBy: "judge", reason: verdict.reason, scope: memo.length ? "chat" : "once", prompted: false });
+        Object.assign(audit, verdict.audit);
+        if (verdict.decision === "approve" && !dangerous) {
+          // `approve-once`: this call runs, and nothing is remembered.
+          const kept = verdict.once ? [] : memo;
+          for (const pattern of kept) this.addCommandGrant(pattern, "chat", "judge", label);
+          finish({ decision: "allow", decidedBy: "judge", reason: verdict.reason, scope: kept.length ? "chat" : "once", prompted: false });
           return { ok: true, scope: "once", by: "judge", ...(onceOnly ? { onceOnly } : {}) } as const;
         }
-        review = verdict.reason;
+        review = verdict.decision === "approve" ? `It found your request, but only you can run a danger: ${verdict.reason}` : verdict.reason;
         audit.reviewer = review;
       }
       if (!ctx.hasUI) {
@@ -1566,6 +1631,8 @@ export class Permissions {
       protectedTargets: this.config.protectedTargets,
       inspect: this.config.inspect,
       ownsProcesses: (target) => this.ownsProcesses(target),
+      processFacts: (target) => this.processFacts(target),
+      installedApp: (path) => this.installedApp(path),
       git: (dir) => this.gitAt(dir),
       inWorkspace: (dir) => this.paths.inWorkspace(this.paths.canonical(dir, this.cwd)),
       kubeContext: (args) => this.kubeContext(args),
@@ -1644,6 +1711,57 @@ export class Permissions {
       else if (!environment.split("\n").includes(want)) return false;
     }
     return unreadable ? undefined : true;
+  }
+
+  /**
+   * The installed Cypher app or its data: `/Applications/Cypher.app`, and
+   * `~/.cypher` outside the chats' worktrees (its data, Runtime and
+   * settings), but never this chat's own folders (a workspace bot works in
+   * its folder under `~/.cypher`). A canonical path.
+   */
+  installedApp(path: string): boolean {
+    const data = join(this.home, ".cypher");
+    if (this.paths.inWorkspace(path)) return false;
+    return isUnder(path, INSTALLED_APP) || (isUnder(path, data) && !isUnder(path, join(data, "worktrees")));
+  }
+
+  /**
+   * What a kill's targets are: this chat's (its marker, `ownsProcesses`),
+   * running in its project folders (their working directory: a dev
+   * instance or test server it started, also through `env -i`, which drops
+   * the marker, or before an engine restart), or the installed app's (its
+   * program, such as the installed Runtime's node, or its data as their
+   * folder; what the chat started stays its own). Read live, so a reused pid
+   * counts as what runs now.
+   */
+  processFacts(target: KillTarget): ProcessFacts {
+    const owned = this.ownsProcesses(target);
+    let pids: number[];
+    if ("pids" in target) pids = target.pids;
+    else {
+      const result = spawnSync("pgrep", target.pgrep, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000 });
+      if (result.status !== 0 && result.status !== 1) return { owned };
+      pids = result.stdout.split("\n").filter(Boolean).map(Number);
+    }
+    let inRoots: boolean | undefined = true;
+    let installedApp = false;
+    for (const pid of pids) {
+      try {
+        process.kill(pid, 0);
+      } catch (error) {
+        // Gone: stopping it does nothing.
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") continue;
+        inRoots = false;
+        continue;
+      }
+      const place = processPlace(pid);
+      const program = place.program ? this.paths.canonical(place.program, "/") : undefined;
+      const cwd = place.cwd ? this.paths.canonical(place.cwd, "/") : undefined;
+      if ((program && this.installedApp(program)) || (cwd && this.installedApp(cwd))) installedApp = true;
+      if (cwd === undefined) inRoots = inRoots === false ? false : undefined;
+      else if (!this.paths.inWorkspace(cwd)) inRoots = false;
+    }
+    return { owned, inRoots, installedApp };
   }
 
   statusText(): string {

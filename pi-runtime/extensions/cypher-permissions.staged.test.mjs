@@ -287,7 +287,7 @@ test("file tools: a sensitive read asks a human; symlinks resolve to their targe
 test("assisted: the judge approves an external write without a dialog; protected writes go to the human", async () => {
   const allowed = await turn(
     [{ tool: "write", args: { path: join(other, "from-judge.md"), content: "ok\n" } }],
-    { judge: '{"decision":"approve","reason":"the user asked for it","confidence":0.95}' },
+    { judge: '{"decision":"approve","reason":"the user asked for it"}' },
   );
   assert.equal(allowed.dialogs.length, 0);
   assert.equal(allowed.results[0].isError, false);
@@ -295,7 +295,7 @@ test("assisted: the judge approves an external write without a dialog; protected
 
   const escalated = await turn(
     [{ tool: "edit", args: { path: ".git/config", edits: [{ oldText: "[core]", newText: "[core]\n\tfsmonitor = touch /tmp/pwned" }] } }],
-    { judge: '{"decision":"ask-user","reason":"fsmonitor runs a program","confidence":0.9}', answers: ["Deny"] },
+    { judge: '{"decision":"ask-user","reason":"fsmonitor runs a program"}', answers: ["Deny"] },
   );
   assert.equal(escalated.dialogs.length, 1);
   assert.match(escalated.dialogs[0].title, /fsmonitor/);
@@ -304,7 +304,7 @@ test("assisted: the judge approves an external write without a dialog; protected
 });
 
 test("model first: the judge runs local work outside the sandbox and may read a sensitive file; dangerous commands skip it", { skip }, async () => {
-  const approve = '{"decision":"approve","reason":"the user asked for it","confidence":0.95}';
+  const approve = '{"decision":"approve","reason":"the user asked for it"}';
   const outside = await turn(
     [{ tool: "bash", args: { command: "echo judged > ../other/judged.txt", escalate: { label: "Note it in the other repo", reason: "the user asked" } } }],
     { judge: approve },
@@ -343,7 +343,7 @@ test("apply_patch goes through the same checks", async () => {
       { tool: "apply_patch", args: { patch: patch("src/added.ts") } },
       { tool: "apply_patch", args: { patch: patch(join(other, "patched.md")) } },
     ],
-    { extraExtensions: [codex], answers: ["Deny"], judge: '{"decision":"ask-user","reason":"unclear","confidence":0}', api: "openai-responses" },
+    { extraExtensions: [codex], answers: ["Deny"], judge: '{"decision":"ask-user","reason":"unclear"}', api: "openai-responses" },
   );
   assert.equal(results[0].isError, false, results[0].text);
   assert.equal(readFileSync(join(workspace, "src", "added.ts"), "utf8"), "patched\n");
@@ -366,7 +366,7 @@ test("filtered network: a new domain asks; a denied one never connects", { skip 
           },
         },
       ],
-      { answers: ["Deny"], judge: '{"decision":"ask-user","reason":"not part of the task","confidence":0.9}' },
+      { answers: ["Deny"], judge: '{"decision":"ask-user","reason":"not part of the task"}' },
     );
     assert.equal(dialogs.length, 1);
     assert.match(dialogs[0].title, /^Allow the agent to reach example\.com\?/);
