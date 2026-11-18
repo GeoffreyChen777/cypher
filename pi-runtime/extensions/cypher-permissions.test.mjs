@@ -416,6 +416,33 @@ test("the judge prompt fences what the agent wrote", () => {
   assert.deepEqual(context.recentToolCalls, ['bash {"command":"make"}']);
 });
 
+test("the judge sees the end of a long request, where its later steps are", () => {
+  // A brief of several parts: the step at hand comes last, past the first few thousand characters.
+  const brief = `Part 1: replay the audit. ${"Details of part one. ".repeat(250)}Part 2: start the dev instance with scripts/dev-instance.sh, capture it, then stop it.`;
+  const earlier = `First ask. ${"Background. ".repeat(600)}Earlier closing words.`;
+  const prompt = judgePrompt({
+    capability: "escalate",
+    paths: [],
+    zone: "outside the sandbox",
+    command: "scripts/dev-instance.sh start",
+    level: "standard",
+    workspaceRoots: ["/w"],
+    userMessages: [earlier, brief],
+    recentToolCalls: [],
+  });
+  assert.ok(brief.length > 5000);
+  assert.ok(prompt.includes("Part 2: start the dev instance with scripts/dev-instance.sh, capture it, then stop it."), "the latest message is seen whole");
+  // An earlier long message keeps its start and its end; the middle is left out.
+  assert.ok(prompt.includes("First ask."));
+  assert.ok(prompt.includes("Earlier closing words."));
+  assert.match(prompt, /characters left out/);
+  // The latest message is cut in the middle too once it is very long, never at its end.
+  const huge = `Start. ${"x".repeat(20_000)} The last step.`;
+  const clipped = judgePrompt({ capability: "read", paths: ["/x"], zone: "external", level: "standard", workspaceRoots: ["/w"], userMessages: [huge], recentToolCalls: [] });
+  assert.ok(clipped.includes("Start.") && clipped.includes("The last step."));
+  assert.ok(clipped.length < 14_000);
+});
+
 // --- the approval pipeline ------------------------------------------------------------------
 
 function engine(options = {}) {

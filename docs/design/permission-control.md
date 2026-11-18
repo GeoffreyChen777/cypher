@@ -567,7 +567,9 @@ When several paths are requested together, the strictest mode wins.
   tools, where it would otherwise refuse a system prompt the chat never recorded. A judge
   that fails says why in the dialog's Review row (the provider's error, or that it did
   not answer in time).
-- **Trusted input**: the conversation's last six user messages, the request (capability:
+- **Trusted input**: the conversation's last six user messages (the latest up to 12,000
+  characters, earlier ones up to 4,000; a longer one loses its middle, never its end,
+  since a long brief often puts the step at hand last), the request (capability:
   `read`, `write`, `network`, `tool` or `escalate`; paths, zone, guard and why, tool,
   level, workspace roots). For a danger, also the owner's own words (§7.3.2) and what the
   command acts on as Cypher read it. When some user messages were written by an agent (a

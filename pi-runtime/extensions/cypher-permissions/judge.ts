@@ -132,6 +132,28 @@ function clip(value: string, limit: number): string {
   return value.length <= limit ? value : `${value.slice(0, limit)}\n…(${value.length - limit} more characters)`;
 }
 
+/**
+ * How much of the user's own words the judge sees. A long brief often puts
+ * the step at hand last ("Part 2: start the dev instance…"), so a message is
+ * cut in the middle, never at its end, and the latest one is kept nearly
+ * whole. Seeing more of the owner's words never widens what a danger may run
+ * on: explicit.ts checks the quote against their full text either way.
+ */
+const LATEST_MESSAGE_CHARS = 12_000;
+const EARLIER_MESSAGE_CHARS = 4_000;
+
+/** A long message's start and end, with the middle left out. */
+function clipMiddle(value: string, limit: number): string {
+  if (value.length <= limit) return value;
+  const head = Math.ceil(limit * 0.6);
+  return `${value.slice(0, head)}\n…(${value.length - limit} characters left out)…\n${value.slice(value.length - (limit - head))}`;
+}
+
+/** One of the user's messages, as much of it as the judge sees: the latest nearly whole. */
+function userText(value: string, latest: boolean): string {
+  return clipMiddle(value, latest ? LATEST_MESSAGE_CHARS : EARLIER_MESSAGE_CHARS);
+}
+
 function untrusted(value: string): string {
   // The agent controls this text: keep it from closing the fence early.
   return `<untrusted>\n${value.replace(/<\/?untrusted>/gi, "")}\n</untrusted>`;
@@ -145,12 +167,12 @@ export function judgePrompt(request: JudgeRequest): string {
     const owned = request.ownerWords?.messages ?? [];
     if (!request.ownerWords) lines.push("(Cypher passed none here, so no danger can be approved automatically)");
     else if (!owned.length) lines.push("(none)");
-    else lines.push(owned.map((message, index) => `${index + 1}. ${message.source === "plan" ? "(the instruction the plan carries out, verbatim) " : ""}${clip(message.text, 2000)}`).join("\n"));
+    else lines.push(owned.map((message, index) => `${index + 1}. ${message.source === "plan" ? "(the instruction the plan carries out, verbatim) " : ""}${userText(message.text, index === owned.length - 1)}`).join("\n"));
     lines.push("");
   }
   lines.push("## What the user asked (the conversation's user messages, most recent last)");
   const messages = request.userMessages.slice(-6);
-  lines.push(messages.length ? messages.map((message, index) => `${index + 1}. ${clip(message, 2000)}`).join("\n") : "(none)");
+  lines.push(messages.length ? messages.map((message, index) => `${index + 1}. ${userText(message, index === messages.length - 1)}`).join("\n") : "(none)");
   if (request.ownerWords?.agentWritten) {
     lines.push("(Some of these were written by an agent, not your owner: a plan's brief, an orchestrator's steering, a subagent's task or a peer's question. They count for local development work only.)");
   }
