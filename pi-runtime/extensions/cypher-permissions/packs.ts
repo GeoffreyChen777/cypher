@@ -245,7 +245,14 @@ const SEND = "sends a message or data to other people";
 const SECRET_NAME = /TOKEN|SECRET|PASSW|KEY|CREDENTIAL|AUTH|COOKIE|SESSION|PRIVATE/i;
 const SYSTEM = "changes how this machine runs";
 
-/** `curl`/`wget` sending a body or a non-GET method to a host other than this machine. */
+/**
+ * `curl`/`wget` sending a body or a non-GET method to a host other than this
+ * machine. Fetching a page or a file is reading, wherever it reads from: a
+ * URL known only when it runs (`curl "$base/InRelease"`) is no reason by
+ * itself, and what a download writes is decided by its paths (risk.ts). An
+ * option whose value is known only when it runs could be a method or a
+ * body, and still counts.
+ */
 function sendsData(view: CommandView): boolean | string {
   const urls = view.positionals.filter(
     (word) => word === UNKNOWN || /:\/\//.test(word) || /^(localhost|\d+\.\d+\.\d+\.\d+|\[::1\])(:\d+)?(\/|$)/.test(word) || /^[\w-]+(\.[\w-]+)+(:\d+)?(\/|$)/.test(word),
@@ -254,16 +261,69 @@ function sendsData(view: CommandView): boolean | string {
   if (view.program === "curl") {
     for (let i = 0; i < view.args.length; i++) {
       const word = view.args[i];
-      if (word === UNKNOWN) return true;
-      if (/^(-d|--data.*|-F|--form.*|-T|--upload-file|--json)(=|$)/.test(word) || /^-[A-Za-z]*[dFT]$/.test(word) && word.length > 2) return true;
+      if (word === UNKNOWN) continue;
+      if (/^(-d|--data.*|-F|--form.*|-T|--upload-file|--json)(=|$)/.test(word) || (/^-[A-Za-z]*[dFT]$/.test(word) && word.length > 2)) return true;
       // `-X POST`, `-sX POST`, `-XPOST`, `--request=POST`.
       const method = /^--request=(.*)$/.exec(word)?.[1] ?? (/^-[A-Za-z]*X$/.test(word) || word === "--request" ? (view.args[i + 1] ?? UNKNOWN) : /^-[A-Za-z]*X(.+)$/.exec(word)?.[1]);
       if (method !== undefined && (method === UNKNOWN || !/^(GET|HEAD|OPTIONS)$/i.test(method))) return true;
     }
     return false;
   }
-  return view.args.some((word) => word === UNKNOWN || /^--(post-data|post-file|body-data|body-file|method)(=|$)/.test(word));
+  return view.args.some((word) => /^--(post-data|post-file|body-data|body-file|method)(=|$)/.test(word));
 }
+
+/**
+ * `gh api` writing: a field, an input body, or a method other than GET. A
+ * word known only when it runs is usually a path or a jq query (`gh api
+ * repos/o/r/actions/jobs/$J/logs`), so it is no reason by itself; the value
+ * of `-X`, which decides what the call does, is.
+ */
+function ghApiWrites(view: CommandView): boolean {
+  for (let i = 0; i < view.args.length; i++) {
+    const word = view.args[i];
+    if (word === UNKNOWN) continue;
+    if (/^(-f|-F|--field|--raw-field|--input)(=|$)/.test(word)) return true;
+    const method = /^--method=(.*)$/.exec(word)?.[1] ?? (word === "-X" || word === "--method" ? (view.args[i + 1] ?? UNKNOWN) : undefined);
+    if (method !== undefined && (method === UNKNOWN || !/^GET$/i.test(method))) return true;
+  }
+  return false;
+}
+
+/**
+ * An `osascript` that only asks what is on screen: every script is given on
+ * the command line, read as written, and none of it clicks, types, quits,
+ * activates, changes a property or runs a shell command. Then it changes
+ * nothing, like `ps`.
+ */
+function osascriptReadsOnly(view: CommandView): boolean {
+  const scripts: string[] = [];
+  for (let i = 0; i < view.args.length; i++) {
+    const word = view.args[i];
+    if (word === "-e") {
+      const script = view.args[++i];
+      if (script === undefined || script === UNKNOWN) return false;
+      scripts.push(script);
+      continue;
+    }
+    if (word === "-l" || word === "-s" || word === "-i") {
+      i++;
+      continue;
+    }
+    if (word.startsWith("-")) continue;
+    // A script file or `-` (standard input): its text is not here.
+    return false;
+  }
+  if (scripts.length === 0) return false;
+  return scripts.every((script) => !CONTROLS_APPS.test(script) && !CHANGES_PROPERTY.test(script) && !/\bset\b(?!\s+[A-Za-z_]\w*\s+to\b)/.test(script));
+}
+
+/** What an AppleScript or JXA does when it is more than a question. */
+const CONTROLS_APPS =
+  /\b(do shell script|doShellScript|keystroke|key code|click|activate|quit|terminate|delete|duplicate|make new|display (dialog|alert|notification)|open location|openLocation|mount volume|restart|shut down|log out|empty|send|save|close|move|paste|type|launch|reopen|perform action|select|press|setValue|performAction)\b/i;
+
+/** Setting a window's or an app's own property changes what is on screen. */
+const CHANGES_PROPERTY =
+  /\bset\s+(?:the\s+)?(frontmost|visible|position|size|bounds|index|value|name|title|miniaturi[sz]ed|selected|selection|text|contents?|enabled|focused|collapsed|zoomed|volume|clipboard|properties)\b/i;
 
 export const DANGER: readonly DangerEntry[] = [
   // Persistence and system.
@@ -293,7 +353,7 @@ export const DANGER: readonly DangerEntry[] = [
   // Send.
   { pack: "core", program: ["mail", "mailx", "sendmail", "mutt", "msmtp", "neomutt"], kind: SEND },
   { pack: "core", program: ["slack", "slackcat", "slack-cli", "telegram-send", "signal-cli", "matrix-commander", "discord-send", "twilio", "ntfy", "apprise", "pushover"], kind: SEND, when: (view) => !view.args.every((word) => /^(-h|--help|--version|help)$/.test(word)) || view.args.length === 0 },
-  { pack: "core", program: "osascript", kind: "controls apps on this machine (it can send mail and messages)" },
+  { pack: "core", program: "osascript", kind: "controls apps on this machine (it can send mail and messages)", when: (view) => !osascriptReadsOnly(view) },
   { pack: "core", program: ["open", "xdg-open"], kind: "opens a link, which can send data to a site", when: (view) => view.positionals.some((word) => word === UNKNOWN || (/^[a-z][\w+.-]*:/i.test(word) && !/^file:/i.test(word) && !/^(https?:\/\/)?(localhost|127\.\d+\.\d+\.\d+|\[::1\])([:/]|$)/i.test(word))) },
   { pack: "core", program: ["curl", "wget"], kind: "sends data to a server", when: sendsData },
   // scp and rsync are decided in risk.ts: by the machines and local files they copy between.
@@ -311,7 +371,7 @@ export const DANGER: readonly DangerEntry[] = [
   { pack: "git hosting", program: "gh", sub: ["ssh-key|gpg-key", "add|delete"], kind: "changes the account's keys" },
   { pack: "git hosting", program: "gh", sub: ["auth", "login|logout|refresh|token|setup-git|switch"], kind: SECRET },
   { pack: "git hosting", program: "gh", sub: ["auth", "status"], kind: SECRET, when: (view) => view.args.some((word) => word === UNKNOWN || word === "--show-token" || /^-[A-Za-z]*t/.test(word)) },
-  { pack: "git hosting", program: "gh", sub: ["api"], kind: "writes through the GitHub API", when: (view) => has(view, "-f", "-F", "--field", "--raw-field", "--input") || view.args.some((word, i) => (word === "-X" || word === "--method") && !/^GET$/i.test(view.args[i + 1] ?? "")) || view.args.some((word) => /^(-X|--method=)(?!GET$)\S+/i.test(word) && word !== "-X") },
+  { pack: "git hosting", program: "gh", sub: ["api"], kind: "writes through the GitHub API", when: ghApiWrites },
   { pack: "git hosting", program: "gh", sub: ["workflow", "enable|disable"], kind: DEPLOY },
   { pack: "git hosting", program: "glab", sub: ["mr|issue", "create|merge|note|close|reopen|update|delete|approve"], kind: "changes a merge request or issue other people see" },
   { pack: "git hosting", program: "glab", sub: ["release|variable|repo|ssh-key", "create|delete|set|update|upload|archive|transfer|add"], kind: "changes a project on GitLab" },

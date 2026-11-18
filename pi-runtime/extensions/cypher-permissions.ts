@@ -419,6 +419,8 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
         };
       }
       if (ranOutside) {
+        // What it makes is this task's own from now on (created.ts).
+        st.noteCreated(command, ctx.cwd);
         const note = `[permissions] Ran outside the sandbox (${ranOutside.note}).`;
         try {
           const result = (await outside().execute(id, bashParams, signal, onUpdate, ctx)) as AnyResult;
@@ -435,6 +437,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
       const viaProxy = compiled.policy.network.httpProxyPort;
       const policy = writePolicyFile(compiled.policy);
       const binary = st.status.binary!;
+      st.noteCreated(command, ctx.cwd);
       st.beginCommand(id, command, requestContext(ctx, signal, id));
       const tool = createBashToolDefinition(ctx.cwd, {
         shellPath,

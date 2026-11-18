@@ -43,6 +43,8 @@ export interface PermissionsConfig {
   sensitive: string[];
   protected: string[];
   self: string[];
+  /** The permission system's own files: a change there always asks the user. */
+  permissionSystem: string[];
   writableSupport: string[];
   envScrub: string[];
   network: {
@@ -181,6 +183,67 @@ export const DEFAULT_PROTECTED: readonly string[] = [
   "~/.config/systemd/user/**",
   "~/.config/autostart/**",
 ];
+
+/**
+ * The permission system itself: the policy files, the settings that say
+ * which extensions load, the extension's own code, the audit log and its
+ * health file, and the session files an approval is restored from. Changing
+ * any of them changes what permission control does next, so a change here
+ * always asks the user: no rule, grant or reviewing model ever approves one
+ * (core.ts `alwaysAsk`, the always-ask floor).
+ *
+ * Reading them is ordinary work (a diagnosis reads the audit log).
+ */
+export const DEFAULT_PERMISSION_SYSTEM: readonly string[] = [
+  // Any Cypher instance's or Pi's policy, settings, extensions, audit and sessions.
+  "~/.cypher*/pi-runtime/agent/permissions.json",
+  "~/.cypher*/*/pi-runtime/agent/permissions.json",
+  "~/.cypher*/pi-runtime/agent/settings.json",
+  "~/.cypher*/*/pi-runtime/agent/settings.json",
+  "~/.cypher*/pi-runtime/agent/extensions/**",
+  "~/.cypher*/*/pi-runtime/agent/extensions/**",
+  "~/.cypher*/pi-runtime/agent/sessions/**",
+  "~/.cypher*/*/pi-runtime/agent/sessions/**",
+  "~/.cypher*/pi-runtime/agent/permission-audit.jsonl",
+  "~/.cypher*/*/pi-runtime/agent/permission-audit.jsonl",
+  "~/.cypher*/pi-runtime/agent/cypher-permissions/**",
+  "~/.cypher*/*/pi-runtime/agent/cypher-permissions/**",
+  "~/.pi/agent/permissions.json",
+  "~/.pi/agent/settings.json",
+  "~/.pi/agent/extensions/**",
+  "~/.pi/agent/sessions/**",
+  "~/.pi/agent/permission-audit.jsonl",
+  "~/.pi/agent/cypher-permissions/**",
+  // The extension's code in an installed Runtime.
+  "~/.cypher*/pi-runtime/versions/*/extensions/cypher-permissions*",
+  "~/.cypher*/pi-runtime/versions/*/extensions/cypher-permissions/**",
+  "~/.cypher*/*/pi-runtime/versions/*/extensions/cypher-permissions*",
+  "~/.cypher*/*/pi-runtime/versions/*/extensions/cypher-permissions/**",
+  // A project's own rules, in any checkout.
+  "**/.pi/permissions.json",
+];
+
+/** The permission-system list for the instance whose agent directory this is. */
+export function permissionSystemPatterns(agentDir: string | undefined): string[] {
+  if (!agentDir) return [...DEFAULT_PERMISSION_SYSTEM];
+  let dir = agentDir;
+  try {
+    dir = realpathSync.native(agentDir);
+  } catch {
+    // A missing directory stays as given.
+  }
+  return [
+    ...new Set([
+      `${dir}/${CONFIG_FILE}`,
+      `${dir}/settings.json`,
+      `${dir}/extensions/**`,
+      `${dir}/sessions/**`,
+      `${dir}/permission-audit.jsonl`,
+      `${dir}/cypher-permissions/**`,
+      ...DEFAULT_PERMISSION_SYSTEM,
+    ]),
+  ];
+}
 
 /**
  * Cypher's and Pi's own data: policy, settings, extensions and the Runtime.
@@ -355,6 +418,7 @@ export function defaultConfig(agentDir?: string): PermissionsConfig {
     sensitive: [...DEFAULT_SENSITIVE],
     protected: [...DEFAULT_PROTECTED],
     self: selfPatterns(agentDir),
+    permissionSystem: permissionSystemPatterns(agentDir),
     writableSupport: [...DEFAULT_WRITABLE_SUPPORT],
     envScrub: [...DEFAULT_ENV_SCRUB],
     network: { localBinding: true, unixSockets: [], mode: "open", allowDomains: [...DEFAULT_ALLOW_DOMAINS] },

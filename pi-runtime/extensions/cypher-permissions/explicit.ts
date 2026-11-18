@@ -360,6 +360,7 @@ function pushTargets(
 ): LineTargets {
   const positionals: string[] = [];
   let remote: string | undefined;
+  let deletes = false;
   for (let i = 0; i < rest.length; i++) {
     const word = rest[i];
     if (word === UNKNOWN) return { unknown: "it pushes something known only when it runs" };
@@ -367,6 +368,7 @@ function pushTargets(
       i++;
       continue;
     }
+    if (word === "-d" || word === "--delete") deletes = true;
     if (word.startsWith("--repo=")) remote = word.slice("--repo=".length);
     else if (word.startsWith("-")) continue;
     else positionals.push(word);
@@ -376,6 +378,16 @@ function pushTargets(
   if (positionals.length === 0) return { unknown: "it pushes what the remote's settings say, which the line doesn't name" };
   const git = dir === undefined ? undefined : facts.git(dir);
   const targets: Target[] = [];
+  // `git push origin --delete x`: the refs it names are the remote's, and
+  // whether they still exist here says nothing.
+  if (deletes) {
+    for (const refspec of positionals) {
+      const name = refspec.replace(/^refs\/(heads|tags)\//, "");
+      const tagged = refspec.startsWith("refs/tags/") || (dir !== undefined && facts.tagExists(dir, name));
+      targets.push({ kind: tagged ? "tag" : "branch", value: name, action: "delete", remote, dir });
+    }
+    return { targets };
+  }
   for (const refspec of positionals) {
     const [source, dest = source] = refspec.replace(/^\+/, "").split(":");
     const name = dest.replace(/^refs\/(heads|tags)\//, "");
@@ -436,7 +448,7 @@ export function describeTarget(target: Target): string {
         ? `a new pull request from ${target.head ?? "this branch"} into ${target.base}${target.repo ? ` of ${target.repo}` : ""}`
         : `pull request #${target.value} (${target.action})${target.repo ? ` of ${target.repo}` : ""}`;
     case "branch":
-      return `branch ${target.value} on ${target.remote}`;
+      return `branch ${target.value} on ${target.remote}${target.action === "delete" ? " (deleted)" : ""}`;
     case "tag":
       return `tag ${target.value}${target.commit && target.commit !== target.value ? ` at ${target.commit}` : ""}${target.remote ? ` on ${target.remote}` : ""}${target.action === "release" ? " (a release)" : ""}`;
     case "package":
@@ -541,6 +553,7 @@ const SAYS = {
   version: /version|版本|新版|release/i,
   publish: /publish|release|发布|发版|上传/i,
   install: /install|安装|装上|装一下|装个/i,
+  delete: /delete|remove|drop|prune|clean ?up|tidy|删除|删掉|删了|移除|清理|清除/i,
 };
 
 /** Why `message` (the owner's request) doesn't cover `target`; undefined when it does. */
@@ -566,6 +579,10 @@ function uncovered(target: Target, message: string, opened: readonly { number: s
       return ours.length ? undefined : `your message doesn't name pull request #${target.value}, and this chat didn't open it`;
     }
     case "branch":
+      if (target.action === "delete") {
+        if (!SAYS.delete.test(message)) return "your message doesn't ask to delete a branch";
+        return mentions(message, target.value) ? undefined : `it deletes ${target.value}, a branch your message doesn't name`;
+      }
       if (!SAYS.push.test(message)) return "your message doesn't ask to push";
       return mentions(message, target.value) ? undefined : `it pushes to ${target.value}, a branch your message doesn't name`;
     case "tag": {
