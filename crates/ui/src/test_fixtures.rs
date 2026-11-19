@@ -6,7 +6,9 @@
 
 use chrono::{DateTime, Utc};
 use cypher_doc::{MessageRole, SessionMessageEntry};
-use cypher_proto::{Chat, Session, SessionStatus, Space};
+use cypher_proto::{
+    Bot, BotRoutine, BotWork, Chat, Session, SessionStatus, Space, StepState, WorkState, WorkStep,
+};
 
 pub fn chat() -> Chat {
     Chat {
@@ -30,6 +32,7 @@ pub fn chat() -> Chat {
         child: None,
         bot: None,
         memory: None,
+        started_by: None,
     }
 }
 
@@ -78,5 +81,79 @@ pub fn entry() -> SessionMessageEntry {
         models: Vec::new(),
         turn_changes: None,
         recovery: None,
+    }
+}
+
+/// A workspace hosted on `"dev"` whose chat is `"bot-chat"`.
+pub fn bot() -> Bot {
+    Bot {
+        id: "b".into(),
+        name: "Bot".into(),
+        icon: None,
+        color: None,
+        host_device_id: "dev".into(),
+        chat_id: "bot-chat".into(),
+        instructions: None,
+        scope: Default::default(),
+        capabilities: Default::default(),
+        paused: false,
+        created_at: DateTime::<Utc>::UNIX_EPOCH,
+    }
+}
+
+/// A proposed one-step plan of `bot_id`, proposed in `"bot-chat"`.
+pub fn bot_work(id: &str, bot_id: &str) -> BotWork {
+    BotWork {
+        id: id.into(),
+        bot_id: bot_id.into(),
+        title: "Plan".into(),
+        instruction: String::new(),
+        summary: None,
+        steps: vec![WorkStep {
+            id: "1".into(),
+            title: "Step".into(),
+            project: None,
+            detail: None,
+            state: StepState::Pending,
+            sessions: vec![],
+            note: None,
+            started_at: None,
+            ended_at: None,
+        }],
+        state: WorkState::Proposed,
+        chat_id: "bot-chat".into(),
+        tool_call_id: None,
+        thread_chat_id: None,
+        created_at: 0,
+        started_at: None,
+        ended_at: None,
+        result: None,
+        decision: None,
+        stop_requested_at: None,
+        notify: false,
+    }
+}
+
+/// A manual workspace routine of `bot_id` that has never run.
+pub fn bot_routine(id: &str, bot_id: &str) -> BotRoutine {
+    BotRoutine {
+        id: id.into(),
+        bot_id: bot_id.into(),
+        name: "Routine".into(),
+        prompt: String::new(),
+        target: Default::default(),
+        model: None,
+        schedule: Default::default(),
+        enabled: true,
+        write_notes: false,
+        work_directly: false,
+        created_at: 0,
+        updated_at: 0,
+        run_requested_at: None,
+        thread_chat_id: None,
+        manual_chat_id: None,
+        worktree_path: None,
+        last_run: None,
+        next_run_at: None,
     }
 }

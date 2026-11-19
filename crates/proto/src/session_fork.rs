@@ -220,6 +220,7 @@ mod tests {
             child: None,
             bot: None,
             memory: None,
+            started_by: None,
         }
     }
 

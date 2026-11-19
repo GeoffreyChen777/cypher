@@ -172,7 +172,6 @@ mod tests {
                         timestamp: None,
                         answered: None,
                         translation: None,
-                        card: None,
                     }
                 })
             })

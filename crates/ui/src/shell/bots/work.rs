@@ -1,53 +1,73 @@
-//! The **Work** card (§13.1): running orchestrations with their current step,
-//! a step bar and elapsed time, then the last few finished ones with a
-//! one-line result. A row opens the orchestration: its status and request,
-//! then the plan as one flow (each step with its state, duration and
-//! sessions, ending in the result), Stop while it runs, and its thread,
-//! read-only in the panel.
+//! The **Work** card (§13.1): running orchestrations with their progress
+//! ring, current step and elapsed time, approved plans waiting to start,
+//! then the last few that ended; "N more" brings the rest in, in place. The
+//! panel holds no list of work: a row opens the orchestration. Its page has
+//! every control at the very top beside its status, then its title; under
+//! them what was asked, the result once it ended, and the steps on one rail
+//! (each with its state, duration and what it reported, its sessions under
+//! the step that is under way). Its thread opens read-only in the panel.
 
-use super::board::{card_corner, card_item, two_lines};
+use super::board::{card_corner, card_item};
 use super::items::{
-    ago, arrow_in, decision_bar, item_row, mark_cell, progress_bar, project_label, section_head,
-    section_label, section_rule, session_mark, session_word, step_mark, trailing, work_mark,
+    ago, arrow_in, mark_cell, project_label, section_head, section_rule, session_mark,
+    session_word, step_mark, trailing, work_mark,
 };
 use super::panel::{PanelHead, PanelItem};
 use super::*;
 use crate::transcript::bot_plan::{PlanPhase, format_span, phase_line, plan_phase, step_span};
 use cypher_proto::{BotWork, StepState, WorkState};
 
-/// Finished work the card keeps under the running ones.
-const CARD_FINISHED: usize = 3;
+use super::board::CARD_SHORT;
 
-/// A bot's work as the card and the list sort it: running first (newest
-/// start first), then work awaiting approval, then finished work, newest
-/// end first. Cancelled proposals only show in the full list.
-pub(super) struct WorkLists<'a> {
-    pub running: Vec<&'a BotWork>,
-    pub proposed: Vec<&'a BotWork>,
-    pub finished: Vec<&'a BotWork>,
+/// A bot's work as its card lists it.
+pub(super) struct WorkCard<'a> {
+    /// Under way, always shown: running plans (newest start first), then
+    /// approved plans that have not started yet (oldest approval first,
+    /// the order they start in). A plan still awaiting approval is in
+    /// Needs you, not here.
+    pub live: Vec<&'a BotWork>,
+    /// Ended, newest end first: the last [`CARD_SHORT`] that ran, or
+    /// every one (rejected plans included) once the card is expanded.
+    pub ended: Vec<&'a BotWork>,
+    /// How many ended items the short list leaves out.
+    pub hidden: usize,
 }
 
-pub(super) fn work_lists<'a>(
+pub(super) fn work_card<'a>(
     records: &'a cypher_proto::BotRecords,
     bot_id: &'a str,
-) -> WorkLists<'a> {
+    expanded: bool,
+) -> WorkCard<'a> {
     let mut running: Vec<&BotWork> = Vec::new();
-    let mut proposed: Vec<&BotWork> = Vec::new();
-    let mut finished: Vec<&BotWork> = Vec::new();
+    let mut waiting: Vec<&BotWork> = Vec::new();
+    let mut ended: Vec<&BotWork> = Vec::new();
     for work in records.work_of(bot_id) {
         match work.state {
             WorkState::Running => running.push(work),
-            WorkState::Proposed => proposed.push(work),
-            _ => finished.push(work),
+            WorkState::Proposed => {
+                if work.decision.as_ref().is_some_and(|d| d.approve) {
+                    waiting.push(work)
+                }
+            }
+            _ => ended.push(work),
         }
     }
     running.sort_by_key(|w| std::cmp::Reverse(w.started_at.unwrap_or(w.created_at)));
-    proposed.sort_by_key(|w| std::cmp::Reverse(w.created_at));
-    finished.sort_by_key(|w| std::cmp::Reverse(w.ended_at.unwrap_or(w.created_at)));
-    WorkLists {
-        running,
-        proposed,
-        finished,
+    waiting.sort_by_key(|w| w.decision.as_ref().map_or(w.created_at, |d| d.at));
+    ended.sort_by_key(|w| std::cmp::Reverse(w.ended_at.unwrap_or(w.created_at)));
+    let total = ended.len();
+    let short: Vec<&BotWork> = ended
+        .iter()
+        .copied()
+        .filter(|w| w.state != WorkState::Cancelled)
+        .take(CARD_SHORT)
+        .collect();
+    let hidden = total - short.len();
+    running.extend(waiting);
+    WorkCard {
+        live: running,
+        ended: if expanded { ended } else { short },
+        hidden,
     }
 }
 
@@ -91,19 +111,59 @@ fn shows_request(work: &BotWork) -> bool {
     !work.instruction.trim().is_empty() && norm(&work.instruction) != norm(&work.title)
 }
 
-/// The hover card of a work item's status tile: its state in its tone,
-/// its progress while it runs, then when it was proposed, approved,
-/// started and ended, and how long it took.
+/// The one project every step that names a project works in (its space
+/// id): the page names it once, in its header.
+fn shared_project(work: &BotWork) -> Option<&str> {
+    let mut projects = work.steps.iter().filter_map(|s| s.project.as_deref());
+    let first = projects.next()?;
+    projects.all(|p| p == first).then_some(first)
+}
+
+/// A work item's state in a word, in its tone, for the page's header.
+fn phase_word(phase: PlanPhase, theme: &Theme) -> (&'static str, gpui::Hsla) {
+    let word = match phase {
+        PlanPhase::Awaiting => "Awaiting approval",
+        PlanPhase::Starting => "Waiting to start",
+        PlanPhase::Cancelling | PlanPhase::Cancelled => "Rejected",
+        PlanPhase::Running => "Running",
+        PlanPhase::Stopping => "Stopping",
+        PlanPhase::Done => "Done",
+        PlanPhase::Failed => "Failed",
+        PlanPhase::Stopped => "Stopped",
+    };
+    (word, phase.tint(theme))
+}
+
+/// A request as its tooltip shows it: at most a few lines' worth.
+fn clip_request(text: &str) -> String {
+    const MAX: usize = 400;
+    let text = text.trim();
+    match text.char_indices().nth(MAX) {
+        Some((end, _)) => format!("{}…", text[..end].trim_end()),
+        None => text.to_string(),
+    }
+}
+
+/// Whether a step shows its details before anyone clicked it: every step
+/// of a plan still to read, else only one that is under way or went wrong.
+fn step_opens(state: StepState, numbered: bool) -> bool {
+    numbered
+        || matches!(
+            state,
+            StepState::Running | StepState::Asking | StepState::Failed
+        )
+}
+
+/// The hover card of a work item's status: when it was proposed, approved,
+/// started and ended, and how long it took or has run. The page itself
+/// shows none of these; the status word and the steps say where it is.
 #[derive(Clone)]
 struct WorkStatusTip {
-    status: String,
-    tone: gpui::Hsla,
-    progress: Option<(usize, usize)>,
     times: Vec<(&'static str, String)>,
 }
 
 impl WorkStatusTip {
-    fn of(work: &BotWork, phase: PlanPhase, theme: &Theme) -> Self {
+    fn of(work: &BotWork) -> Self {
         let now = Utc::now().timestamp_millis();
         let when = parts::past_full_ms;
         let mut times = vec![("Proposed", when(work.created_at))];
@@ -130,16 +190,7 @@ impl WorkStatusTip {
             };
             times.push((label, format_span(until - start)));
         }
-        Self {
-            status: phase_line(work, now),
-            tone: match phase {
-                PlanPhase::Running | PlanPhase::Starting => theme.text,
-                _ => phase.tint(theme),
-            },
-            progress: matches!(phase, PlanPhase::Running | PlanPhase::Stopping)
-                .then(|| work.progress()),
-            times,
-        }
+        Self { times }
     }
 }
 
@@ -177,31 +228,37 @@ impl Render for WorkStatusTip {
                 .shadow_md()
                 .flex()
                 .flex_col()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_size(px(12.5))
-                        .line_height(px(17.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(self.tone)
-                        .child(SharedString::from(self.status.clone())),
-                )
-                .children(
-                    self.progress
-                        .map(|(done, total)| progress_bar(done, total, theme)),
-                )
-                .child(
-                    div()
-                        .pt(px(6.0))
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .flex()
-                        .flex_col()
-                        .gap(px(3.0))
-                        .text_size(px(11.5))
-                        .line_height(px(16.0))
-                        .children(rows),
-                ),
+                .gap(px(3.0))
+                .text_size(px(11.5))
+                .line_height(px(16.0))
+                .children(rows),
+        )
+    }
+}
+
+/// What the owner asked, on hover over the page's title once the plan is
+/// under way: wrapped, where the one-line tooltip would run off.
+#[derive(Clone)]
+struct RequestTip(SharedString);
+
+impl Render for RequestTip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        motion::fade_quick(
+            "bot-work-request-tip",
+            div()
+                .w(px(280.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .bg(theme.surface_raised)
+                .shadow_md()
+                .text_size(px(11.5))
+                .line_height(px(16.0))
+                .text_color(theme.text_muted)
+                .child(self.0.clone()),
         )
     }
 }
@@ -242,190 +299,111 @@ fn flow_number(n: usize, theme: &Theme) -> AnyElement {
 }
 
 impl Shell {
-    /// A running item: spinner, title, its current step over a step bar,
-    /// and the time it has run.
+    /// A running item on the card: its progress ring (the steps done, with
+    /// the spinner in it), its title and how long it has run, then the step
+    /// it is on.
     fn running_row(
         &self,
-        key: String,
         work: &BotWork,
-        roomy: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let now = Utc::now().timestamp_millis();
         let item = PanelItem::WorkItem(work.id.clone());
         let selected = self.board.panel.as_ref() == Some(&item);
-        let (done, total) = work.progress();
         let elapsed = format_span(now - work.started_at.unwrap_or(work.created_at));
         let stopping = plan_phase(work) == PlanPhase::Stopping;
-        if !roomy {
-            // On the card: its mark, title and how far it got.
-            return card_item(
-                &key,
-                Some(work_mark(work, self.pulse_ticker.entity_id(), theme)),
-                transcript::single_line(&work.title),
-                Some(card_corner(
-                    if stopping {
-                        "stopping".to_string()
-                    } else {
-                        format!("{done}/{total}")
-                    },
-                    None,
-                    theme,
-                )),
-                selected,
-                theme,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)));
-        }
-        item_row(&key, selected)
-            .items_start()
-            .py(px(8.0))
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
-            .child(div().pt(px(2.0)).child(mark_cell(work_mark(
-                work,
-                self.pulse_ticker.entity_id(),
-                theme,
-            ))))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.0))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(13.0))
-                            .line_height(px(17.0))
-                            .text_color(theme.text)
-                            .child(SharedString::from(transcript::single_line(&work.title))),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(11.0))
-                            .line_height(px(14.0))
-                            .text_color(theme.text_muted.opacity(0.85))
-                            .child(SharedString::from(if stopping {
-                                "Stopping…".to_string()
-                            } else {
-                                current_step_line(work)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .pt(px(5.0))
-                            .pb(px(2.0))
-                            .child(progress_bar(done, total, theme)),
-                    ),
-            )
-            .child(div().pt(px(1.0)).child(trailing(elapsed, theme.text_muted)))
+        let detail = div()
+            .pt(px(2.0))
+            .min_w_0()
+            .truncate()
+            .text_size(px(11.0))
+            .line_height(px(14.0))
+            .text_color(theme.text_muted.opacity(0.85))
+            .child(SharedString::from(if stopping {
+                "Stopping…".to_string()
+            } else {
+                current_step_line(work)
+            }))
+            .into_any_element();
+        super::board::card_item_detail(
+            &format!("bot-work-{}", work.id),
+            Some(work_mark(work, self.pulse_ticker.entity_id(), theme)),
+            transcript::single_line(&work.title),
+            Some(card_corner(elapsed, None, theme)),
+            Some(detail),
+            selected,
+            theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
     }
 
-    /// A finished or waiting item: its outcome mark, title and one line.
+    /// An item that is not running, on the card: its mark, its title and
+    /// when it ended; an approved plan that has not started says it waits
+    /// (for a free slot, or for the workspace to be resumed).
     fn settled_row(
         &self,
-        key: String,
         work: &BotWork,
-        roomy: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let now = Utc::now();
-        let item = if work.awaiting_approval() {
-            PanelItem::Plan(work.id.clone())
-        } else {
-            PanelItem::WorkItem(work.id.clone())
-        };
+        let item = PanelItem::WorkItem(work.id.clone());
         let selected = self.board.panel.as_ref() == Some(&item);
-        let sub = if work.state == WorkState::Proposed {
-            phase_line(work, now.timestamp_millis())
+        let corner = if work.state == WorkState::Proposed {
+            "waiting".to_string()
         } else {
-            result_line(work)
+            ago(work.ended_at.unwrap_or(work.created_at), Utc::now())
         };
-        if !roomy {
-            return card_item(
-                &key,
-                Some(work_mark(work, self.pulse_ticker.entity_id(), theme)),
-                transcript::single_line(&work.title),
-                Some(card_corner(
-                    ago(work.ended_at.unwrap_or(work.created_at), now),
-                    None,
-                    theme,
-                )),
-                selected,
-                theme,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)));
-        }
-        item_row(&key, selected)
-            .py(px(8.0))
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
-            .child(mark_cell(work_mark(
-                work,
-                self.pulse_ticker.entity_id(),
-                theme,
-            )))
-            .child(two_lines(
-                transcript::single_line(&work.title),
-                sub,
-                String::new(),
-                theme,
-            ))
-            .child(trailing(
-                ago(work.ended_at.unwrap_or(work.created_at), now),
-                theme.text_faint,
-            ))
+        card_item(
+            &format!("bot-work-{}", work.id),
+            Some(work_mark(work, self.pulse_ticker.entity_id(), theme)),
+            transcript::single_line(&work.title),
+            Some(card_corner(corner, None, theme)),
+            selected,
+            theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
     }
 
-    /// The sidebar card; `None` when there is nothing to show.
+    /// The sidebar card; `None` when there is nothing to show. What is
+    /// under way always shows; of what ended, the last few, and the rest
+    /// in place on "N more" ([`work_card`]).
     pub(super) fn render_work_card(
         &self,
         bot: &Bot,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (running, finished) = {
+        let expanded = self.list_expanded("work");
+        let (live, ended, hidden) = {
             let state = self.state.read(cx);
-            let lists = work_lists(&state.bot_records, &bot.id);
-            let finished: Vec<BotWork> = lists
-                .finished
-                .into_iter()
-                .filter(|w| w.state != WorkState::Cancelled)
-                .take(CARD_FINISHED)
-                .cloned()
-                .collect();
-            let running: Vec<BotWork> = lists.running.into_iter().cloned().collect();
-            (running, finished)
+            let card = work_card(&state.bot_records, &bot.id, expanded);
+            let own = |list: Vec<&BotWork>| list.into_iter().cloned().collect::<Vec<_>>();
+            (own(card.live), own(card.ended), card.hidden)
         };
-        if running.is_empty() && finished.is_empty() {
+        if live.is_empty() && ended.is_empty() && hidden == 0 {
             return None;
         }
         let header = self.card_header(
             "work",
             "bot-work-header",
             "Work",
-            if running.is_empty() {
-                finished.len()
-            } else {
-                running.len()
-            },
-            PanelItem::Work,
+            live.len(),
+            None,
             None,
             theme,
             cx,
         );
-        let mut rows = Vec::new();
-        for w in &running {
-            rows.push(self.running_row(format!("bot-work-{}", w.id), w, false, theme, cx));
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for w in live.iter().chain(&ended) {
+            let row = if w.state == WorkState::Running {
+                self.running_row(w, theme, cx)
+            } else {
+                self.settled_row(w, theme, cx)
+            };
+            rows.push(row.into_any_element());
         }
-        for w in &finished {
-            rows.push(self.settled_row(format!("bot-work-{}", w.id), w, false, theme, cx));
-        }
+        rows.extend(self.more_row("work".into(), hidden, theme, cx));
         Some(self.fold_card("work", header, rows, theme))
     }
 
@@ -433,93 +411,25 @@ impl Shell {
     /// longer resolves.
     pub(super) fn render_work_panel(
         &mut self,
-        bot: &Bot,
         item: &PanelItem,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         match item {
-            PanelItem::Work => Some(self.render_work_list(bot, theme, cx)),
             PanelItem::WorkItem(id) => self.render_work_item(id, theme, window, cx),
             PanelItem::Thread(id) => self.render_thread(id, theme, cx),
             _ => None,
         }
     }
 
-    fn render_work_list(
-        &mut self,
-        bot: &Bot,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> (PanelHead, gpui::Div) {
-        let (running, proposed, finished) = {
-            let state = self.state.read(cx);
-            let lists = work_lists(&state.bot_records, &bot.id);
-            let own = |list: Vec<&BotWork>| list.into_iter().cloned().collect::<Vec<_>>();
-            (own(lists.running), own(lists.proposed), own(lists.finished))
-        };
-        let head = PanelHead {
-            glyph: icons::HIERARCHY,
-            tint: None,
-            title: "Work".into(),
-        };
-        let mut body = div().p(px(8.0)).flex().flex_col().gap(px(1.0));
-        if !running.is_empty() {
-            body =
-                body.child(section_label("Running", theme))
-                    .children(running.iter().map(|w| {
-                        self.running_row(format!("bot-panel-work-{}", w.id), w, true, theme, cx)
-                    }));
-        }
-        if !proposed.is_empty() {
-            body =
-                body.child(section_label("Proposed", theme))
-                    .children(proposed.iter().map(|w| {
-                        self.settled_row(format!("bot-panel-work-{}", w.id), w, true, theme, cx)
-                    }));
-        }
-        if !finished.is_empty() {
-            body =
-                body.child(section_label("Finished", theme))
-                    .children(finished.iter().map(|w| {
-                        self.settled_row(format!("bot-panel-work-{}", w.id), w, true, theme, cx)
-                    }));
-        }
-        if running.is_empty() && proposed.is_empty() && finished.is_empty() {
-            self.board.panel_empty = Some(
-                parts::panel_empty(
-                    theme,
-                    icons::HIERARCHY,
-                    "No work yet",
-                    "Ask it for something that takes a few steps; it proposes a plan first.",
-                )
-                .child(
-                    div().pt(px(6.0)).text_size(px(12.0)).child(
-                        super::parts::link("bot-work-empty-activity", "View all activity", theme)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.open_panel(PanelItem::Activity, cx)
-                            })),
-                    ),
-                )
-                .into_any_element(),
-            );
-            return (head, div());
-        }
-        // The full log lives here, not in a card of its own.
-        body =
-            body.child(div().px(px(10.0)).pt(px(12.0)).text_size(px(12.0)).child(
-                super::parts::link("bot-work-all-activity", "View all activity", theme).on_click(
-                    cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Activity, cx)),
-                ),
-            ));
-        (head, body)
-    }
-
-    /// One work item in every phase, the plan to approve included: its
-    /// status and what was asked, then [`Self::work_flow`].
-    /// Approve / Cancel or Stop sit in the footer; opening its background
-    /// session and Delete in the header.
+    /// One work item in every phase, the plan to approve included.
+    ///
+    /// The page says each thing once and nothing it can leave out. Its
+    /// header holds every control at the very top beside a word of how it
+    /// stands (the times on hover), then its title. The body is the result
+    /// once it ended, then the steps ([`Self::work_flow`]); a plan still to
+    /// approve also quotes what was asked and gives its approach.
     pub(super) fn render_work_item(
         &mut self,
         work_id: &str,
@@ -528,7 +438,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         let now = Utc::now();
-        let (work, steps, thread_listed) = {
+        let (work, steps, thread_listed, shared) = {
             let state = self.state.read(cx);
             let work = state
                 .bot_records
@@ -570,24 +480,142 @@ impl Shell {
                 .thread_chat_id
                 .as_deref()
                 .is_some_and(|id| state.chats.iter().any(|c| c.id == id));
-            (work, steps, thread_listed)
+            let shared = shared_project(&work).and_then(|space| {
+                project_label(state, space, theme).map(|label| (space.to_string(), label))
+            });
+            (work, steps, thread_listed, shared)
         };
         let phase = plan_phase(&work);
         let head = PanelHead {
             glyph: icons::HIERARCHY,
-            tint: (!matches!(phase, PlanPhase::Running | PlanPhase::Starting))
-                .then(|| phase.tint(theme)),
+            tint: None,
             title: work.title.clone(),
         };
-        // ── header: its background session, and Delete once it ended ──
-        let mut buttons = Vec::new();
+        self.board.panel_header =
+            Some(self.work_header(&work, phase, shared.as_ref(), thread_listed, theme, cx));
+
+        let mut body = div().p(px(8.0)).pb(px(14.0)).flex().flex_col();
+        // What was asked, as a quote, while the plan is still to judge
+        // against it; after that the title stands for it (the request is
+        // its tooltip).
+        let quoted = phase.awaiting() && shows_request(&work);
+        if quoted {
+            body = body.child(
+                div()
+                    .mx(px(8.0))
+                    .mt(px(6.0))
+                    .mb(px(10.0))
+                    .pl(px(10.0))
+                    .border_l_2()
+                    .border_color(crate::kit::theme::hairline(0.2))
+                    .child(super::items::panel_markdown(
+                        &work.instruction,
+                        format!("bot-work-request-{}", work.id),
+                        12.5,
+                        theme.text_muted,
+                        theme,
+                        window,
+                    )),
+            );
+        }
+        let mut resulted = false;
+        // What it produced comes before how it got there.
+        if let Some(result) = work
+            .result
+            .as_ref()
+            .filter(|r| phase.ended() && !r.trim().is_empty())
+        {
+            let key = format!("bot-work-result-{}", work.id);
+            body = body.child(
+                div()
+                    .id(SharedString::from(key.clone()))
+                    .on_hover(motion::hover_listener(key.clone()))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        section_head("Result", true, theme)
+                            .child(div().flex_1())
+                            // Copy, shown with the pointer over the result.
+                            .child(
+                                self.copy_button(
+                                    format!("{key}-copy"),
+                                    result.clone(),
+                                    motion::hover_t(&key),
+                                    theme,
+                                    cx,
+                                )
+                                .mr(px(-6.0)),
+                            ),
+                    )
+                    .child(div().px(px(8.0)).child(super::items::panel_markdown(
+                        result,
+                        format!("{key}-text"),
+                        13.0,
+                        theme.text,
+                        theme,
+                        window,
+                    ))),
+            );
+            resulted = true;
+        }
+        if !work.steps.is_empty() {
+            body = body.child(self.work_flow(
+                &work,
+                steps,
+                phase,
+                resulted,
+                shared.is_some(),
+                theme,
+                window,
+                cx,
+            ));
+        }
+        Some((head, body))
+    }
+
+    /// The work page's header. A bar of controls at the very top: the
+    /// status at the left (its mark and a word, the times on hover), every
+    /// button at the right. Then the title, and under it only the project
+    /// when every step shares one. Counts and times are not repeated here:
+    /// the steps show how far it is, the hover card when.
+    fn work_header(
+        &self,
+        work: &BotWork,
+        phase: PlanPhase,
+        shared: Option<&(String, super::items::ProjectLabel)>,
+        thread_listed: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tip = WorkStatusTip::of(work);
+        // A running plan parked on a question says so, as its ring does.
+        let asking = phase.running()
+            && work
+                .current_step()
+                .is_some_and(|(_, step)| step.state == StepState::Asking);
+        let (word, tone) = if asking {
+            ("Waiting on you", theme.warning)
+        } else {
+            phase_word(phase, theme)
+        };
+        let status = super::items::header_status(
+            format!("bot-work-status-{}", work.id),
+            work_mark(work, self.pulse_ticker.entity_id(), theme),
+            word,
+            tone,
+        )
+        .tooltip(move |_, cx| cx.new(|_| tip.clone()).into());
+
+        let mut controls: Vec<AnyElement> = Vec::new();
         if thread_listed {
             let thread = PanelItem::Thread(work.thread_chat_id.clone().unwrap_or_default());
-            buttons.push(
+            controls.push(
+                // Not a step's session (those are rows under their step):
+                // the one that runs the plan and starts them.
                 super::items::icon_button(
                     "bot-work-thread",
-                    icons::CHAT_ROUND_LINE,
-                    "Open its session",
+                    icons::HIERARCHY,
+                    "Open the coordinator: the session that runs this plan",
                     theme,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.open_panel(thread.clone(), cx)))
@@ -596,7 +624,7 @@ impl Shell {
         }
         if phase.ended() {
             let (id, name) = (work.id.clone(), work.title.clone());
-            buttons.push(
+            controls.push(
                 super::items::icon_button(
                     "bot-work-delete",
                     icons::TRASH_BIN_MINIMALISTIC,
@@ -610,80 +638,142 @@ impl Shell {
                 .into_any_element(),
             );
         }
-        self.set_panel_actions(buttons);
-
-        // ── its status: the tile left of the title, details on hover ──
-        self.board.panel_mark = Some(self.status_tile(&work, phase, theme));
-
-        // Request and Plan: sections under one kind of heading.
-        let mut body = div().p(px(8.0)).flex().flex_col();
-        if shows_request(&work) {
-            body = body
-                .child(section_head("Request", true, theme))
-                .child(div().px(px(8.0)).child(super::items::panel_markdown(
-                    &work.instruction,
-                    format!("bot-work-request-{}", work.id),
-                    13.0,
-                    theme.text,
-                    theme,
-                    window,
-                )));
-        }
-        if !work.steps.is_empty() {
-            body = body.child(self.work_flow(&work, steps, phase, theme, window, cx));
-        }
-
-        // ── footer: the decision it waits on ──
         if phase.awaiting() {
             let (approve, cancel) = (work.id.clone(), work.id.clone());
-            self.set_panel_footer(
-                decision_bar(Some("Nothing runs until you approve."), theme)
-                    .child(
-                        popover::btn_ghost(theme, "Cancel plan", "bot-plan-cancel")
-                            .id("bot-plan-cancel")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.mutate(
-                                    serde_json::json!({
-                                        "op": "resolveBotPlan", "workId": cancel, "approve": false,
-                                    }),
-                                    cx,
-                                )
-                            })),
-                    )
-                    .child(
-                        popover::btn_primary(theme, "Approve")
-                            .id("bot-plan-approve")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.mutate(
-                                    serde_json::json!({
-                                        "op": "resolveBotPlan", "workId": approve, "approve": true,
-                                    }),
-                                    cx,
-                                )
-                            })),
-                    ),
-            );
-        } else if phase.running() {
-            let stop = self.stop_button("bot-work-stop", &work.id, theme, cx);
-            self.set_panel_footer(
-                decision_bar(
-                    Some("Stop ends the work and every session it started."),
+            let (edit_id, edit_title) = (work.id.clone(), work.title.clone());
+            // Reject it and start the reply that asks for the change.
+            controls.push(
+                super::items::icon_button(
+                    "bot-plan-edit",
+                    icons::PEN,
+                    "Ask for a change: rejects it and starts your reply",
                     theme,
                 )
-                .child(stop),
+                .on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.edit_bot_plan(&edit_id, &edit_title, cx)
+                    }),
+                )
+                .into_any_element(),
+            );
+            controls.push(
+                popover::btn_ghost(theme, "Reject", "bot-plan-cancel")
+                    .id("bot-plan-cancel")
+                    .flex_none()
+                    .px(px(10.0))
+                    .py(px(4.0))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.mutate(
+                            serde_json::json!({
+                                "op": "resolveBotPlan", "workId": cancel, "approve": false,
+                            }),
+                            cx,
+                        )
+                    }))
+                    .into_any_element(),
+            );
+            controls.push(
+                popover::btn_primary(theme, "Approve")
+                    .id("bot-plan-approve")
+                    .flex_none()
+                    .py(px(4.0))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.mutate(
+                            serde_json::json!({
+                                "op": "resolveBotPlan", "workId": approve, "approve": true,
+                            }),
+                            cx,
+                        )
+                    }))
+                    .into_any_element(),
+            );
+        } else if phase.running() {
+            controls.push(
+                self.stop_button("bot-work-stop", &work.id, theme, cx)
+                    .into_any_element(),
             );
         }
-        Some((head, body))
+
+        // Past its approval the page does not quote the request: it is
+        // here for whoever wants the exact words.
+        let request = (!phase.awaiting() && shows_request(work)).then(|| {
+            SharedString::from(clip_request(&super::items::plain_markdown(
+                &work.instruction,
+            )))
+        });
+        let place = shared.map(|(space, label)| {
+            let key = format!("bot-work-place-{}", work.id);
+            let space = space.clone();
+            let tip = SharedString::from(format!("Open the project · on {}", label.device));
+            div()
+                .id(SharedString::from(key.clone()))
+                .flex_none()
+                .max_w(px(160.0))
+                .ml(px(-4.0))
+                .px(px(5.0))
+                .h(px(20.0))
+                .rounded(px(6.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(5.0))
+                .cursor_pointer()
+                .bg(motion::hover_blend(
+                    &key,
+                    crate::kit::theme::wash(0.0),
+                    crate::kit::theme::wash(0.07),
+                ))
+                .on_hover(motion::hover_listener(key.clone()))
+                .tooltip(move |_, cx| {
+                    let tip = tip.clone();
+                    cx.new(|_| super::super::session::FindTooltip(tip)).into()
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_panel(PanelItem::Project(space.clone()), cx)
+                }))
+                .text_color(motion::hover_blend(&key, theme.text_muted, theme.text))
+                .child(
+                    icon(label.glyph)
+                        .size(px(11.0))
+                        .flex_none()
+                        .text_color(label.tint),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(label.name.clone())),
+                )
+        });
+        let title =
+            super::items::header_title(format!("bot-work-title-{}", work.id), &work.title, theme)
+                .when_some(request, |el, request| {
+                    el.tooltip(move |_, cx| cx.new(|_| RequestTip(request.clone())).into())
+                });
+        // Under the title only the one project every step works in.
+        super::items::item_header(
+            status,
+            controls,
+            title,
+            place.map(IntoElement::into_any_element),
+            theme,
+        )
     }
 
-    /// The plan as one flow on one rail: each step (its sessions under it),
-    /// then the result the last step leads to. The rail fills in as steps
-    /// finish; a project every step shares is named once, over the flow.
+    /// The steps on one rail: each with its state, how long it took and
+    /// what it reported. A step with one session is the way into it; one
+    /// with several lists them while it is running, asking or failed, and
+    /// otherwise keeps to a line that a click opens. A plan still to
+    /// approve shows every step's description. `heading` says a result
+    /// stands above; `shared` that the header already names the project.
+    #[allow(clippy::too_many_arguments)]
     fn work_flow(
         &self,
         work: &BotWork,
         steps: Vec<FlowStep>,
         phase: PlanPhase,
+        heading: bool,
+        shared: bool,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<Self>,
@@ -700,73 +790,17 @@ impl Shell {
                 | PlanPhase::Cancelling
                 | PlanPhase::Cancelled
         );
-        let place = |p: &super::items::ProjectLabel| format!("{} · {}", p.name, p.device);
-        let common = steps
-            .first()
-            .and_then(|(p, _)| p.as_ref().map(|p| (p.glyph, p.tint, place(p))))
-            .filter(|(_, _, first)| {
-                steps
-                    .iter()
-                    .all(|(p, _)| p.as_ref().map(place).as_deref() == Some(first.as_str()))
-            });
-
-        // ── its heading (where it works on the right), then the summary ──
-        let first = !shows_request(work);
-        let mut flow = div()
-            .flex()
-            .flex_col()
-            .when(!first, |el| el.child(section_rule()))
-            .child(
-                section_head("Plan", first, theme)
-                    .child(div().flex_1())
-                    .when_some(common.clone(), |el, (glyph, tint, place)| {
-                        // The shared project, a link to its page.
-                        let key = format!("bot-work-place-{}", work.id);
-                        let space = work.steps.first().and_then(|s| s.project.clone());
-                        el.child(
-                            div()
-                                .id(SharedString::from(key.clone()))
-                                .min_w_0()
-                                .mr(px(-6.0))
-                                .px(px(6.0))
-                                .h(px(20.0))
-                                .rounded(px(6.0))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(5.0))
-                                .cursor_pointer()
-                                .bg(motion::hover_blend(
-                                    &key,
-                                    crate::kit::theme::wash(0.0),
-                                    crate::kit::theme::wash(0.07),
-                                ))
-                                .on_hover(motion::hover_listener(key.clone()))
-                                .tooltip(|_, cx| {
-                                    cx.new(|_| {
-                                        super::super::session::FindTooltip(
-                                            "Open the project".into(),
-                                        )
-                                    })
-                                    .into()
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(space) = space.clone() {
-                                        this.open_panel(PanelItem::Project(space), cx);
-                                    }
-                                }))
-                                .text_size(px(11.0))
-                                .text_color(motion::hover_blend(
-                                    &key,
-                                    theme.text_muted.opacity(0.85),
-                                    theme.text,
-                                ))
-                                .child(icon(glyph).size(px(11.0)).flex_none().text_color(tint))
-                                .child(div().min_w_0().truncate().child(SharedString::from(place))),
-                        )
-                    }),
-            );
-        if let Some(summary) = work.summary.as_ref().filter(|s| !s.trim().is_empty()) {
+        // A heading only where a result stands above the steps; alone on
+        // the page they need none.
+        let mut flow = div().flex().flex_col().pt(px(2.0)).when(heading, |el| {
+            el.child(section_rule())
+                .child(section_head("Steps", false, theme))
+        });
+        // The approach in a sentence, for the decision; once it runs the
+        // steps say it.
+        if phase.awaiting()
+            && let Some(summary) = work.summary.as_ref().filter(|s| !s.trim().is_empty())
+        {
             flow = flow.child(div().px(px(8.0)).pb(px(6.0)).child(md(
                 summary,
                 format!("bot-work-summary-{}", work.id),
@@ -775,7 +809,6 @@ impl Shell {
             )));
         }
 
-        // ── the rail: steps, then the result ──
         // One node: its mark over the segment to the next node, beside its
         // content. Hovering a node washes it and firms up its segment.
         let node = |key: &str, mark: AnyElement, joined: Option<(gpui::Hsla, gpui::Hsla)>| {
@@ -802,12 +835,12 @@ impl Shell {
                 .id(SharedString::from(key.to_string()))
                 .mx(px(2.0))
                 .px(px(6.0))
-                .py(px(6.0))
+                .py(px(5.0))
                 .rounded(px(10.0))
                 .flex()
                 .flex_row()
                 .items_stretch()
-                .gap(px(12.0))
+                .gap(px(10.0))
                 .bg(motion::hover_blend(
                     key,
                     crate::kit::theme::wash(0.0),
@@ -827,7 +860,7 @@ impl Shell {
                 )
             }
         };
-        flow = flow.child(div().h(px(2.0)));
+        let last = work.steps.len().saturating_sub(1);
         for (ix, (step, (project, sessions))) in work.steps.iter().zip(steps).enumerate() {
             let key = format!("bot-work-node-{}-{ix}", work.id);
             let mark = if numbered {
@@ -836,7 +869,7 @@ impl Shell {
                 step_mark(step.state, ticker, theme)
             };
             let span = (!numbered).then(|| step_span(step, now_ms)).flatten();
-            let project = project.filter(|_| common.is_none());
+            let project = project.filter(|_| !shared);
             // While it waits the plan says what each step will do; once it
             // runs, what the step reported.
             let detail = if numbered {
@@ -846,12 +879,30 @@ impl Shell {
             }
             .filter(|d| !d.trim().is_empty());
             let asking = step.state == StepState::Asking;
+            // A step with one session is that session: its row would say
+            // the step's title and state again, so the step is the link.
+            let (link, sessions) = match sessions.as_slice() {
+                [(chat_id, Some(_))] => (Some(chat_id.clone()), Vec::new()),
+                _ => (None, sessions),
+            };
             let sessions_n = sessions.len();
-            let foldable = project.is_some() || detail.is_some() || sessions_n > 0;
-            let folded = foldable && self.board.work_folded.contains(&(work.id.clone(), ix));
-            // Its title line folds the details away and back; a chevron
-            // shows on hover.
+            let foldable = link.is_none() && (detail.is_some() || sessions_n > 0);
+            let (timed, placed) = (span.is_some(), project.is_some());
             let toggle = (work.id.clone(), ix);
+            let open = match link {
+                // No fold: its note in full while it is under way.
+                Some(_) => step_opens(step.state, numbered),
+                None => {
+                    foldable
+                        && self
+                            .board
+                            .work_open
+                            .get(&toggle)
+                            .copied()
+                            .unwrap_or_else(|| step_opens(step.state, numbered))
+                }
+            };
+            let waiting = !numbered && step.state == StepState::Pending;
             let title_key = format!("{key}-title");
             let title = div()
                 .id(SharedString::from(title_key.clone()))
@@ -863,11 +914,21 @@ impl Shell {
                 .when(foldable, |el| {
                     el.cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.board.work_folded.remove(&toggle) {
-                                this.board.work_folded.insert(toggle.clone());
-                            }
+                            this.board.work_open.insert(toggle.clone(), !open);
                             cx.notify();
                         }))
+                })
+                .when_some(link.clone(), |el, chat_id| {
+                    el.cursor_pointer()
+                        .tooltip(|_, cx| {
+                            cx.new(|_| {
+                                super::super::session::FindTooltip("Open its session".into())
+                            })
+                            .into()
+                        })
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx)),
+                        )
                 })
                 .child(
                     div()
@@ -875,83 +936,112 @@ impl Shell {
                         .min_w_0()
                         .text_size(px(13.0))
                         .line_height(px(18.0))
-                        .text_color(if step.state == StepState::Skipped {
+                        .text_color(if waiting || step.state == StepState::Skipped {
                             theme.text_muted
                         } else {
                             theme.text
                         })
                         .child(SharedString::from(step.title.clone())),
                 )
-                .children(span.map(|span| {
-                    // Its exact times on hover.
-                    let tip = match (step.started_at, step.ended_at) {
-                        (Some(start), Some(end)) => format!(
-                            "{} → {}",
-                            parts::past_full_ms(start),
-                            parts::past_full_ms(end)
-                        ),
-                        (Some(start), None) => format!("Since {}", parts::past_full_ms(start)),
-                        _ => String::new(),
-                    };
+                // Where it works, quietly before its time: the name, and
+                // the device only when that is another machine (it is in
+                // the tooltip either way).
+                .child(
                     div()
-                        .id(SharedString::from(format!("{key}-span")))
                         .flex_none()
-                        .pt(px(2.0))
-                        .when(!tip.is_empty(), |el| {
-                            el.tooltip(move |_, cx| {
-                                let tip = tip.clone();
-                                cx.new(|_| super::super::session::FindTooltip(tip.into()))
-                                    .into()
-                            })
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(4.0))
+                        .children(project.map(|project| {
+                            let tip = SharedString::from(format!(
+                                "{} · on {}",
+                                project.name, project.device
+                            ));
+                            div()
+                                .id(SharedString::from(format!("{key}-place")))
+                                .flex_none()
+                                .max_w(px(120.0))
+                                .pt(px(2.0))
+                                .truncate()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted.opacity(0.85))
+                                .tooltip(move |_, cx| {
+                                    let tip = tip.clone();
+                                    cx.new(|_| super::super::session::FindTooltip(tip)).into()
+                                })
+                                .child(SharedString::from(project.short()))
+                        }))
+                        .when(timed && placed, |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .pt(px(2.0))
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_faint)
+                                    .child("·"),
+                            )
                         })
-                        .child(trailing(span, theme.text_faint))
-                }))
+                        .children(span.map(|span| {
+                            // Its exact times on hover.
+                            let tip = match (step.started_at, step.ended_at) {
+                                (Some(start), Some(end)) => format!(
+                                    "{} → {}",
+                                    parts::past_full_ms(start),
+                                    parts::past_full_ms(end)
+                                ),
+                                (Some(start), None) => {
+                                    format!("Since {}", parts::past_full_ms(start))
+                                }
+                                _ => String::new(),
+                            };
+                            div()
+                                .id(SharedString::from(format!("{key}-span")))
+                                .flex_none()
+                                .pt(px(2.0))
+                                .when(!tip.is_empty(), |el| {
+                                    el.tooltip(move |_, cx| {
+                                        let tip = tip.clone();
+                                        cx.new(|_| super::super::session::FindTooltip(tip.into()))
+                                            .into()
+                                    })
+                                })
+                                .child(trailing(span, theme.text_faint))
+                        })),
+                )
                 // The chevron's slot is kept on every step, so the times
-                // line up in one column (and the result's right edge with
-                // them).
+                // line up in one column. A closed step shows it faintly:
+                // there is more under it.
                 .child(
                     div()
                         .flex_none()
                         .w(px(CHEVRON_W))
                         .pt(px(4.0))
+                        // The way into its one session, shown on hover
+                        // like a session row's.
+                        .when(link.is_some(), |el| el.child(arrow_in(&key, theme)))
                         .when(foldable, |el| {
+                            let hover = motion::hover_t(&key);
                             el.child(
-                                icon(if folded {
-                                    icons::ALT_ARROW_RIGHT
-                                } else {
+                                icon(if open {
                                     icons::ALT_ARROW_DOWN
+                                } else {
+                                    icons::ALT_ARROW_RIGHT
                                 })
                                 .size(px(CHEVRON_W))
-                                .text_color(theme.text_faint.opacity(motion::hover_t(&key))),
+                                .text_color(
+                                    theme.text_faint.opacity(if open {
+                                        hover
+                                    } else {
+                                        0.55 + 0.45 * hover
+                                    }),
+                                ),
                             )
                         }),
                 );
             let mut content = div().flex_1().min_w_0().flex().flex_col().child(title);
-            if !folded {
+            if open && (detail.is_some() || sessions_n > 0) {
                 let mut details = div().flex().flex_col().gap(px(2.0)).pt(px(2.0));
-                if let Some(project) = project {
-                    details = details.child(
-                        div()
-                            .min_w_0()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(5.0))
-                            .text_size(px(11.5))
-                            .line_height(px(16.0))
-                            .text_color(theme.text_muted.opacity(0.85))
-                            .child(
-                                icon(project.glyph)
-                                    .size(px(11.0))
-                                    .flex_none()
-                                    .text_color(project.tint),
-                            )
-                            .child(div().min_w_0().truncate().child(SharedString::from(format!(
-                                "{} · {}",
-                                project.name, project.device
-                            )))),
-                    );
-                }
                 if let Some(detail) = &detail {
                     details = details.child(md(
                         detail,
@@ -973,124 +1063,33 @@ impl Shell {
                         ),
                     );
                 }
-                // Unfolding fades the details in.
-                content = content.when(foldable, |el| {
-                    el.child(motion::fade_quick(
-                        SharedString::from(format!("{key}-details")),
-                        details,
-                    ))
-                });
+                // Opening fades the details in.
+                content = content.child(motion::fade_quick(
+                    SharedString::from(format!("{key}-details")),
+                    details,
+                ));
+            } else if let Some(detail) = &detail {
+                // Closed, it keeps what it reported to one line.
+                content = content.child(
+                    div()
+                        .pr(px(CHEVRON_W + TITLE_GAP))
+                        .truncate()
+                        .text_size(px(11.5))
+                        .line_height(px(16.0))
+                        .text_color(theme.text_muted.opacity(0.85))
+                        .child(SharedString::from(transcript::single_line(
+                            &super::items::plain_markdown(detail),
+                        ))),
+                );
             }
-            flow =
-                flow.child(node(&key, mark, Some(segment(step.state))).child(content.pb(px(6.0))));
+            let joined = (ix < last).then(|| segment(step.state));
+            flow = flow.child(node(&key, mark, joined).child(content.pb(px(6.0))));
         }
-
-        // ── the result: where the last step leads ──
-        let (tone, done) = match phase {
-            PlanPhase::Done => (theme.success, true),
-            PlanPhase::Failed => (theme.danger, true),
-            _ if phase.ended() => (theme.text_muted, true),
-            _ => (theme.text_faint, false),
-        };
-        let result = work
-            .result
-            .as_ref()
-            .filter(|r| !r.trim().is_empty() && done);
-        let key = format!("bot-work-node-{}-result", work.id);
-        // The flag alone, in the outcome's tone; it deepens on hover.
-        let mark = icon(icons::FLAG)
-            .size(px(12.0))
-            .text_color(motion::mix(
-                tone.opacity(if done { 0.85 } else { 0.7 }),
-                tone,
-                motion::hover_t(&key),
-            ))
-            .into_any_element();
-        let title = div()
-            .min_h(px(18.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(13.0))
-                    .line_height(px(18.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(if done { theme.text } else { theme.text_muted })
-                    .child("Result"),
-            )
-            .when_some(result.cloned(), |el, text| {
-                // Copy, shown on hover; its label (not its padding) meets
-                // the times.
-                el.child(
-                    self.copy_button(
-                        format!("{key}-copy"),
-                        text,
-                        motion::hover_t(&key),
-                        theme,
-                        cx,
-                    )
-                    .mr(px(-6.0)),
-                )
-            });
-        let content = match result {
-            // What it produced, under its title; the flag carries the tone.
-            Some(result) => div().flex().flex_col().gap(px(4.0)).child(title).child(md(
-                result,
-                format!("bot-work-result-{}", work.id),
-                12.5,
-                theme.text,
-            )),
-            None => div().flex().flex_col().gap(px(2.0)).child(title).child(
-                div()
-                    .text_size(px(12.0))
-                    .line_height(px(17.0))
-                    .text_color(if done {
-                        theme.text_muted
-                    } else {
-                        theme.text_faint
-                    })
-                    .child(SharedString::from(if done {
-                        phase_line(work, now_ms)
-                    } else {
-                        "Reported when the last step ends".to_string()
-                    })),
-            ),
-        };
-        // Its right edge meets the steps' times, past which they keep the
-        // chevron's slot.
-        flow.child(
-            node(&key, mark, None).child(
-                content
-                    .flex_1()
-                    .min_w_0()
-                    .pr(px(CHEVRON_W + TITLE_GAP))
-                    .pb(px(4.0)),
-            ),
-        )
+        flow
     }
 
-    /// A work item's status as the mark left of the panel's title, bare
-    /// (no tile); hovering it shows what state it is in and when.
-    fn status_tile(&self, work: &BotWork, phase: PlanPhase, theme: &Theme) -> AnyElement {
-        let key = format!("bot-work-status-{}", work.id);
-        let tip = WorkStatusTip::of(work, phase, theme);
-        div()
-            .id(SharedString::from(key))
-            .flex_none()
-            .size(px(20.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .tooltip(move |_, cx| cx.new(|_| tip.clone()).into())
-            .child(work_mark(work, self.pulse_ticker.entity_id(), theme))
-            .into_any_element()
-    }
-
-    /// A session a step started, under the step: its status, title, and a
-    /// click that opens it.
+    /// A session a step started, under the step: its status mark, its
+    /// title, and a click that opens it.
     fn flow_session(
         &self,
         chat_id: String,
@@ -1130,13 +1129,13 @@ impl Shell {
                         .text_color(motion::hover_blend(&key, theme.text_muted, theme.text))
                         .child(SharedString::from(title)),
                 )
-                .children(session_word(status, theme).map(|(word, color)| {
-                    div()
-                        .flex_none()
-                        .text_size(px(11.0))
-                        .text_color(color)
-                        .child(word)
-                }))
+                // Its mark says how it stands; the word is in the tooltip.
+                .when_some(session_word(status, theme), |el, (word, _)| {
+                    el.tooltip(move |_, cx| {
+                        cx.new(|_| super::super::session::FindTooltip(word.into()))
+                            .into()
+                    })
+                })
                 .child(arrow_in(&key, theme)),
             None => row
                 .child(mark_cell(session_mark(ChatIndicator::Idle, ticker, theme)))
@@ -1148,17 +1147,17 @@ impl Shell {
         }
     }
 
-    /// The orchestration's thread, read-only, with the way back to its work.
-    /// The panel draws its body unscrolled: the transcript scrolls itself.
-    /// A hidden thread's transcript, read-only, with a way back to what
-    /// owns it: its work item, routine or connection.
+    /// A hidden thread's transcript, read-only, with the way back to what
+    /// owns it (its work item, routine or connection) as an arrow left of
+    /// the title. The panel draws its body unscrolled: the transcript
+    /// scrolls itself.
     fn render_thread(
         &mut self,
         thread: &str,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
-        let (title, back_item, back_label) = {
+        let (title, back_item, back_label, coordinator) = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|c| c.id == thread)?;
             let marker = chat.bot.as_ref()?;
@@ -1170,6 +1169,7 @@ impl Shell {
                         work.title.clone(),
                         PanelItem::WorkItem(work.id.clone()),
                         "Back to the work",
+                        true,
                     )
                 }
                 cypher_proto::BotThread::Routine { routine_id }
@@ -1179,6 +1179,7 @@ impl Shell {
                         routine.name.clone(),
                         PanelItem::Routine(routine.id.clone()),
                         "Back to the routine",
+                        false,
                     )
                 }
                 cypher_proto::BotThread::Peer { connection_id } => {
@@ -1190,53 +1191,35 @@ impl Shell {
                         format!("Questions from {}", connection.peer.name),
                         PanelItem::Connection(connection.id.clone()),
                         "Back to the connection",
+                        false,
                     )
                 }
                 cypher_proto::BotThread::Main | cypher_proto::BotThread::Unknown => return None,
             }
         };
         self.peek(thread, true, cx);
-        let view = self.board.peek.as_ref()?.transcript.clone()?;
+        let view = self.board.peeks.get(thread)?.transcript.clone()?;
+        // The way back is the arrow left of the title, where an item has
+        // its icon.
         let head = PanelHead {
             glyph: icons::CHAT_ROUND_LINE,
             tint: None,
             title,
         };
-        let back_key = "bot-thread-back";
-        let back = div()
-            .id(back_key)
-            .flex_none()
-            .mx(px(8.0))
-            .mt(px(6.0))
-            .px(px(8.0))
-            .h(px(26.0))
-            .rounded(px(7.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .cursor_pointer()
-            .text_size(px(12.0))
-            .text_color(motion::hover_blend(back_key, theme.text_muted, theme.text))
-            .bg(motion::hover_blend(
-                back_key,
-                crate::kit::theme::wash(0.0),
-                crate::kit::theme::wash(0.06),
-            ))
-            .on_hover(motion::hover_listener(back_key))
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(back_item.clone(), cx)))
-            .child(
-                icon(icons::ALT_ARROW_LEFT)
-                    .size(px(12.0))
-                    .text_color(theme.text_muted),
-            )
-            .child(SharedString::from(back_label));
-        let body = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(back)
-            .child(div().flex_1().min_h_0().child(view));
+        self.set_panel_back("bot-thread-back", back_label, back_item, cx);
+        // A plan's thread is its coordinator, named so beside the title: it
+        // is not one of the steps' sessions.
+        if coordinator {
+            self.board.panel_title_note = Some(
+                div()
+                    .flex_none()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child("Coordinator")
+                    .into_any_element(),
+            );
+        }
+        let body = div().size_full().child(view);
         Some((head, body))
     }
 }
@@ -1278,27 +1261,104 @@ mod tests {
             result: None,
             decision: None,
             stop_requested_at: None,
+            notify: false,
         }
     }
 
     #[test]
-    fn work_sorts_into_running_proposed_and_finished() {
+    fn the_card_keeps_whats_under_way_and_the_last_few_that_ended() {
         let mut records = cypher_proto::BotRecords::default();
         let mut other = work("other", WorkState::Running, 9);
         other.bot_id = "x".into();
+        let decided = |id: &str, approve: bool, at: i64| {
+            let mut plan = work(id, WorkState::Proposed, at);
+            plan.decision = Some(cypher_proto::PlanDecision { approve, at });
+            plan
+        };
         records.work = vec![
             work("old-run", WorkState::Running, 1),
             work("new-run", WorkState::Running, 5),
+            // Awaiting approval: Needs you lists it, not Work.
             work("plan", WorkState::Proposed, 2),
-            work("done", WorkState::Done, 3),
-            work("failed", WorkState::Failed, 4),
+            // Approved, not started yet (a full house, a paused workspace).
+            decided("second", true, 8),
+            decided("first", true, 7),
+            // Rejected here, not closed by its host yet.
+            decided("rejecting", false, 6),
+            work("done-1", WorkState::Done, 1),
+            work("failed-2", WorkState::Failed, 2),
+            work("rejected-3", WorkState::Cancelled, 3),
+            work("stopped-4", WorkState::Stopped, 4),
+            work("done-5", WorkState::Done, 5),
             other,
         ];
-        let lists = work_lists(&records, "b");
         let ids = |list: &[&BotWork]| list.iter().map(|w| w.id.clone()).collect::<Vec<_>>();
-        assert_eq!(ids(&lists.running), ["new-run", "old-run"]);
-        assert_eq!(ids(&lists.proposed), ["plan"]);
-        assert_eq!(ids(&lists.finished), ["failed", "done"]);
+        let short = work_card(&records, "b", false);
+        assert_eq!(ids(&short.live), ["new-run", "old-run", "first", "second"]);
+        assert_eq!(ids(&short.ended), ["done-5", "stopped-4", "failed-2"]);
+        assert_eq!(short.hidden, 2, "an older one and the rejected one");
+        // Expanded in place: everything that ended, rejected plans too.
+        let all = work_card(&records, "b", true);
+        assert_eq!(ids(&all.live), ids(&short.live));
+        assert_eq!(
+            ids(&all.ended),
+            ["done-5", "stopped-4", "rejected-3", "failed-2", "done-1"]
+        );
+        assert_eq!(all.hidden, 2, "what Show less puts away again");
+        // Nothing left out: no row to expand.
+        records.work.truncate(2);
+        assert_eq!(work_card(&records, "b", false).hidden, 0);
+    }
+
+    #[test]
+    fn a_long_request_is_clipped_for_its_tooltip() {
+        assert_eq!(clip_request("  Speed it up.  "), "Speed it up.");
+        let long = "é".repeat(450);
+        let clipped = clip_request(&long);
+        assert_eq!(clipped.chars().count(), 401);
+        assert!(clipped.ends_with('…'));
+    }
+
+    #[test]
+    fn one_project_is_shared_when_no_step_names_another() {
+        let mut w = work("w", WorkState::Running, 0);
+        w.steps = vec![
+            step("a", StepState::Done),
+            step("b", StepState::Running),
+            step("report", StepState::Pending),
+        ];
+        assert_eq!(shared_project(&w), None);
+        w.steps[0].project = Some("billing".into());
+        w.steps[1].project = Some("billing".into());
+        // A step with no project (a report) does not break it.
+        assert_eq!(shared_project(&w), Some("billing"));
+        w.steps[2].project = Some("web".into());
+        assert_eq!(shared_project(&w), None);
+    }
+
+    #[test]
+    fn a_step_names_its_device_only_when_it_is_another_machine() {
+        let mut label = super::super::items::ProjectLabel {
+            glyph: icons::FOLDER,
+            tint: gpui::black(),
+            name: "web-api".into(),
+            device: "Build box".into(),
+            local: true,
+        };
+        assert_eq!(label.short(), "web-api");
+        label.local = false;
+        assert_eq!(label.short(), "web-api · Build box");
+    }
+
+    #[test]
+    fn steps_open_when_they_are_under_way_or_still_to_read() {
+        for state in [StepState::Running, StepState::Asking, StepState::Failed] {
+            assert!(step_opens(state, false), "{state:?}");
+        }
+        for state in [StepState::Done, StepState::Pending, StepState::Skipped] {
+            assert!(!step_opens(state, false), "{state:?}");
+            assert!(step_opens(state, true), "{state:?}");
+        }
     }
 
     #[test]

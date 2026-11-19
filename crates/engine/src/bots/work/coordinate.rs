@@ -735,6 +735,7 @@ impl Bots {
             result: None,
             decision: None,
             stop_requested_at: None,
+            notify: false,
         };
         work.clamp();
         self.inner.workspace.put_record(
@@ -778,31 +779,32 @@ impl Bots {
         Ok(format!(
             "The plan \"{}\" (work {}) is waiting for your owner's approval in a card in this \
              chat.{waiting} Stop here: end your turn with one line saying it awaits approval. \
-             Once approved, a background session carries it out and its result appears \
-             here; list_work and get_work show where it stands.",
+             Once approved, a background session carries it out and you are told here when \
+             it ends; list_work and get_work show where it stands.",
             work.title, work.id
         ))
     }
 
     /// The owner's newest message in the bot chat: the instruction a plan
-    /// carries out, verbatim.
+    /// carries out, verbatim. Messages the engine wrote there itself (a
+    /// result notice's turn, another workspace's late answer) are nobody's
+    /// instruction.
     async fn latest_owner_message(&self, chat_id: &str) -> String {
         let docs = self.inner.doc_host.clone();
         let id = chat_id.to_string();
-        off_runtime(move || docs.read_transcript(&id))
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .flatten()
-            .and_then(|entries| {
-                entries
-                    .iter()
-                    .rev()
-                    .filter(|e| e.role == MessageRole::User)
-                    .map(entry_text)
-                    .find(|text| !text.trim().is_empty())
-            })
-            .unwrap_or_default()
+        off_runtime(move || {
+            let entries = docs.read_transcript(&id).ok().flatten()?;
+            let commands = docs
+                .open(&id)
+                .ok()
+                .and_then(|handle| handle.doc().read_commands().ok())
+                .unwrap_or_default();
+            newest_owner_message(&entries, &commands)
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
     }
 
     fn list_work(&self, view: &View) -> String {
@@ -1277,6 +1279,15 @@ impl Bots {
             Some(cwd.clone()),
         )?;
         ws.rename_chat(&session_id, &title)?;
+        // The session is this workspace's: listed there, not among the
+        // owner's own sessions.
+        ws.set_chat_started_by(
+            &session_id,
+            &p::ChatStartedBy {
+                bot_id: view.bot.id.clone(),
+                work_id: Some(work.id.clone()),
+            },
+        )?;
         // Recorded before its run: a crash here still finds and stops it.
         let now = p::now_ms();
         self.edit_work(&work.id, |w| {
@@ -1582,6 +1593,35 @@ impl Bots {
     }
 }
 
+/// The newest user message with text that a person sent: not one of the
+/// engine's own (`commands` name their author), nor a notice's turn or a
+/// late answer by its id (their commands expire from the ledger).
+pub(super) fn newest_owner_message(
+    entries: &[SessionMessageEntry],
+    commands: &[cypher_doc::SessionCommandEntry],
+) -> Option<String> {
+    let authored: std::collections::HashSet<&str> = commands
+        .iter()
+        .filter(|command| command.author.is_some())
+        .filter_map(|command| match &command.payload {
+            SessionCommandPayload::Run { message_id, .. } => Some(message_id.as_str()),
+            SessionCommandPayload::Steer { message_id, .. } => message_id.as_deref(),
+            _ => None,
+        })
+        .collect();
+    entries
+        .iter()
+        .rev()
+        .filter(|e| e.role == MessageRole::User)
+        .filter(|e| {
+            !authored.contains(e.id.as_str())
+                && !e.id.starts_with(p::BOT_EVENT_PREFIX)
+                && !e.id.starts_with("bot-answer-")
+        })
+        .map(entry_text)
+        .find(|text| !text.trim().is_empty())
+}
+
 /// The activity line of a created worktree; [`worktree_path_of`] reads the
 /// path back.
 fn worktree_line(path: &str, branch: &str, project: &str) -> String {
@@ -1780,6 +1820,56 @@ mod state_tests {
             text: t.into(),
             agent_text: None,
         }
+    }
+
+    #[test]
+    fn the_instruction_is_the_owners_message_never_the_engines() {
+        let said = |id: &str, words: &str| SessionMessageEntry {
+            id: id.into(),
+            ..entry(MessageRole::User, vec![text(words)])
+        };
+        let command = |message_id: &str, author: Option<&str>| cypher_doc::SessionCommandEntry {
+            id: new_id(),
+            payload: SessionCommandPayload::Steer {
+                prompt: String::new(),
+                message_id: Some(message_id.into()),
+                agent_prompt: None,
+            },
+            issued_by: "dev".into(),
+            issued_at: 0,
+            based_on: None,
+            expires_at: None,
+            status: cypher_doc::SessionCommandStatus::Applied,
+            resolution: None,
+            sent_at: None,
+            dismissed: false,
+            author: author.map(str::to_string),
+        };
+        let entries = vec![
+            said("m1", "Fix the invoice rounding"),
+            entry(MessageRole::Assistant, vec![text("On it.")]),
+            said("m2", "Plan carried on by a routine"),
+            said(
+                "bot-event-routine-r-5",
+                "[Routine \"Morning brief\" finished]",
+            ),
+            said("bot-answer-x1", "[Answer from \"Ada\"]\n\njose"),
+            said("m3", "  "),
+        ];
+        // A notice's turn and a late answer are told by their ids, an
+        // engine-written message by its command's author.
+        assert_eq!(
+            newest_owner_message(
+                &entries,
+                &[command("m2", Some("routine")), command("m1", None)]
+            ),
+            Some("Fix the invoice rounding".into())
+        );
+        assert_eq!(
+            newest_owner_message(&entries, &[]),
+            Some("Plan carried on by a routine".into())
+        );
+        assert_eq!(newest_owner_message(&entries[3..], &[]), None);
     }
 
     fn asking(permission: bool) -> Vec<SessionMessageEntry> {

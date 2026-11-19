@@ -1,7 +1,8 @@
 // A workspace's routines (crates/ui/src/shell/bots/schedule.rs): the list
-// by next run, and one routine — where and when it runs, its prompt, what
-// its last run did and the sessions its runs happen in; Run now, Edit,
-// Enabled and Delete. The form is RoutineFormPage.swift.
+// by next run, and one routine: how it stands, how it is set up where that
+// is not the default, its prompt, what its last run said and the sessions
+// its runs happen in; Run now, Edit, Enabled and Delete. The form is
+// RoutineFormPage.swift.
 
 import SwiftUI
 
@@ -76,9 +77,10 @@ struct RoutineListPage: View {
     }
 }
 
-/// A routine on a list: its mark (the workspace's repeat or a project's
-/// code), its name and the next run, where and when it runs, and how the
-/// last run went. Switched off or done, it fades.
+/// A routine on a list (schedule.rs `job_item`): its state as its mark,
+/// its name, how it is set up where that is not the default, and at the
+/// right how long its run has gone or when the next one comes. Switched
+/// off or done, it fades.
 struct RoutineRow: View {
     @Environment(AppModel.self) private var model
     let routine: BotRoutine
@@ -86,49 +88,56 @@ struct RoutineRow: View {
 
     var body: some View {
         let state = BoardRoutineState(routine, now: now)
+        let note =
+            if state == .running, let run = routine.lastRun { BotTime.span(now - run.at) } else { state.note(now: now) }
         BoardRow(
-            title: singleLine(routine.name), sub: "\(place) · \(routine.schedule.describe)",
-            trailing: state == .running ? nil : state.note(now: now),
-            trailingColor: noteColor(state), titleLines: 2
+            title: singleLine(routine.name),
+            sub: routine.setupLine(place: RoutineLook.place(routine.target, bot: bot, model: model)),
+            trailing: note, titleLines: 2
         ) {
-            BoardGlyph(symbol: RoutineLook.symbol(routine), color: RoutineLook.tint(routine, bot: bot))
-        } extra: {
-            if state == .running {
-                HStack(spacing: 6) {
-                    MiniSpinner(cellSize: 2.0).foregroundStyle(Theme.statusWorking)
-                    Text("Running")
-                        .font(Theme.sans(13, weight: .medium, relativeTo: .subheadline))
-                        .foregroundStyle(Theme.text)
-                }
-                .padding(.top, 1)
-            } else if let run = routine.lastRun {
-                HStack(spacing: 0) {
-                    BotStatusText(run.outcome.status, size: 13)
-                    Text(" · \(BotTime.past(run.at, now: now))")
-                        .font(Theme.sans(13, relativeTo: .subheadline))
-                        .foregroundStyle(Theme.textMuted)
-                        .lineLimit(1)
-                }
-                .padding(.top, 1)
-            }
+            RoutineMark(routine: routine, state: state)
         }
         .opacity(state.dim ? 0.55 : 1)
         .accessibilityElement(children: .combine)
     }
 
     private var bot: Bot? { model.bot(id: routine.botId) }
+}
 
-    /// "Workspace", or the project and its device.
-    private var place: String {
-        RoutineLook.place(routine.target, model: model)
-    }
+/// A routine's mark, on its row and its page (schedule.rs
+/// `job_status_mark`): the ring while a run is under way (amber and still
+/// when it waits on the owner), a red mark when its last run failed and
+/// `flagFailed` (its row, which has no other place to say so), else the
+/// glyph of its kind.
+struct RoutineMark: View {
+    @Environment(AppModel.self) private var model
+    let routine: BotRoutine
+    let state: BoardRoutineState
+    var flagFailed = true
 
-    private func noteColor(_ state: BoardRoutineState) -> Color {
+    var body: some View {
         switch state {
-        case .running: Theme.text
-        case .starting, .next: Theme.textMuted
-        default: Theme.textFaint
+        case .running: ProgressRing(state: model.routineAsking(routine) ? .asking : .running)
+        case .starting: ProgressRing(state: .waiting)
+        default:
+            if flagFailed && routine.lastRunFailed {
+                BoardGlyph(symbol: "xmark.circle", color: Theme.danger)
+            } else {
+                BoardGlyph(
+                    symbol: RoutineLook.symbol(routine),
+                    color: RoutineLook.tint(routine, bot: model.bot(id: routine.botId)))
+            }
         }
+    }
+}
+
+extension AppModel {
+    /// Whether the session a routine's run is in waits on the owner.
+    func routineAsking(_ routine: BotRoutine) -> Bool {
+        guard let run = routine.lastRun, run.outcome == .running, let chat = run.chatId.flatMap(chat(id:)) else {
+            return false
+        }
+        return indicator(for: chat) == .awaitingInput
     }
 }
 
@@ -147,11 +156,13 @@ enum RoutineLook {
         return BotStyle.color(bot?.color) ?? Theme.textMuted
     }
 
-    /// "Workspace", or "cypher · MacBook Pro".
-    static func place(_ target: RoutineTarget, model: AppModel) -> String {
-        guard let spaceId = target.spaceId else { return "Workspace" }
-        guard let space = model.spaces.first(where: { $0.id == spaceId }) else { return "A project it can't see" }
-        return "\(space.displayName) · \(model.deviceName(space.deviceId))"
+    /// The project it runs in ("cypher", with its device when that is not
+    /// the workspace's own); nil for one that runs in the workspace, which
+    /// is the default and goes unsaid.
+    static func place(_ target: RoutineTarget, bot: Bot?, model: AppModel) -> String? {
+        guard let spaceId = target.spaceId else { return nil }
+        guard let space = model.spaces.first(where: { $0.id == spaceId }) else { return "a project it can't see" }
+        return model.placeName(space, for: bot)
     }
 
     /// The device its runs use: its project's, else the workspace's host.
@@ -209,6 +220,7 @@ private struct RoutineDeleteConfirmation: ViewModifier {
 struct RoutinePage: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.botOpenChat) private var openChat
     let botId: String
     let routineId: String
     @State private var runner = BotActionRunner()
@@ -236,37 +248,29 @@ struct RoutinePage: View {
         }
     }
 
+    /// One routine's page, laid out like a work item's: how it stands, its
+    /// title and one line of how it is set up; then what it is told to do
+    /// and what its last run said. Each thing is said once, and what is
+    /// the default (it runs in the workspace, on the default model, in the
+    /// project's checkout) is not said at all.
     private func page(_ routine: BotRoutine, bot: Bot, now: Int64) -> some View {
         let state = BoardRoutineState(routine, now: now)
+        let asking = model.routineAsking(routine)
+        let line = routine.setupLine(
+            place: RoutineLook.place(routine.target, bot: bot, model: model),
+            model: routine.chosenModel.map { modelLabels[$0] ?? $0 })
         return BotPageList(title: "Routine") {
             Section {
-                BotPageHeader(title: routine.name) {
-                    BotHeaderGlyph(symbol: RoutineLook.symbol(routine), tint: RoutineLook.tint(routine, bot: bot))
-                }
-                if bot.paused {
-                    RoutinePausedNote(bot: bot)
-                }
-            }
-            .groupedRowStyle()
-
-            Section {
-                BotFact(label: "Status") { BotStatusText(status(routine, state: state)) }
-                    .accessibilityIdentifier("routine-status")
-                BotFact(label: "Where", value: RoutineLook.place(routine.target, model: model))
-                if case .project(_, let worktree, _) = routine.target {
-                    BotFact(label: "Checkout", value: worktree ? "Its own worktree" : "The project's checkout")
-                    if worktree, let path = routine.worktreePath {
-                        CopyPathFact(label: "Worktree", path: path)
-                    }
-                }
-                BotFact(label: "Trigger", value: RoutineWords.trigger(routine.schedule))
-                if routine.schedule != .manual {
-                    BotFact(label: "Next run", value: RoutineWords.nextRun(state, now: now))
-                }
-                BotFact(label: "Model", value: modelLabel(routine))
-                if routine.target.spaceId == nil {
-                    BotFact(label: "May write memory", value: routine.writeNotes ? "Yes" : "No")
-                    BotFact(label: "May run commands", value: routine.workDirectly ? "Yes" : "No")
+                BotItemHeader(
+                    status: RoutineWords.status(
+                        state, schedule: routine.schedule, asking: asking, paused: bot.paused, now: now),
+                    title: routine.name, details: RoutineWords.statusDetails(routine, state: state, now: now),
+                    statusIdentifier: "routine-status"
+                ) {
+                    // No failure mark here: Last run says it just below.
+                    RoutineMark(routine: routine, state: state, flagFailed: false)
+                } line: {
+                    if !line.isEmpty { Text(line) }
                 }
             }
             .groupedRowStyle()
@@ -286,20 +290,14 @@ struct RoutinePage: View {
                     )
                     .font(Theme.sans(16, relativeTo: .body))
                     .accessibilityIdentifier("routine-enabled")
-                } footer: {
-                    Text(routine.enabled ? "Runs on its schedule." : "Runs only when you press Run now.")
                 }
                 .groupedRowStyle()
             }
 
+            // What it is told to do: a quote, as a plan's request is.
             Section {
-                Text(routine.prompt)
-                    .font(Theme.sans(15, relativeTo: .body))
-                    .foregroundStyle(Theme.text)
+                BotQuote(text: routine.prompt, cacheKey: "routine-prompt-\(routine.id)")
                     .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } header: {
-                ListSectionHeader(title: "Prompt")
             }
             .groupedRowStyle()
 
@@ -328,51 +326,32 @@ struct RoutinePage: View {
         .botActionAlert(runner)
     }
 
+    /// What its last run said, once one has ended: when (with Failed or
+    /// Skipped in words; a check for one that went well) and its summary.
+    /// A run under way is the status's to say, so it has no section.
     @ViewBuilder
     private func lastRunSection(_ routine: BotRoutine, now: Int64) -> some View {
-        Section {
-            if let run = routine.lastRun {
-                let asking =
-                    run.outcome == .running
-                    && run.chatId.flatMap { model.chat(id: $0) }
-                        .map { model.indicator(for: $0) == .awaitingInput } == true
-                BotFact(label: "Outcome") {
-                    if asking {
-                        BotStatusText("Needs you", tone: .waiting)
-                    } else if run.outcome == .running {
-                        HStack(spacing: 6) {
-                            MiniSpinner(cellSize: 2.0).foregroundStyle(Theme.statusWorking)
-                            Text("Running").font(Theme.sans(15, weight: .medium, relativeTo: .body))
-                        }
-                    } else {
-                        BotStatusText(run.outcome.status)
-                    }
-                }
-                BotFact(label: run.outcome == .running ? "Started" : "Ran") {
-                    Text(BotTime.past(run.at, now: now) + (run.manual ? " · by hand" : ""))
-                }
-                if let ended = run.endedAt {
-                    BotFact(label: "Took", value: BotTime.span(ended - run.at))
-                } else if run.outcome == .running {
-                    BotFact(label: asking ? "Elapsed" : "Running for", value: BotTime.span(now - run.at))
+        if let run = routine.lastRun, run.outcome != .running {
+            let when = BotTime.past(run.at, now: now) + (run.manual ? " · by hand" : "")
+            Section {
+                switch run.outcome {
+                case .failed: BotStatusText("Failed · \(when)", tone: .failed)
+                case .skipped: BotStatusText("Skipped · \(when)", tone: .muted)
+                default: BotStatusText(BotStatusLabel(when, .muted, symbol: "checkmark"))
                 }
                 if let summary = run.summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
                     BotMarkdown(text: summary, cacheKey: "routine-\(routine.id)-summary")
                         .padding(.vertical, 2)
                 }
-            } else {
-                Text("Not run yet")
-                    .font(Theme.sans(15, relativeTo: .body))
-                    .foregroundStyle(Theme.textMuted)
+            } header: {
+                ListSectionHeader(title: "Last run")
             }
-        } header: {
-            ListSectionHeader(title: "Last run")
+            .groupedRowStyle()
         }
-        .groupedRowStyle()
     }
 
     /// The sessions its runs happen in: the standing one scheduled runs
-    /// continue, and the latest Run now's (both hidden; read-only here).
+    /// continue, and the latest Run now's.
     @ViewBuilder
     private func sessionsSection(_ routine: BotRoutine) -> some View {
         let sessions = [
@@ -382,18 +361,31 @@ struct RoutinePage: View {
         if !sessions.isEmpty {
             Section {
                 ForEach(sessions, id: \.id) { session in
-                    NavigationLink(value: BotThreadLink(chatId: session.id)) {
-                        let chat = model.chat(id: session.id)
-                        BoardRow(
-                            title: session.label,
-                            sub: chat?.lastMessagePreview.map(singleLine) ?? "Not on this device yet",
-                            trailing: chat.map { BotTime.ago($0.lastMessageAt ?? $0.createdAt) }
-                        ) {
-                            if let chat, model.indicator(for: chat) != .idle {
-                                SessionStatusMark(indicator: model.indicator(for: chat), cellSize: 2.0)
-                            } else {
-                                BoardGlyph(symbol: "bubble.left")
+                    let chat = model.chat(id: session.id)
+                    // No preview of its last message: Last run says it.
+                    let row = BoardRow(
+                        title: session.label, sub: chat == nil ? "Not on this device yet" : nil,
+                        trailing: chat.map { BotTime.ago($0.lastMessageAt ?? $0.createdAt) }
+                    ) {
+                        if let chat, model.indicator(for: chat) != .idle {
+                            WorkspaceSessionMark(indicator: model.indicator(for: chat))
+                        } else {
+                            BoardGlyph(symbol: "bubble.left")
+                        }
+                    }
+                    Group {
+                        // A project routine's session is an ordinary session:
+                        // it opens as one. The workspace's own thread opens
+                        // read-only on the board.
+                        if let chat, !chat.isReadOnlyThread {
+                            Button {
+                                openChat(session.id)
+                            } label: {
+                                row
                             }
+                            .tint(Theme.text)
+                        } else {
+                            NavigationLink(value: BotThreadLink(chatId: session.id)) { row }
                         }
                     }
                     .accessibilityIdentifier("routine-session-\(session.id)")
@@ -405,33 +397,12 @@ struct RoutinePage: View {
         }
     }
 
-    /// The Status fact: what it is doing, else how it stands.
-    private func status(_ routine: BotRoutine, state: BoardRoutineState) -> BotStatusLabel {
-        switch state {
-        case .running: return BotStatusLabel("Running", .active)
-        case .starting: return BotStatusLabel("Run requested", .active, symbol: "hourglass")
-        case .done: return BotStatusLabel("Done", .done)
-        case .off: return BotStatusLabel("Disabled", .muted, symbol: "pause.circle")
-        default:
-            if routine.lastRunFailed { return BotStatusLabel("Last run failed", .failed) }
-            if routine.lastRun?.outcome == .skipped { return BotStatusLabel("Last run skipped", .muted) }
-            return state == .manual
-                ? BotStatusLabel("Manual", .muted)
-                : BotStatusLabel("Enabled", .muted, symbol: "checkmark.circle")
-        }
-    }
-
     private func runTitle(_ state: BoardRoutineState) -> String {
         switch state {
         case .running: "Running…"
         case .starting: "Run requested"
         default: "Run now"
         }
-    }
-
-    private func modelLabel(_ routine: BotRoutine) -> String {
-        guard let id = routine.chosenModel else { return "Default" }
-        return modelLabels[id] ?? id
     }
 
     private func loadModelLabels(_ deviceId: String) async {

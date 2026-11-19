@@ -1,12 +1,14 @@
 //! The Botboard sidebar under the header: the bot picker, a notice line
 //! when something is off, then the current bot's cards, top to bottom
 //! (§13.1). This file holds the cards' shared shapes, the floating card,
-//! and **Projects** (each granted project with its sessions in scope). A
+//! and **Projects** (each granted project with the sessions the workspace
+//! runs there). A
 //! card with nothing to show is not drawn; with no bots the sidebar says so and
 //! offers a new one. Cards hold no state: everything is read from the main
-//! state on render. A card's header opens its whole list in the detail
-//! panel ([`super::panel`]); a row opens that item, and stays highlighted
-//! while it is open.
+//! state on render. A card is its list: it shows its first rows and grows
+//! in place on "N more" ([`Shell::more_row`]); the detail panel
+//! ([`super::panel`]) never lists a card's rows. A row opens that item
+//! there, and stays highlighted while it is open.
 
 use super::*;
 use cypher_proto::{Chat, Space};
@@ -15,48 +17,67 @@ use cypher_proto::{Chat, Space};
 const CARD_PAD: f32 = 12.0;
 const CARD_RADIUS: f32 = 12.0;
 
-/// One granted project on the Projects card: its sessions in the bot's
-/// scope, and how many of them run or ask.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ProjectLoad {
-    pub space_id: String,
-    pub sessions: usize,
-    pub running: usize,
-    pub asking: usize,
-}
+/// How many settled rows a short list keeps, on every card: what is under
+/// way always shows, then this many of the rest, then "N more".
+pub(super) const CARD_SHORT: usize = 3;
 
-/// The projects `scope` grants, in `spaces` order (every one under "All
-/// projects"), each with its sessions in scope ([`scoped_sessions`]) counted
-/// by `status`.
-pub(super) fn project_loads(
-    scope: &BotScope,
-    spaces: &[&Space],
-    chats: &[Chat],
-    status: impl Fn(&Chat) -> ChatIndicator,
-) -> Vec<ProjectLoad> {
-    let visible = scope.visible_chats(chats);
-    spaces
-        .iter()
-        .filter(|space| scope.sees_space(&space.id))
-        .map(|space| {
-            let sessions: Vec<&Chat> = visible
-                .iter()
-                .copied()
-                .filter(|c| in_project(c, &space.id))
-                .collect();
-            let count = |want: ChatIndicator| sessions.iter().filter(|c| status(c) == want).count();
-            ProjectLoad {
-                space_id: space.id.clone(),
-                sessions: sessions.len(),
-                running: count(ChatIndicator::Working),
-                asking: count(ChatIndicator::AwaitingInput),
+/// A list as its card shows it before "N more" ([`CARD_SHORT`]): every row
+/// under way (`live`) and the first few of the rest, in their order. Returns
+/// the rows kept and how many were left out.
+pub(super) fn short_rows<T>(rows: Vec<T>, live: impl Fn(&T) -> bool) -> (Vec<T>, usize) {
+    let total = rows.len();
+    let mut settled = 0;
+    let kept: Vec<T> = rows
+        .into_iter()
+        .filter(|row| {
+            if live(row) {
+                return true;
             }
+            settled += 1;
+            settled <= CARD_SHORT
         })
-        .collect()
+        .collect();
+    let hidden = total - kept.len();
+    (kept, hidden)
 }
 
-/// A project's sessions the bot can read, newest activity first: its live
-/// top-level sessions (subagent children ride their parent's row).
+/// A project's key among the expanded lists.
+fn project_key(space_id: &str) -> String {
+    format!("project-{space_id}")
+}
+
+/// What a card's header offers at its end, on hover.
+pub(super) enum HeaderAction {
+    /// The card's own page in the panel (Needs you, where its items are
+    /// answered); it stays shown while that page is open.
+    Page(PanelItem),
+    /// Add a routine: the form, in the panel.
+    NewRoutine,
+    /// Connect a workspace: the connect page, in the panel.
+    Connect,
+}
+
+/// One project on the Projects card with the workspace's sessions there.
+struct ProjectSessions {
+    space: Space,
+    /// The ones its short list keeps ([`short_rows`]: those working or
+    /// asking, and the newest few of the rest), or all once expanded.
+    sessions: Vec<SessionLine>,
+    /// How many the short list leaves out.
+    hidden: usize,
+}
+
+/// A workspace session's row under its project.
+struct SessionLine {
+    id: String,
+    title: String,
+    status: ChatIndicator,
+    time_ago: String,
+}
+
+/// The owner's sessions in a project that the bot can read, newest activity
+/// first: its live top-level sessions (subagent children ride their
+/// parent's row; a workspace's own sessions are listed apart).
 pub(super) fn scoped_sessions<'a>(
     scope: &BotScope,
     chats: &'a [Chat],
@@ -74,6 +95,7 @@ pub(super) fn scoped_sessions<'a>(
 fn in_project(chat: &Chat, space_id: &str) -> bool {
     !chat.archived
         && !chat.is_child()
+        && !chat.is_workspace_session()
         && !chat.is_memory_pass()
         && chat.space_id.as_deref() == Some(space_id)
 }
@@ -105,22 +127,6 @@ pub(super) fn board_notice(
     }
 }
 
-/// A Projects row's right-hand note: "1 asking · 2 running", else "idle".
-pub(super) fn load_note(load: &ProjectLoad) -> String {
-    let mut parts = Vec::new();
-    if load.asking > 0 {
-        parts.push(format!("{} asking", load.asking));
-    }
-    if load.running > 0 {
-        parts.push(format!("{} running", load.running));
-    }
-    if parts.is_empty() {
-        "idle".to_string()
-    } else {
-        parts.join(" · ")
-    }
-}
-
 /// A card's shape. Like the project sidebar's groups, cards are bare: one
 /// plate floats under the focused card ([`focused_card`]) and glides when
 /// focus moves.
@@ -135,20 +141,16 @@ pub(super) fn card_of(
     thread_kind: impl Fn(&str) -> Option<cypher_proto::BotThread>,
 ) -> &'static str {
     match item {
-        PanelItem::Projects | PanelItem::Project(_) => "projects",
-        PanelItem::NeedsYou
-        | PanelItem::Plan(_)
-        | PanelItem::Approval(_)
-        | PanelItem::Asking { .. }
-        | PanelItem::Review(_) => "needs",
-        PanelItem::Work | PanelItem::WorkItem(_) => "work",
-        PanelItem::Schedule | PanelItem::Routine(_) | PanelItem::NewRoutine => "schedule",
+        PanelItem::Project(_) | PanelItem::Session(_) => "projects",
+        PanelItem::NeedsYou | PanelItem::Plan(_) | PanelItem::Review(_) => "needs",
+        PanelItem::WorkItem(_) => "work",
+        // A result notice names a routine's run or an ended plan.
+        PanelItem::Post(id) if id.starts_with("routine-") => "schedule",
+        PanelItem::Post(_) => "work",
+        PanelItem::Routine(_) | PanelItem::NewRoutine => "schedule",
         // The log opens from the Work panel and the chat header.
         PanelItem::Activity => "work",
-        PanelItem::Network
-        | PanelItem::Connection(_)
-        | PanelItem::Invite
-        | PanelItem::Question(_) => "network",
+        PanelItem::Connection(_) | PanelItem::Invite => "network",
         PanelItem::Thread(chat_id) => match thread_kind(chat_id) {
             Some(
                 cypher_proto::BotThread::Routine { .. }
@@ -352,8 +354,13 @@ impl Shell {
         )
     }
 
-    /// Each granted project with its sessions in scope; the header opens
-    /// the full list, a row opens the project. `None` with nothing granted.
+    /// The projects the workspace covers, each with the sessions the
+    /// workspace runs there (the ones its plans started, its project
+    /// routines'), the way the Sessions view lists a project's sessions:
+    /// they are listed nowhere else. A project shows the ones working or
+    /// asking and its newest few, and the rest in place on "N more". A project's row opens its page, a
+    /// session's the session, live, in the panel. `None` with nothing
+    /// granted.
     fn render_projects_card(
         &self,
         bot: &Bot,
@@ -361,20 +368,55 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let now = Utc::now();
-        let rows: Vec<(ProjectLoad, Space)> = {
+        let ticker = self.pulse_ticker.entity_id();
+        let projects: Vec<ProjectSessions> = {
             let state = self.state.read(cx);
-            let spaces = state.spaces_sorted();
-            project_loads(&bot.scope, &spaces, &state.chats, |chat| {
-                state.display_status_for(chat, now)
-            })
-            .into_iter()
-            .filter_map(|load| {
-                let space = state.space_row(&load.space_id)?.clone();
-                Some((load, space))
-            })
-            .collect()
+            state
+                .spaces_sorted()
+                .into_iter()
+                .filter(|space| bot.scope.sees_space(&space.id))
+                .map(|space| {
+                    let sessions: Vec<SessionLine> = state
+                        .workspace_sessions(&bot.id, &space.id)
+                        .into_iter()
+                        .map(|chat| SessionLine {
+                            id: chat.id.clone(),
+                            title: transcript::single_line(&super::items::plain_markdown(
+                                chat.title.as_deref().unwrap_or("New session"),
+                            )),
+                            status: state.display_status_for(chat, now),
+                            time_ago: format_time_ago(
+                                chat.last_message_at.unwrap_or(chat.created_at),
+                                now,
+                            ),
+                        })
+                        .collect();
+                    let live = |line: &SessionLine| {
+                        matches!(
+                            line.status,
+                            ChatIndicator::Working | ChatIndicator::AwaitingInput
+                        )
+                    };
+                    let (sessions, hidden) =
+                        if self.board.expanded.contains(&project_key(&space.id)) {
+                            let hidden = short_rows(
+                                sessions.iter().map(live).collect::<Vec<bool>>(),
+                                |live| *live,
+                            )
+                            .1;
+                            (sessions, hidden)
+                        } else {
+                            short_rows(sessions, live)
+                        };
+                    ProjectSessions {
+                        space: space.clone(),
+                        sessions,
+                        hidden,
+                    }
+                })
+                .collect()
         };
-        if rows.is_empty() {
+        if projects.is_empty() {
             return None;
         }
         let open = self.board.panel.clone();
@@ -382,50 +424,95 @@ impl Shell {
             "projects",
             "bot-projects-header",
             "Projects",
-            rows.len(),
-            PanelItem::Projects,
+            projects.len(),
+            None,
             None,
             theme,
             cx,
         );
-        let rows = rows.into_iter().map(|(load, space)| {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for project in projects {
+            let space = project.space;
             let item = PanelItem::Project(space.id.clone());
             let selected = open.as_ref() == Some(&item);
-            let key = format!("bot-project-{}", space.id);
             let tint = crate::appearance::space_style::space_color(space.color.as_deref(), theme)
                 .unwrap_or(theme.text_muted);
             let glyph = crate::appearance::space_style::space_icon(space.icon.as_deref());
-            // What runs or asks there, else how many sessions it holds.
-            let corner = if load.asking > 0 || load.running > 0 {
-                card_corner(
-                    load_note(&load),
-                    (load.asking > 0).then_some(theme.warning),
+            let project_item = item.clone();
+            rows.push(
+                card_item(
+                    &format!("bot-project-{}", space.id),
+                    Some(card_glyph(glyph, tint.opacity(0.82))),
+                    space.display_name().to_string(),
+                    None,
+                    selected,
                     theme,
                 )
-            } else {
-                card_corner(load.sessions.to_string(), None, theme)
-            };
-            card_item(
-                &key,
-                Some(card_glyph(glyph, tint.opacity(0.82))),
-                space.display_name().to_string(),
-                Some(corner),
-                selected,
-                theme,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
-        });
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.open_panel(project_item.clone(), cx)),
+                )
+                .into_any_element(),
+            );
+            let more = project.hidden;
+            for session in project.sessions {
+                let item = PanelItem::Session(session.id.clone());
+                let menu_id = session.id.clone();
+                let selected = open.as_ref() == Some(&item);
+                // Its state is its mark, at the left like every row's on
+                // this panel (under its project's glyph); the right keeps
+                // to when it last moved. A session at rest has no mark.
+                let mark = match session.status {
+                    ChatIndicator::Working => Some(super::items::ring_mark(
+                        super::items::RingState::Running,
+                        (0, 0),
+                        ticker,
+                        theme,
+                    )),
+                    ChatIndicator::AwaitingInput => {
+                        Some(card_glyph(icons::QUESTION_CIRCLE, theme.warning))
+                    }
+                    ChatIndicator::Completed => {
+                        Some(card_glyph(icons::CHECK, theme.success.opacity(0.9)))
+                    }
+                    ChatIndicator::Errored => Some(card_glyph(icons::CLOSE_CIRCLE, theme.danger)),
+                    ChatIndicator::Idle => None,
+                };
+                rows.push(
+                    card_item(
+                        &format!("bot-session-{}", session.id),
+                        mark,
+                        session.title,
+                        Some(card_corner(session.time_ago, None, theme)),
+                        selected,
+                        theme,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
+                    // A session's own menu (rename, archive, delete), as on
+                    // its row in the Sessions view.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.menus.chat.open((menu_id.clone(), event.position));
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                );
+            }
+            rows.extend(self.more_row(project_key(&space.id), more, theme, cx));
+        }
         Some(self.fold_card("projects", header, rows, theme))
     }
 
-    /// Whether `card` is the one floating: the open panel item's card
-    /// ([`focused_card`]).
     /// A full card's header, the project card header's twin: 36px tall, its
     /// title in text (semibold only on the focused card, medium elsewhere,
     /// as the project sidebar weighs its projects), and a count only when
-    /// `count_tint` gives it one (Needs you). A click folds the card to this row and
-    /// back, as a project header does; the arrow at its end, shown on hover
-    /// and while the list is open, opens the whole list.
+    /// `count_tint` gives it one (Needs you). A click folds the card to this
+    /// row and back, as a project header does. `action` is the one small
+    /// button at its end, shown on hover. A header never opens the card's
+    /// list in the panel: the list is the card, which grows in place
+    /// ([`Self::more_row`]).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn card_header(
         &self,
@@ -433,17 +520,25 @@ impl Shell {
         key: &'static str,
         title: &'static str,
         count: usize,
-        list: PanelItem,
+        action: Option<HeaderAction>,
         count_tint: Option<gpui::Hsla>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let open = self.board.panel.as_ref() == Some(&list);
-        let shown = if open { 1.0 } else { motion::hover_t(key) };
-        let arrow_key = SharedString::from(format!("{key}-open"));
-        let arrow =
+        let button = action.map(|action| {
+            let (glyph, tip, open) = match &action {
+                HeaderAction::Page(page) => (
+                    icons::ALT_ARROW_RIGHT,
+                    "Open",
+                    self.board.panel.as_ref() == Some(page),
+                ),
+                HeaderAction::NewRoutine => (icons::PLUS, "New routine", false),
+                HeaderAction::Connect => (icons::PLUS, "Connect a workspace", false),
+            };
+            let shown = if open { 1.0 } else { motion::hover_t(key) };
+            let button_key = SharedString::from(format!("{key}-action"));
             div()
-                .id(arrow_key.clone())
+                .id(button_key.clone())
                 .flex_none()
                 .size(px(22.0))
                 .mr(px(-5.0))
@@ -453,26 +548,33 @@ impl Shell {
                 .justify_center()
                 .cursor_pointer()
                 .bg(motion::hover_blend(
-                    &arrow_key,
+                    &button_key,
                     crate::kit::theme::wash(0.0),
                     crate::kit::theme::wash(0.12),
                 ))
-                .on_hover(motion::hover_listener(arrow_key.clone()))
-                .tooltip(|_, cx| {
-                    cx.new(|_| super::super::session::FindTooltip("Show all".into()))
+                .on_hover(motion::hover_listener(button_key.clone()))
+                .tooltip(move |_, cx| {
+                    cx.new(|_| super::super::session::FindTooltip(tip.into()))
                         .into()
                 })
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    this.open_panel(list.clone(), cx);
+                    match &action {
+                        HeaderAction::Page(page) => this.open_panel(page.clone(), cx),
+                        HeaderAction::NewRoutine => this.open_job_form(
+                            super::schedule::FormTarget::NewRoutine,
+                            Some(window),
+                            cx,
+                        ),
+                        HeaderAction::Connect => this.open_connect(cx),
+                    }
                 }))
-                .child(icon(icons::ALT_ARROW_RIGHT).size(px(11.0)).text_color(
-                    motion::hover_blend(
-                        &arrow_key,
-                        theme.text_muted.opacity(0.8 * shown),
-                        theme.text,
-                    ),
-                ));
+                .child(icon(glyph).size(px(11.0)).text_color(motion::hover_blend(
+                    &button_key,
+                    theme.text_muted.opacity(0.8 * shown),
+                    theme.text,
+                )))
+        });
         header_frame(key, title, self.card_focused(card, cx), theme)
             .pr(px(7.0))
             .cursor_pointer()
@@ -489,7 +591,53 @@ impl Shell {
                     .child(SharedString::from(count.to_string()))
             }))
             .child(div().flex_1())
-            .child(arrow)
+            .children(button)
+    }
+
+    /// The last row of a list that holds more than it shows: "N more"
+    /// brings the rest in, in place, and "Show less" puts them away again.
+    /// `None` when the list is whole and was never expanded. `key` names
+    /// the list among the expanded ones; `hidden` is what the short list
+    /// leaves out.
+    pub(super) fn more_row(
+        &self,
+        key: String,
+        hidden: usize,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let expanded = self.board.expanded.contains(&key);
+        if hidden == 0 {
+            return None;
+        }
+        let label = if expanded {
+            "Show less".to_string()
+        } else {
+            format!("{hidden} more")
+        };
+        // Each of its two faces is a row of its own (id and hover fade).
+        let row_key = format!("bot-{}-{key}", if expanded { "less" } else { "more" });
+        let fade_key = row_key.clone();
+        Some(
+            more_label(&row_key, label, theme)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    // The click moves the row out from under the pointer
+                    // (the list grows or shrinks), and nothing tells a row
+                    // that the pointer left it that way: without this its
+                    // hover tint stays on, here and when it comes back.
+                    motion::set_hover(&fade_key, false, true);
+                    if !this.board.expanded.remove(&key) {
+                        this.board.expanded.insert(key.clone());
+                    }
+                    cx.notify();
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// Whether the list `key` shows every row ([`Self::more_row`]).
+    pub(super) fn list_expanded(&self, key: &str) -> bool {
+        self.board.expanded.contains(key)
     }
 
     /// A full card: its header over its rows, or the header alone while it
@@ -514,6 +662,8 @@ impl Shell {
         cx.notify();
     }
 
+    /// Whether `card` is the one floating: the open panel item's card
+    /// ([`focused_card`]).
     pub(super) fn card_focused(&self, card: &str, cx: &App) -> bool {
         let wanted = self.board.panel.as_ref().map(|item| {
             let state = self.state.read(cx);
@@ -591,6 +741,73 @@ pub(super) fn card_item(
     selected: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    card_item_detail(key, mark, title, corner, None, selected, theme)
+}
+
+/// [`card_item`] with `detail` under its title, on the titles' column: a
+/// running item's current step over its small progress bar. The mark and
+/// the corner stay on the title's line.
+pub(super) fn card_item_detail(
+    key: &str,
+    mark: Option<AnyElement>,
+    title: impl Into<SharedString>,
+    corner: Option<AnyElement>,
+    detail: Option<AnyElement>,
+    selected: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let title = div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .text_size(px(12.5))
+        .line_height(px(16.0))
+        .child(title.into())
+        .into_any_element();
+    card_row(key, mark, title, corner, detail, selected, theme)
+}
+
+/// [`card_item`] whose title is followed by a quieter `aside` on the same
+/// line ("Dana Kim · Scout": who, then which of theirs).
+pub(super) fn card_item_aside(
+    key: &str,
+    mark: Option<AnyElement>,
+    title: impl Into<SharedString>,
+    aside: Option<String>,
+    corner: Option<AnyElement>,
+    selected: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let title = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .gap(px(4.0))
+        .text_size(px(12.5))
+        .line_height(px(16.0))
+        .child(div().min_w_0().truncate().child(title.into()))
+        .children(aside.map(|aside| {
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(theme.text_muted.opacity(0.7))
+                .child(SharedString::from(format!("· {aside}")))
+        }))
+        .into_any_element();
+    card_row(key, mark, title, corner, None, selected, theme)
+}
+
+/// A card's row around its `title` element (see [`card_item`]).
+fn card_row(
+    key: &str,
+    mark: Option<AnyElement>,
+    title: AnyElement,
+    corner: Option<AnyElement>,
+    detail: Option<AnyElement>,
+    selected: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
     let hover = crate::appearance::surface_style::sidebar_hover(theme);
     let selected_wash = crate::appearance::surface_style::sidebar_selected(theme);
     let rest_bg = if selected {
@@ -605,29 +822,11 @@ pub(super) fn card_item(
         theme.text.opacity(0.8)
     };
     let has_mark = mark.is_some();
-    div()
-        .id(SharedString::from(key.to_string()))
+    let line = div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .rounded(px(8.0))
-        .mx(px(ROW_MARGIN))
-        .mb(px(2.0))
-        // The mark under the switcher's icon (and the card's title), the
-        // title under the workspace's name; a row without a mark keeps its
-        // title on that column.
-        .pl(px(if has_mark {
-            ROW_MARK_INSET
-        } else {
-            ROW_MARK_INSET + 14.0 + ROW_MARK_GAP
-        }))
-        .pr(px(8.0))
-        .py(px(6.0))
-        .cursor_pointer()
-        .text_color(motion::hover_blend(key, rest_text, theme.text))
-        .bg(motion::hover_blend(key, rest_bg, hover_bg))
-        .on_hover(motion::hover_listener(key.to_string()))
         .child(
             div()
                 .flex_1()
@@ -647,17 +846,67 @@ pub(super) fn card_item(
                             .child(mark),
                     )
                 })
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(12.5))
-                        .line_height(px(16.0))
-                        .child(title.into()),
-                ),
+                .child(title),
         )
-        .children(corner)
+        .children(corner);
+    div()
+        .id(SharedString::from(key.to_string()))
+        .flex()
+        .flex_col()
+        .rounded(px(8.0))
+        .mx(px(ROW_MARGIN))
+        .mb(px(2.0))
+        // The mark under the switcher's icon (and the card's title), the
+        // title under the workspace's name; a row without a mark keeps its
+        // title on that column.
+        .pl(px(if has_mark {
+            ROW_MARK_INSET
+        } else {
+            ROW_MARK_INSET + 14.0 + ROW_MARK_GAP
+        }))
+        .pr(px(8.0))
+        .py(px(6.0))
+        .cursor_pointer()
+        .text_color(motion::hover_blend(key, rest_text, theme.text))
+        .bg(motion::hover_blend(key, rest_bg, hover_bg))
+        .on_hover(motion::hover_listener(key.to_string()))
+        .child(line)
+        .children(detail.map(|detail| {
+            div()
+                .pl(px(if has_mark { 14.0 + ROW_MARK_GAP } else { 0.0 }))
+                .child(detail)
+        }))
+}
+
+/// The quiet last line of a list that holds more than it shows ("2 more",
+/// "Show less"): a small label under the rows' titles, in the corners'
+/// faint ink, with no wash of its own. Hovering it only firms the ink up.
+pub(super) fn more_label(
+    key: &str,
+    label: impl Into<SharedString>,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(key.to_string()))
+        .flex()
+        .flex_row()
+        .mx(px(ROW_MARGIN))
+        .mb(px(2.0))
+        // On the titles' column, like a row without a mark.
+        .pl(px(ROW_MARK_INSET + 14.0 + ROW_MARK_GAP))
+        .pr(px(8.0))
+        .py(px(4.0))
+        .cursor_pointer()
+        .text_size(px(10.5))
+        .line_height(px(14.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(motion::hover_blend(
+            key,
+            theme.text_muted.opacity(0.5),
+            theme.text_muted,
+        ))
+        .on_hover(motion::hover_listener(key.to_string()))
+        .child(label.into())
 }
 
 /// A card row's corner: the session rows' 10px time-and-state note, in the
@@ -703,40 +952,6 @@ pub(super) fn card_with_rows(
         .into_any_element()
 }
 
-/// A row's title over its muted sub-line, taking the row's free width. The
-/// sub-line's lead (a device name) truncates before its `tail` does.
-pub(super) fn two_lines(title: String, sub: String, tail: String, theme: &Theme) -> gpui::Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(1.0))
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_size(px(13.0))
-                .line_height(px(17.0))
-                .text_color(theme.text)
-                .child(SharedString::from(title)),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .flex()
-                .flex_row()
-                .gap(px(3.0))
-                .text_size(px(11.0))
-                .line_height(px(14.0))
-                .text_color(theme.text_muted.opacity(0.85))
-                .child(div().min_w_0().truncate().child(SharedString::from(sub)))
-                .when(!tail.is_empty(), |el| {
-                    el.child(div().flex_none().child(SharedString::from(tail)))
-                }),
-        )
-}
-
 /// No bots yet: one line and the way to make one.
 fn render_board_empty(theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
     card(theme)
@@ -771,14 +986,6 @@ fn render_board_empty(theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
 mod tests {
     use super::*;
     use crate::test_fixtures;
-
-    fn space(id: &str) -> Space {
-        Space {
-            id: id.into(),
-            name: Some(id.to_uppercase()),
-            ..test_fixtures::space()
-        }
-    }
 
     fn chat(id: &str, space: &str, minutes: i64) -> Chat {
         Chat {
@@ -825,76 +1032,26 @@ mod tests {
     }
 
     #[test]
-    fn project_loads_count_sessions_in_scope() {
-        let spaces = [space("a"), space("b"), space("c")];
-        let spaces: Vec<&Space> = spaces.iter().collect();
-        let mut archived = chat("a3", "a", 3);
-        archived.archived = true;
-        let mut child = chat("a4", "a", 4);
-        child.child = Some(cypher_proto::ChildChat {
-            parent_chat_id: "a1".into(),
-            parent_run_id: "run".into(),
-            agent: "worker".into(),
-            task: "task".into(),
-            mode: cypher_proto::SubagentRunMode::Sync,
-            tool_call_id: None,
-            profile: cypher_proto::ChildAgentProfile {
-                system_prompt: String::new(),
-                tools: vec![],
-                model: None,
-                thinking: None,
-            },
-        });
-        let excluded = chat("b2", "b", 2);
-        let mut bot_chat = chat("bot", "a", 5);
-        bot_chat.bot = Some(cypher_proto::BotChat::owner("x"));
-        let chats = vec![
-            chat("a1", "a", 1),
-            chat("a2", "a", 2),
-            archived,
-            child,
-            chat("b1", "b", 1),
-            excluded,
-            chat("c1", "c", 1),
-            bot_chat,
+    fn a_short_list_keeps_whats_under_way_and_the_first_few_of_the_rest() {
+        // (id, under way), in the list's order.
+        let rows = vec![
+            ("a", false),
+            ("b", true),
+            ("c", false),
+            ("d", false),
+            ("e", false),
+            ("f", true),
+            ("g", false),
         ];
-        let status = |c: &Chat| match c.id.as_str() {
-            "a1" => ChatIndicator::Working,
-            "a2" | "b1" => ChatIndicator::AwaitingInput,
-            _ => ChatIndicator::Idle,
-        };
-        let scope = BotScope {
-            exclude_sessions: vec!["b2".into()],
-            ..selected(&["a", "b", "gone"])
-        };
-        let loads = project_loads(&scope, &spaces, &chats, status);
-        assert_eq!(
-            loads,
-            vec![
-                ProjectLoad {
-                    space_id: "a".into(),
-                    sessions: 2,
-                    running: 1,
-                    asking: 1,
-                },
-                ProjectLoad {
-                    space_id: "b".into(),
-                    sessions: 1,
-                    running: 0,
-                    asking: 1,
-                },
-            ]
-        );
-        let all = BotScope {
-            projects: ProjectGrant::All,
-            ..Default::default()
-        };
-        let ids: Vec<String> = project_loads(&all, &spaces, &chats, status)
-            .into_iter()
-            .map(|l| l.space_id)
-            .collect();
-        assert_eq!(ids, ["a", "b", "c"], "all projects lists every project");
-        assert!(project_loads(&BotScope::default(), &spaces, &chats, status).is_empty());
+        let (kept, hidden) = short_rows(rows.clone(), |row| row.1);
+        let ids: Vec<&str> = kept.iter().map(|row| row.0).collect();
+        assert_eq!(ids, ["a", "b", "c", "d", "f"], "in order, live ones kept");
+        assert_eq!(hidden, 2);
+        // Nothing to leave out: no "N more".
+        let (kept, hidden) = short_rows(rows[..4].to_vec(), |row| row.1);
+        assert_eq!((kept.len(), hidden), (4, 0));
+        let (kept, hidden) = short_rows(Vec::<(&str, bool)>::new(), |row| row.1);
+        assert_eq!((kept.len(), hidden), (0, 0));
     }
 
     #[test]
@@ -908,19 +1065,6 @@ mod tests {
             .map(|c| c.id.as_str())
             .collect();
         assert_eq!(ids, ["old", "mid"]);
-    }
-
-    #[test]
-    fn project_notes_read_plainly() {
-        let load = |running, asking| ProjectLoad {
-            space_id: "a".into(),
-            sessions: 3,
-            running,
-            asking,
-        };
-        assert_eq!(load_note(&load(0, 0)), "idle");
-        assert_eq!(load_note(&load(2, 0)), "2 running");
-        assert_eq!(load_note(&load(1, 1)), "1 asking · 1 running");
     }
 
     #[test]

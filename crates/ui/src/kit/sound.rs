@@ -166,12 +166,16 @@ impl SessionChimes {
         chat: Option<&Chat>,
         status: SessionStatus,
     ) -> Option<Sound> {
-        if !chat.is_some_and(Chat::is_user_facing) {
+        // A session a workspace started rings only when it asks: its
+        // question is the owner's to answer, while what it finished is its
+        // workspace's to report.
+        let workspace = chat.is_some_and(Chat::is_workspace_session);
+        if !workspace && !chat.is_some_and(Chat::is_user_facing) {
             self.previous.remove(chat_id);
             return None;
         }
         let prev = self.previous.insert(chat_id.to_owned(), status)?;
-        sound_for_transition(prev, status)
+        sound_for_transition(prev, status).filter(|sound| !workspace || *sound == Sound::Request)
     }
 }
 
@@ -248,6 +252,29 @@ mod tests {
             ] {
                 assert_eq!(chimes.observe(&chat.id, Some(&chat), status), expected);
             }
+        }
+    }
+
+    #[test]
+    fn a_workspaces_session_rings_only_when_it_asks() {
+        use SessionStatus::*;
+        let mut worker = chat();
+        worker.started_by = Some(cypher_proto::ChatStartedBy {
+            bot_id: "bot".into(),
+            work_id: Some("work".into()),
+        });
+        let mut chimes = SessionChimes::default();
+        for (status, expected) in [
+            (Idle, None),
+            (Working, None),
+            (AwaitingInput, Some(Sound::Request)),
+            (Working, None),
+            // What it finished is its workspace's to report.
+            (Idle, None),
+            (Working, None),
+            (AwaitingInput, Some(Sound::Request)),
+        ] {
+            assert_eq!(chimes.observe(&worker.id, Some(&worker), status), expected);
         }
     }
 

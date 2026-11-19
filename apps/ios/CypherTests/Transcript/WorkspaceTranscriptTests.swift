@@ -87,19 +87,89 @@ final class WorkspaceTranscriptTests: XCTestCase {
         }
         XCTAssertEqual(phases, [.awaiting, .running, .done, .failed, .stopped])
         var work = try XCTUnwrap(demo.work(id: "work-rounding"))
-        XCTAssertEqual(work.cardStatus(), "Awaiting approval")
+        XCTAssertNil(work.decisionWord, "it waits: the card offers the decision")
         work.decision = PlanDecision(approve: true, at: 1)
         XCTAssertEqual(work.phase, .starting, "approved here, not started yet")
+        XCTAssertEqual(work.decisionWord?.word, "Approved")
         work.decision = PlanDecision(approve: false, at: 1)
         XCTAssertEqual(work.phase, .cancelling)
+        XCTAssertEqual(work.decisionWord?.word, "Rejected")
         var running = try XCTUnwrap(demo.work(id: "work-flaky"))
         let started = try XCTUnwrap(running.startedAt)
-        XCTAssertEqual(running.cardStatus(now: started + 12 * 60_000), "Running · 12m")
         running.stopRequestedAt = started + 1
         XCTAssertEqual(running.phase, .stopping)
-        XCTAssertEqual(running.cardStatus(), "Stopping…")
-        let done = try XCTUnwrap(demo.work(id: "work-notes"))
-        XCTAssertEqual(done.cardStatus(), "Done · 1h")
+    }
+
+    /// A decided plan's card says the decision, never where the run stands.
+    func testADecidedPlanSaysTheDecisionNotTheProgress() throws {
+        let demo = DemoDataset.standard()
+        for id in ["work-flaky", "work-notes", "work-loro", "work-docs"] {
+            let decision = try XCTUnwrap(try XCTUnwrap(demo.work(id: id)).decisionWord, id)
+            XCTAssertEqual(decision.word, "Approved", id)
+            XCTAssertTrue(decision.approved, id)
+        }
+        XCTAssertEqual(BotWork.planLine(steps: 1, place: nil), "Plan · 1 step")
+        XCTAssertEqual(
+            BotWork.planLine(steps: 4, place: "web-api · Studio"), "Plan · 4 steps · web-api · Studio")
+    }
+
+    /// A result notice's card: what ended and how, for a routine and a plan.
+    func testResultNoticesNameWhatEndedAndHow() throws {
+        let routine = try XCTUnwrap(
+            BotPostNotice(.routine(routineId: "r", name: "Brief", outcome: .failed, runAt: 0, threadChatId: nil)))
+        XCTAssertEqual(routine.title, "Brief")
+        XCTAssertTrue(routine.subtitle.hasPrefix("Routine · "))
+        XCTAssertEqual(routine.status, BotStatusLabel("Failed", .failed))
+        let plan = try XCTUnwrap(
+            BotPostNotice(
+                .work(workId: "w", title: "Fix rounding", outcome: .done, startedAt: 0, endedAt: 60 * 60_000)))
+        XCTAssertEqual(plan.subtitle, "Plan · took 1h")
+        XCTAssertEqual(plan.status, BotStatusLabel("Done", .done))
+        let stopped = try XCTUnwrap(
+            BotPostNotice(.work(workId: "w", title: "x", outcome: .stopped, startedAt: nil, endedAt: 0)))
+        XCTAssertEqual(stopped.status, BotStatusLabel("Stopped", .muted))
+        XCTAssertNil(BotPostNotice(.unknown))
+    }
+
+    /// A saved routine's card is named by the call's answer.
+    func testASavedRoutineIsNamedByItsAnswer() throws {
+        let saved = try XCTUnwrap(
+            SavedRoutine(
+                output: "Saved routine \"Morning brief\" (id 2974bf05-4a69): Manual. It runs in the background."))
+        XCTAssertEqual(saved.name, "Morning brief")
+        XCTAssertEqual(saved.id, "2974bf05-4a69")
+        XCTAssertNil(SavedRoutine(output: "No routine \"x\"."))
+        XCTAssertNil(SavedRoutine(output: "Saved routine \"x\" (id )"))
+        XCTAssertNil(SavedRoutine(output: nil))
+        var call = RenderToolCall(tag: "unknown", fields: ["name": "save_routine"])
+        call.fields[SavedRoutine.outputField] = "Saved routine \"Brief\" (id r1): Manual."
+        let entry = MessageEntry.fixture(
+            "a",
+            parts: [
+                .tool(id: "saved", call: call, isError: false, resolved: true),
+                .tool(id: "refused", call: call, isError: true, resolved: true),
+            ])
+        var parsers: [String: IncrementalMarkdownParser] = [:]
+        var completed: [String: CompletedParse] = [:]
+        let rows = TranscriptRowBuilder.rows(
+            entries: [entry], pendingSends: [], parsers: &parsers, completed: &completed, memoryCards: [])
+        let cards = rows.compactMap { row -> String? in
+            if case .botRoutine(let name, let id) = row.kind { return "\(name)|\(id)" }
+            return nil
+        }
+        XCTAssertEqual(cards, ["Brief|r1"], "a refused call stays a chip")
+    }
+
+    /// The post wire shape (bot_records.rs `BotPost`): a plan's end decodes,
+    /// and a kind from a newer engine reads as unknown.
+    func testPostsDecodeAPlansEndAndUnknownKinds() throws {
+        let decode = { (json: String) in try JSONDecoder().decode(BotPost.self, from: Data(json.utf8)) }
+        XCTAssertEqual(
+            try decode(#"{"kind":"work","workId":"w","title":"Fix","outcome":"failed","endedAt":9}"#),
+            .work(workId: "w", title: "Fix", outcome: .failed, startedAt: nil, endedAt: 9))
+        XCTAssertEqual(try decode(#"{"kind":"later"}"#), .unknown)
+        let work = BotPost.work(workId: "w", title: "Fix", outcome: .done, startedAt: 1, endedAt: 9)
+        XCTAssertEqual(try JSONDecoder().decode(BotPost.self, from: JSONEncoder().encode(work)), work)
     }
 
     func testPlanCardsFindTheirPlanByCallElseByTitle() {
@@ -147,27 +217,36 @@ final class WorkspaceTranscriptTests: XCTestCase {
                     from: .routine(routineId: "r", name: "Brief", outcome: .done, runAt: 1, threadChatId: "t"))
             ], createdAt: 2)
         let unknown = MessageEntry.fixture("u", parts: [.post(id: "y", text: "Hello", from: .unknown)], createdAt: 3)
+        // The turn that tells the workspace's agent draws nothing.
+        let told = MessageEntry.fixture(
+            "\(BotPost.eventPrefix)p", role: .user,
+            parts: [.text(id: "t", text: "[Routine \"Brief\" finished]", agentText: nil)],
+            createdAt: 4)
         var parsers: [String: IncrementalMarkdownParser] = [:]
         var completed: [String: CompletedParse] = [:]
         let rows = TranscriptRowBuilder.rows(
-            entries: [entry, post, unknown], pendingSends: [], parsers: &parsers, completed: &completed,
+            entries: [entry, post, unknown, told], pendingSends: [], parsers: &parsers, completed: &completed,
             memoryCards: ["held"])
         var plans: [String] = []
         var memory: [String] = []
-        var headers = 0
+        var notices: [String] = []
+        var prose = 0
         for row in rows {
             switch row.kind {
             case .botPlan(let id, let resolved):
                 plans.append(id)
                 XCTAssertTrue(resolved)
             case .memoryWrite(let id): memory.append(id)
-            case .postHeader: headers += 1
+            case .botPost(let entryId, _): notices.append(entryId)
+            case .prose, .markdown: prose += 1
+            case .user: XCTFail("the notice's turn draws no message")
             default: break
             }
         }
         XCTAssertEqual(plans, ["plan"], "a refused plan stays a chip")
         XCTAssertEqual(memory, ["held"], "a write nobody held stays a chip")
-        XCTAssertEqual(headers, 1, "an unknown source is plain text")
+        XCTAssertEqual(notices, ["p"], "a notice is one card, named by its entry")
+        XCTAssertEqual(prose, 1, "its text is not drawn; an unknown source is plain text")
     }
 
     func testMemoryCardsShowHeldThenDecidedWrites() throws {
@@ -242,13 +321,19 @@ final class WorkspaceTranscriptTests: XCTestCase {
         XCTAssertEqual(ThreadOrigin.of(try chat("chat-atlas-routine-brief"), in: demo)?.text, "Routine · Morning brief")
         XCTAssertEqual(ThreadOrigin.of(try chat("chat-atlas-peer-ledger"), in: demo)?.text, "Question from Ledger")
         XCTAssertNil(ThreadOrigin.of(try chat("chat-atlas"), in: demo))
-        XCTAssertNil(ThreadOrigin.of(try chat("chat-atlas-w2"), in: demo))
-        // Read-only: the workspace's threads and memory passes; its chat and
-        // a project routine's session stay writable.
+        // A session one of its plans started names the plan, like the
+        // plan's own thread; the owner's own session names nothing.
+        XCTAssertEqual(
+            ThreadOrigin.of(try chat("chat-atlas-w2"), in: demo)?.text, "Plan · Stabilise the flaky sync tests")
+        XCTAssertEqual(ThreadOrigin.of(try chat("chat-atlas-w2"), in: demo)?.page, .workItem("work-flaky"))
+        XCTAssertNil(ThreadOrigin.of(try XCTUnwrap(demo.chats(in: "space-cypher").first), in: demo))
+        // Read-only: the workspace's threads and memory passes; its chat, a
+        // project routine's session and a plan's sessions stay writable.
         XCTAssertTrue(try chat("chat-atlas-thread-flaky").isReadOnlyThread)
         XCTAssertTrue(try chat("chat-memory-pass").isReadOnlyThread)
         XCTAssertFalse(try chat("chat-atlas").isReadOnlyThread)
         XCTAssertFalse(try chat("chat-atlas-routine-tests").isReadOnlyThread)
+        XCTAssertFalse(try chat("chat-atlas-w2").isReadOnlyThread)
         // Their subtitles name the workspace, not its folder; sessions in a
         // project keep the project.
         XCTAssertEqual(WorkspaceChatText.threadOwner(try chat("chat-atlas-thread-flaky"), in: demo), "Atlas")
@@ -264,6 +349,7 @@ final class WorkspaceTranscriptTests: XCTestCase {
         XCTAssertFalse(BotPage.activity.wantsFullHeight)
         for page: BotPage in [
             .approval("a"), .exchange("e"), .routineForm(routineId: nil), .connect, .workItem("w"),
+            .post(entryId: "p"),
         ] {
             XCTAssertTrue(page.wantsFullHeight, "\(page)")
         }

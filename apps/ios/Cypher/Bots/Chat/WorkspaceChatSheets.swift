@@ -20,6 +20,8 @@ struct WorkspaceChatSheets: ViewModifier {
     @Binding var showMemorySettings: Bool
     let memoryCards: Set<String>
     let openChat: (String) -> Void
+    /// Opens the workspace's board at a page (a notice's details).
+    let openPage: ((BotPage) -> Void)?
     /// Opens a route on the screen's path (the board's "Open project").
     let openRoute: (Route) -> Void
     let seedComposer: (String) -> Void
@@ -34,6 +36,7 @@ struct WorkspaceChatSheets: ViewModifier {
     func body(content: Content) -> some View {
         content
             .environment(\.openBotChat, openChat)
+            .environment(\.openBotPage, openPage)
             .environment(\.openBotRoute, openRoute)
             .environment(\.seedComposer, seedComposer)
             .environment(\.transcriptMemoryCards, memoryCards)
@@ -41,6 +44,7 @@ struct WorkspaceChatSheets: ViewModifier {
                 BoardSheet(target: target, openChat: openChat)
                     .environment(\.openBotChat, openChat)
                     .environment(\.openBotRoute, openRoute)
+                    .environment(\.seedComposer, seedComposer)
             }
             .sheet(item: $botSettings) { target in
                 BotSettingsSheet(botId: target.botId, onDeleted: deleted)
@@ -67,7 +71,7 @@ extension BotPage {
         switch self {
         case .overview, .needsYou, .work, .routines, .projects, .activity, .connections, .memory: false
         case .workItem, .approval, .asking, .routine, .routineForm, .project, .connection, .exchange, .connect,
-            .memoryFile:
+            .memoryFile, .post:
             true
         }
     }

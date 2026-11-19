@@ -33,6 +33,34 @@ final class ProjectLoadsTests: XCTestCase {
         XCTAssertEqual(ProjectLoads.sessions(scope, chats: chats, spaceId: "b").map(\.id), [], "not granted")
     }
 
+    /// The sessions a workspace runs in a project are listed apart: never
+    /// among the owner's, and only for the workspace they belong to.
+    func testAWorkspacesOwnSessionsAreListedApart() {
+        var worker = chat("worker", space: "a", at: 9)
+        worker.startedBy = ChatStartedBy(botId: "b", workId: "w")
+        var routine = chat("routine", space: "a", at: 7)
+        routine.bot = BotChatMarker(botId: "b", origin: .routine, thread: .routineSession(routineId: "r"))
+        var thread = chat("thread", space: "a", at: 8)
+        thread.bot = BotChatMarker(botId: "b", origin: .owner, thread: .work(workId: "w"))
+        var other = chat("other", space: "a", at: 6)
+        other.startedBy = ChatStartedBy(botId: "c", workId: nil)
+        var archived = chat("archived", space: "a", at: 5)
+        archived.startedBy = ChatStartedBy(botId: "b", workId: "w")
+        archived.archived = true
+        let chats = [chat("mine", space: "a", at: 1), worker, routine, thread, other, archived]
+        XCTAssertEqual(
+            ProjectLoads.workspaceSessions(botId: "b", chats: chats, spaceId: "a").map(\.id), ["worker", "routine"])
+        XCTAssertEqual(ProjectLoads.workspaceSessions(botId: "c", chats: chats, spaceId: "a").map(\.id), ["other"])
+        XCTAssertEqual(ProjectLoads.workspaceSessions(botId: "b", chats: chats, spaceId: "b").map(\.id), [])
+        let scope = BotScope(projects: .selected(["a"]))
+        XCTAssertEqual(ProjectLoads.sessions(scope, chats: chats, spaceId: "a").map(\.id), ["mine"])
+        XCTAssertTrue(worker.isHiddenFromSessions)
+        XCTAssertFalse(worker.isReadOnlyThread, "it is an ordinary session, opened in its workspace")
+        XCTAssertEqual(worker.workspaceSessionOf, "b")
+        XCTAssertEqual(routine.workspaceSessionOf, "b")
+        XCTAssertNil(thread.workspaceSessionOf)
+    }
+
     func testProjectsGroupByDeviceInProjectOrder() {
         let loads = [
             BoardProjectLoad(space: space("web", device: "mac"), sessions: 2, running: 1),

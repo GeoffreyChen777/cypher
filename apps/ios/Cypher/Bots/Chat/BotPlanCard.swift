@@ -1,15 +1,15 @@
-// The plan card (transcript/bot_plan.rs; docs/design/agent-bots.md §6.1,
-// §6.6): a workspace's `propose_plan` call in its chat, drawn from the
-// plan's record rather than the call. One card through the plan's life: its
-// numbered steps with Cancel / Edit / Approve while it waits, live marks,
-// notes and sessions with Stop while it runs, the result once it ends.
+// The workspace chat's notices (transcript/bot_plan.rs; docs/design/
+// agent-bots.md §13.1). The chat only announces: a plan card says what is
+// proposed, with Details / Reject / Approve while it waits and the decision
+// once made; a result card says a plan or a routine's run ended and how;
+// a routine card says the agent saved a routine. Steps, progress and
+// results live on the board, which the cards open.
 
 import SwiftUI
 
 struct BotPlanCard: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openBotChat) private var openChat
-    @Environment(\.seedComposer) private var seedComposer
+    @Environment(\.openBotPage) private var openPage
     let callId: String
     let chatId: String
     /// The call ended: a missing record is gone, not still being written.
@@ -17,212 +17,99 @@ struct BotPlanCard: View {
 
     @State private var busy = false
     @State private var error: String?
-    @State private var confirmingStop = false
 
     var body: some View {
         if let work = model.botRecords.plan(forCall: callId, chatId: chatId) {
-            // Live durations tick while it runs.
-            TimelineView(.periodic(from: .now, by: work.phase == .running ? 30 : 3_600)) { _ in
-                card(work, now: nowMs())
-            }
+            card(work)
         } else {
             BotCardSurface {
-                PlanHead(
-                    title: "Plan", subtitle: resolved ? "This plan is no longer available." : "Writing the plan…",
-                    tone: Theme.textMuted, status: nil)
+                NoticeHead(
+                    symbol: "checklist", tint: Theme.textMuted, title: "Plan",
+                    subtitle: resolved ? "This plan is no longer available." : "Writing the plan…")
             }
         }
     }
 
-    private func card(_ work: BotWork, now: Int64) -> some View {
-        let phase = work.phase
+    private func card(_ work: BotWork) -> some View {
         let places = work.steps.map { step in step.project.flatMap(place) }
-        // Where it works, named once when every step shares the project.
+        // Where it works, named when every step shares the project.
         let common = places.first.flatMap { $0 }.flatMap { first in places.allSatisfy { $0 == first } ? first : nil }
-        var subtitle = "Plan · \(work.steps.count) step\(work.steps.count == 1 ? "" : "s")"
-        if let common { subtitle += " · \(common)" }
+        let subtitle = BotWork.planLine(steps: work.steps.count, place: common)
+        let details: () -> Void = { openPage?(.workItem(work.id)) }
         return BotCardSurface {
-            PlanHead(
-                title: work.title, subtitle: subtitle, tone: Self.tone(phase),
-                status: PlanStatus(work: work, phase: phase, now: now))
-            BotCardRule()
-            VStack(alignment: .leading, spacing: 12) {
+            if let decision = work.decisionWord {
+                // Decided: the decision and the way in, never the progress.
+                Button(action: details) {
+                    NoticeHead(symbol: "checklist", tint: Theme.textMuted, title: work.title, subtitle: subtitle) {
+                        HStack(spacing: 4) {
+                            Image(systemName: decision.approved ? "checkmark" : "xmark")
+                                .font(.system(size: 10, weight: .bold))
+                            Text(decision.word)
+                                .font(Theme.sans(12, weight: .medium, relativeTo: .footnote))
+                        }
+                        .foregroundStyle(Theme.textMuted)
+                        .fixedSize()
+                        .accessibilityIdentifier("plan-status")
+                        NoticeChevron()
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(openPage == nil)
+                .accessibilityHint("Opens the plan")
+            } else {
+                NoticeHead(symbol: "checklist", tint: Theme.warning, title: work.title, subtitle: subtitle) {
+                    Text("Awaiting approval")
+                        .font(Theme.sans(12, weight: .medium, relativeTo: .footnote))
+                        .foregroundStyle(Theme.warning)
+                        .fixedSize()
+                        .accessibilityIdentifier("plan-status")
+                }
                 if let summary = work.summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
                     Text(Self.inline(summary))
                         .font(Theme.sans(14, relativeTo: .subheadline))
-                        .foregroundStyle(Theme.text)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .foregroundStyle(Theme.text.opacity(0.85))
+                        .lineLimit(2)
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 10)
                 }
-                if phase == .running || phase == .stopping {
-                    let (done, total) = work.progress
-                    HStack(spacing: 10) {
-                        ProgressView(value: Double(done), total: Double(max(total, 1)))
-                            .tint(Theme.accent)
-                        Text("\(done) of \(total)")
-                            .font(Theme.sans(11.5))
-                            .foregroundStyle(Theme.textMuted)
-                            .monospacedDigit()
-                            .fixedSize()
-                    }
-                    .accessibilityElement(children: .combine)
-                }
-                steps(work, phase: phase, places: common == nil ? places : [], now: now)
-                if phase.ended, let result = work.result?.trimmingCharacters(in: .whitespacesAndNewlines),
-                    !result.isEmpty
-                {
-                    BotMarkdown(text: result, cacheKey: "plan-\(work.id)")
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 9)
-                        .background(Theme.text.opacity(0.04), in: RoundedRectangle(cornerRadius: 9))
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            if phase.awaiting || phase.running {
                 BotCardRule()
-                actions(work, phase: phase)
+                VStack(alignment: .leading, spacing: 8) {
+                    if let error {
+                        Text(error)
+                            .font(Theme.sans(12.5, relativeTo: .footnote))
+                            .foregroundStyle(Theme.danger)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack(spacing: 8) {
+                        Button(action: details) {
+                            HStack(spacing: 3) {
+                                Text("Details")
+                                NoticeChevron()
+                            }
+                            .font(Theme.sans(14, weight: .medium, relativeTo: .subheadline))
+                            .foregroundStyle(Theme.textMuted)
+                            .frame(minHeight: 34)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(openPage == nil)
+                        .accessibilityIdentifier("card-details")
+                        Spacer(minLength: 0)
+                        BotCardButton(title: "Reject", role: .secondary, busy: false) {
+                            act { try await $0.resolvePlan(workId: work.id, approve: false) }
+                        }
+                        BotCardButton(title: "Approve", role: .primary, busy: busy) {
+                            act { try await $0.resolvePlan(workId: work.id, approve: true) }
+                        }
+                    }
+                    .disabled(busy)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("plan-card")
-        .confirmationDialog("Stop the work and its sessions?", isPresented: $confirmingStop, titleVisibility: .visible)
-        {
-            Button("Stop", role: .destructive) { act { try await $0.stopWork(workId: work.id) } }
-        } message: {
-            Text("Stop ends the work and every session it started.")
-        }
-    }
-
-    // MARK: Steps
-
-    /// While the plan waits each step is numbered with its detail; once it
-    /// runs, its mark, note and sessions show.
-    private func steps(_ work: BotWork, phase: PlanPhase, places: [String?], now: Int64) -> some View {
-        let numbered = [PlanPhase.awaiting, .starting, .cancelling, .cancelled].contains(phase)
-        return VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(work.steps.enumerated()), id: \.element.id) { ix, step in
-                let last = ix == work.steps.count - 1
-                HStack(alignment: .top, spacing: 10) {
-                    VStack(spacing: 3) {
-                        PlanStepMark(state: step.state, number: ix + 1, numbered: numbered)
-                        if !last {
-                            Rectangle().fill(Theme.border).frame(width: 1).frame(maxHeight: .infinity)
-                        }
-                    }
-                    .frame(width: 20)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(Self.inline(step.title))
-                            .font(Theme.sans(14, relativeTo: .subheadline))
-                            .foregroundStyle(step.state == .skipped ? Theme.textMuted : Theme.text)
-                            .fixedSize(horizontal: false, vertical: true)
-                        if numbered, let detail = step.detail?.trimmingCharacters(in: .whitespacesAndNewlines),
-                            !detail.isEmpty
-                        {
-                            Text(Self.inline(detail))
-                                .font(Theme.sans(12.5, relativeTo: .footnote))
-                                .foregroundStyle(Theme.textMuted)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        let place = ix < places.count ? places[ix] : nil
-                        let note = numbered ? nil : step.note
-                        if place != nil || note != nil {
-                            Text([place, note].compactMap { $0 }.joined(separator: " · "))
-                                .font(Theme.sans(12, relativeTo: .footnote))
-                                .foregroundStyle(Theme.textFaint)
-                                .lineLimit(2)
-                        }
-                        if !numbered {
-                            ForEach(step.sessions, id: \.self) { sessionId in
-                                if let chat = model.chat(id: sessionId) { sessionRow(chat) }
-                            }
-                        }
-                    }
-                    .padding(.bottom, last ? 0 : 12)
-                    Spacer(minLength: 0)
-                    if !numbered, let span = step.span(now: now) {
-                        Text(span)
-                            .font(Theme.sans(11.5))
-                            .foregroundStyle(Theme.textFaint)
-                            .monospacedDigit()
-                            .padding(.top, 1)
-                    }
-                }
-                .accessibilityElement(children: .contain)
-            }
-        }
-    }
-
-    /// A session a step started: its status dot and title; a tap opens it.
-    private func sessionRow(_ chat: Chat) -> some View {
-        let indicator = model.indicator(for: chat)
-        let color: Color =
-            switch indicator {
-            case .working: Theme.accent
-            case .awaitingInput: Theme.warning
-            case .errored: Theme.danger
-            case .completed: Theme.success
-            case .idle: Theme.textFaint
-            }
-        return Button {
-            openChat?(chat.id)
-        } label: {
-            HStack(spacing: 7) {
-                Circle().fill(color).frame(width: 6, height: 6)
-                Text(chat.displayTitle)
-                    .font(Theme.sans(13, relativeTo: .footnote))
-                    .foregroundStyle(Theme.textMuted)
-                    .lineLimit(1)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Theme.textFaint)
-            }
-            .frame(minHeight: 28)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PressWashButtonStyle(cornerRadius: 6))
-        .disabled(openChat == nil)
-        .accessibilityHint("Opens the session")
-    }
-
-    // MARK: Actions
-
-    private func actions(_ work: BotWork, phase: PlanPhase) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(
-                error
-                    ?? (phase.awaiting
-                        ? "Nothing runs until you approve." : "Stop ends the work and every session it started.")
-            )
-            .font(Theme.sans(12.5, relativeTo: .footnote))
-            .foregroundStyle(error == nil ? Theme.textMuted : Theme.danger)
-            .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 8) {
-                Spacer(minLength: 0)
-                if phase.awaiting {
-                    BotCardButton(title: "Cancel", role: .secondary, busy: false) {
-                        act { try await $0.resolvePlan(workId: work.id, approve: false) }
-                    }
-                    BotCardButton(title: "Edit", role: .secondary, busy: false) { edit(work) }
-                    BotCardButton(title: "Approve", role: .primary, busy: busy) {
-                        act { try await $0.resolvePlan(workId: work.id, approve: true) }
-                    }
-                } else {
-                    BotCardButton(title: "Stop", role: .destructive, busy: busy) { confirmingStop = true }
-                }
-            }
-            .disabled(busy)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-    }
-
-    /// Edit: cancel the proposal and start a reply asking for the change,
-    /// so the workspace proposes a revised plan (shell/bots.rs
-    /// `edit_bot_plan`).
-    private func edit(_ work: BotWork) {
-        act { try await $0.resolvePlan(workId: work.id, approve: false) }
-        let title = work.title.split(whereSeparator: \.isNewline).joined(separator: " ")
-        seedComposer?("Change the plan “\(title)”: ")
     }
 
     private func act(_ action: @escaping (any WorkspaceData) async throws -> Void) {
@@ -251,152 +138,229 @@ struct BotPlanCard: View {
         guard let space = model.spaces.first(where: { $0.id == spaceId }) else { return nil }
         return "\(space.displayName) · \(model.deviceName(space.deviceId))"
     }
-
-    /// The head tile's colour: amber while it waits, the accent while it
-    /// works, green done, red failed (bot_plan.rs `phase_tone`).
-    static func tone(_ phase: PlanPhase) -> Color {
-        switch phase {
-        case .awaiting: Theme.warning
-        case .starting, .running, .stopping: Theme.accent
-        case .done: Theme.success
-        case .failed: Theme.danger
-        case .cancelling, .stopped, .cancelled: Theme.textMuted
-        }
-    }
 }
 
 extension BotWork {
-    /// The plan card's status at the head's right: "Awaiting approval",
-    /// "Running · 12m", "Done · 18m" (bot_plan.rs `phase_status`).
-    func cardStatus(now: Int64 = nowMs()) -> String {
-        let took = startedAt.map { BotTime.span((endedAt ?? now) - $0) }
-        let withTime = { (word: String) in took.map { "\(word) · \($0)" } ?? word }
+    /// How a decided plan reads on its card: the owner's decision, never
+    /// the run's progress; nil while it waits (bot_plan.rs `decision_word`).
+    var decisionWord: (word: String, approved: Bool)? {
         switch phase {
-        case .awaiting: return "Awaiting approval"
-        case .starting: return "Starting…"
-        case .cancelling: return "Cancelling…"
-        case .running: return withTime("Running")
-        case .stopping: return "Stopping…"
-        case .done: return withTime("Done")
-        case .failed: return withTime("Failed")
-        case .stopped: return withTime("Stopped")
-        case .cancelled: return "Cancelled"
+        case .awaiting: nil
+        case .cancelling, .cancelled: ("Rejected", false)
+        default: ("Approved", true)
+        }
+    }
+
+    /// A plan card's one quiet line: "Plan · 4 steps · web-api · Studio"
+    /// (bot_plan.rs `plan_sub`).
+    static func planLine(steps: Int, place: String?) -> String {
+        var line = "Plan · \(steps) step\(steps == 1 ? "" : "s")"
+        if let place { line += " · \(place)" }
+        return line
+    }
+}
+
+// MARK: - Result notice
+
+/// A result notice's card: what ended, how, and the way to its details
+/// (bot_plan.rs `render_bot_post`). A plan's opens the plan's page while
+/// its record is kept; anything else the notice in full.
+struct BotPostCard: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.openBotPage) private var openPage
+    let entryId: String
+    let from: BotPost
+
+    var body: some View {
+        if let notice = BotPostNotice(from) {
+            Button {
+                openPage?(page)
+            } label: {
+                BotCardSurface {
+                    NoticeHead(
+                        symbol: notice.symbol, tint: notice.status.tone.color, title: notice.title,
+                        subtitle: notice.subtitle
+                    ) {
+                        BotStatusText(notice.status, size: 12.5)
+                            .fixedSize()
+                        NoticeChevron()
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(openPage == nil)
+            .accessibilityHint("Opens the result")
+            .accessibilityIdentifier("post-card")
+        }
+    }
+
+    private var page: BotPage {
+        if case .work(let workId, _, _, _, _) = from, model.data?.work(id: workId) != nil {
+            return .workItem(workId)
+        }
+        return .post(entryId: entryId)
+    }
+}
+
+/// What a result notice's card says (bot_plan.rs `render_bot_post`).
+struct BotPostNotice: Equatable {
+    var symbol: String
+    var title: String
+    var subtitle: String
+    var status: BotStatusLabel
+
+    /// nil for a source this app doesn't know.
+    init?(_ from: BotPost, now: Int64 = nowMs()) {
+        switch from {
+        case .routine(_, let name, let outcome, let runAt, _):
+            symbol = "clock"
+            title = name
+            subtitle = "Routine · \(BotTime.past(runAt, now: now))"
+            status = outcome == .failed ? BotStatusLabel("Failed", .failed) : BotStatusLabel("Done", .done)
+        case .work(_, let title, let outcome, let startedAt, let endedAt):
+            symbol = "checklist"
+            self.title = title
+            subtitle =
+                startedAt.map { "Plan · took \(BotTime.span(endedAt - $0))" }
+                ?? "Plan · \(BotTime.past(endedAt, now: now))"
+            status =
+                switch outcome {
+                case .failed: BotStatusLabel("Failed", .failed)
+                case .stopped: BotStatusLabel("Stopped", .muted)
+                default: BotStatusLabel("Done", .done)
+                }
+        case .unknown:
+            return nil
         }
     }
 }
 
-/// The plan card's head: the tile in the phase's colour, the title over its
-/// sub-line, and the status at the right — or under them when the row is
-/// too narrow to hold all three whole (a phone).
-private struct PlanHead: View {
+// MARK: - Saved routine
+
+/// A routine as its `save_routine` answer names it: `Saved routine
+/// "<name>" (id <id>): …` (bot_plan.rs `parse_saved_routine`).
+struct SavedRoutine: Equatable {
+    /// Where the doc's tool part keeps the answer on its call's fields.
+    static let outputField = "output"
+
+    var name: String
+    var id: String
+
+    init?(output: String?) {
+        guard let output else { return nil }
+        let text = output.drop(while: \.isWhitespace)
+        let lead = "Saved routine \""
+        guard text.hasPrefix(lead) else { return nil }
+        let rest = text.dropFirst(lead.count)
+        guard let close = rest.range(of: "\" (id "), let end = rest[close.upperBound...].firstIndex(of: ")") else {
+            return nil
+        }
+        let name = rest[..<close.lowerBound].trimmingCharacters(in: .whitespaces)
+        let id = rest[close.upperBound..<end].trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, !id.isEmpty, !id.contains(where: \.isWhitespace) else { return nil }
+        self.name = name
+        self.id = id
+    }
+}
+
+/// A saved routine's card (bot_plan.rs `render_bot_routine`): its name over
+/// where and when it runs, and the way to its page. Read from the routine's
+/// record; one that is gone keeps the name the call gave.
+struct BotRoutineCard: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.openBotPage) private var openPage
+    let name: String
+    let routineId: String
+
+    var body: some View {
+        if let routine = model.data?.routine(id: routineId) {
+            Button {
+                openPage?(.routine(routineId))
+            } label: {
+                BotCardSurface {
+                    NoticeHead(
+                        symbol: "clock", tint: Theme.textMuted, title: routine.name, subtitle: subtitle(routine)
+                    ) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark").font(.system(size: 10, weight: .bold))
+                            Text("Saved").font(Theme.sans(12, weight: .medium, relativeTo: .footnote))
+                        }
+                        .foregroundStyle(Theme.textMuted)
+                        .fixedSize()
+                        NoticeChevron()
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(openPage == nil)
+            .accessibilityHint("Opens the routine")
+            .accessibilityIdentifier("routine-card")
+        } else {
+            BotCardSurface {
+                NoticeHead(symbol: "clock", tint: Theme.textMuted, title: name, subtitle: "Routine · no longer here")
+            }
+        }
+    }
+
+    /// "Routine · Daily 09:00 · in web-api".
+    private func subtitle(_ routine: BotRoutine) -> String {
+        var line = "Routine · \(routine.schedule.describe)"
+        if let spaceId = routine.target.spaceId,
+            let space = model.spaces.first(where: { $0.id == spaceId })
+        {
+            line += " · in \(space.displayName)"
+        }
+        return line
+    }
+}
+
+// MARK: - Notice pieces
+
+/// A notice's head: a small tile in its tone, the title over one quiet
+/// line, and whatever closes the row (a status, a way in).
+struct NoticeHead<Trailing: View>: View {
+    let symbol: String
+    let tint: Color
     let title: String
     let subtitle: String
-    let tone: Color
-    let status: PlanStatus?
+    @ViewBuilder var trailing: Trailing
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
-            BotCardTile(symbol: "checklist", tint: tone)
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 8) {
-                    lines.fixedSize(horizontal: true, vertical: false)
-                    Spacer(minLength: 4)
-                    status
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    lines
-                    status
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            BotCardTile(symbol: symbol, tint: tint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(Theme.sans(15, weight: .medium, relativeTo: .subheadline))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(2)
+                Text(subtitle)
+                    .font(Theme.sans(12, relativeTo: .footnote))
+                    .foregroundStyle(Theme.textMuted)
+                    .lineLimit(1)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            trailing
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
     }
+}
 
-    private var lines: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(title)
-                .font(Theme.sans(15, weight: .semibold, relativeTo: .subheadline))
-                .foregroundStyle(Theme.text)
-                .lineLimit(3)
-            Text(subtitle)
-                .font(Theme.sans(12, relativeTo: .footnote))
-                .foregroundStyle(Theme.textMuted)
-                .lineLimit(2)
-        }
+extension NoticeHead where Trailing == EmptyView {
+    init(symbol: String, tint: Color, title: String, subtitle: String) {
+        self.init(symbol: symbol, tint: tint, title: title, subtitle: subtitle) { EmptyView() }
     }
 }
 
-private struct PlanStatus: View {
-    let work: BotWork
-    let phase: PlanPhase
-    let now: Int64
-
+/// The small chevron of a notice that opens its details.
+struct NoticeChevron: View {
     var body: some View {
-        HStack(spacing: 5) {
-            switch phase {
-            case .awaiting: Circle().fill(Theme.warning).frame(width: 6, height: 6)
-            case .running: MiniSpinner(cellSize: 1.8)
-            case .done: Image(systemName: "checkmark").font(.system(size: 10, weight: .bold))
-            case .failed: Image(systemName: "exclamationmark.triangle").font(.system(size: 10, weight: .semibold))
-            default: EmptyView()
-            }
-            Text(work.cardStatus(now: now))
-                .font(Theme.sans(12, weight: .medium, relativeTo: .footnote))
-                .lineLimit(1)
-        }
-        .foregroundStyle(color)
-        .fixedSize()
-        .accessibilityIdentifier("plan-status")
-    }
-
-    private var color: Color {
-        switch phase {
-        case .awaiting: Theme.warning
-        case .running: Theme.text
-        case .done: Theme.success
-        case .failed: Theme.danger
-        default: Theme.textMuted
-        }
-    }
-}
-
-/// A step's mark: its number while the plan waits, then how it went.
-private struct PlanStepMark: View {
-    let state: StepState
-    let number: Int
-    let numbered: Bool
-
-    var body: some View {
-        Group {
-            if numbered {
-                Text("\(number)")
-                    .font(Theme.sans(10.5, weight: .semibold))
-                    .foregroundStyle(Theme.textMuted)
-                    .frame(width: 19, height: 19)
-                    .overlay(Circle().strokeBorder(Theme.borderStrong, lineWidth: 1))
-            } else {
-                switch state {
-                case .pending:
-                    Circle().strokeBorder(Theme.textFaint, lineWidth: 1).frame(width: 9, height: 9)
-                case .running:
-                    MiniSpinner(cellSize: 1.8).foregroundStyle(Theme.textMuted)
-                case .asking:
-                    Image(systemName: "questionmark.circle").foregroundStyle(Theme.warning)
-                case .done:
-                    Image(systemName: "checkmark").foregroundStyle(Theme.success)
-                case .failed:
-                    Image(systemName: "xmark").foregroundStyle(Theme.danger)
-                case .skipped:
-                    Capsule().fill(Theme.textFaint).frame(width: 8, height: 1.5)
-                }
-            }
-        }
-        .font(.system(size: 12, weight: .semibold))
-        .frame(width: 20, height: 20)
-        .accessibilityLabel(numbered ? "Step \(number)" : "Step \(number), \(state.status.text)")
+        Image(systemName: "chevron.right")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(Theme.textFaint)
+            .accessibilityHidden(true)
     }
 }
 

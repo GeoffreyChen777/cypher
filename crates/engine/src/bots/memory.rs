@@ -231,7 +231,7 @@ impl Bots {
     }
 
     /// Run Now: a fresh run the scheduler starts on its next pass, like the
-    /// routine page's button; its result posts in this chat.
+    /// routine page's button; its result is announced in this chat.
     fn run_routine_now(&self, bot: &Bot, routine: &BotRoutine) -> Result<String, EngineError> {
         let now = p::now_ms();
         let mut fields = serde_json::Map::new();
@@ -432,8 +432,8 @@ impl Bots {
             next_words(&routine.schedule, routine.enabled, Local::now()),
         )];
         out.push(match &routine.target {
-            RoutineTarget::Workspace => "It runs in the background as you, in its own thread, and posts \
-                 its result in this chat."
+            RoutineTarget::Workspace => "It runs in the background as you, in its own thread, and you \
+                 are told in this chat when a run ends."
                 .to_string(),
             RoutineTarget::Project {
                 space_id, worktree, ..
@@ -441,8 +441,8 @@ impl Bots {
                 let space = view.space(Some(space_id));
                 format!(
                     "It runs in the background as an ordinary session in {} on {}, {}; scheduled runs \
-                     continue one session and Run now starts a fresh one. Its result is posted \
-                     in this chat.",
+                     continue one session and Run now starts a fresh one. You are told in this \
+                     chat when a run ends.",
                     space.map(super::prompt::space_name).unwrap_or_default(),
                     space
                         .map(|s| view.device(&s.device_id).to_string())
@@ -548,13 +548,16 @@ pub(super) fn memory_prompt(marker: &BotChat) -> Option<String> {
 }
 
 /// What the bot chat is told about routines.
-pub(super) const ROUTINES_LINE: &str = "Routines:\n- Routines run by hand or on a schedule and \
-     post their results in this chat. One runs either as you, in its own thread (\"every \
+pub(super) const ROUTINES_LINE: &str = "Routines:\n- Routines run by hand or on a schedule, in \
+     the background. When a run ends you get a bracketed notice here with its result: tell \
+     your owner what it says in one or two sentences (they open the rest from its card). \
+     One runs either as you, in its own thread (\"every \
      morning, tell me what's stuck\"), or as an ordinary session in one of your projects \
      (\"every night, run the tests and fix anything flaky\"). When your owner asks for \
      something recurring, save it with save_routine; list_routines shows your routines with \
-     their last results. run_routine runs one now (a fresh run that posts here when it \
-     ends) and delete_routine removes one, when your owner asks.\n- Reminders are routines too. When your owner asks to be reminded \
+     their last results. run_routine runs one now (a fresh run; you are told here when it \
+     ends) and delete_routine removes one, when your owner asks. After save_routine, one \
+     line is enough: your owner sees the routine's card.\n- Reminders are routines too. When your owner asks to be reminded \
      (\"remind me tomorrow morning to review the code in invoice-demo\"), save a routine as \
      you with a once schedule at that local time (morning is 09:00 unless they say; \
      list_routines shows the time now) and a prompt that tells you to remind them and add \

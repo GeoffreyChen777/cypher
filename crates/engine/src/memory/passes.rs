@@ -353,6 +353,7 @@ impl Memory {
             room_gen: Some(2),
             child: None,
             bot: None,
+            started_by: None,
             memory: Some(MemoryChat {
                 store_id: store_id.clone(),
                 scope: scope.clone(),

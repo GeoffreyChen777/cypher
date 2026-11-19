@@ -537,6 +537,7 @@ fn session_candidates(
     for chat in chats {
         if chat.is_child()
             || chat.is_bot()
+            || chat.is_workspace_session()
             || chat.is_memory_pass()
             || current_chat == Some(chat.id.as_str())
         {

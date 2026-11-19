@@ -249,20 +249,22 @@ Owner: "Fix bug X in A, then check B against A's fix"
                                           ├─ wait, read its result
                                           ├─ start session in B ("run tests against A's branch") ─► worker 2
                                           ├─ wait, read its result
-                                          └─ report ─► result card in the bot chat
+                                          └─ report ─► result notice in the bot chat
 ```
 
 1. The owner asks in the bot chat. For a task that needs more than a couple of steps the
    bot writes a plan: steps, projects, devices, models, and how the steps depend on each
    other (`propose_plan`).
-2. The plan shows as a card. In the first version every plan waits for the owner's
-   approval; auto-start becomes a per-bot setting later.
+2. The plan shows as a compact card: what is proposed, with Details, Reject and Approve.
+   In the first version every plan waits for the owner's approval; auto-start becomes a
+   per-bot setting later.
 3. On approval the engine creates an **orchestration thread**, a hidden child chat of the
    bot chat with origin *owner*, and queues its first run. The bot chat is free again.
 4. The thread does the work: small steps directly in local projects (*Work directly*),
    real changes and anything on another device in worker sessions (*Coordinate*).
-5. When it finishes, fails or is stopped, the result lands in the bot chat as a card, and
-   the bot can follow up.
+5. When it finishes, fails or is stopped, the bot chat gets a result notice (§6.8): a
+   compact card, and a short turn in which the bot says what came of it. The bot can
+   follow up from there.
 
 ### 6.2 The thread starts from a brief
 
@@ -281,8 +283,9 @@ The bot's instructions give it this trade-off:
   another device; steps that run in parallel.
 
 Worker sessions are ordinary sessions in their project, marked with who started them
-(`startedBy: {botId, threadId}` on the chat row) and shown as "Started by Bob · <task>".
-The owner can open, steer or stop them like any session.
+(`startedBy: {botId, workId}` on the chat row). They belong to the workspace: it lists
+them under their project and opens them in its detail panel, and the Sessions view leaves
+them out. The owner can open, steer or stop them there like any session.
 
 ### 6.4 Dependencies between projects
 
@@ -304,8 +307,9 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
 
 ### 6.6 Control and limits
 
-- A live **progress card** in the bot chat: the plan, each step's state, links to its
-  sessions, and elapsed time.
+- Live **progress** beside the bot chat, never in it: the plan's row in the sidebar (its
+  progress ring and current step) and its page in the detail panel (each step's
+  state, its sessions, elapsed time).
 - **Stop** ends the thread and interrupts every session it started.
 - Limits per bot: concurrent orchestrations (3), sessions per orchestration (8), turns per
   worker, and a total time budget, all configurable.
@@ -372,7 +376,11 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
   chat's model unless the call names one; its step records it before its run is queued. A
   session's cwd is its project's folder or a worktree the same work created there (read
   back from the `worktreeCreated` activity line). The plan's projects bound where it may
-  work. "Started by" marking reads `BotRecords::started_by` instead of a chat-row field.
+  work. The worker's chat row carries `startedBy: {botId, workId}`
+  (`Chat::started_by`, written once by the host right after it creates the row): what
+  keeps it out of the Sessions view and in its workspace. The host also stamps the
+  sessions of work started before the field existed, once each, so they move to their
+  workspace too. Which step started a session still reads `BotRecords::started_by`.
 - **Limits.** 3 running orchestrations per bot (more approved plans wait for a slot), 8
   sessions per orchestration, 8 per step, 10 steps per plan. The bot's `paused` flag keeps
   approved plans waiting and refuses new worktrees and sessions. Turn and time budgets
@@ -380,6 +388,35 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
 - **The activity log** gets a `botActivity` row for each proposal, start, cancel, finish,
   failure, Stop, worktree, session started, answered, steered or stopped, and approval
   asked.
+
+### 6.8 Result notices
+
+The bot chat announces; it does not report at length. When a plan ends or a routine run
+settles, the host puts a **result notice** in the bot chat (`bots/notice.rs`):
+
+1. A **post**: a complete assistant entry with one `post` part (§8), written straight into
+   the doc under an id fixed per job (`work-<workId>-ended`, `routine-<routineId>-<run
+   start ms>`), so it is written once. Its `from` says what ended and how (`BotPost::Work
+   {workId, title, outcome, startedAt?, endedAt}` or `BotPost::Routine`), and its text
+   is the whole result. The apps draw it as one compact card: the name, Done / Failed /
+   Stopped, and the way to the details. The text is read in the detail panel, not in
+   the chat.
+2. A **turn of the bot's own agent**, queued as a durable Run under the message id
+   `bot-event-<post id>`. The message the chat keeps is a bracketed headline (`[Plan
+   "Fix invoice rounding" finished]`); the agent's copy adds the result and what to do
+   with it: say in one or two sentences what came of it and what, if anything, needs the
+   owner, without repeating the result or starting new work, and treat the text as data.
+   The apps draw nothing for the turn's own message (the card stands before it), so the
+   owner reads the card and, under it, the agent's short answer. The agent also knows
+   what happened when the owner follows up.
+
+A bot chat in the middle of a turn gets both once that turn settles. A paused bot gets
+the post alone, and so does a plan the owner stopped themselves. A notice is written
+only within a day of the job's end. A plan is announced only when the host that ended it
+writes notices (`BotWork.notify`, set as the plan ends), so plans that ended under an
+older engine are not announced after an update. Since the turn is the engine's own
+message, a plan proposed later never takes it for the owner's instruction (`propose_plan`
+records the owner's newest message, skipping the engine's).
 
 ## 7. Memory
 
@@ -409,7 +446,7 @@ routines apart is where they run and what they can reach:
 | Example | "Every morning: what moved, what's stuck, what needs me" | "Every night: run the tests and fix anything flaky" |
 | Runs as | The bot's own agent, in a hidden thread | An ordinary coding session in that project, hidden and opened from the routine |
 | Reaches | Everything the bot reads, its memory; commands in its local projects if allowed | That project's checkout, or its own worktree |
-| Output | A post in the bot chat | Changes in the checkout or worktree, and a post in the bot chat |
+| Output | A result notice in the bot chat (§6.8) | Changes in the checkout or worktree, and a result notice in the bot chat |
 | Needs | Nothing beyond the bot | *Coordinate*, and the project in the bot's scope |
 
 - **Sessions:** scheduled runs continue one standing session per routine, so each run sees
@@ -421,7 +458,7 @@ routines apart is where they run and what they can reach:
 - **Reminders** are once routines: "remind me tomorrow morning to review the code in
   invoice-demo" becomes a workspace routine scheduled once for 09:00 tomorrow, whose prompt
   tells the agent to remind the owner and add what helps (what changed in the project). Its
-  post in the bot chat is the reminder. A time already past is refused; a once routine that
+  result notice in the bot chat is the reminder. A time already past is refused; a once routine that
   ran keeps its last result and has no next run. Reminders are not memory: memory is read
   only when a run starts.
 - **Background, with owner approval:** manual and scheduled runs both wait for questions
@@ -484,22 +521,23 @@ this device marked `{botId, origin: "routine", thread: {kind: "routine", routine
 titled with the routine's name, in the bot's folder, with the bot chat's config. The Run's
 prompt is a header and the routine's prompt: `Routine "<name>" · <Weekday Month D, YYYY,
 HH:MM>`, a blank line, then the prompt. The run can wait for its owner's input. When it settles, the
-host writes `lastRun`, adds a `routineRan` activity entry, and **posts the output into the
-bot chat**: a complete assistant entry (id `routine-<routineId>-<run start ms>`, so it is
-posted once) with one `post` part, written straight into the doc. It starts no turn. If
-the bot chat is in the middle of a turn, the post waits until that turn settles. The post
-also sets the bot chat's preview to "<name>: <output>" and bumps its activity, so it shows
-unread. A failed run posts its reason the same way and marks its routine; it is not
-in Needs you, which holds decisions only.
+host writes `lastRun`, adds a `routineRan` activity entry, and puts a **result notice** in
+the bot chat (§6.8): the output as a post (id `routine-<routineId>-<run start ms>`, so it
+is posted once), then a short turn of the bot's agent about it. If the bot chat is in the
+middle of a turn, the notice waits until that turn settles. The post also sets the bot
+chat's preview to "<name>: <output>" and bumps its activity, so it shows unread. A failed
+run posts its reason the same way and marks its routine; it is not in Needs you, which
+holds decisions only.
 
 The `post` part (`cypher_doc::MessagePart::Post`) is additive: `{id, kind: "post", text,
 from}`, with the body under `text` so readers that predate the kind show it as a text
 part. `from` is a `BotPost`: `{kind: "routine", routineId, name, outcome: "done" |
-"failed", runAt, threadChatId?}`; a kind from a newer engine reads as `unknown`. The
-Workspaces board draws each post as a card: a tinted, bordered box (red-tinted when the
-run failed) whose head holds the routine's mark, its name over "Routine · <when>", a Done
-or Failed mark and Open session, with the result's markdown under a divider. The head and
-the result's rows each draw their slice of the box (`transcript::rows::CardSlice`).
+"failed", runAt, threadChatId?}` or `{kind: "work", workId, title, outcome, startedAt?,
+endedAt}`; a kind from a newer engine reads as `unknown` and shows as plain text. The
+apps draw a known post as one compact card: the job's mark, its name over "Routine ·
+<when>" or "Plan · took <how long>", and Done, Failed or Stopped. The whole card opens
+the result in the detail panel (a plan's on the plan's own page while its record is
+kept); the post's text is not drawn in the chat.
 
 **Project routine runs.** A project routine runs on the device of its project's space (a
 workspace routine on its bot's host). Its session is a chat in the space, marked `{botId,
@@ -523,8 +561,8 @@ to its listeners (`SessionsEngine::add_unattended_listener`); the scheduler's re
 reason and settles the run `failed` with it.
 
 **Notifications.** There is no new notification path. A failed routine run raises
-attention through its post (unread bot chat on every device) and the mark on its
-routine, whichever target it ran in.
+attention through its result notice (unread bot chat on every device, and the bot's short
+answer about it) and the mark on its routine, whichever target it ran in.
 
 ## 9. Bot runtime on the host device
 
@@ -650,7 +688,7 @@ orchestration thread gets the rest but `stop_work` (it ends its own work with
 | `wait_for_session {session_id, timeout_s?}` | Waits (default 300 s, at most 900) until a session settles or asks; returns its state, its last message and any question with its options, as quoted data. A question is read out once: called again while the same question is open, it waits for the owner's answer (or the wait's end, or Stop). |
 | `answer_session {session_id, answers? \| text?}` | Answers the question a session is asking (never a permission prompt). |
 | `steer_session {session_id, message}`, `stop_session {session_id}` | For sessions this work started; for others only with *Coordinate: steer* and the owner's approval of each action. |
-| `update_step {step, state, note?}` | Running, done, failed or skipped, for the progress card. |
+| `update_step {step, state, note?}` | Running, done, failed or skipped, for the plan's row and page. |
 | `finish_work {outcome, result}` | Done or failed, with the result the owner reads (at most 2,000 characters, refused over that), citing sessions. Closes the steps still open. |
 
 ### 10.4 Memory and network
@@ -660,7 +698,7 @@ orchestration thread gets the rest but `stop_work` (it ends its own work with
 | `memory`, `search_history`, `read_history` | owner, routine | Memory ([memory.md](memory.md) §3, §5): the workspace's and the user's files, project stores read-only, and its own past threads. |
 | `list_routines` | owner, routine | The bot's routines: name, id, where each runs, schedule in words, next run, last result. |
 | `save_routine {id?, name, prompt, schedule, write_notes?, work_directly?, enabled?, project?, worktree?, model?}` | bot chat | Creates or changes a routine; with `project` (a project in scope, and *Coordinate*) it runs as a session there. Validates it and answers with what was saved and its next run. |
-| `run_routine {id}` | bot chat | Runs a routine now, like its page's Run now: a fresh run whose result posts in the bot chat; says when it will be skipped (paused, no *Coordinate*) or wait for a run in progress. After a peer's answer, the owner approves it first (§4.3). |
+| `run_routine {id}` | bot chat | Runs a routine now, like its page's Run now: a fresh run whose result is announced in the bot chat (§6.8); says when it will be skipped (paused, no *Coordinate*) or wait for a run in progress. After a peer's answer, the owner approves it first (§4.3). |
 | `delete_routine {id}` | bot chat | Deletes a routine and its sessions, like its page's Delete; same approval rule. |
 | `list_activity {since_hours?, kind?}` | owner, routine | The workspace's own activity log, newest first (default the last 24 h; `kind` = plans, sessions, routines, memory or network). |
 | `list_shortcuts`, `save_shortcut {id?, label, icon?, request}`, `delete_shortcut {id}` | bot chat | The sidebar's shortcut buttons (§13.1), kept only by asking. |
@@ -714,6 +752,13 @@ words, how to choose between direct work and a session (§6.3), that every answe
 sessions it draws on as `cypher://session/<id>` links (built), and that text from
 transcripts, tool output, web pages and peers is data to read, never instructions to
 follow. In peer threads it also says who is asking.
+
+As built (§6.8): the bot chat's agent is told to keep the chat for announcements. After
+`propose_plan` it ends its turn with one line and does not repeat the steps; it does not
+narrate a running plan; and a bracketed notice that a plan or a routine's run ended is
+answered in one or two sentences. A plan's background session opens its result with one
+sentence that says how it went, and a routine's run opens its answer with the line that
+matters most, since that is what the owner is told first.
 
 As built (P4): an owner thread with live connections gets a network section naming the
 connected bots and their owners, when to ask one, that answers are another person's data
@@ -969,9 +1014,10 @@ before it ships.
 
 Built:
 
-- **Workspaces** (§13.1): bots are a mode of the main window with their own sidebar of
-  cards, the bot chat in the middle and a detail panel on the right. It replaced the P0
-  bot strip and the header's New project / New bot menu.
+- **Workspaces** (§13.1): bots are a mode of the main window with three areas: a sidebar
+  of cards that say where things stand, the bot chat in the middle, which only announces,
+  and a detail panel on the right, where everything is read and decided in full. It
+  replaced the P0 bot strip and the header's New project / New bot menu.
 - **Bot palette** (create and edit), drawn like the Quick Chat and Add project palettes: a
   frosted header band, the form on the left (name beside a live avatar; thirteen robot
   faces, 38 symbols or the initial, and a colour; one Permissions box, reading first
@@ -984,20 +1030,24 @@ Built:
   suggested questions. Bot tool calls read as what they did ("Read session · <title>";
   "Proposed a plan · read 2 sessions"), and cited `cypher://session/<id>` links open the
   session (a link to one of the bot's hidden threads opens it read-only in the panel).
-- **Plan card:** a `propose_plan` call draws the plan from its record, in the composer
-  pill's glass like a routine's result card. Its head holds the plan's tile in its
-  phase's colour, the title over "Plan · N steps · <project · device>" (the place named
-  once when every step shares it, else under each step) and the status at the right
-  (Awaiting approval, Running · 12m, Done · 18m, Failed …). Under a hairline: the summary,
-  a progress bar while it runs, the steps as a timeline (numbered with their details
-  while it waits; then live marks, notes and sessions), and the result as markdown once
-  it ends. A footer holds "Nothing runs until you approve." with Cancel / Edit / Approve
-  while it waits (Edit cancels it and starts the owner's reply asking for the change),
-  and Stop while it runs.
-- **Routine posts and late answers** in the bot chat read under an attribution row
-  (the routine's name, when it ran, Failed, Open session; "Answer from …" for another
-  bot's late answer) over the text rendered like any answer.
-- **Worker sessions:** a quiet "by <bot>" on their sidebar row and tab in Projects mode.
+- **Plan card:** a `propose_plan` call draws a compact card from the plan's record: its
+  tile, the title over "Plan · N steps · <project · device>" (the place named when every
+  step shares it), and "Awaiting approval". While it waits, a line of the summary and a
+  footer with Details, Reject and Approve. Once decided the card is one row: Approved or
+  Rejected, and Details. It never shows steps, progress or the result: Details opens the
+  plan's page in the detail panel, which has them (and Edit, which rejects the plan and
+  starts the owner's reply asking for the change).
+- **Routine card:** a `save_routine` call that went through draws one row: the routine's
+  name over "Routine · <schedule> · in <project>" and "Saved", read from the routine's
+  record (found by the id the tool's answer gives, since the doc keeps a workspace
+  tool's first lines of output but not its input). It opens the routine's page.
+- **Result notices** (§6.8): a routine's run or a plan's end is one compact card (the
+  job's mark, its name, Done / Failed / Stopped), followed by the bot's own one or two
+  sentences about it. The card opens the result in the detail panel.
+- **Late answers** from another bot read under an attribution row ("Answer from …") over
+  the text rendered like any answer.
+- **Worker sessions** and project routines' sessions are listed in their workspace, under
+  their project, and open live in its detail panel. The Sessions view does not list them.
 
 - **iPhone and iPad:** the whole Workspaces surface (§13.2).
 
@@ -1013,23 +1063,36 @@ the sidebar. One switcher, the sidebar's logo, picks the view:
 | | Sessions view (Projects mode) | A workspace (Workspaces mode) |
 |---|---|---|
 | Logo | **Cypher** ⇅ | **Cypher** `Atlas` ⇅ (the workspace as a soft tag in its colour) |
-| Sidebar | Project and session cards, as today | The workspace's cards |
-| Middle | Session tabs | The workspace's chat |
-| Right | The session dock | The detail panel |
+| Sidebar | Project and session cards, as today | The workspace's cards: where things stand |
+| Middle | Session tabs | The workspace's chat: what was proposed and what ended |
+| Right | The session dock | The detail panel: one item in full, with its decisions |
 | Header `+` | New project | New workspace |
 
 ```
 A workspace
-┌ sidebar ───────────┐┌──────── chat ─────────┐┌── detail ──┐
-│ Cypher [Atlas] ⇅   ││                       ││ Fix invoice│
-│ ⏸ Atlas is paused  ││  conversation with    ││ rounding   │
-│ Needs you  2       ││  the workspace; plan, ││ steps,     │
-│   …                ││  progress and result  ││ sessions,  │
-│ Work  3            ││  cards inline         ││ Stop       │
-│ Routines  3        ││                       ││            │
-│ Projects  2        ││  [ Ask Atlas…       ] ││        [×] │
-└────────────────────┘└───────────────────────┘└────────────┘
+┌ sidebar: status ───┐┌─── chat: notices ─[◨]┐┌─ detail: in full ─┐
+│ Cypher [Atlas] ⇅   ││                       ││ Fix rounding ›    │
+│ Needs you  2       ││ ▢ Plan · Fix rounding ││ Run this command? │
+│   Run npm test     ││   Approved  Details › ││   npm test        │
+│   Plan: Release    ││                       ││ [Deny] [Run once] │
+│ Work               ││ ▢ Morning brief  Done │└───────────────────┘
+│   Fix rounding     ││ Three sessions moved; │┌───────────────────┐
+│   Step 2 of 4 ▓▓░░ ││ nothing needs you.    ││ Plan to approve   │
+│ Routines           ││                       ││ Release 0.5       │
+│ Projects           ││    ( ▲ 2 need you )   ││ [Reject] [Approve]│
+│   billing          ││ [ Ask Atlas…        ] │└───────────────────┘
+│     Fix rounding ● │└───────────────────────┘
+└────────────────────┘
 ```
+
+**Each area has one job.** The chat **announces**: a plan was proposed (decide here or
+open it), a plan or a routine's run ended (how, in a word, with the bot's sentence or two).
+It holds no card that changes while work runs. The sidebar **shows where things stand**:
+what needs the owner, each running plan with its progress ring and current step,
+routines with their next run, and the sessions the workspace runs in each project. The
+detail panel **holds everything in full**: a plan's steps and result, a routine and its
+runs, a session live, and the one page where everything that needs the owner is answered.
+Every row and card opens the panel; nothing opens outside the workspace.
 
 **Switching.** A click on the logo opens one list: **Sessions** (the projects view, the
 default) first, then every workspace by name with what it is doing (a Needs-you count, a
@@ -1040,8 +1103,10 @@ Settings… / Delete… menu. The chosen workspace follows "Cypher" as a soft ta
 and name in its colour on a faint wash of it. An amber count beside it says what needs the owner in
 workspaces not shown: all of them from the Sessions view, the others from a workspace.
 Each view keeps its own state: the workspace that was open, the session tabs and their
-layout. Sessions a workspace started stay in their projects, marked "by <workspace>".
-Project windows have only the plain wordmark.
+layout. Sessions a workspace started are listed in that workspace only (a session started
+before chat rows said who started them shows in the Sessions view, marked "by
+<workspace>", until its workspace's host stamps it). Project windows have only the plain
+wordmark.
 
 **No status card.** Who the bot is reads from the logo's tag and the chat header, what it
 may do from its settings (Permissions), and its pause and settings buttons sit
@@ -1053,11 +1118,48 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 
 | Card | Shows | Opens in the detail panel |
 |---|---|---|
-| **Needs you** | Plans awaiting approval, workers asking or failed on an approval, tainted actions awaiting approval, and later review drafts | The item with its context and actions: the plan to approve, the question with the worker's recent messages and the bot's suggested answer, the action and why it needs approval |
-| **Work** | Running orchestrations with their current step, a step bar and elapsed time; the last few finished ones with a one-line result | The orchestration: its status as the title's tile (state, progress and times on hover), its request, then one flow on one rail: each step with its state, duration, note and sessions, ending in the result; Stop. Agent-written text (request, summary, notes, result) renders as markdown. A step's title folds its details; hovering a node washes it and firms up its rail segment, a duration shows its exact times, the result offers Copy, and the shared project opens its page |
-| **Routines** | Its routines in order of next run: name, where and when it runs, next run, last result | The routine: where it runs, trigger, prompt, settings, the last run and links to its scheduled and manual sessions, edit, run now |
-| **Projects** | Each granted project with device, running and waiting sessions, and "works directly" or "via sessions" | The list groups projects by device (sessions, what runs or asks, last activity). A project's page: its device beside the title (the folder on hover, a click copies it), its sessions in scope with status, the bot's work there and its routines there |
-| **Connections** (P4; "network" in code) | Just its header: how many workspaces are connected ("3 · 1 open invite"), or "N to review" in amber when answers wait in Needs you (a click opens the review) | The Connections panel lists the connected workspaces, invites and recent questions; its header's + opens the connect page (create an invite code, or paste one). A connection opens its own page (scope, reply mode, exchanges, revoke), and a question its own (who asked whom, the question, the answer, how it ended; a waiting one opens as its review), each with a back arrow to Connections |
+| **Needs you** | Everything that waits on the owner, one row each: the bot's own question, actions awaiting approval, sessions the workspace runs that are asking (a permission prompt, a question), plans awaiting approval, and answers to review | The **Needs you page**: a card per item, answered in place (below). A row opens the page on its card |
+| **Work** | Running orchestrations, each with its progress ring (below), its current step ("Step 2 of 4 · Run the tests") and the time it has run; approved plans that have not started yet ("waiting": for a free slot, or a paused workspace); then the last three that ended, with their outcome mark. "N more" brings in everything that ended, rejected plans included | The orchestration's page (below) |
+| **Routines** | Its routines in order of next run, one line each: a mark, the name, and at the right when it next runs ("in 3h", "Mon", "off", "manual") or, while a run is under way, how long it has gone. The mark alone carries the state: the progress ring while it runs (amber and still when its session waits on the owner), a red mark when its last run failed, else the glyph of its kind (the workspace's repeat, a project's code). Those running and the next three show, then "N more". The header's **+** (on hover) adds one | The routine's page (below), or its form |
+| **Projects** | Each granted project, and under it the sessions the workspace runs there (a plan's workers, a project routine's), newest first, each with its state as a mark at its left (the ring while it works, the amber question mark while it asks, a check when it finished unseen, a red mark when it failed, none at rest) and when it last moved at its right; per project, those working or asking and the newest three of the rest, then "N more" | A project's row: its page (its device beside the title, the folder on hover; the workspace's sessions there, the owner's sessions it reads, its work and its routines there). A session's row: the session, live |
+| **Connections** (P4; "network" in code) | One line per connected workspace. Its mark, at the left, says how it stands: an amber paper plane when an answer waits for review (its own mark: the question mark is a session asking), the ring while a question is on its way either way, else the person's photo. Then the person's name with their workspace's name quieter beside it, and at the right when the last question was, or "off" when replies are off. A wait on the other side (their answer, the sending of a reviewed one) can last days, so its ring goes round for its first minute and then holds still; while this workspace writes an answer it keeps going. Those with something under way show first and always, then three, then "N more". While an invite code is open it keeps one quiet last row ("Invite open · 4d left"). The header's **+** (on hover) opens the connect page | A connection's page, the connect page, or an answer to review (all below) |
+
+**Needs you is one page.** Whatever waits on the owner, wherever it comes from (the bot's
+own chat, a plan, a worker session of a plan, a routine's run in the workspace or in a
+project, a connected workspace), is listed in one place and answered there. The page
+stacks a card per item, most pressing first. The cards stand in the panel's column on
+their own, each shaped like the chat's card with its buttons at its foot under a
+hairline: the page has no frame or title around them, and it scrolls. Each card names its source ("Fix invoice
+rounding › Migrate tables", "Nightly tests · routine", "Plan to approve"), says what is
+asked, and holds the buttons that decide it:
+
+- **A permission prompt** of a session: its question, the facts the permission extension
+  gives (the command or path, why, what a lasting approval would cover), a change or
+  input block (its first lines), and the extension's own options, weighed as the
+  session's own card weighs them (the narrowest approval filled, broader ones outlined,
+  Deny quiet, Deny and stop in red). They share one line, the refusals at the left and
+  the approvals at the right. In a panel too narrow for every label, options fold to
+  icons with their label as the tooltip, only as far as the line needs: first the two
+  refusals (a cross, a red stop square), then the broader approvals from the broadest
+  in (a shield for "Always…", a chat bubble for "…this chat"). The narrowest approval
+  always keeps its label.
+- **A question** with answers to choose one of: each answer is a button. A question that
+  takes more (several questions, several answers, one to type) says so and offers
+  "Answer in the session", which opens the session live in the panel.
+- **A plan** to approve: its line and summary, with Details, Reject and Approve.
+- **An action** awaiting approval (§4.3): what and why, with Decline and Approve.
+- **An answer to review**: the question, and the way to its review page.
+- **The bot's own question**: a line of it, and "Answer in the chat".
+
+An answer is the same owner field or queued command the item's own page writes, so the
+card leaves the page once its record says so, and every count follows: the sidebar card,
+the strip, the switcher's list and the logo's amber count. After the last card the page
+says the owner is caught up. Two things say something waits: the sidebar's **Needs you**
+card, always first, and an **"N need you"** pill floating over the bot chat's composer.
+Both only open the page. The pill is the twin of the transcript's "Scroll to bottom"
+pill (the same raised capsule, its bell in amber) and shares its centred row, so the two
+sit side by side when both show. A session's card also has the way into the session
+itself.
 
 **Shortcuts** sit pinned at the bottom of the sidebar, below the cards, which scroll above
 them: buttons, each an icon and a short label, wrapping; with none, the area isn't drawn. A
@@ -1072,19 +1174,153 @@ chip's menu only moves or deletes it. Shortcuts are `botShortcuts` registry rows
 deletion (`Mutate orderBotShortcuts`, `deleteBotShortcut`), and they are deleted with their
 workspace.
 
-There is no Activity card: it mostly repeated Work, Routines and Connections. The full audit
-log, filterable as Plans, Sessions, Routines, Memory or Connections, opens from the chat header's activity button and from "View all
-activity" in the Work panel. A card with nothing to show is not drawn. **Needs you** always comes first, so attention
-items are never below the fold. One card floats at a time, the open panel item's; with
-the panel shut none does. A click on a card's header folds the card to that one row and back, as a project card's does (for this window only, like the project cards); the arrow at the header's end, shown on hover, opens its whole list; a row opens that item.
+**Lists live in the sidebar; the panel is for details.** Every card keeps a short list by
+one rule: what is under way always shows (a running plan, a routine mid-run, a session
+working or asking), then three of the rest (the last plans that ended, the next routines
+to run, a project's newest sessions). Needs you, whose every row waits on the owner,
+shows five. When a list holds more, its last line is a small faint "N more" under the
+titles: a click brings the rest in, in place, and the line becomes "Show less". The panel never shows a card's list (there is no Work,
+Routines or Projects list page): a row opens that item's page.
+**Marks at the left, a note at the right.** On every card a row's state is its mark, in
+the one column under the card titles: a ring for what is under way, amber for what waits
+on the owner, a check, a red mark or a stop square for how it ended, and otherwise the
+glyph of what it is (a routine's kind, a person's photo; a session at rest has none).
+The right end of a row is only ever one quiet note: a time, an age, "off", "waiting".
+A state never sits at the right in place of the time.
 
-**The chat** is the bot conversation as built: the owner instructs the bot here, and
-plan, progress and result cards appear inline. It has no terminal and no session dock.
+What is expanded is kept for this window only, like the folds. One card has a page of
+its own that is not a list of its rows: **Needs you** (the page that answers its
+items, opened by any row and by the arrow at its header's end; its "N more" still
+expands the card in place).
+
+There is no Activity card: it mostly repeated Work, Routines and Connections. The full audit
+log, filterable as Plans, Sessions, Routines, Memory or Connections, opens from the chat
+header's activity button. A card with nothing to show is not drawn. **Needs you** always comes first, so attention
+items are never below the fold. One card floats at a time, the open panel item's; with
+the panel shut none does. A click on a card's header folds the card to that one row and back, as a project card's does (for this window only, like the project cards); a row opens that item.
+
+**The chat** is the bot conversation: the owner instructs the bot here. Besides their
+exchange it holds only notices: a plan's compact card, a saved routine's and a result
+notice's (§6.8), each one row or little more, each opening the detail panel. Progress never shows here. It has
+no terminal and no session dock.
 
 **The detail panel** slides in from the window's right edge and the chat narrows to make
 room. Its left edge drags to resize it (340 to 760px, never squeezing the chat below
-380px); a double click restores 420px, and the width is saved with the UI settings. It shows one item in full with its actions, closes with × or Esc, and opening
-another row replaces its content; the opened row stays highlighted in the sidebar.
+380px); a double click restores 420px, and the width is saved with the UI settings. It shows one item in full with its actions, and opening
+another row replaces its content; the opened row stays highlighted in the sidebar. The
+button at the right end of the chat's header opens and closes it (Esc closes it too): it
+opens on what the panel last showed, or on Needs you. An item is one card under its
+title; the panel has no close button of its own.
+
+**A session opens live in the panel.** A session the workspace runs in a project (a
+plan's worker, a project routine's) is an ordinary coding session, so the panel shows it
+as one: the transcript and its own composer, where the owner reads it, steers it, stops
+it and answers its question card. Its header names its project and leads back to the
+plan or routine it belongs to. There is no Git / Files dock or terminal in the panel. The
+workspace's own hidden threads (an orchestration's, a workspace routine's, a
+connection's) still open read-only: nobody writes there but the workspace.
+
+**The progress ring.** A running plan's mark is one ring that says how far it is and
+that it is alive. The steps done are an arc from twelve o'clock over a faint track, in the text's
+ink (near black on light, near white on dark), not the accent: colour is kept for what
+needs the owner. Once
+per 1.6s a comet leaves the tip of that arc, stretches as it speeds round the part still
+to do, crosses the finished arc as a glint and is taken back in at the tip, where the ring
+rests for a beat; with no step done it circles alone, a plain spinner. The ring turns
+amber and holds still while a step waits on the owner, a paler grey while the plan is stopping,
+and is an empty ring while an approved plan waits to start. It holds still under reduced
+motion (`kit/progress_ring.rs`).
+
+**A work item's page** says each thing once, and nothing it can leave out: a count, a
+time or a sentence that another part of the page already gives is not shown again. It has
+its own header, with every control at the very top:
+
+- **The bar:** at the left its status, the mark and a word in its tone (Awaiting approval,
+  Waiting to start, Running, Waiting on you, Stopping, Done, Failed, Stopped, Rejected).
+  Its times (proposed, approved, started, ended, how long) are the status's hover card and
+  nowhere on the page. At the right every button: its coordinator (the hidden session that
+  runs the plan and starts each step's sessions, read-only), Delete once it ended, the pen
+  (reject and start the reply that asks for a change), Reject and Approve while it waits,
+  Stop while it runs (a second click confirms). The page has no footer.
+- **Title**, and under it only the project, when every step that names one names the
+  same; it opens the project's page. No step count or progress line: the steps show it.
+- **The request** as a quote, and the plan's **summary**, only while the plan awaits
+  approval, where they are what the owner decides on. Afterwards the title stands for the
+  request, which is its tooltip.
+- **Result**, once it ended and wrote one: before the steps, with Copy on hover.
+- **Steps** on one rail, under a heading only when a result stands above them. A step
+  shows its state, title and duration (exact times on hover). Where steps work in
+  different projects, each names its project quietly before its duration ("web-api · 2h
+  10m"): the name alone, with the device added only when it is another machine (the
+  tooltip has both). **A step with one session is the way into it**: no row repeats its
+  title and state under it, a click on the step opens the session, and what it reported
+  shows in full while it is under way and on one line after. A step with several
+  sessions lists them while it is running, asking or failed, each a row of its status
+  mark and title that opens the session (its state in words is the tooltip); otherwise
+  it keeps to its title and one line of what it reported, and a click opens or closes
+  it. Every step of a plan still to approve is open on its description. Agent-written
+  text renders as markdown.
+
+**A routine's page** follows a work item's: every control at the very top, each thing
+said once, and nothing that is the default.
+
+- **The bar:** at the left how it stands, its mark and a word or two: Running, Waiting on
+  you, Starting…, how soon the next run comes ("Next in 3h"; the exact time is the
+  tooltip), the time itself for a once-only one ("Tomorrow 09:00"), Manual, Off, Done (a
+  once-only one that ran), or Workspace paused. At the right the Enabled switch (for a
+  routine on a schedule), Run now, Edit, the last run's session and Delete.
+- **Title**, then one line of how it is set up, each part only when it is not the
+  default: the schedule ("Weekdays 09:00"; none for a manual routine, just "Once" for a
+  once-only one), the project it runs in (and its device when that is another machine),
+  "own worktree", the model. A manual routine in the workspace on the default model has
+  no line.
+- **The prompt** as a quote.
+- **Last run**, once one has ended: when (with Failed or Skipped in words, a check for
+  one that went well; "Run by hand" is the tooltip) and what it said, as markdown. A run
+  under way is the status's to say, so it has no section.
+
+Its form follows the same rule: the schedule kinds take their row without a label of
+their own, the line at the schedule's foot says how soon the next run comes rather than
+the day and hour its fields already show, and a project names its device only when that
+is another machine.
+
+**A connection's page** follows a work item's and a routine's.
+
+- **The bar:** at the left how it stands (Waiting on you while an answer waits for review,
+  Answering, Waiting for Dana, Replies off, Disconnecting…, else Connected; since when is
+  the tooltip), led by the person's photo, or the ring or the amber paper plane while something
+  is under way. At the right the reply mode as one button naming it (Auto, Review, Off),
+  which opens the three with what each does; its thread, when this device lists it; and
+  Disconnect (confirmed).
+- **Title:** the person. Under it one line: their workspace's name and what its questions
+  can read ("Harbor · can read billing, web-api", "… everything Atlas reads"). It is
+  always said, the default included: it is the fact a connection turns on. A click on
+  the line opens the choice in place under the header (all the workspace reads, or only
+  the projects ticked).
+- **Body:** only the questions between the two, newest first (the last eight), with no
+  heading. Each is one row: an arrow for its direction (who asked whom is its tooltip),
+  the question in at most two lines, and at the right the amber paper plane when its answer
+  waits for review, the ring while it is on its way, "declined" or "expired" with its
+  age, else just its age (exact times on hover). A click opens the answer in place, as
+  it went (the owner's edit when there was one), or a line saying why there is none;
+  the one waiting for review opens its review. There is no page for a single question.
+  The rings here follow the card's rule: a minute of movement for a wait on the other
+  side, then still.
+
+**The connect page** (the card's +, its hint, the open invite's row): *Invite someone*
+(Create invite code, then the code once with Copy and its expiry; under it the invites
+still open, each with how long it has left and Revoke) and *Use their code* (paste,
+Connect). What crosses Cypher's servers is said here, once, where connecting is decided.
+Signed out, it says to sign in.
+
+**An answer to review** (from Needs you, or its row on the connection's page): Decline
+and Send at the top beside the paper plane and "Answer to review", who asks, their workspace and when, the
+question as a quote, and the draft to edit. Once decided it shows the connection's page
+with that question open.
+
+**A result opens in the panel.** A result notice's card opens the plan's own page while
+the plan's record is kept, else (and for a routine's run) a page with how it ended,
+when, and what it wrote in full, with the ways on to the routine and its session.
 
 Every panel page shares one layout, so a page says each thing once:
 
@@ -1095,13 +1331,13 @@ Every panel page shares one layout, so a page says each thing once:
   by every step is named once, as a fact; a request that repeats the title is left out.
 - **Lists:** a small caps label (Steps, Sessions, Connections…) only where a page holds
   more than one list.
-- **Decisions** (Approve, Send, Stop, Save) sit in a footer pinned to the panel's foot,
-  the primary button last, with at most one short note.
+- **Decisions** (Send, Save) sit in a footer pinned to the panel's foot, the primary
+  button last, with at most one short note. A work item is the exception: its
+  decisions (Approve, Reject, Stop) are in the bar at the top of its page.
 - Editable fields alone keep a grey well; read-only text is a fact.
 - **Empty:** a panel with nothing to list says so in the middle of the space under its
   header (a quiet glyph, a short line, a hint, and an action where one helps); what it
-  still shows above, like Activity's filter, stays on top. A list's own "add" is the
-  header's **+** (Routines).
+  still shows above, like Activity's filter, stays on top.
 
 Behaviour:
 
@@ -1119,20 +1355,32 @@ As built, beyond the table:
   since: an orchestration can end while its session's question stays open), plans
   awaiting approval, and review drafts: decisions only, and the only place in the sidebar
   they are listed (other cards show state; Network says "N to review" in amber and opens
-  them). A failed routine is state, marked on its routine. The Asking panel
-  answers a single-question prompt with its options; others say to answer in the
-  session.
+  them). A failed routine is state, marked on its routine.
+- **Sessions the workspace runs** never appear in the Sessions view, its tabs, or the
+  `@` mention list. `Chat::workspace_session_of` names their workspace (a worker by the
+  row's `startedBy`, a project routine's session by its marker). Opening one from
+  anywhere (a link in an answer, a step, a banner) switches to its workspace and shows
+  it in the panel. They ring and badge only when they ask: what they finish is their
+  workspace's to report (the result notice).
 - **The bot learns where its plans stand.** Approval, progress and results happen
   outside the conversation, so each owner turn carries a short status of the bot's live
   and recently ended plans to the agent (the transcript keeps the owner's words).
-- **Hidden threads** (orchestrations, routines, peer questions) never appear in the
-  Projects sidebar and never chime, banner or push; the panel's Thread view shows one
-  read-only with a way back to its work item, routine or connection.
+- **Hidden threads** (orchestrations, workspace routines, peer questions) never appear
+  in the Projects sidebar and never chime, banner or push; the panel's Thread view shows
+  one read-only, the way back to its work item, routine or connection an arrow left of its
+  title.
 - **A routine** can be granted *Work directly* ("May run commands"), only while the bot
   has it; anything that needs approval waits for the owner in Needs you.
 - **Empty cards** for Routines and Connections show only their header with a quiet
-  hint; the header opens the panel, whose own button adds the first routine, note or
-  connection. No card carries a `+`.
+  hint. The Routines header opens the new-routine form; the Connections header
+  ("Connect a workspace") opens the connect page.
+- **After a delete** (a routine, finished work) or a cancelled new-routine form, the
+  panel shuts: there is no list page to fall back to.
+- **A side chat** opened from a selection in the workspace's chat (or in a session the
+  panel shows live) opens beside the conversation inside that card, or over it when the
+  card is narrow. These cards have no session rail, so the side chat's own bar carries
+  its close button; closing the last one shuts the dock and gives the conversation its
+  room back.
 - **Signed out**, the Connections card says "Sign in to connect"; records stay visible.
 
 ### 13.2 iPhone and iPad
@@ -1149,21 +1397,43 @@ app has the desktop's whole surface, laid out for a phone.
   Settings…, Pause/Resume and Delete…. The list's **+** opens the settings form, which
   creates the workspace on an online device. On iPad the sidebar heads each list with
   its title and summary, where the phone's large title sits. Hidden chats
-  (bot-marked threads and memory passes) are never listed among sessions, nor offered
-  by `@` mentions; worker sessions say "by <workspace>".
+  (bot-marked threads, the sessions a workspace started and memory passes) are never
+  listed among sessions, nor offered by `@` mentions.
 - **The workspace** opens on its chat: the session screen with the workspace's avatar
   and name, its shortcuts as chips above the composer (a `{input}` blank asks first;
   long press moves or deletes), an amber "N need you" pill in the status row, the
   quiet off-line ("Atlas is paused" with Resume, "<device> is offline"), and the start
-  screen with suggested questions while the chat is empty. Plan cards, held-memory
-  cards and routine posts draw as on the desktop; bot tool calls read as what they did.
-  Hidden sessions open read-only, under a banner naming the plan, routine or
-  connection they belong to.
+  screen with suggested questions while the chat is empty. The chat only announces, as
+  on the desktop: a plan's compact card (Details, Reject, Approve, then the decision),
+  a saved routine's card, a result notice's card, and nothing for the turn that tells
+  the bot a job ended; the cards open the board at their page. Held-memory cards draw as on the desktop, and bot
+  tool calls read as what they did. A session the workspace runs in a project opens as
+  an ordinary session, and a hidden thread read-only, each under a banner naming the
+  plan, routine or connection it belongs to.
 - **The board** replaces the sidebar cards and the detail panel: the toolbar's grid
   button (badged with the Needs-you count) opens it as a sheet on iPhone and as the
   inspector beside the chat on iPad. Its overview holds Needs you, Work, Routines,
-  Projects, Connections, Activity and Memory; each item opens a page of its own with
-  the panel's layout (header, facts, lists, a decision bar at the foot).
+  Projects, Connections, Activity and Memory; each item opens a page of its own. The
+  desktop's rules hold here too. *Marks at the left, a note at the right:* a row's
+  state is its mark (the progress ring for what is under way, amber for what waits on
+  the owner, a red mark for a failed last run, the paper plane for an answer to send),
+  and its right end is one quiet note. *Each thing once, and no defaults:* a work
+  item's, a routine's, a connection's and a question's page open on how the item
+  stands (its mark and a word; a tap shows its times, which the page then does not
+  list), its title, and at most one line under it (the shared project; a routine's
+  setup where it is not the default; a connection's workspace and what it can read).
+  A work page then has the result before the steps, quotes the request only while the
+  plan awaits approval, and makes a step with one session the way into it. Connections
+  are rows on the overview, with the open invites on the connect page. What differs
+  from the desktop is where decisions sit: on a phone they stay in a bar at the foot
+  (Approve, Stop, Run now, Send), in reach of the thumb, and item actions (Delete, the
+  coordinator, Disconnect) in the navigation bar. **Needs you**
+  is the one place for what waits on the owner: each item is a section with its row and,
+  under it, its decision (Decline / Approve, Reject / Approve, a permission prompt's
+  card with the extension's options, a question's answers); the row still opens the
+  item's own page. A project's page lists the workspace's sessions there, then the
+  owner's sessions it reads. A result notice has a page of its own (how it ended, what
+  it wrote, the way to its routine and session).
 - **Memory** is in Home's account menu (the desktop's Settings › Memory) and on the
   board; a store's page watches it live (`WatchMemory` over the relay).
 - **Writes.** A decision is a registry write of the same owner fields
@@ -1214,8 +1484,8 @@ As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is n
 |---|---|
 | **P0: local bot** (built) | `bots` rows, the bot chat, the bot spawn mode with tool allowlist, four read tools (bounded scan), scope enforcement, palette and conversation UI, use from other owner devices. |
 | **P1: foundation** (built) | Role-aware run profiles with engine-stamped origins; the untrusted-data prompt; the non-interactive run mode; the FTS index, `session_activity` and `project_git`. |
-| **P2: coordinator** (built) | *Work directly*; *Coordinate: start* with `propose_plan`, orchestration threads from a brief, worktree and session tools, worker marking; plan, progress and result cards; Stop; limits including a 4-hour time budget; audit log; approvals for tainted threads. Not built: per-worker turn budgets. |
-| **P3: memory and routines** (built) | The notebook, since replaced by [Memory](memory.md); the scheduler; routines in the workspace (optionally working directly) or as sessions in a project; their posts in the bot chat; the Routines card; Needs you. Not built: event triggers. |
+| **P2: coordinator** (built) | *Work directly*; *Coordinate: start* with `propose_plan`, orchestration threads from a brief, worktree and session tools, worker marking; the plan card, live progress beside the chat and result notices; Stop; limits including a 4-hour time budget; audit log; approvals for tainted threads. Not built: per-worker turn budgets. |
+| **P3: memory and routines** (built) | The notebook, since replaced by [Memory](memory.md); the scheduler; routines in the workspace (optionally working directly) or as sessions in a project; their result notices in the bot chat; the Routines card; Needs you. Not built: event triggers. |
 | **P4: network** (built) | `BotRoom`, publish, invites, connections, peer threads, `ask_bot`, exchange states, late answers, the Connections card and panels. |
 | **P5: review and control** (built but notifications) | Review mode and the outgoing scrub, reviews in Needs you; *Coordinate: steer* with a per-action approval. Not built: push notifications for reviews, plans and connections. |
 | **P6: groups, iPhone, E2E** | Owner groups, then shared groups; end-to-end encrypted exchanges. The iOS Workspaces surface is built (§13.2); its push notifications are not. |

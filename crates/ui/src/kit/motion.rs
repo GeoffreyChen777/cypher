@@ -337,6 +337,9 @@ pub const GRADIENT_SPIN: MotionSpec = MotionSpec::new(750, EASE);
 /// Running-tool arc: one turn per 900ms. Only the period is read; the
 /// rotation stays linear so the arc never appears to stall.
 pub const STATUS_SPIN: MotionSpec = MotionSpec::new(900, EASE);
+/// The progress ring's comet: once round and a rest in 1.6s. Only the
+/// period is read; `kit::progress_ring` eases the comet itself.
+pub const RING_ORBIT: MotionSpec = MotionSpec::new(1600, EASE);
 
 // ---------------------------------------------------------------------------
 // Element helpers (paint-layer entrances/exits)

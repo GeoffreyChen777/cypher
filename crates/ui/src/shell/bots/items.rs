@@ -1,10 +1,9 @@
 //! Pieces the coordination cards and panels share (Needs you, Work,
 //! Activity and the chat header's bot actions): item rows led by a mark,
-//! section labels, text blocks, step and outcome marks, the progress bar,
+//! section labels, text blocks, step and outcome marks, the progress ring,
 //! the arm-then-confirm Stop, and the session a panel looks into.
 
 use super::*;
-pub(super) use crate::transcript::bot_plan::progress_bar;
 use crate::transcript::bot_plan::{PlanPhase, plan_phase};
 use cypher_proto::{BotWork, StepState};
 
@@ -15,7 +14,6 @@ const STOP_ARM_MS: u64 = 4000;
 /// transcript (an asking worker's question, an orchestration thread), and
 /// for a thread the read-only transcript drawn from it.
 pub(super) struct Peek {
-    pub chat_id: String,
     pub state: Entity<crate::state::AppState>,
     pub transcript: Option<Entity<Transcript>>,
     _observe: Subscription,
@@ -69,11 +67,6 @@ pub(super) fn trailing(text: String, color: gpui::Hsla) -> gpui::Div {
         .text_size(px(11.0))
         .text_color(color)
         .child(SharedString::from(text))
-}
-
-/// A panel section's small caps label ("STEPS", "RESULT").
-pub(super) fn section_label(text: &str, theme: &Theme) -> gpui::Div {
-    super::parts::section_label(theme, text)
 }
 
 /// Agent-written text in a panel (a request, a note, a result) as markdown
@@ -198,8 +191,71 @@ pub(super) fn step_mark(state: StepState, ticker: gpui::EntityId, theme: &Theme)
     }
 }
 
-/// A work item's mark: a spinner while it runs, then how it ended.
+/// The mark of an answer drafted for a connected workspace that waits for
+/// the owner to send it, in amber wherever it shows (the connection's row
+/// and page, the question, its review, Needs you). Its own glyph: the
+/// question mark is a session asking, the checklist a plan to approve.
+pub(super) const REVIEW_GLYPH: &str = icons::PLANE;
+
+/// The ring's side in a row's mark slot.
+pub(super) const RING: f32 = 14.0;
+
+/// How a run stands, as its ring shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RingState {
+    /// Not started yet: an empty ring, still.
+    Waiting,
+    /// Under way: the comet goes round.
+    Running,
+    /// Parked on its owner: amber, still.
+    Asking,
+    /// Being stopped: paler, the comet still going.
+    Stopping,
+}
+
+/// The mark of something under way (a plan, a routine's run): its progress
+/// ring, `done` of `total` steps as an arc (none for a run without steps,
+/// which leaves the comet circling alone). Drawn in the text's ink, no
+/// accent: colour is kept for what needs the owner.
+pub(super) fn ring_mark(
+    state: RingState,
+    (done, total): (usize, usize),
+    ticker: gpui::EntityId,
+    theme: &Theme,
+) -> AnyElement {
+    use crate::kit::loaders::{progress_ring, still_ring};
+    use crate::kit::progress_ring::ProgressRing;
+    let ink = theme.text.opacity(0.82);
+    match state {
+        RingState::Waiting => {
+            still_ring(ProgressRing::new(0, total, ink, theme), RING).into_any_element()
+        }
+        RingState::Running => {
+            progress_ring(ProgressRing::new(done, total, ink, theme), RING, ticker)
+                .into_any_element()
+        }
+        // Amber all the way round, so it shows with no step done yet.
+        RingState::Asking => still_ring(
+            ProgressRing {
+                track: theme.warning.opacity(0.3),
+                ..ProgressRing::new(done, total, theme.warning, theme)
+            },
+            RING,
+        )
+        .into_any_element(),
+        RingState::Stopping => progress_ring(
+            ProgressRing::new(done, total, theme.text_muted.opacity(0.7), theme),
+            RING,
+            ticker,
+        )
+        .into_any_element(),
+    }
+}
+
+/// A work item's mark: its progress ring while it runs ([`ring_mark`]),
+/// then how it ended.
 pub(super) fn work_mark(work: &BotWork, ticker: gpui::EntityId, theme: &Theme) -> AnyElement {
+    let progress = work.progress();
     let glyph_mark = |path, color| {
         icon(path)
             .size(px(12.0))
@@ -207,10 +263,16 @@ pub(super) fn work_mark(work: &BotWork, ticker: gpui::EntityId, theme: &Theme) -
             .into_any_element()
     };
     match plan_phase(work) {
-        PlanPhase::Running | PlanPhase::Starting | PlanPhase::Stopping => {
-            super::super::render::status_mark(ChatIndicator::Working, ticker, theme)
-                .unwrap_or_else(|| gpui::Empty.into_any_element())
+        PlanPhase::Starting => ring_mark(RingState::Waiting, progress, ticker, theme),
+        PlanPhase::Running
+            if work
+                .current_step()
+                .is_some_and(|(_, step)| step.state == StepState::Asking) =>
+        {
+            ring_mark(RingState::Asking, progress, ticker, theme)
         }
+        PlanPhase::Running => ring_mark(RingState::Running, progress, ticker, theme),
+        PlanPhase::Stopping => ring_mark(RingState::Stopping, progress, ticker, theme),
         PlanPhase::Awaiting => glyph_mark(icons::CHECKLIST, theme.warning),
         PlanPhase::Done => glyph_mark(icons::CHECK, theme.success),
         PlanPhase::Failed => glyph_mark(icons::CLOSE_CIRCLE, theme.danger),
@@ -220,6 +282,98 @@ pub(super) fn work_mark(work: &BotWork, ticker: gpui::EntityId, theme: &Theme) -
             .bg(theme.text_faint)
             .into_any_element(),
     }
+}
+
+/// How an item stands, at the left of its page's bar: its mark and a word
+/// in its tone. The caller adds what a hover shows.
+pub(super) fn header_status(
+    key: impl Into<SharedString>,
+    mark: AnyElement,
+    word: impl Into<SharedString>,
+    tone: gpui::Hsla,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(key.into())
+        .min_w_0()
+        .h(px(28.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(7.0))
+        .child(
+            div()
+                .flex_none()
+                .size(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(mark),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(12.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(tone)
+                .child(word.into()),
+        )
+}
+
+/// A page's title under its bar. The caller adds what a hover shows.
+pub(super) fn header_title(
+    key: impl Into<SharedString>,
+    title: &str,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(key.into())
+        .mt(px(8.0))
+        .text_size(px(16.0))
+        .line_height(px(22.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+        .line_clamp(3)
+        .child(SharedString::from(title.to_string()))
+}
+
+/// The header of a page that is run and controlled (a work item, a
+/// routine): a bar at the very top with how it stands at the left and every
+/// control at the right, its title, and at most one quiet line under it for
+/// what nothing else on the page says.
+pub(super) fn item_header(
+    status: impl IntoElement,
+    controls: Vec<AnyElement>,
+    title: impl IntoElement,
+    line: Option<AnyElement>,
+    theme: &Theme,
+) -> AnyElement {
+    div()
+        .pt(px(10.0))
+        .pb(px(12.0))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .child(div().flex_1().min_w_0().flex().child(status))
+                .children(controls),
+        )
+        .child(title)
+        .children(line.map(|line| {
+            div()
+                .mt(px(3.0))
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .text_size(px(11.5))
+                .text_color(theme.text_muted)
+                .child(line)
+        }))
+        .into_any_element()
 }
 
 /// A session's status mark, with a quiet dot where the sidebar shows none.
@@ -245,13 +399,15 @@ pub(super) fn session_mark(
 /// A square icon button (the chat header's bot actions): a hover wash and a
 /// tooltip.
 pub(super) fn icon_button(
-    key: &'static str,
+    key: impl Into<SharedString>,
     path: &'static str,
     tip: &'static str,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    let key: SharedString = key.into();
+    let key = &key;
     div()
-        .id(key)
+        .id(key.clone())
         .flex_none()
         .size(px(28.0))
         .rounded(px(8.0))
@@ -276,12 +432,26 @@ pub(super) fn icon_button(
         )))
 }
 
-/// A project as a step names it: glyph, tint, name and device.
+/// A project as a step names it: glyph, tint, name and device; `local`
+/// while it is on this device (or no one knows which this is).
 pub(super) struct ProjectLabel {
     pub glyph: &'static str,
     pub tint: gpui::Hsla,
     pub name: String,
     pub device: String,
+    pub local: bool,
+}
+
+impl ProjectLabel {
+    /// The project in a few words beside a step: its name, and its device
+    /// only when that is another machine.
+    pub(super) fn short(&self) -> String {
+        if self.local {
+            self.name.clone()
+        } else {
+            format!("{} · {}", self.name, self.device)
+        }
+    }
 }
 
 pub(super) fn project_label(
@@ -299,6 +469,10 @@ pub(super) fn project_label(
             .device_name(&space.device_id)
             .unwrap_or("Unknown device")
             .to_string(),
+        local: state
+            .local_device_id
+            .as_deref()
+            .is_none_or(|local| local == space.device_id),
     })
 }
 
@@ -341,20 +515,6 @@ pub(super) fn text_value(text: &str) -> crate::markdown::justified::JustifiedTex
     crate::markdown::justified::JustifiedText::new(plain_markdown(text), None)
 }
 
-/// The pinned footer of a panel that asks for a decision: a quiet note on
-/// the left, then the caller's buttons, the primary one last.
-pub(super) fn decision_bar(note: Option<&str>, theme: &Theme) -> gpui::Div {
-    div().flex().flex_row().items_center().gap(px(6.0)).child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .truncate()
-            .text_size(px(11.5))
-            .text_color(theme.text_muted)
-            .children(note.map(|n| SharedString::from(n.to_string()))),
-    )
-}
-
 impl Shell {
     /// The open panel item's own buttons, drawn in the panel header before
     /// its close button (icon buttons: edit, delete, open its session…).
@@ -374,11 +534,6 @@ impl Shell {
         );
     }
 
-    /// The open panel item's decision bar, pinned under its body.
-    pub(super) fn set_panel_footer(&mut self, footer: impl IntoElement) {
-        self.board.panel_footer = Some(footer.into_any_element());
-    }
-
     /// The session context following `chat_id` for the panel, made on first
     /// use (with the read-only transcript when `transcript`).
     pub(super) fn peek(
@@ -387,42 +542,31 @@ impl Shell {
         transcript: bool,
         cx: &mut Context<Self>,
     ) -> Entity<crate::state::AppState> {
-        if self
-            .board
-            .peek
-            .as_ref()
-            .is_none_or(|p| p.chat_id != chat_id)
-        {
+        if !self.board.peeks.contains_key(chat_id) {
             let state = crate::state::AppState::new_session_context(
                 &self.state,
                 Some(chat_id.to_string()),
                 cx,
             );
             let observe = cx.observe(&state, |_, _, cx| cx.notify());
-            self.board.peek = Some(Peek {
-                chat_id: chat_id.to_string(),
-                state,
-                transcript: None,
-                _observe: observe,
-            });
+            self.board.peeks.insert(
+                chat_id.to_string(),
+                Peek {
+                    state,
+                    transcript: None,
+                    _observe: observe,
+                },
+            );
         }
-        let state = self
+        let peek = self
             .board
-            .peek
-            .as_ref()
-            .map(|p| p.state.clone())
+            .peeks
+            .get_mut(chat_id)
             .expect("peek was just made");
-        if transcript
-            && self
-                .board
-                .peek
-                .as_ref()
-                .is_some_and(|p| p.transcript.is_none())
-        {
+        let state = peek.state.clone();
+        if transcript && peek.transcript.is_none() {
             let view = cx.new(|cx| Transcript::for_side_chat(state.clone(), cx));
-            if let Some(peek) = self.board.peek.as_mut() {
-                peek.transcript = Some(view);
-            }
+            peek.transcript = Some(view);
         }
         state
     }
@@ -440,8 +584,17 @@ impl Shell {
         let work_id = work_id.to_string();
         div()
             .id(SharedString::from(key.to_string()))
+            .flex_none()
+            .tooltip(|_, cx| {
+                cx.new(|_| {
+                    super::super::session::FindTooltip(
+                        "Stop the work and every session it started".into(),
+                    )
+                })
+                .into()
+            })
             .px(px(10.0))
-            .py(px(5.0))
+            .py(px(4.0))
             .rounded(px(8.0))
             .flex()
             .flex_row()
@@ -467,11 +620,7 @@ impl Shell {
             } else {
                 theme.text_muted
             }))
-            .child(SharedString::from(if armed {
-                "Stop the work and its sessions?"
-            } else {
-                "Stop"
-            }))
+            .child(SharedString::from(if armed { "Stop it?" } else { "Stop" }))
     }
 
     fn arm_or_stop(&mut self, work_id: String, cx: &mut Context<Self>) {

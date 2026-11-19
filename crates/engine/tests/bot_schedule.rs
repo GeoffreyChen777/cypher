@@ -555,15 +555,6 @@ async fn a_due_routine_runs_in_its_thread_and_posts_to_the_bot_chat() {
             }
         )]
     );
-    assert_eq!(
-        core.workspace
-            .chat(&bot.chat_id)
-            .unwrap()
-            .unwrap()
-            .last_message_preview
-            .as_deref(),
-        Some("Morning brief: Report: Tell me what's stuck.")
-    );
     let activity = core.workspace.read_bot_records().activity;
     assert!(
         activity
@@ -573,15 +564,57 @@ async fn a_due_routine_runs_in_its_thread_and_posts_to_the_bot_chat() {
                 && a.chat_id.as_deref() == Some(thread_id.as_str())),
         "{activity:?}"
     );
-    // One post per run, however many passes look at it.
+    // The workspace's agent is told, in a turn of its own: the message the
+    // chat keeps is a bracketed headline, and the agent's copy carries the
+    // output and asks for a short answer.
+    let event_id = format!("bot-event-routine-r-brief-{}", run.at);
+    wait_for(
+        || {
+            common::entries(&core, &bot.chat_id)
+                .iter()
+                .any(|e| e.id == event_id)
+        },
+        "the notice turn",
+    )
+    .await;
+    let entries = common::entries(&core, &bot.chat_id);
+    let post_ix = entries
+        .iter()
+        .position(|e| {
+            e.parts
+                .iter()
+                .any(|p| matches!(p, MessagePart::Post { .. }))
+        })
+        .unwrap();
+    let event_ix = entries.iter().position(|e| e.id == event_id).unwrap();
+    assert!(
+        post_ix < event_ix,
+        "the card stands before the agent's turn"
+    );
+    assert!(matches!(
+        &entries[event_ix].parts[..],
+        [MessagePart::Text { text, .. }] if text == "[Routine \"Morning brief\" finished]"
+    ));
+    let notice_runs = || -> Vec<String> {
+        runs.lock()
+            .unwrap()
+            .iter()
+            .map(|(r, _)| r.prompt.clone())
+            .filter(|prompt| prompt.starts_with("[Routine \"Morning brief\" finished]"))
+            .collect()
+    };
+    wait_for(|| !notice_runs().is_empty(), "the agent's turn").await;
+    let told = notice_runs().remove(0);
+    assert!(
+        told.starts_with("[Routine \"Morning brief\" finished]\n\nReport: Tell me what's stuck."),
+        "{told}"
+    );
+    assert!(told.contains("one or two sentences"), "{told}");
+    // One post and one turn per run, however many passes look at it.
+    core.bots.schedule_now().await;
     core.bots.schedule_now().await;
     assert_eq!(posts(&core, &bot.chat_id).len(), 1);
-    // No bot-chat turn was started for it.
-    assert!(
-        !runs.lock().unwrap().iter().any(
-            |(r, _)| r.cwd == bot_chat.cwd.clone().unwrap() && !r.prompt.starts_with("Routine")
-        ),
-    );
+    assert_eq!(notice_runs().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1329,6 +1362,7 @@ async fn the_workspace_chat_runs_deletes_and_stops_what_the_owner_could() {
             at: now,
         }),
         stop_requested_at: None,
+        notify: false,
     };
     core.workspace
         .put_record(

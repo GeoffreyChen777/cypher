@@ -240,6 +240,9 @@ final class WorkspaceStore: WorkspaceData {
             if let raw = f["bot"], raw != .null, bot == nil { return nil }
             let memory = SubagentProjection.decode(f["memory"], as: MemoryChatMarker.self)
             if let raw = f["memory"], raw != .null, memory == nil { return nil }
+            // A session a workspace started; one this app can't read stays an
+            // ordinary session, as it was before the field.
+            let startedBy = SubagentProjection.decode(f["startedBy"], as: ChatStartedBy.self)
             var chatConfig: ChatConfig?
             if let c = f["config"]?.objectValue {
                 chatConfig = ChatConfig(
@@ -262,7 +265,7 @@ final class WorkspaceStore: WorkspaceData {
                 createdAt: f["createdAt"]?.int64Value ?? 0,
                 spaceId: f["spaceId"]?.stringValue,
                 lastSeenAt: f["lastSeenAt"]?.int64Value,
-                child: child, bot: bot, memory: memory)
+                child: child, bot: bot, memory: memory, startedBy: startedBy)
         }
 
         var rows: [String: SessionRow] = [:]

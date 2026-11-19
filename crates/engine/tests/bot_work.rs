@@ -11,12 +11,12 @@ use std::time::Duration;
 
 use futures::StreamExt;
 
-use cypher_doc::{SessionCommandPayload, SessionCommandStatus};
+use cypher_doc::{MessagePart, SessionCommandPayload, SessionCommandStatus};
 use cypher_engine::EngineCore;
 use cypher_proto::{
-    ActivityKind, ApprovalState, Bot, BotApproval, BotChat, BotOrigin, BotScope, BotThread,
-    BotWork, DoneStatus, HarnessId, ProjectGrant, RunRequest, SandboxLevel, SessionStatus,
-    StepState, UserInputQuestion, WorkState,
+    self as p, ActivityKind, ApprovalState, Bot, BotApproval, BotChat, BotOrigin, BotScope,
+    BotThread, BotWork, DoneStatus, HarnessId, ProjectGrant, RunRequest, SandboxLevel,
+    SessionStatus, StepState, UserInputQuestion, WorkState,
 };
 
 use common::{run_request, wait_for, wait_for_some};
@@ -441,6 +441,14 @@ async fn a_work_thread_drives_its_sessions_through_commands() {
     assert_eq!(chat.space_id.as_deref(), Some("sp-billing"));
     assert_eq!(chat.title.as_deref(), Some("Migrate tables"));
     assert_eq!(chat.bot, None, "a worker is an ordinary session");
+    assert_eq!(
+        chat.started_by,
+        Some(p::ChatStartedBy {
+            bot_id: bot.id.clone(),
+            work_id: Some(work_id.clone()),
+        }),
+        "marked as its workspace's, so the Sessions view leaves it out"
+    );
     let work = rig.work(&work_id);
     assert_eq!(work.steps[0].sessions, std::slice::from_ref(&session));
     assert!(matches!(
@@ -557,6 +565,45 @@ async fn a_work_thread_drives_its_sessions_through_commands() {
         )
         .await;
     assert!(refused.contains("This work is done"), "{refused}");
+
+    // The workspace's chat is told once: a post naming the plan and how it
+    // ended, with the result as its text, then a turn of the workspace's
+    // agent that carries the result and asks for a short answer.
+    let post_id = p::work_post_id(&work_id);
+    let event_id = format!("{}{post_id}", p::BOT_EVENT_PREFIX);
+    wait_for(
+        || {
+            common::entries(&rig.core, &bot.chat_id)
+                .iter()
+                .any(|e| e.id == event_id)
+        },
+        "the plan's notice",
+    )
+    .await;
+    let entries = common::entries(&rig.core, &bot.chat_id);
+    let post = entries.iter().find(|e| e.id == post_id).expect("the post");
+    assert!(matches!(
+        &post.parts[..],
+        [MessagePart::Post { text, from: p::BotPost::Work { work_id: id, title, outcome, .. }, .. }]
+            if text == "Migrated invoices."
+                && *id == work_id
+                && title == "Migrate"
+                && *outcome == WorkState::Done
+    ));
+    let notice_runs = || -> Vec<String> {
+        rig.runs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(r, _)| r.prompt.clone())
+            // (After the status of its plans, which every turn there carries.)
+            .filter(|prompt| prompt.contains("[Plan \"Migrate\" finished]\n\nMigrated invoices."))
+            .collect()
+    };
+    wait_for(|| !notice_runs().is_empty(), "the agent's turn").await;
+    let told = notice_runs();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].contains("one or two sentences"), "{}", told[0]);
     let kinds = rig.activity(&bot);
     for kind in [
         ActivityKind::SessionStarted,

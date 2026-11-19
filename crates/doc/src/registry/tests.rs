@@ -302,6 +302,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         child: None,
         bot: None,
         memory: None,
+        started_by: None,
     }
 }
 
@@ -1530,6 +1531,15 @@ fn deleting_a_bot_removes_its_chats_and_records() {
     ));
     doc.upsert_chat(&thread).unwrap();
     doc.upsert_chat(&chat("other", "dev-a")).unwrap();
+    // A session one of its plans started: an ordinary session, listed in
+    // the workspace while there is one.
+    let mut worker = chat("worker", "dev-a");
+    worker.started_by = Some(p::ChatStartedBy {
+        bot_id: "b1".into(),
+        work_id: Some("w1".into()),
+    });
+    doc.upsert_chat(&worker).unwrap();
+    assert!(doc.chat("worker").unwrap().unwrap().is_workspace_session());
     doc.upsert_bot(&bot("b1", "c1")).unwrap();
     let mut note = serde_json::Map::new();
     for (k, v) in [
@@ -1556,7 +1566,7 @@ fn deleting_a_bot_removes_its_chats_and_records() {
     assert!(all.bots.is_empty());
     assert_eq!(
         all.chats.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-        ["other"]
+        ["other", "worker"]
     );
     assert!(doc.read_bot_records().notes.is_empty());
 }

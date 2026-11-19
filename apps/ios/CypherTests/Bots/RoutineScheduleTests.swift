@@ -259,9 +259,39 @@ final class RoutineScheduleTests: XCTestCase {
         XCTAssertEqual(RoutineWords.inWords(now + 25 * 60_000, now: now), "in 25m")
         XCTAssertEqual(RoutineWords.inWords(now + 9 * 3_600_000, now: now), "in 9h")
         XCTAssertEqual(RoutineWords.inWords(now + 3 * 86_400_000, now: now), "in 3 days")
-        XCTAssertEqual(RoutineWords.trigger(.manual), "Only when you press Run now")
-        XCTAssertEqual(RoutineWords.trigger(.daily(time: "09:00", days: [6, 7])), "Weekends 09:00")
-        XCTAssertEqual(RoutineWords.nextRun(.off, now: now), "Off")
+        // The status says what happens now or next, in a word or two.
+        func routine(_ id: String, _ schedule: Schedule, next: Int64? = nil) -> BotRoutine {
+            var r = BotRoutine(
+                id: id, botId: "b", name: id, prompt: "p", schedule: schedule, enabled: true, createdAt: 0,
+                updatedAt: 0)
+            r.nextRunAt = next
+            return r
+        }
+        let weekdays = Schedule.daily(time: "09:00", days: [1, 2, 3, 4, 5])
+        let status = { (state: BoardRoutineState, schedule: Schedule, asking: Bool, paused: Bool) in
+            RoutineWords.status(state, schedule: schedule, asking: asking, paused: paused, now: now)
+        }
+        XCTAssertEqual(
+            status(.next(now + 3 * 3_600_000), weekdays, false, false), BotStatusLabel("Next in 3h", .active))
+        XCTAssertEqual(status(.running, weekdays, false, true).text, "Running")
+        XCTAssertEqual(status(.running, weekdays, true, false), BotStatusLabel("Waiting on you", .waiting))
+        XCTAssertEqual(status(.off, weekdays, false, true).text, "Off")
+        XCTAssertEqual(status(.manual, .manual, false, false).text, "Manual")
+        // A paused workspace runs nothing on a schedule.
+        XCTAssertEqual(
+            status(.next(now + 60_000), weekdays, false, true), BotStatusLabel("Workspace paused", .waiting))
+        // A once-only routine names its time; its line then says only Once.
+        let once = Schedule.once(at: "2001-09-10T09:00")
+        XCTAssertFalse(status(.next(now + 86_400_000), once, false, false).text.hasPrefix("Next"))
+        XCTAssertEqual(routine("o", once).setupLine(place: nil), "Once")
+        XCTAssertEqual(routine("m", .manual).setupLine(place: nil), "", "a manual one in the workspace needs no line")
+        XCTAssertEqual(routine("m", .manual).setupLine(place: "web"), "web")
+        var running = routine("r", weekdays, next: now + 60_000)
+        XCTAssertEqual(
+            RoutineWords.statusDetails(running, state: .next(now + 60_000), now: now).map(\.label), ["Next run"])
+        running.lastRun = RunRecord(at: now - 1, outcome: .running, manual: true)
+        XCTAssertTrue(
+            RoutineWords.statusDetails(running, state: .running, now: now).first?.value.hasSuffix("by hand") == true)
     }
 
     @MainActor

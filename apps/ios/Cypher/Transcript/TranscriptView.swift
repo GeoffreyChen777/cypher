@@ -907,8 +907,11 @@ struct TranscriptView: View {
             case .memoryWrite(let callId):
                 MemoryWriteCard(callId: callId)
 
-            case .postHeader(let from):
-                PostAttribution(from: from)
+            case .botPost(let entryId, let from):
+                BotPostCard(entryId: entryId, from: from)
+
+            case .botRoutine(let name, let routineId):
+                BotRoutineCard(name: name, routineId: routineId)
 
             case .thought(_, let live, let preview):
                 let open = TranscriptRowBuilder.isOpen(row, pins: togglePins)

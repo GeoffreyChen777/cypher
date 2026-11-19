@@ -1929,9 +1929,9 @@ fn the_detail_panel_opens_replaces_and_closes(cx: &mut gpui::TestAppContext) {
     let panel = |cx: &mut gpui::TestAppContext| shell.read_with(cx, |s, _| s.board.panel.clone());
     shell.update(cx, |shell, cx| {
         shell.open_bot("bob", cx);
-        shell.open_panel(PanelItem::Projects, cx);
+        shell.open_panel(PanelItem::Activity, cx);
     });
-    assert_eq!(panel(cx), Some(PanelItem::Projects));
+    assert_eq!(panel(cx), Some(PanelItem::Activity));
     // Another row replaces it; the open row again closes it.
     let project = PanelItem::Project("sp".into());
     shell.update(cx, |shell, cx| shell.open_panel(project.clone(), cx));
@@ -1940,7 +1940,7 @@ fn the_detail_panel_opens_replaces_and_closes(cx: &mut gpui::TestAppContext) {
     assert_eq!(panel(cx), None);
     // Esc closes it, unless a bot dialog over it takes the key.
     shell.update(cx, |shell, cx| {
-        shell.open_panel(PanelItem::Projects, cx);
+        shell.open_panel(PanelItem::Activity, cx);
         shell.dialogs.delete_bot = Some("bob".into());
         assert!(!shell.close_panel_on_escape(cx));
         shell.dialogs.delete_bot = None;
@@ -1950,12 +1950,12 @@ fn the_detail_panel_opens_replaces_and_closes(cx: &mut gpui::TestAppContext) {
     assert_eq!(panel(cx), None);
     // Switching bots shuts it at once; so does Projects mode for Esc.
     shell.update(cx, |shell, cx| {
-        shell.open_panel(PanelItem::Projects, cx);
+        shell.open_panel(PanelItem::Activity, cx);
         shell.open_bot("ann", cx);
     });
     assert_eq!(panel(cx), None);
     shell.update(cx, |shell, cx| {
-        shell.open_panel(PanelItem::Projects, cx);
+        shell.open_panel(PanelItem::Activity, cx);
         shell.set_window_mode(WindowMode::Projects, cx);
         assert!(!shell.close_panel_on_escape(cx), "the board is not shown");
     });
@@ -2053,6 +2053,7 @@ fn needs_you_counts_records_and_worker_questions_across_bots() {
         result: None,
         decision: None,
         stop_requested_at: None,
+        notify: false,
     };
     let records = cypher_proto::BotRecords {
         work: vec![

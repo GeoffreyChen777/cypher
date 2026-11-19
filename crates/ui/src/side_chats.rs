@@ -16,7 +16,8 @@
 //!
 //! The panel renders ONLY: one rounded selection/Open-as-Chat bar, the existing
 //! Transcript (flex_1), and the existing Composer. Closing remains in the
-//! right-pane tab strip. Send/stop/answer/wizard all flow through the reused
+//! right-pane tab strip; where there is none (a workspace's chat has no rail)
+//! the bar carries its own close button. Send/stop/answer/wizard all flow through the reused
 //! components — there is no manual bubble renderer, input, or watcher here.
 
 use gpui::{App, Context, Entity, SharedString, Subscription, Task, div, prelude::*, px};
@@ -38,6 +39,8 @@ pub enum SideChatEvent {
         chat_id: String,
         side_chat_id: String,
     },
+    /// The panel's own close button was pressed ([`SideChatPanel::set_closable`]).
+    CloseRequested { side_chat_id: String },
 }
 
 impl gpui::EventEmitter<SideChatEvent> for SideChatPanel {}
@@ -88,6 +91,9 @@ pub struct SideChatPanel {
     /// The header row's right padding — the dock widens it while the
     /// tile's floating rail covers the corner.
     header_right: f32,
+    /// The bar shows a close button: the tile around it has no tab strip to
+    /// close it from.
+    closable: bool,
 }
 
 impl SideChatPanel {
@@ -156,6 +162,7 @@ impl SideChatPanel {
             promoting: false,
             error: None,
             header_right: 8.0,
+            closable: false,
         }
     }
 
@@ -341,6 +348,14 @@ impl SideChatPanel {
         }
     }
 
+    /// Show a close button in the bar (a tile with no rail to close from).
+    pub fn set_closable(&mut self, closable: bool, cx: &mut Context<Self>) {
+        if self.closable != closable {
+            self.closable = closable;
+            cx.notify();
+        }
+    }
+
     pub fn render_panel(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let live = self
@@ -397,7 +412,36 @@ impl SideChatPanel {
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| this.promote(cx)))
                                     .child(SharedString::from("Open as Chat")),
-                            ),
+                            )
+                            .when(self.closable, |el| {
+                                el.child(
+                                    div()
+                                        .id("side-chat-close")
+                                        .flex_none()
+                                        .size(px(20.0))
+                                        .rounded(px(6.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .text_color(theme.text_muted)
+                                        .hover(|style| {
+                                            style
+                                                .bg(crate::kit::theme::ink(0.08))
+                                                .text_color(theme.text)
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            cx.emit(SideChatEvent::CloseRequested {
+                                                side_chat_id: this.side_chat_id.clone(),
+                                            })
+                                        }))
+                                        .child(
+                                            crate::kit::icons::icon(crate::kit::icons::CLOSE)
+                                                .size(px(10.0))
+                                                .text_color(theme.text_muted),
+                                        ),
+                                )
+                            }),
                     ),
             )
             .when_some(self.error.clone(), |el, error| {

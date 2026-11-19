@@ -125,7 +125,8 @@ impl Shell {
     }
 
     /// The bot's own actions where a tile keeps its own: the activity log,
-    /// pause (or resume) and settings. A press here never starts the window
+    /// pause (or resume), settings, and at the corner the button that opens
+    /// and closes the detail panel. A press here never starts the window
     /// drag the header is.
     fn render_board_actions(&self, bot: &Bot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let edit_id = bot.id.clone();
@@ -163,6 +164,17 @@ impl Shell {
                     cx,
                 )
             }));
+        let open = self.board.panel.is_some();
+        let panel = super::items::icon_button(
+            "bot-header-panel",
+            icons::SIDEBAR_MINIMALISTIC,
+            "Side panel",
+            theme,
+        )
+        // Held down while the panel is open.
+        .when(open, |el| el.bg(crate::kit::theme::ink(0.07)))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx)));
         div()
             .flex_none()
             .flex()
@@ -172,6 +184,7 @@ impl Shell {
             .child(activity)
             .child(pause)
             .child(settings)
+            .child(panel)
             .into_any_element()
     }
 
@@ -238,7 +251,7 @@ impl Shell {
     /// never reflows mid-slide. `None` once shut.
     fn render_panel_column(
         &mut self,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let span = self.panel_span_in(window);
@@ -249,7 +262,9 @@ impl Shell {
         };
         let width = self.eval_tween(self.board.panel_tween, target).min(span);
         if width < 0.5 && self.board.panel.is_none() {
-            self.board.panel_last = None;
+            if self.board.panel_last.take().is_some() || self.board.session_slot.is_some() {
+                self.sync_panel_session(cx);
+            }
             self.board.panel_tween = None;
             self.drop_panel_extras();
             return None;
@@ -266,6 +281,10 @@ impl Shell {
             None => {
                 if self.board.panel.as_ref() == Some(&item) {
                     self.close_panel(cx);
+                }
+                // Gone: the header's button opens the page instead.
+                if self.board.panel_recent.as_ref() == Some(&item) {
+                    self.board.panel_recent = None;
                 }
                 let card_bg = crate::appearance::chat_style::panel_background(
                     crate::appearance::chat_style::settings(cx),
@@ -305,11 +324,15 @@ impl Shell {
                     .rounded(px(2.0))
                     .hover(move |s| s.bg(wash)),
             );
+        // Clipped only while it slides: at rest the cards' shadows fall
+        // around them like the chat card's, into the gap and the window's
+        // inset.
+        let sliding = width < span - 0.5;
         Some(
             div()
                 .h_full()
                 .flex_none()
-                .overflow_hidden()
+                .when(sliding, |el| el.overflow_hidden())
                 .w(px(width))
                 .child(
                     div()
@@ -327,6 +350,11 @@ impl Shell {
     /// The panel and its gap as stored, for the open and close tweens.
     pub(super) fn panel_span(&self) -> f32 {
         self.settings.bot_panel_width + PANEL_GAP
+    }
+
+    /// The panel's own width as drawn.
+    pub(super) fn panel_width_in(&self, window: &Window) -> f32 {
+        self.panel_span_in(window) - PANEL_GAP
     }
 
     /// The panel and its gap as drawn: the stored width, less what the chat

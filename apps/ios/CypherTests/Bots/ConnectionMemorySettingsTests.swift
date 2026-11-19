@@ -33,10 +33,15 @@ final class InviteCodeTests: XCTestCase {
         let now: Int64 = 1_762_761_600_000
         var invite = BotInvite(
             id: "i", botId: "b", createdAt: now - 3 * 3_600_000, expiresAt: now + 5 * 86_400_000, maxUses: 1)
-        XCTAssertEqual(invite.title(now: now), "Invite code · made 3h ago")
-        XCTAssertEqual(invite.detail(now: now, calendar: utc), "Expires in 5 days · 0 of 1 used")
+        XCTAssertEqual(invite.title(now: now), "Made 3h ago")
+        XCTAssertEqual(invite.detail(now: now), "5d left")
+        // Only a code that works more than once says how often it was used.
+        invite.maxUses = 3
+        XCTAssertEqual(invite.detail(now: now), "0 of 3 used · 5d left")
         invite.revokeRequestedAt = now
-        XCTAssertEqual(invite.detail(now: now, calendar: utc), "Revoking…")
+        XCTAssertEqual(invite.detail(now: now), "revoking…")
+        XCTAssertEqual(inviteLeft(now + 3 * 3_600_000, now: now), "3h left")
+        XCTAssertEqual(inviteLeft(now + 600_000, now: now), "soon")
         XCTAssertEqual(inviteExpiry(now + 86_400_000, now: now, calendar: utc), "tomorrow")
         XCTAssertEqual(inviteExpiry(now + 3_600_000, now: now, calendar: utc), "today 09:00")
     }
@@ -46,11 +51,17 @@ final class InviteCodeTests: XCTestCase {
         var connection = BotConnection(
             id: "c", botId: "b", peer: PeerBot(roomId: "r", name: "Ledger", ownerName: "Dana"), createdAt: 0,
             replyMode: .review)
-        XCTAssertEqual(connection.subLine(now: now), "Review replies · no questions yet")
+        // The person first, their workspace beside it.
+        XCTAssertEqual(connection.peer.names.who, "Dana")
+        XCTAssertEqual(connection.peer.names.theirs, "Ledger")
+        XCTAssertEqual(PeerBot(roomId: "r", name: "Ledger", ownerName: " ").names.who, "Ledger")
+        XCTAssertNil(PeerBot(roomId: "r", name: "Ledger", ownerName: " ").names.theirs)
+        XCTAssertNil(connection.note(.idle, now: now), "no questions yet: nothing to note")
         connection.lastExchangeAt = now - 2 * 3_600_000
-        XCTAssertEqual(connection.subLine(now: now), "Review replies · 2h ago")
-        connection.revokeRequestedAt = now
-        XCTAssertEqual(connection.subLine(now: now), "Revoking…")
+        XCTAssertEqual(connection.note(.idle, now: now), "2h ago")
+        XCTAssertEqual(connection.note(.off, now: now), "off")
+        XCTAssertEqual(connection.status(.asking).text, "Waiting for Dana")
+        XCTAssertEqual(connection.status(.review), BotStatusLabel("Waiting on you", .waiting))
         XCTAssertEqual(connection.peerLabel, "Ledger (Dana)")
 
         var exchange = BotExchange(
@@ -58,11 +69,45 @@ final class InviteCodeTests: XCTestCase {
             askedAt: 0)
         XCTAssertEqual(exchange.who(peer: connection.peer, bot: "Atlas"), "Ledger asked Atlas")
         XCTAssertEqual(exchange.who(peer: nil, bot: "Atlas"), "A former connection asked Atlas")
-        XCTAssertEqual(exchange.stateTone, .waiting)
+        XCTAssertEqual(ConnectionStanding(connection, exchanges: [exchange]), .review)
+        XCTAssertFalse(exchange.inFlight, "still the owner's to decide")
+        // Reviewed: it is on its way, and moves for a minute from then.
+        exchange.review = ReviewDecision(send: true, text: nil, at: now)
+        XCTAssertEqual(ConnectionStanding(connection, exchanges: [exchange]), .answering)
+        XCTAssertTrue(exchange.moving(now: now + 1))
+        XCTAssertFalse(exchange.moving(now: now + 60_000))
+        exchange.review = nil
         exchange.direction = .outgoing
+        exchange.state = .delivered
         XCTAssertEqual(exchange.who(peer: connection.peer, bot: "Atlas"), "Atlas asked Ledger")
+        XCTAssertEqual(ConnectionStanding(connection, exchanges: [exchange]), .asking)
+        // A wait on the other side can last days: a minute of movement.
+        XCTAssertTrue(exchange.moving(now: 59_999))
+        XCTAssertFalse(exchange.moving(now: 60_000))
+        // This workspace writing its answer is work under way: it moves.
+        exchange.direction = .incoming
+        exchange.state = .working
+        XCTAssertTrue(exchange.moving(now: now))
         exchange.state = .expired
-        XCTAssertEqual(exchange.stateTone, .muted)
+        XCTAssertFalse(exchange.moving(now: 0))
+        XCTAssertEqual(exchange.settledNote(now: 3 * 86_400_000), "expired · 3d ago")
+        connection.replyMode = .off
+        XCTAssertEqual(ConnectionStanding(connection, exchanges: [exchange]), .off)
+        connection.revokeRequestedAt = now
+        XCTAssertEqual(ConnectionStanding(connection, exchanges: []), .leaving)
+    }
+
+    func testWhatAConnectionReadsIsSaidInAFewWords() {
+        let same = ConnectionReach(sameProjects: true, spaceIds: [], transcripts: true)
+        let some = ConnectionReach(sameProjects: false, spaceIds: [], transcripts: true)
+        XCTAssertEqual(connectionReads(same, names: ["a"], all: 4, bot: "Atlas"), "everything Atlas reads")
+        XCTAssertEqual(connectionReads(some, names: [], all: 4, bot: "Atlas"), "no projects")
+        XCTAssertEqual(connectionReads(some, names: ["billing"], all: 4, bot: "Atlas"), "billing")
+        XCTAssertEqual(connectionReads(some, names: ["billing", "web"], all: 4, bot: "Atlas"), "billing, web")
+        XCTAssertEqual(connectionReads(some, names: ["a", "b", "c"], all: 4, bot: "Atlas"), "a, b +1")
+        // Every project ticked reads as the whole.
+        XCTAssertEqual(
+            connectionReads(some, names: ["a", "b", "c", "d"], all: 4, bot: "Atlas"), "everything Atlas reads")
     }
 
     private var utc: Calendar {

@@ -3,7 +3,8 @@
 // saying so; then a section per card, top to bottom, each drawn only when it
 // has something to show: Needs you (first, so attention is never below the
 // fold), Work, Routines, Projects and Connections (Routines and Connections
-// keep a quiet row when empty), then Activity and Memory. Rows open their
+// keep a quiet row when empty), then Activity and Memory. A row's state is
+// its mark, at its left; its right end is one quiet note. Rows open their
 // pages; approvals and plans also decide in place.
 
 import SwiftUI
@@ -17,6 +18,8 @@ struct BotOverviewPage: View {
     static let recentWork = 3
     /// Routines it lists before "All routines".
     static let routineRows = 5
+    /// Connections it lists before "All connections".
+    static let connectionRows = 5
 
     var body: some View {
         if let data = model.data, let bot = data.bot(id: botId) {
@@ -163,7 +166,6 @@ struct BotOverviewPage: View {
 
     private func routines(_ data: any WorkspaceData) -> some View {
         let routines = BoardRoutineState.ordered(data.routines(of: botId))
-        let tint = model.bot(id: botId).flatMap { BotStyle.color($0.color) } ?? Theme.textMuted
         return Section {
             if routines.isEmpty {
                 NavigationLink(value: BotPage.routines) {
@@ -175,7 +177,7 @@ struct BotOverviewPage: View {
             }
             ForEach(routines.prefix(Self.routineRows)) { routine in
                 NavigationLink(value: BotPage.routine(routine.id)) {
-                    routineRow(routine, data: data, tint: tint)
+                    RoutineRow(routine: routine)
                 }
                 .accessibilityIdentifier("board-routine-\(routine.id)")
             }
@@ -201,32 +203,6 @@ struct BotOverviewPage: View {
         .groupedRowStyle()
     }
 
-    /// Name over where and when it runs, the next run, and a failed last
-    /// run in red (schedule.rs `job_item`).
-    private func routineRow(_ routine: BotRoutine, data: any WorkspaceData, tint: Color) -> some View {
-        let state = BoardRoutineState(routine)
-        let failed = routine.lastRun?.outcome == .failed
-        let names = { (id: String) in data.spaces.first { $0.id == id }?.displayName }
-        return BoardRow(
-            title: routine.name, sub: routine.whereAndWhen(projectName: names),
-            trailing: state.note(), trailingColor: Theme.textFaint
-        ) {
-            if state == .running {
-                MiniSpinner(cellSize: 2.0).foregroundStyle(Theme.statusWorking)
-            } else {
-                BoardGlyph(
-                    symbol: routine.target == .workspace
-                        ? "arrow.clockwise" : "chevron.left.forwardslash.chevron.right",
-                    color: routine.target == .workspace ? tint : Theme.textMuted)
-            }
-        } extra: {
-            if failed {
-                BotStatusText("Last run failed", tone: .failed, size: 13)
-            }
-        }
-        .opacity(state.dim ? 0.55 : 1)
-    }
-
     // MARK: Projects
 
     @ViewBuilder
@@ -238,8 +214,7 @@ struct BotOverviewPage: View {
                     NavigationLink(value: BotPage.project(load.space.id)) {
                         BoardRow(
                             title: load.space.displayName,
-                            sub:
-                                "\(data.botDeviceName(load.space.deviceId)) · \(data.boardProjectMode(bot, space: load.space))",
+                            sub: projectSub(data, bot, load.space),
                             trailing: load.note,
                             trailingColor: load.asking > 0 ? Theme.warning : Theme.textFaint
                         ) {
@@ -258,33 +233,65 @@ struct BotOverviewPage: View {
         }
     }
 
+    /// How the workspace works in a project, led by its device only when
+    /// that is not the workspace's own.
+    private func projectSub(_ data: any WorkspaceData, _ bot: Bot, _ space: Space) -> String {
+        let device = space.deviceId == bot.hostDeviceId ? nil : data.botDeviceName(space.deviceId)
+        return [device, data.boardProjectMode(bot, space: space)].compactMap { $0 }.joined(separator: " · ")
+    }
+
     // MARK: Connections
 
+    /// One row per connected workspace (network.rs `render_network_card`):
+    /// its state as its mark, who it is, and when the last question was.
+    /// An open invite keeps one quiet row; with nothing yet, one row says
+    /// how to start.
     private func connections(_ data: any WorkspaceData) -> some View {
-        let summary = data.boardConnections(botId)
-        let page: BotPage =
-            switch summary.reviews.count {
-            case 0: .connections
-            case 1: .exchange(summary.reviews[0])
-            default: .needsYou
-            }
+        let rows = data.boardConnectionRows(botId)
+        let invites = data.openInvites(of: botId)
         return Section {
-            NavigationLink(value: page) {
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    BoardGlyph(symbol: "person.2", color: summary.reviews.isEmpty ? Theme.textMuted : Theme.warning)
-                        .frame(width: 18)
-                    Text("Connections")
-                        .font(Theme.sans(16, weight: .medium, relativeTo: .body))
-                        .foregroundStyle(Theme.text)
-                    Spacer(minLength: 8)
-                    Text(summary.text)
-                        .font(Theme.sans(14, relativeTo: .subheadline))
-                        .foregroundStyle(summary.reviews.isEmpty ? Theme.textMuted : Theme.warning)
-                        .lineLimit(1)
+            ForEach(rows.prefix(Self.connectionRows)) { row in
+                NavigationLink(value: BotPage.connection(row.connection.id)) {
+                    ConnectionRow(row: row)
                 }
-                .padding(.vertical, 2)
+                .accessibilityIdentifier("board-connection-\(row.connection.id)")
             }
-            .accessibilityIdentifier("board-connections")
+            if rows.count > Self.connectionRows {
+                NavigationLink(value: BotPage.connections) {
+                    BoardRow(title: "All connections", trailing: "\(rows.count)") { BoardGlyph(symbol: "person.2") }
+                }
+            }
+            if let soonest = invites.map(\.expiresAt).min() {
+                NavigationLink(value: BotPage.connect) {
+                    BoardRow(
+                        title: invites.count == 1 ? "Invite open" : "\(invites.count) invites open",
+                        trailing: inviteLeft(soonest)
+                    ) {
+                        BoardGlyph(symbol: "key")
+                    }
+                }
+                .accessibilityIdentifier("board-invites")
+            }
+            if rows.isEmpty && invites.isEmpty {
+                NavigationLink(value: BotPage.connect) {
+                    BoardRow(title: "Connect a workspace") { BoardGlyph(symbol: "person.2") }
+                        .opacity(0.7)
+                }
+                .accessibilityIdentifier("board-connections")
+            }
+        } header: {
+            ListSectionHeader(title: "Connections") {
+                NavigationLink(value: BotPage.connect) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Theme.textMuted)
+                        .frame(minWidth: 32, minHeight: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Connect a workspace")
+                .accessibilityIdentifier("board-connect")
+            }
         }
         .groupedRowStyle()
     }

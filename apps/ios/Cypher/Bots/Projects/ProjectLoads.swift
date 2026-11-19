@@ -34,13 +34,23 @@ struct ProjectDeviceGroup: Identifiable, Equatable {
 }
 
 enum ProjectLoads {
-    /// A project's sessions `scope` reads, newest activity first: its live
-    /// root sessions, without workspace threads, memory passes and the
-    /// sessions the scope leaves out.
+    /// The owner's sessions in a project that `scope` reads, newest activity
+    /// first: its live root sessions, without workspace threads and
+    /// sessions, memory passes and the sessions the scope leaves out.
     static func sessions(_ scope: BotScope, chats: [Chat], spaceId: String) -> [Chat] {
         guard scope.seesSpace(spaceId) else { return [] }
         return chats.filter {
             $0.spaceId == spaceId && $0.isListedSession && !$0.archived && !scope.excludeSessions.contains($0.id)
+        }
+        .sorted { ($0.lastMessageAt ?? $0.createdAt, $0.id) > ($1.lastMessageAt ?? $1.createdAt, $1.id) }
+    }
+
+    /// The sessions the workspace `botId` runs in a project, newest activity
+    /// first: the ones its plans started and its project routines'
+    /// (queries.rs `workspace_sessions`). Listed in the workspace only.
+    static func workspaceSessions(botId: String, chats: [Chat], spaceId: String) -> [Chat] {
+        chats.filter {
+            $0.spaceId == spaceId && !$0.archived && !$0.isChild && $0.workspaceSessionOf == botId
         }
         .sorted { ($0.lastMessageAt ?? $0.createdAt, $0.id) > ($1.lastMessageAt ?? $1.createdAt, $1.id) }
     }

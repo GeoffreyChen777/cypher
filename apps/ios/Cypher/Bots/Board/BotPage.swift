@@ -33,6 +33,10 @@ enum BotPage: Hashable {
     case connect
     case memory(MemoryScope)
     case memoryFile(MemoryScope, path: String)
+    /// A result notice from the workspace chat, in full (the post's entry
+    /// id): what a routine's run wrote, or how a plan ended once its record
+    /// is gone.
+    case post(entryId: String)
 
     /// The page that settles a Needs you item; nil for the workspace's own
     /// question, which is answered in its chat.
@@ -51,9 +55,9 @@ enum BotPage: Hashable {
     /// `asking:<workId>:<chatId>`, `routines`, `routine:<id>`,
     /// `routine-form[:<id>]`, `projects`, `project:<spaceId>`, `activity`,
     /// `connections`, `connection:<id>`, `exchange:<id>`, `connect`,
-    /// `memory[:you|:project:<spaceId>]` (the workspace's own by default) and
-    /// `memory-file:<path>` (in the workspace's memory). Takes the whole
-    /// sheet value, `board:` included.
+    /// `memory[:you|:project:<spaceId>]` (the workspace's own by default),
+    /// `memory-file:<path>` (in the workspace's memory) and `post:<entryId>`.
+    /// Takes the whole sheet value, `board:` included.
     init?(launchSpec: String, botId: String) {
         guard launchSpec.hasPrefix("board:") else { return nil }
         let parts = launchSpec.dropFirst("board:".count).split(separator: ":", maxSplits: 2).map(String.init)
@@ -84,6 +88,9 @@ enum BotPage: Hashable {
         case ("memory", "project"):
             guard let rest else { return nil }
             self = .memory(.project(spaceId: rest))
+        case ("post", let id?):
+            // An entry id holds no colon of its own, but take the rest anyway.
+            self = .post(entryId: rest.map { "\(id):\($0)" } ?? id)
         case ("memory-file", let path?):
             // The split stops at two colons; the rest is the path's own.
             self = .memoryFile(.workspace(botId: botId), path: rest.map { "\(path):\($0)" } ?? path)

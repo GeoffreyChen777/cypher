@@ -62,8 +62,10 @@ pub(super) fn system_prompt(
              Never bypass approval. For nonessential ambiguities, make the reasonable choice \
              and say what you assumed."
                 .to_string(),
-            "- Your final answer is delivered to your owner as a message. Make it stand on \
-             its own: what you found, and what needs them."
+            "- Your final answer is this run's result. Your owner is told what it says in \
+             a sentence or two and opens the rest from there, so open with the line that \
+             matters most, then make it stand on its own: what you found, and what needs \
+             them."
                 .to_string(),
             "- Only what you write after your last tool call is delivered. Finish every \
              tool call first, saving to memory included, then write the whole answer in \
@@ -281,7 +283,7 @@ mod tests {
         let routine = prompt(BotOrigin::Routine, None);
         assert!(routine.contains("This run happens in the background"));
         assert!(routine.contains("pause this run until your owner answers in Needs you"));
-        assert!(routine.contains("delivered to your owner as a message"));
+        assert!(routine.contains("Your final answer is this run's result"));
         assert!(routine.contains("Keep answers short."));
 
         let peer = prompt(

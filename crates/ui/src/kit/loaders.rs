@@ -18,9 +18,11 @@ use gpui::{
 
 use crate::kit::live_layer;
 use crate::kit::motion::{
-    self, CYPHER_PULSE, GRADIENT_SPIN, MotionSpec, PROGRESS_FLOW, SPLASH_OUT, STATUS_SPIN,
+    self, CYPHER_PULSE, GRADIENT_SPIN, MotionSpec, PROGRESS_FLOW, RING_ORBIT, SPLASH_OUT,
+    STATUS_SPIN,
 };
 use crate::kit::progress_bar::ProgressBar;
+use crate::kit::progress_ring::ProgressRing;
 use crate::kit::theme::{Appearance, MonoStyled, Theme, oklch};
 use gpui::Hsla;
 
@@ -67,6 +69,9 @@ pub enum Loader {
     /// [`progress_bar`]: the working trailer's progress bar, its glint and
     /// breathing ring moving once per [`PROGRESS_FLOW`] period.
     Progress(ProgressBar),
+    /// [`progress_ring`]: the steps done as an arc, its comet going round
+    /// once per [`RING_ORBIT`] period.
+    Ring(ProgressRing),
 }
 
 impl Loader {
@@ -77,6 +82,7 @@ impl Loader {
             Loader::Arc { .. } => &STATUS_SPIN,
             Loader::Wash { .. } => &CYPHER_PULSE,
             Loader::Progress(_) => &PROGRESS_FLOW,
+            Loader::Ring(_) => &RING_ORBIT,
         }
     }
 
@@ -102,6 +108,7 @@ impl Loader {
                     .ok();
             }
             Loader::Progress(bar) => bar.paint(bounds, delta, window),
+            Loader::Ring(ring) => ring.paint(bounds, delta, window),
             Loader::Wash { bg, border, radius } => {
                 let opacity = 0.35 + 0.4 * motion::pulse_wave(delta);
                 window.paint_quad(gpui::quad(
@@ -259,6 +266,25 @@ pub fn progress_bar(bar: ProgressBar, view: EntityId) -> impl IntoElement {
     loader_element(Loader::Progress(bar), view)
         .w_full()
         .h(px(crate::kit::progress_bar::HEIGHT))
+}
+
+/// A job's progress ring ([`ProgressRing`]), `size` square, its comet going
+/// round while the job runs.
+pub fn progress_ring(ring: ProgressRing, size: f32, view: EntityId) -> impl IntoElement {
+    loader_element(Loader::Ring(ring), view)
+        .flex_none()
+        .size(px(size))
+}
+
+/// [`progress_ring`] holding still: a job that waits (to start, on its
+/// owner). It leases no clock.
+pub fn still_ring(ring: ProgressRing, size: f32) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| ring.paint(bounds, 0.0, window),
+    )
+    .flex_none()
+    .size(px(size))
 }
 
 /// Full-window boot splash: a compact ASCII cypher wordmark over an opaque

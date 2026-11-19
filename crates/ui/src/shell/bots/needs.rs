@@ -1,120 +1,217 @@
-//! The **Needs you** card (§13.1): what waits on the owner, most pressing
-//! first, right under Status in the amber the sidebar gives a session
-//! awaiting input. Its rows are the bot's own question, actions and plans
-//! awaiting approval, sessions the bot started that are asking and review
-//! drafts: decisions only, each listed here and nowhere else in the sidebar
-//! (a failed routine is state, marked on its routine; a held memory write
-//! asks in the chat that made it). The header opens the whole list.
+//! **Needs you** (§13.1): everything in a workspace that waits on its
+//! owner, in one place. The sidebar card lists the items, most pressing
+//! first, in the amber the sidebar gives a session awaiting input; its rows
+//! and the pill over the chat's composer open the one page that answers
+//! them.
 //!
-//! Each item opens in the detail panel with its context and its actions:
-//! the plan to approve, the action and why it needs approval, the worker's
-//! question with its options and recent messages, the draft answer to send.
-//! A decision is one owner field on the record (a `Mutate`), so every count
-//! follows the record wherever it was made.
+//! The page stacks a card per item, each naming where it comes from and
+//! answered in place: the workspace's own question (answered in its chat),
+//! an action or a plan to approve, a permission prompt or a question from
+//! a session the workspace runs (a plan's worker, a routine), and an
+//! answer to review before it is sent. Decisions only: a failed routine is
+//! state, marked on its routine, and a held memory write asks in the chat
+//! that made it.
+//!
+//! A decision is one owner field on a record (a `Mutate`) or an answer
+//! queued on the asking session, so every count follows wherever it was
+//! made, and a decided card leaves the page.
 
-use super::board::{card_corner, card_glyph, card_item, two_lines};
-use super::items::{
-    ago, decision_bar, glyph, item_row, mark_cell, outcome_value, project_label, section_label,
-    text_value, trailing,
-};
+use super::board::{card_corner, card_glyph, card_item};
+use super::items::ago;
 use super::panel::{PanelHead, PanelItem};
 use super::*;
-use cypher_proto::{ApprovalState, ExchangeDirection, ExchangeState, NeedsYou};
+use crate::composer::permission_card::{self, FactKind, OptionRole};
+use crate::kit::theme::MonoStyled;
+use cypher_proto::{NeedsYou, UserInputQuestion};
 
-/// Rows the card shows before it points at the full list.
+/// Rows the card shows before "N more". More than the other cards' short
+/// lists: every one of these waits on the owner.
 const CARD_ROWS: usize = 5;
 
-/// One Needs you item as a row draws it.
-struct NeedRow {
-    /// What a click opens; `None` for the bot's own question, which lives in
-    /// the chat beside the board.
-    item: Option<PanelItem>,
-    glyph: &'static str,
-    tint: gpui::Hsla,
-    title: String,
-    sub: String,
-    at: Option<chrono::DateTime<Utc>>,
+/// The lines of a tool's input or a change a permission card shows before
+/// it says how many more there are.
+const BLOCK_LINES: usize = 14;
+
+/// The gap between the page's cards (the gap between the chat and the
+/// panel) and a card's own padding.
+const CARD_GAP: f32 = 8.0;
+const CARD_PAD: f32 = 14.0;
+/// How far a card's shadow reaches past its sides.
+const SHADOW_ROOM: f32 = 4.0;
+
+/// The gap between a card's buttons, a text button's side padding, and an
+/// icon button's side.
+const BUTTON_GAP: f32 = 6.0;
+const BUTTON_PAD: f32 = 12.0;
+const ICON_BUTTON: f32 = 28.0;
+
+/// The key of the workspace's own question among the items.
+const CHAT_KEY: &str = "chat";
+
+/// What a Needs you item is, with what its card draws.
+enum NeedKind {
+    /// The workspace's own question, waiting in its chat.
+    Chat {
+        preview: String,
+    },
+    Plan {
+        work_id: String,
+        sub: String,
+        summary: Option<String>,
+    },
+    Approval {
+        id: String,
+        reason: String,
+    },
+    /// A session the workspace runs is asking.
+    Asking {
+        chat_id: String,
+    },
+    Review {
+        id: String,
+    },
 }
 
-fn need_rows(
-    state: &crate::state::AppState,
-    bot: &Bot,
-    needs: Vec<Need>,
-    theme: &Theme,
-) -> Vec<NeedRow> {
+/// One Needs you item as the card's row and the page's card draw it.
+struct NeedItem {
+    /// Stable across frames: the row's and the card's key.
+    key: String,
+    glyph: &'static str,
+    /// What is asked, in a line.
+    title: String,
+    /// Where it comes from: "Fix invoice rounding › Migrate tables".
+    source: String,
+    at: Option<chrono::DateTime<Utc>>,
+    kind: NeedKind,
+}
+
+/// "Plan · 4 steps · web-api · Studio": the place when every step shares it.
+pub(super) fn plan_line(state: &crate::state::AppState, work: &cypher_proto::BotWork) -> String {
+    let places: Vec<Option<String>> = work
+        .steps
+        .iter()
+        .map(|step| {
+            let space = state.space_row(step.project.as_deref()?)?;
+            Some(match state.device_name(&space.device_id) {
+                Some(device) => format!("{} · {device}", space.display_name()),
+                None => space.display_name().to_string(),
+            })
+        })
+        .collect();
+    let common = places
+        .first()
+        .cloned()
+        .flatten()
+        .filter(|first| places.iter().all(|p| p.as_deref() == Some(first.as_str())));
+    crate::transcript::bot_plan::plan_sub(work.steps.len(), common.as_deref())
+}
+
+/// Who a session the workspace runs belongs to, for its card's source: the
+/// plan that started it or the routine it runs for.
+fn session_owner(state: &crate::state::AppState, chat: &cypher_proto::Chat) -> Option<String> {
     let records = &state.bot_records;
-    let chat_title = |id: &str| {
-        state
-            .chats
-            .iter()
-            .find(|c| c.id == id)
-            .map(|c| transcript::single_line(c.title.as_deref().unwrap_or("New session")))
+    if let Some((work, _)) = records.started_by(&chat.id) {
+        return Some(transcript::single_line(&work.title));
+    }
+    let routine_id = match chat.bot.as_ref().map(|marker| &marker.thread) {
+        Some(
+            cypher_proto::BotThread::Routine { routine_id }
+            | cypher_proto::BotThread::RoutineSession { routine_id },
+        ) => routine_id,
+        _ => return None,
     };
+    records
+        .routines
+        .iter()
+        .find(|r| &r.id == routine_id)
+        .map(|r| format!("{} · routine", transcript::single_line(&r.name)))
+}
+
+fn need_items(state: &crate::state::AppState, bot: &Bot, needs: Vec<Need>) -> Vec<NeedItem> {
+    let records = &state.bot_records;
+    let name = transcript::single_line(&bot.name);
     needs
         .into_iter()
         .filter_map(|need| match need {
             Need::Chat => {
                 let chat = state.chats.iter().find(|c| c.id == bot.chat_id)?;
-                Some(NeedRow {
-                    item: None,
+                Some(NeedItem {
+                    key: CHAT_KEY.into(),
                     glyph: icons::CHAT_ROUND_LINE,
-                    tint: theme.warning,
-                    title: format!("{} asked you something", transcript::single_line(&bot.name)),
-                    sub: chat
-                        .last_message_preview
-                        .as_deref()
-                        .map(transcript::single_line)
-                        .unwrap_or_else(|| "In your conversation".into()),
+                    title: format!("{name} asked you something"),
+                    source: name.clone(),
                     at: chat.last_message_at,
+                    kind: NeedKind::Chat {
+                        preview: chat
+                            .last_message_preview
+                            .as_deref()
+                            .map(transcript::single_line)
+                            .unwrap_or_default(),
+                    },
                 })
             }
             Need::Record(NeedsYou::Plan(id)) => {
                 let work = records.work.iter().find(|w| w.id == id)?;
-                let steps = work.steps.len();
-                Some(NeedRow {
-                    item: Some(PanelItem::Plan(id)),
+                Some(NeedItem {
+                    key: format!("plan-{id}"),
                     glyph: icons::CHECKLIST,
-                    tint: theme.warning,
                     title: transcript::single_line(&work.title),
-                    sub: format!(
-                        "Plan to approve · {steps} step{}",
-                        if steps == 1 { "" } else { "s" }
-                    ),
+                    source: "Plan to approve".into(),
                     at: Some(super::items::at(work.created_at)),
+                    kind: NeedKind::Plan {
+                        sub: plan_line(state, work),
+                        summary: work
+                            .summary
+                            .as_deref()
+                            .map(transcript::single_line)
+                            .filter(|s| !s.is_empty()),
+                        work_id: id,
+                    },
                 })
             }
             Need::Record(NeedsYou::Approval(id)) => {
                 let approval = records.approvals.iter().find(|a| a.id == id)?;
-                Some(NeedRow {
-                    item: Some(PanelItem::Approval(id)),
+                let from = approval
+                    .work_id
+                    .as_deref()
+                    .and_then(|id| records.work.iter().find(|w| w.id == id))
+                    .map(|w| transcript::single_line(&w.title))
+                    .unwrap_or_else(|| name.clone());
+                Some(NeedItem {
+                    key: format!("approval-{id}"),
                     glyph: icons::SHIELD_CHECK,
-                    tint: theme.warning,
                     title: transcript::single_line(&approval.action),
-                    sub: transcript::single_line(&approval.reason),
+                    source: from,
                     at: Some(super::items::at(approval.created_at)),
+                    kind: NeedKind::Approval {
+                        reason: approval.reason.clone(),
+                        id,
+                    },
                 })
             }
-            Need::Record(NeedsYou::Asking { chat_id, work_id }) => {
+            Need::Record(NeedsYou::Asking { chat_id, .. }) => {
                 let chat = state.chats.iter().find(|c| c.id == chat_id)?;
+                let title = transcript::single_line(chat.title.as_deref().unwrap_or("New session"));
                 let project = chat
                     .space_id
                     .as_deref()
                     .and_then(|id| state.space_row(id))
                     .map(|s| s.display_name().to_string());
-                let sub = match project {
-                    Some(project) => format!("Asking · in {project}"),
-                    None => "Asking".to_string(),
+                // The owner, then the session (a routine's own thread is
+                // named like its routine: once is enough), else its project.
+                let source = match (session_owner(state, chat), project) {
+                    (Some(owner), _) if chat.is_bot() => owner,
+                    (Some(owner), _) => format!("{owner} › {title}"),
+                    (None, Some(project)) => format!("{title} · {project}"),
+                    (None, None) => title.clone(),
                 };
-                Some(NeedRow {
-                    item: Some(PanelItem::Asking {
-                        chat_id: chat_id.clone(),
-                        work_id,
-                    }),
+                Some(NeedItem {
+                    key: format!("ask-{chat_id}"),
                     glyph: icons::QUESTION_CIRCLE,
-                    tint: theme.warning,
-                    title: chat_title(&chat_id).unwrap_or_default(),
-                    sub,
+                    title,
+                    source,
                     at: chat.last_message_at,
+                    kind: NeedKind::Asking { chat_id },
                 })
             }
             Need::Record(NeedsYou::Review(id)) => {
@@ -125,474 +222,945 @@ fn need_rows(
                     .find(|c| c.id == exchange.connection_id)
                     .map(|c| c.peer.name.clone())
                     .unwrap_or_else(|| "a connected workspace".into());
-                Some(NeedRow {
-                    item: Some(PanelItem::Review(id)),
-                    glyph: icons::USERS,
-                    tint: theme.warning,
+                Some(NeedItem {
+                    key: format!("review-{id}"),
+                    glyph: super::items::REVIEW_GLYPH,
                     title: transcript::single_line(&exchange.question),
-                    sub: format!("Review the answer to {peer}"),
+                    source: format!("Answer to {peer}, to review"),
                     at: Some(super::items::at(exchange.asked_at)),
+                    kind: NeedKind::Review { id },
                 })
             }
         })
         .collect()
 }
 
-impl Shell {
-    fn current_need_rows(&self, bot: &Bot, theme: &Theme, cx: &App) -> Vec<NeedRow> {
-        let state = self.state.read(cx);
-        need_rows(state, bot, bot_needs(state, bot, Utc::now()), theme)
+/// What a question asks, as its card says it: the prompt's headline and
+/// the context under it.
+fn question_text(question: &UserInputQuestion) -> String {
+    if question.question.trim().is_empty() {
+        question.header.clone()
+    } else {
+        question.question.clone()
     }
+}
 
-    /// A Needs you row: its item opens in the panel; the bot's own question
-    /// hands focus to the chat beside the board.
-    fn need_row(
-        &self,
-        key: String,
-        row: NeedRow,
-        roomy: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let now = Utc::now();
-        let selected = row.item.is_some() && self.board.panel == row.item;
-        let item = row.item.clone();
-        let open = cx.listener(move |this, _, _, cx| match item.clone() {
-            Some(item) => this.open_panel(item, cx),
-            None => {
-                this.close_panel(cx);
-                this.tiles.focus_pending = true;
-                cx.notify();
-            }
-        });
-        if !roomy {
-            // On the card: one line, what it is; the panel says what to do.
-            return card_item(
-                &key,
-                Some(card_glyph(row.glyph, row.tint)),
-                row.title,
-                row.at
-                    .map(|at| card_corner(format_time_ago(at, now), None, theme)),
-                selected,
-                theme,
-            )
-            .on_click(open);
+/// The click that answers a session's question with one of its options.
+fn answer_click(
+    chat_id: String,
+    request_id: String,
+    question_id: String,
+    label: String,
+    cx: &mut Context<Shell>,
+) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static + use<> {
+    let shell = cx.weak_entity();
+    move |_, _, cx| {
+        shell
+            .update(cx, |this, cx| {
+                this.answer_session(
+                    chat_id.clone(),
+                    request_id.clone(),
+                    question_id.clone(),
+                    label.clone(),
+                    cx,
+                )
+            })
+            .ok();
+    }
+}
+
+/// A card's quiet button (Reject, Deny, Details): text that washes on hover.
+fn quiet_button(key: &str, label: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    popover::btn_ghost(theme, label, key.to_string())
+        .id(SharedString::from(key.to_string()))
+        .flex_none()
+        .py(px(5.0))
+}
+
+/// A card's outlined button (a broader approval, an answer to pick).
+fn outline_button(key: &str, label: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(key.to_string()))
+        .flex_none()
+        .max_w_full()
+        .px(px(12.0))
+        .py(px(5.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(px(13.0))
+        .text_color(theme.text)
+        .cursor_pointer()
+        .bg(motion::hover_blend(
+            key,
+            crate::kit::theme::ink(0.02),
+            crate::kit::theme::ink(0.07),
+        ))
+        .on_hover(motion::hover_listener(key.to_string()))
+        .child(SharedString::from(label.to_string()))
+}
+
+/// A card's filled button: the decision it most likely wants.
+fn primary_button(key: &str, label: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    popover::btn_primary(theme, label)
+        .id(SharedString::from(key.to_string()))
+        .flex_none()
+        .py(px(5.0))
+}
+
+/// The row a card's buttons sit in, at its foot under a hairline: at the
+/// right, wrapping.
+fn card_actions() -> gpui::Div {
+    div()
+        .mt(px(12.0))
+        .pt(px(10.0))
+        .border_t_1()
+        .border_color(crate::kit::theme::hairline(0.07))
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .justify_end()
+        .items_center()
+        .gap(px(BUTTON_GAP))
+}
+
+/// A label's width in a card's button.
+fn label_width(label: &str, weight: gpui::FontWeight, theme: &Theme, window: &Window) -> f32 {
+    let run = gpui::TextRun {
+        len: label.len(),
+        font: gpui::Font {
+            weight,
+            ..gpui::font(theme.font_sans.clone())
+        },
+        color: theme.text,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window.text_system().shape_line(
+        SharedString::from(label.to_string()),
+        px(13.0),
+        &[run],
+        None,
+    );
+    f32::from(line.width).ceil()
+}
+
+/// Which of a permission prompt's options draw as icons so that all of them
+/// share one line `room` wide: none while their labels fit, then the
+/// refusals, then the broader approvals from the broadest in. The narrowest
+/// approval always keeps its label. `widths` are the buttons with labels.
+fn folded_options(roles: &[OptionRole], widths: &[f32], room: f32) -> Vec<bool> {
+    let mut folded = vec![false; roles.len()];
+    let fits = |folded: &[bool]| {
+        let buttons: f32 = folded
+            .iter()
+            .zip(widths)
+            .map(|(folded, width)| if *folded { ICON_BUTTON } else { *width })
+            .sum();
+        // The buttons and the space that parts refusals from approvals.
+        buttons + BUTTON_GAP * roles.len() as f32 <= room
+    };
+    if fits(&folded) {
+        return folded;
+    }
+    for (ix, role) in roles.iter().enumerate() {
+        folded[ix] = matches!(role, OptionRole::Deny | OptionRole::Stop);
+    }
+    // The extension lists approvals from the narrowest out.
+    for ix in (0..roles.len()).rev() {
+        if fits(&folded) {
+            break;
         }
-        item_row(&key, selected)
-            .py(px(8.0))
-            .on_click(open)
-            .child(mark_cell(glyph(row.glyph, row.tint)))
-            .child(two_lines(row.title, row.sub, String::new(), theme))
-            .children(
-                row.at
-                    .map(|at| trailing(format_time_ago(at, now), theme.text_faint)),
-            )
+        folded[ix] |= roles[ix] == OptionRole::Secondary;
+    }
+    folded
+}
+
+/// The glyph a folded approval draws: what it lasts for.
+fn approval_glyph(label: &str) -> &'static str {
+    if label.starts_with("Always") {
+        icons::SHIELD_CHECK
+    } else if label.ends_with("this chat") {
+        icons::CHAT_ROUND_LINE
+    } else {
+        icons::CHECK
+    }
+}
+
+/// A permission option folded to its icon, its label in the tooltip: a
+/// cross for Deny, the stop square for Deny and stop, an outlined glyph for
+/// a broader approval.
+fn icon_option(
+    key: &str,
+    label: &str,
+    role: OptionRole,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let tip = SharedString::from(label.to_string());
+    let base = div()
+        .id(SharedString::from(key.to_string()))
+        .flex_none()
+        .size(px(ICON_BUTTON))
+        .rounded(px(8.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .on_hover(motion::hover_listener(key.to_string()))
+        .tooltip(move |_, cx| {
+            cx.new(|_| super::super::session::FindTooltip(tip.clone()))
+                .into()
+        });
+    // A refusal's label is bare text; alone, its icon needs a plate to read
+    // as a button.
+    match role {
+        OptionRole::Stop => base
+            .bg(motion::hover_blend(
+                key,
+                theme.danger.opacity(0.08),
+                theme.danger.opacity(0.16),
+            ))
+            .child(div().size(px(9.0)).rounded(px(2.0)).bg(theme.danger)),
+        OptionRole::Deny => base
+            .bg(motion::hover_blend(
+                key,
+                crate::kit::theme::ink(0.045),
+                crate::kit::theme::ink(0.09),
+            ))
+            .child(
+                icon(icons::CLOSE)
+                    .size(px(12.0))
+                    .text_color(motion::hover_blend(
+                        key,
+                        theme.text.opacity(0.7),
+                        theme.text,
+                    )),
+            ),
+        OptionRole::Secondary | OptionRole::Primary => base
+            .border_1()
+            .border_color(theme.border)
+            .bg(motion::hover_blend(
+                key,
+                crate::kit::theme::ink(0.02),
+                crate::kit::theme::ink(0.07),
+            ))
+            .child(
+                icon(approval_glyph(label))
+                    .size(px(14.0))
+                    .text_color(theme.text.opacity(0.85)),
+            ),
+    }
+}
+
+/// A line of card copy under its title.
+fn card_copy(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
+    div()
+        .mt(px(4.0))
+        .text_size(px(12.5))
+        .line_height(px(18.0))
+        .text_color(theme.text.opacity(0.85))
+        .child(text.into())
+}
+
+/// A quiet note in place of a card's buttons (an answer on its way).
+fn card_note(text: &'static str, theme: &Theme) -> gpui::Div {
+    div()
+        .mt(px(8.0))
+        .text_size(px(12.0))
+        .text_color(theme.text_muted)
+        .child(text)
+}
+
+impl Shell {
+    fn current_need_items(&self, bot: &Bot, cx: &App) -> Vec<NeedItem> {
+        let state = self.state.read(cx);
+        need_items(state, bot, bot_needs(state, bot, Utc::now()))
     }
 
-    /// The sidebar card; `None` when there is nothing to show.
+    /// How many items wait on the owner beside the chat of the workspace
+    /// on the board: everything but the workspace's own question, which
+    /// already stands over its composer.
+    pub(in crate::shell) fn board_needs_count(&self, cx: &App) -> usize {
+        let state = self.state.read(cx);
+        current_bot(&state.bots, self.settings.botboard_bot.as_deref()).map_or(0, |bot| {
+            bot_needs(state, bot, Utc::now())
+                .iter()
+                .filter(|need| **need != Need::Chat)
+                .count()
+        })
+    }
+
+    /// Open the Needs you page on the card `key` (a row, the pill). The
+    /// workspace's own question is answered in its chat: its row goes there.
+    pub(in crate::shell) fn open_need(&mut self, key: Option<String>, cx: &mut Context<Self>) {
+        if key.as_deref() == Some(CHAT_KEY) {
+            self.close_panel(cx);
+            self.tiles.focus_pending = true;
+            cx.notify();
+            return;
+        }
+        self.show_panel(PanelItem::NeedsYou, cx);
+        self.board.needs_focus = key;
+        cx.notify();
+    }
+
+    /// The sidebar card; `None` when there is nothing to show. Its rows
+    /// name what waits; the page answers.
     pub(super) fn render_needs_card(
         &self,
         bot: &Bot,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let rows = self.current_need_rows(bot, theme, cx);
-        if rows.is_empty() {
+        let items = self.current_need_items(bot, cx);
+        if items.is_empty() {
             return None;
         }
-        let total = rows.len();
+        let now = Utc::now();
+        let total = items.len();
         let header = self.card_header(
             "needs",
             "bot-needs-header",
             "Needs you",
             total,
-            PanelItem::NeedsYou,
+            Some(super::board::HeaderAction::Page(PanelItem::NeedsYou)),
             Some(theme.warning),
             theme,
             cx,
         );
-        let shown: Vec<_> = rows
+        let shown = if self.list_expanded("needs") {
+            total
+        } else {
+            CARD_ROWS
+        };
+        let mut rows: Vec<AnyElement> = items
             .into_iter()
-            .take(CARD_ROWS)
-            .enumerate()
-            .map(|(ix, row)| self.need_row(format!("bot-need-{ix}"), row, false, theme, cx))
+            .take(shown)
+            .map(|item| {
+                let key = item.key.clone();
+                card_item(
+                    &format!("bot-need-{}", item.key),
+                    Some(card_glyph(item.glyph, theme.warning)),
+                    item.title,
+                    item.at
+                        .map(|at| card_corner(format_time_ago(at, now), None, theme)),
+                    false,
+                    theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.open_need(Some(key.clone()), cx)))
+                .into_any_element()
+            })
             .collect();
-        let more = (total > CARD_ROWS).then(|| {
-            card_item(
-                "bot-needs-more",
-                None,
-                format!("{} more", total - CARD_ROWS),
-                None,
-                false,
-                theme,
-            )
-            .text_color(theme.text_muted)
-            .on_click(cx.listener(|this, _, _, cx| this.open_panel(PanelItem::NeedsYou, cx)))
-        });
-        Some(self.fold_card("needs", header, shown.into_iter().chain(more), theme))
+        // The rest come in in place, like any card's.
+        rows.extend(self.more_row("needs".into(), total.saturating_sub(CARD_ROWS), theme, cx));
+        Some(self.fold_card("needs", header, rows, theme))
     }
 
-    /// The detail panel for this card's items; `None` when the item no
-    /// longer resolves.
-    pub(super) fn render_needs_panel(
+    /// The page: a card per item, answered in place. The cards stand in
+    /// the panel's column on their own, shaped like the chat's card, with no
+    /// frame or title around them; the page scrolls itself, so a row can
+    /// bring its card into view.
+    pub(super) fn render_needs_page(
         &mut self,
         bot: &Bot,
-        item: &PanelItem,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> Option<(PanelHead, gpui::Div)> {
-        match item {
-            PanelItem::NeedsYou => Some(self.render_needs_list(bot, theme, cx)),
-            // A plan is a work item waiting on its approval: one page.
-            PanelItem::Plan(id) => self.render_work_item(id, theme, window, cx),
-            PanelItem::Approval(id) => self.render_approval_panel(bot, id, theme, cx),
-            PanelItem::Asking { chat_id, work_id } => {
-                self.render_asking_panel(bot, chat_id, work_id.as_deref(), theme, cx)
-            }
-            PanelItem::Review(id) => self.render_question_panel(id, theme, cx),
-            _ => None,
-        }
-    }
-
-    fn render_needs_list(
-        &mut self,
-        bot: &Bot,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> (PanelHead, gpui::Div) {
-        let rows = self.current_need_rows(bot, theme, cx);
-        let head = PanelHead {
-            glyph: icons::BELL,
-            tint: Some(theme.warning),
-            title: "Needs you".into(),
+    ) -> gpui::Div {
+        let items = self.current_need_items(bot, cx);
+        let card_bg = crate::appearance::chat_style::panel_background(
+            crate::appearance::chat_style::settings(cx),
+            theme,
+            true,
+        );
+        let card = || {
+            div()
+                .flex_none()
+                .rounded(px(PANEL_CORNER_RADIUS))
+                .bg(card_bg)
+                .shadow_sm()
+                .flex()
+                .flex_col()
         };
-        let body = div().p(px(8.0)).flex().flex_col().gap(px(2.0));
-        let body = if rows.is_empty() {
-            self.board.panel_empty = Some(
-                parts::panel_empty(
-                    theme,
-                    icons::CHECK,
-                    "You're all caught up",
-                    "Plans, approvals, questions and answers to review land here.",
-                )
-                .into_any_element(),
+        // The sessions this page looks into are the ones still asking.
+        let asking: Vec<&str> = items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                NeedKind::Asking { chat_id } => Some(chat_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        self.board
+            .peeks
+            .retain(|chat_id, _| asking.contains(&chat_id.as_str()));
+        if items.is_empty() {
+            self.board.needs_focus = None;
+            return div().size_full().child(
+                card()
+                    .items_center()
+                    .px(px(CARD_PAD))
+                    .py(px(36.0))
+                    .child(parts::panel_empty(
+                        theme,
+                        icons::CHECK,
+                        "You're all caught up",
+                        "Approvals, permission prompts, questions and answers to review land here.",
+                    )),
             );
-            body
-        } else {
-            body.children(rows.into_iter().enumerate().map(|(ix, row)| {
-                self.need_row(format!("bot-panel-need-{ix}"), row, true, theme, cx)
-            }))
-        };
-        (head, body)
-    }
-
-    /// An action a background session waits on: what it is, why it needs
-    /// you and where it comes from; Decline / Approve in the footer.
-    fn render_approval_panel(
-        &mut self,
-        bot: &Bot,
-        approval_id: &str,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<(PanelHead, gpui::Div)> {
+        }
+        // A row asked for one card: bring it into view.
+        let focus = self.board.needs_focus.take();
+        if let Some(ix) = focus
+            .as_ref()
+            .and_then(|key| items.iter().position(|item| &item.key == key))
+        {
+            self.board.needs_scroll.scroll_to_item(ix);
+        }
+        // What a card's buttons have to share.
+        let room = self.panel_width_in(window) - 2.0 * CARD_PAD;
         let now = Utc::now();
-        let (approval, work_title) = {
-            let state = self.state.read(cx);
-            let approval = state
-                .bot_records
-                .approvals
-                .iter()
-                .find(|a| a.id == approval_id)?
-                .clone();
-            let work_title = approval.work_id.as_deref().and_then(|id| {
-                state
-                    .bot_records
-                    .work
-                    .iter()
-                    .find(|w| w.id == id)
-                    .map(|w| w.title.clone())
-            });
-            (approval, work_title)
-        };
-        let awaiting = approval.awaiting();
-        let head = PanelHead {
-            glyph: icons::SHIELD_CHECK,
-            tint: awaiting.then_some(theme.warning),
-            title: if awaiting {
-                "Approve action".into()
-            } else {
-                "Action".into()
-            },
-        };
-        let mut body = div()
-            .p(px(8.0))
-            .flex()
-            .flex_col()
-            .child(parts::fact(theme, "Action", text_value(&approval.action)))
-            .child(parts::fact(theme, "Why", text_value(&approval.reason)))
-            .child(parts::fact(
-                theme,
-                "From",
-                SharedString::from(format!(
-                    "{} · {}",
-                    work_title.unwrap_or_else(|| bot.name.clone()),
-                    ago(approval.created_at, now)
-                )),
-            ));
-        if awaiting {
-            let (yes, no) = (approval.id.clone(), approval.id.clone());
-            self.set_panel_footer(
-                decision_bar(None, theme)
+        let cards: Vec<AnyElement> = items
+            .into_iter()
+            .map(|item| {
+                let content = self.need_content(&item, room, theme, window, cx);
+                let head = self.need_head(&item, now, theme, cx);
+                card()
+                    .p(px(CARD_PAD))
+                    .pt(px(12.0))
+                    .child(head)
                     .child(
-                        popover::btn_ghost(theme, "Decline", "bot-approval-decline")
-                            .id("bot-approval-decline")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.mutate(
-                                    serde_json::json!({
-                                        "op": "resolveBotApproval", "approvalId": no, "approve": false,
-                                    }),
-                                    cx,
-                                )
+                        div()
+                            .mt(px(6.0))
+                            .text_size(px(13.5))
+                            .line_height(px(19.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(SharedString::from(match &item.kind {
+                                // A session's card is titled by its question.
+                                NeedKind::Asking { .. } => content.title.clone(),
+                                _ => item.title.clone(),
                             })),
                     )
-                    .child(
-                        popover::btn_primary(theme, "Approve")
-                            .id("bot-approval-approve")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.mutate(
-                                    serde_json::json!({
-                                        "op": "resolveBotApproval", "approvalId": yes, "approve": true,
-                                    }),
-                                    cx,
-                                )
-                            })),
-                    ),
-            );
-        } else {
-            let decided = approval.decision.as_ref().map(|d| d.approve);
-            let (text, ok) = match (approval.state, decided) {
-                (ApprovalState::Approved, _) | (ApprovalState::Pending, Some(true)) => {
-                    ("Approved", true)
-                }
-                (ApprovalState::Declined, _) | (ApprovalState::Pending, Some(false)) => {
-                    ("Declined", false)
-                }
-                (ApprovalState::Expired, _) | (ApprovalState::Pending, None) => {
-                    ("Expired before an answer", false)
-                }
-            };
-            body = body.child(parts::fact(theme, "Status", outcome_value(text, ok, theme)));
-        }
-        Some((head, body))
+                    .child(content.body)
+                    .into_any_element()
+            })
+            .collect();
+        // The list clips what scrolls out of it, so it reaches past the
+        // cards' sides and foot by the room their shadows take.
+        div().size_full().relative().child(
+            div()
+                .id("bot-needs-page")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(-SHADOW_ROOM))
+                .right(px(-SHADOW_ROOM))
+                .overflow_y_scroll()
+                .track_scroll(&self.board.needs_scroll)
+                .px(px(SHADOW_ROOM))
+                .pb(px(SHADOW_ROOM))
+                .flex()
+                .flex_col()
+                .gap(px(CARD_GAP))
+                .children(cards),
+        )
     }
 
-    /// A session the bot started, asking: its question with the options as
-    /// answers, its latest messages, and the way into the session.
-    fn render_asking_panel(
-        &mut self,
-        bot: &Bot,
-        chat_id: &str,
-        work_id: Option<&str>,
+    /// A card's first line: where the item comes from, when, and for a
+    /// session the way into it.
+    fn need_head(
+        &self,
+        item: &NeedItem,
+        now: chrono::DateTime<Utc>,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> Option<(PanelHead, gpui::Div)> {
-        let (title, place, work_title, status) = {
-            let state = self.state.read(cx);
-            let chat = state.chats.iter().find(|c| c.id == chat_id)?;
-            let place = chat
-                .space_id
-                .as_deref()
-                .and_then(|id| project_label(state, id, theme));
-            let work_title = state
-                .bot_records
-                .work
-                .iter()
-                .find(|w| Some(w.id.as_str()) == work_id)
-                .map(|w| w.title.clone());
-            (
-                transcript::single_line(chat.title.as_deref().unwrap_or("New session")),
-                place,
-                work_title,
-                state.display_status_for(chat, Utc::now()),
-            )
+    ) -> gpui::Div {
+        let open = match &item.kind {
+            NeedKind::Asking { chat_id } => {
+                let chat_id = chat_id.clone();
+                Some(
+                    super::items::icon_button(
+                        format!("bot-need-open-{}", item.key),
+                        icons::CHAT_ROUND_LINE,
+                        "Open the session",
+                        theme,
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx)),
+                    ),
+                )
+            }
+            _ => None,
         };
+        div()
+            .h(px(22.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(7.0))
+            .child(
+                icon(item.glyph)
+                    .size(px(13.0))
+                    .flex_none()
+                    .text_color(theme.warning),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(11.5))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(item.source.clone())),
+            )
+            .children(item.at.map(|at| {
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(format_time_ago(at, now)))
+            }))
+            .children(open)
+    }
+
+    /// What a card says under its title and the buttons that decide it.
+    fn need_content(
+        &mut self,
+        item: &NeedItem,
+        room: f32,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> NeedContent {
+        let key = &item.key;
+        match &item.kind {
+            NeedKind::Chat { preview } => NeedContent::of(
+                div()
+                    .flex()
+                    .flex_col()
+                    .when(!preview.is_empty(), |el| {
+                        el.child(card_copy(preview.clone(), theme).line_clamp(3))
+                    })
+                    .child(
+                        card_actions().child(
+                            primary_button(&format!("{key}-answer"), "Answer in the chat", theme)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.close_panel(cx);
+                                    this.tiles.focus_pending = true;
+                                    cx.notify();
+                                })),
+                        ),
+                    ),
+            ),
+            NeedKind::Plan {
+                work_id,
+                sub,
+                summary,
+            } => {
+                let (approve, reject, details) =
+                    (work_id.clone(), work_id.clone(), work_id.clone());
+                NeedContent::of(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .mt(px(1.0))
+                                .text_size(px(11.5))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(sub.clone())),
+                        )
+                        .children(
+                            summary
+                                .clone()
+                                .map(|summary| card_copy(summary, theme).line_clamp(3)),
+                        )
+                        .child(
+                            card_actions()
+                                .child(
+                                    quiet_button(&format!("{key}-details"), "Details", theme)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.show_panel(PanelItem::Plan(details.clone()), cx)
+                                        })),
+                                )
+                                .child(div().flex_1())
+                                .child(
+                                    quiet_button(&format!("{key}-reject"), "Reject", theme)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.board_mutate(
+                                                serde_json::json!({
+                                                    "op": "resolveBotPlan",
+                                                    "workId": reject,
+                                                    "approve": false,
+                                                }),
+                                                cx,
+                                            )
+                                        })),
+                                )
+                                .child(
+                                    primary_button(&format!("{key}-approve"), "Approve", theme)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.board_mutate(
+                                                serde_json::json!({
+                                                    "op": "resolveBotPlan",
+                                                    "workId": approve,
+                                                    "approve": true,
+                                                }),
+                                                cx,
+                                            )
+                                        })),
+                                ),
+                        ),
+                )
+            }
+            NeedKind::Approval { id, reason } => {
+                let (yes, no) = (id.clone(), id.clone());
+                NeedContent::of(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(card_copy(reason.clone(), theme))
+                        .child(
+                            card_actions()
+                                .child(
+                                    quiet_button(&format!("{key}-decline"), "Decline", theme)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.board_mutate(
+                                                serde_json::json!({
+                                                    "op": "resolveBotApproval",
+                                                    "approvalId": no,
+                                                    "approve": false,
+                                                }),
+                                                cx,
+                                            )
+                                        })),
+                                )
+                                .child(
+                                    primary_button(&format!("{key}-approve"), "Approve", theme)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.board_mutate(
+                                                serde_json::json!({
+                                                    "op": "resolveBotApproval",
+                                                    "approvalId": yes,
+                                                    "approve": true,
+                                                }),
+                                                cx,
+                                            )
+                                        })),
+                                ),
+                        ),
+                )
+            }
+            NeedKind::Review { id } => {
+                let review = id.clone();
+                NeedContent::of(div().flex().flex_col().child(card_actions().child(
+                    primary_button(&format!("{key}-review"), "Review the answer", theme).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.show_panel(PanelItem::Review(review.clone()), cx)
+                        }),
+                    ),
+                )))
+            }
+            NeedKind::Asking { chat_id } => {
+                self.asking_content(key, chat_id, room, theme, window, cx)
+            }
+        }
+    }
+
+    /// A session's question as its card: a permission prompt with what it
+    /// asks about and the extension's own options, a question with its
+    /// answers to pick, or the way into the session for anything that takes
+    /// more than a pick.
+    fn asking_content(
+        &mut self,
+        key: &str,
+        chat_id: &str,
+        room: f32,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> NeedContent {
         let peek = self.peek(chat_id, false, cx);
-        let (pending, recent, loaded) = {
+        let (pending, loaded) = {
             let state = peek.read(cx);
             (
                 crate::composer::pending_input_request(&state.transcript),
-                recent_messages(&state.transcript, 3),
                 !state.transcript.is_empty(),
             )
         };
-        let head = PanelHead {
-            glyph: icons::QUESTION_CIRCLE,
-            tint: (status == ChatIndicator::AwaitingInput).then_some(theme.warning),
-            title,
+        let Some((request_id, questions)) = pending else {
+            return NeedContent {
+                title: if loaded {
+                    "Nothing to answer right now".into()
+                } else {
+                    "Loading the question…".into()
+                },
+                body: div(),
+            };
         };
-        let open = chat_id.to_string();
-        self.set_panel_actions(vec![
-            super::items::icon_button(
-                "bot-asking-open",
-                icons::CHAT_ROUND_LINE,
-                "Open the session",
-                theme,
+        let Some(question) = questions.first().cloned() else {
+            return NeedContent {
+                title: "Waiting on you".into(),
+                body: div(),
+            };
+        };
+        let prompt = question_text(&question);
+        if self.board.answered.contains(&request_id) {
+            let (headline, _) = crate::composer::split_question_context(&prompt);
+            return NeedContent {
+                title: headline,
+                body: card_note("Answer sent.", theme),
+            };
+        }
+        let answer = |label: &str, cx: &mut Context<Self>| {
+            answer_click(
+                chat_id.to_string(),
+                request_id.clone(),
+                question.id.clone(),
+                label.to_string(),
+                cx,
             )
-            .on_click(cx.listener(move |this, _, _, cx| this.open_chat(open.clone(), cx)))
-            .into_any_element(),
-        ]);
-        let mut body = div().p(px(8.0)).flex().flex_col();
-        if let Some(place) = &place {
-            body = body.child(parts::fact(
-                theme,
-                "Project",
-                SharedString::from(format!("{} · {}", place.name, place.device)),
-            ));
-        }
-        body = body.child(parts::fact(
-            theme,
-            "From",
-            SharedString::from(work_title.unwrap_or_else(|| bot.name.clone())),
-        ));
-        match pending {
-            Some((request_id, questions)) if !self.board.answered.contains(&request_id) => {
-                let first = questions.first().cloned();
-                if let Some(question) = &first {
-                    let (headline, context) = crate::composer::split_question_context(
-                        if question.question.trim().is_empty() {
-                            &question.header
-                        } else {
-                            &question.question
-                        },
-                    );
-                    let question = match context {
-                        Some(context) => format!("{headline}\n\n{context}"),
-                        None => headline,
+        };
+        let single = questions.len() == 1;
+        // A permission prompt: what it asks about, then the extension's
+        // options in its order, weighed as the question card weighs them.
+        if single && let Some(request) = permission_card::parse(&question, &prompt) {
+            let rows: Vec<gpui::Div> = request
+                .rows()
+                .map(|fact| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(60.0))
+                                .text_size(px(11.5))
+                                .line_height(px(17.0))
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from(fact.kind.label().unwrap_or_default())),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(if fact.kind.monospace() { 11.5 } else { 12.5 }))
+                                .line_height(px(17.0))
+                                .text_color(theme.text)
+                                .when(fact.kind.monospace(), |el| el.mono(theme))
+                                .child(SharedString::from(fact.value.clone())),
+                        )
+                })
+                .collect();
+            let sentences: Vec<gpui::Div> = request
+                .sentences()
+                .map(|fact| {
+                    let glyph = match fact.kind {
+                        FactKind::Review => icons::LIGHTBULB,
+                        FactKind::Network => icons::GLOBAL,
+                        _ => icons::INFO_CIRCLE,
                     };
-                    body = body.child(parts::fact(theme, "Question", text_value(&question)));
-                }
-                let simple = questions.len() == 1
-                    && first
-                        .as_ref()
-                        .is_some_and(|q| !q.multi_select && !q.options.is_empty());
-                match first.filter(|_| simple) {
-                    Some(question) => {
-                        body = body.child(section_label("Answer", theme)).children(
-                            question.options.iter().enumerate().map(|(ix, option)| {
-                                let key = format!("bot-asking-option-{ix}");
-                                let (chat, request, question_id, label) = (
-                                    chat_id.to_string(),
-                                    request_id.clone(),
-                                    question.id.clone(),
-                                    option.clone(),
-                                );
-                                // Resting like the start screen's suggestion
-                                // cards, so each reads as an answer to pick.
-                                item_row(&key, false)
-                                    .mx(px(8.0))
-                                    .mb(px(4.0))
-                                    .py(px(8.0))
-                                    .bg(motion::hover_blend(
-                                        &key,
-                                        crate::kit::theme::ink(0.035),
-                                        crate::kit::theme::ink(0.07),
-                                    ))
-                                    .child(mark_cell(
-                                        div()
-                                            .size(px(16.0))
-                                            .rounded(px(5.0))
-                                            .bg(crate::kit::theme::ink(0.06))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .text_size(px(10.0))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(theme.text_muted)
-                                            .child(SharedString::from((ix + 1).to_string())),
-                                    ))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_size(px(13.0))
-                                            .line_height(px(18.0))
-                                            .text_color(theme.text)
-                                            .child(SharedString::from(option.clone())),
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.answer_session(
-                                            chat.clone(),
-                                            request.clone(),
-                                            question_id.clone(),
-                                            label.clone(),
-                                            cx,
-                                        )
-                                    }))
-                            }),
-                        );
-                    }
-                    None => {
-                        body = body.child(parts::fact(
-                            theme,
-                            "Answer",
-                            SharedString::from("In the session"),
-                        ));
-                    }
-                }
-            }
-            Some(_) => {
-                body = body.child(parts::fact(
-                    theme,
-                    "Status",
-                    outcome_value("Answer sent", true, theme),
-                ));
-            }
-            None if loaded => {
-                body = body.child(parts::fact(
-                    theme,
-                    "Status",
-                    outcome_value("Nothing to answer right now", true, theme),
-                ));
-            }
-            None => {
-                body = body.child(parts::fact(
-                    theme,
-                    "Status",
-                    SharedString::from("Loading the session…"),
-                ));
-            }
-        }
-        if !recent.is_empty() {
-            body = body.child(section_label("Latest in the session", theme));
-            body = body.children(recent.into_iter().map(|(user, text)| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(7.0))
+                        .child(
+                            icon(glyph)
+                                .size(px(12.0))
+                                .mt(px(3.0))
+                                .flex_none()
+                                .text_color(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(12.0))
+                                .line_height(px(17.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(fact.value.clone())),
+                        )
+                })
+                .collect();
+            let block = request.block.as_ref().map(|(label, text)| {
+                let lines: Vec<&str> = text.lines().collect();
+                let shown = lines
+                    .iter()
+                    .take(BLOCK_LINES)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let more = lines.len().saturating_sub(BLOCK_LINES);
                 div()
-                    .px(px(8.0))
-                    .py(px(5.0))
+                    .mt(px(8.0))
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
+                    .gap(px(4.0))
                     .child(
                         div()
-                            .text_size(px(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted.opacity(0.8))
-                            .child(SharedString::from(if user {
-                                bot.name.clone()
-                            } else {
-                                "Session".to_string()
-                            })),
+                            .text_size(px(11.5))
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(label.clone())),
                     )
                     .child(
                         div()
-                            .text_size(px(12.5))
-                            .line_height(px(18.0))
-                            .text_color(theme.text.opacity(0.85))
-                            .child(SharedString::from(text)),
+                            .px(px(10.0))
+                            .py(px(8.0))
+                            .rounded(px(9.0))
+                            .bg(crate::kit::theme::ink(0.035))
+                            .overflow_hidden()
+                            .text_size(px(11.5))
+                            .line_height(px(16.0))
+                            .text_color(theme.text.opacity(0.9))
+                            .mono(theme)
+                            .child(SharedString::from(shown)),
                     )
-            }));
+                    .when(more > 0, |el| {
+                        el.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from(format!(
+                                    "{more} more line{} in the session",
+                                    if more == 1 { "" } else { "s" }
+                                ))),
+                        )
+                    })
+            });
+            // Weighed and placed as the session's own card does it, on one
+            // line: the refusals at the left, the approvals at the right
+            // with the narrowest one last. Where the card is too narrow for
+            // every label, options fold to icons.
+            let roles = permission_card::option_roles(&question.options);
+            let widths: Vec<f32> = question
+                .options
+                .iter()
+                .zip(&roles)
+                .map(|(label, role)| {
+                    let (weight, border) = match role {
+                        OptionRole::Primary => (gpui::FontWeight::MEDIUM, 0.0),
+                        OptionRole::Secondary => (gpui::FontWeight::NORMAL, 2.0),
+                        _ => (gpui::FontWeight::NORMAL, 0.0),
+                    };
+                    label_width(label, weight, theme, window) + 2.0 * BUTTON_PAD + border
+                })
+                .collect();
+            let folded = folded_options(&roles, &widths, room);
+            let (mut refusals, mut broader, mut primary) = (Vec::new(), Vec::new(), None);
+            for (ix, (label, role)) in question.options.iter().zip(roles).enumerate() {
+                let button_key = format!("{key}-option-{ix}");
+                let button = if folded[ix] {
+                    icon_option(&button_key, label, role, theme)
+                } else {
+                    match role {
+                        OptionRole::Primary => primary_button(&button_key, label, theme),
+                        OptionRole::Secondary => outline_button(&button_key, label, theme),
+                        OptionRole::Deny => quiet_button(&button_key, label, theme),
+                        OptionRole::Stop => quiet_button(&button_key, label, theme)
+                            .text_color(theme.danger.opacity(0.85)),
+                    }
+                };
+                let button = button.on_click(answer(label, cx)).into_any_element();
+                match role {
+                    OptionRole::Deny | OptionRole::Stop => refusals.push(button),
+                    OptionRole::Secondary => broader.push(button),
+                    OptionRole::Primary => primary = Some(button),
+                }
+            }
+            broader.reverse();
+            let buttons = card_actions()
+                .justify_start()
+                .children(refusals)
+                .child(div().flex_1())
+                .children(broader)
+                .children(primary);
+            let body = div()
+                .flex()
+                .flex_col()
+                .when(!rows.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .mt(px(8.0))
+                            .px(px(10.0))
+                            .py(px(8.0))
+                            .rounded(px(9.0))
+                            .bg(crate::kit::theme::ink(0.035))
+                            .flex()
+                            .flex_col()
+                            .gap(px(5.0))
+                            .children(rows),
+                    )
+                })
+                .when(!sentences.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .mt(px(8.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .children(sentences),
+                    )
+                })
+                .children(block)
+                .child(buttons);
+            return NeedContent {
+                title: request.question,
+                body,
+            };
         }
-        Some((head, body))
+        let (headline, context) = crate::composer::split_question_context(&prompt);
+        let context = context.map(|context| card_copy(context, theme));
+        let simple = single && !question.multi_select && !question.options.is_empty();
+        let body = if simple {
+            // One question with answers to pick: each is a button.
+            let options: Vec<AnyElement> = question
+                .options
+                .iter()
+                .enumerate()
+                .map(|(ix, label)| {
+                    outline_button(&format!("{key}-option-{ix}"), label, theme)
+                        .on_click(answer(label, cx))
+                        .into_any_element()
+                })
+                .collect();
+            div()
+                .flex()
+                .flex_col()
+                .children(context)
+                .child(card_actions().justify_start().children(options))
+        } else {
+            // Several questions, several answers or one to type: the
+            // session's own question card takes them.
+            let open = chat_id.to_string();
+            div()
+                .flex()
+                .flex_col()
+                .children(context)
+                .child(card_note(
+                    if single {
+                        "This one takes more than a pick."
+                    } else {
+                        "It asks several things at once."
+                    },
+                    theme,
+                ))
+                .child(
+                    card_actions().child(
+                        primary_button(&format!("{key}-open"), "Answer in the session", theme)
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.open_chat(open.clone(), cx)),
+                            ),
+                    ),
+                )
+        };
+        NeedContent {
+            title: headline,
+            body,
+        }
     }
 
     /// Answer a worker's question with one option, the way its question
@@ -634,19 +1202,21 @@ impl Shell {
         .detach();
     }
 
-    /// A peer's question and the answer the bot drafted, editable, then
-    /// Send / Decline.
-    /// One question between workspaces: who asked whom, the question and
-    /// its answer, and how it ended; while its answer waits on the owner,
-    /// the draft to edit and Send / Decline.
-    pub(super) fn render_question_panel(
+    /// An answer the workspace drafted for a connected workspace's
+    /// question, waiting for the owner: Decline and Send at the very top,
+    /// who asks, the question as a quote, and the draft to edit. Once it is
+    /// decided (here or on another device) the question lives on its
+    /// connection's page, which this then shows.
+    pub(super) fn render_review_panel(
         &mut self,
+        bot: &Bot,
         exchange_id: &str,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         let now = Utc::now();
-        let (exchange, peer, person) = {
+        let (exchange, peer) = {
             let state = self.state.read(cx);
             let exchange = state
                 .bot_records
@@ -654,32 +1224,24 @@ impl Shell {
                 .iter()
                 .find(|e| e.id == exchange_id)?
                 .clone();
-            let person = state
+            let peer = state
                 .bot_records
                 .connections
                 .iter()
                 .find(|c| c.id == exchange.connection_id)
                 .map(|c| c.peer.clone());
-            let label = person.as_ref().map_or_else(
-                || "A connected workspace".to_string(),
-                |p| {
-                    if p.owner_name.is_empty() {
-                        p.name.clone()
-                    } else {
-                        format!("{} ({})", p.name, p.owner_name)
-                    }
-                },
-            );
-            (exchange, label, person)
+            (exchange, peer)
         };
-        let awaiting = exchange.awaiting_review();
-        let incoming = exchange.direction == ExchangeDirection::Incoming;
-        if awaiting
-            && self
-                .board
-                .review
-                .as_ref()
-                .is_none_or(|(id, _)| id != exchange_id)
+        if !exchange.awaiting_review() {
+            self.board.review = None;
+            self.board.network.opened.insert(exchange.id.clone());
+            return self.render_connection(bot, &exchange.connection_id, theme, window, cx);
+        }
+        if self
+            .board
+            .review
+            .as_ref()
+            .is_none_or(|(id, _)| id != exchange_id)
         {
             let draft = exchange.answer.clone().unwrap_or_default();
             let input = cx.new(|cx| {
@@ -689,198 +1251,161 @@ impl Shell {
             });
             self.board.review = Some((exchange_id.to_string(), input));
         }
-        let head = PanelHead {
-            glyph: if awaiting {
-                icons::USERS
-            } else {
-                icons::CHAT_ROUND_LINE
-            },
-            tint: awaiting.then_some(theme.warning),
-            title: if awaiting {
-                "Review answer"
-            } else {
-                "Question"
-            }
-            .into(),
-        };
-        // The Network card opens a waiting review straight away; this is
-        // the way on to the connections.
-        self.set_panel_back(
-            "bot-review-back",
-            "Back to Connections",
-            PanelItem::Network,
-            cx,
+        let input = self.board.review.as_ref().map(|(_, input)| input.clone())?;
+        let (who, theirs) = peer.as_ref().map_or_else(
+            || ("A connected workspace".to_string(), None),
+            super::network::peer_names,
         );
-        let mut body = div()
+        let head = PanelHead {
+            glyph: super::items::REVIEW_GLYPH,
+            tint: Some(theme.warning),
+            title: who.clone(),
+        };
+
+        // ── the bar: it waits on the owner; the two ways to decide ──
+        let status = super::items::header_status(
+            format!("bot-review-status-{exchange_id}"),
+            icon(super::items::REVIEW_GLYPH)
+                .size(px(13.0))
+                .text_color(theme.warning)
+                .into_any_element(),
+            "Answer to review",
+            theme.warning,
+        );
+        let (send_input, id_send, id_decline) =
+            (input.clone(), exchange.id.clone(), exchange.id.clone());
+        let original = exchange.answer.clone().unwrap_or_default();
+        let (after_send, after_decline) = (
+            PanelItem::Connection(exchange.connection_id.clone()),
+            PanelItem::Connection(exchange.connection_id.clone()),
+        );
+        let controls = vec![
+            popover::btn_ghost(theme, "Decline", "bot-review-decline")
+                .id("bot-review-decline")
+                .flex_none()
+                .px(px(10.0))
+                .py(px(4.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.mutate(
+                        serde_json::json!({
+                            "op": "reviewBotExchange",
+                            "exchangeId": id_decline,
+                            "send": false,
+                        }),
+                        cx,
+                    );
+                    this.board.network.opened.insert(id_decline.clone());
+                    this.show_panel(after_decline.clone(), cx);
+                }))
+                .into_any_element(),
+            popover::btn_primary(theme, "Send")
+                .id("bot-review-send")
+                .flex_none()
+                .py(px(4.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let text = send_input.read(cx).text().trim().to_string();
+                    let edited = (text != original.trim()).then_some(text);
+                    this.mutate(
+                        serde_json::json!({
+                            "op": "reviewBotExchange",
+                            "exchangeId": id_send,
+                            "send": true,
+                            "text": edited,
+                        }),
+                        cx,
+                    );
+                    this.board.network.opened.insert(id_send.clone());
+                    this.show_panel(after_send.clone(), cx);
+                }))
+                .into_any_element(),
+        ];
+        let asked = match ago(exchange.asked_at, now).as_str() {
+            "now" => "asked just now".to_string(),
+            span => format!("asked {span} ago"),
+        };
+        let line = match theirs {
+            Some(theirs) => format!("{theirs} · {asked}"),
+            None => asked,
+        };
+        self.board.panel_header = Some(super::items::item_header(
+            status,
+            controls,
+            div()
+                .mt(px(8.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .children(
+                    peer.as_ref()
+                        .map(|peer| super::network::peer_avatar(peer, 20.0, theme)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(16.0))
+                        .line_height(px(22.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(SharedString::from(who)),
+                ),
+            Some(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(line))
+                    .into_any_element(),
+            ),
+            theme,
+        ));
+
+        // ── what they asked, as a quote; then the draft, to edit ──
+        let body = div()
             .p(px(8.0))
+            .pb(px(14.0))
             .flex()
             .flex_col()
-            .child(parts::fact(
-                theme,
-                if incoming { "From" } else { "To" },
+            .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .children(
-                        person
-                            .as_ref()
-                            .map(|p| super::network::peer_avatar(p, 16.0, theme)),
-                    )
-                    .child(SharedString::from(format!(
-                        "{peer} · {}",
-                        ago(exchange.asked_at, now)
-                    ))),
-            ))
-            .child(parts::fact(
-                theme,
-                "Question",
-                text_value(&exchange.question),
-            ));
-        let input = self
-            .board
-            .review
-            .as_ref()
-            .filter(|(id, _)| awaiting && id == exchange_id)
-            .map(|(_, input)| input.clone());
-        match input {
-            Some(input) => {
-                let (send_input, id_send, id_decline) =
-                    (input.clone(), exchange.id.clone(), exchange.id.clone());
-                let original = exchange.answer.clone().unwrap_or_default();
-                body =
-                    body.child(parts::field_label(theme, "Answer"))
-                        .child(div().mx(px(8.0)).child(
-                            popover::dialog_field(input.into_any_element()).text_size(px(13.0)),
-                        ));
-                self.set_panel_footer(
-                    decision_bar(Some("Edit it before it goes, or decline."), theme)
-                        .child(
-                            popover::btn_ghost(theme, "Decline", "bot-review-decline")
-                                .id("bot-review-decline")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.mutate(
-                                        serde_json::json!({
-                                            "op": "reviewBotExchange",
-                                            "exchangeId": id_decline,
-                                            "send": false,
-                                        }),
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(theme, "Send")
-                                .id("bot-review-send")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let text = send_input.read(cx).text().trim().to_string();
-                                    let edited = (text != original.trim()).then_some(text);
-                                    this.mutate(
-                                        serde_json::json!({
-                                            "op": "reviewBotExchange",
-                                            "exchangeId": id_send,
-                                            "send": true,
-                                            "text": edited,
-                                        }),
-                                        cx,
-                                    )
-                                })),
-                        ),
-                );
-            }
-            None => {
-                let sent = exchange.review.as_ref().map(|r| (r.send, r.text.clone()));
-                let shown = sent
-                    .as_ref()
-                    .and_then(|(_, text)| text.clone())
-                    .or_else(|| exchange.answer.clone());
-                if let Some(answer) = shown.filter(|a| !a.trim().is_empty()) {
-                    body = body.child(parts::fact(theme, "Answer", text_value(&answer)));
-                }
-                let (text, ok) = if incoming {
-                    match (exchange.state, sent) {
-                        (ExchangeState::Answered, _) => ("Sent", true),
-                        (_, Some((true, _))) => ("Sending your answer", true),
-                        (ExchangeState::Declined, _) | (_, Some((false, _))) => ("Declined", false),
-                        (ExchangeState::Expired, _) => ("Expired", false),
-                        _ => ("Working on its answer", false),
-                    }
-                } else {
-                    match exchange.state {
-                        ExchangeState::Answered => ("Answered", true),
-                        ExchangeState::Declined => ("They declined to answer", false),
-                        ExchangeState::Expired => ("No answer came; it expired", false),
-                        _ => ("Waiting for their answer", false),
-                    }
-                };
-                body = body.child(parts::fact(theme, "Status", outcome_value(text, ok, theme)));
-            }
-        }
+                    .mx(px(8.0))
+                    .mt(px(6.0))
+                    .mb(px(12.0))
+                    .pl(px(10.0))
+                    .border_l_2()
+                    .border_color(crate::kit::theme::hairline(0.2))
+                    .child(super::items::panel_markdown(
+                        &exchange.question,
+                        format!("bot-review-question-{exchange_id}"),
+                        12.5,
+                        theme.text_muted,
+                        theme,
+                        window,
+                    )),
+            )
+            .child(
+                div()
+                    .mx(px(8.0))
+                    .child(popover::dialog_field(input.into_any_element()).text_size(px(13.0))),
+            );
         Some((head, body))
     }
 }
 
-/// The last `n` messages of a session with text, oldest first, as (sent by
-/// the bot, text): one paragraph each, clipped.
-fn recent_messages(entries: &[cypher_doc::SessionMessageEntry], n: usize) -> Vec<(bool, String)> {
-    let mut out: Vec<(bool, String)> = entries
-        .iter()
-        .rev()
-        .filter_map(|entry| {
-            let user = match entry.role {
-                cypher_doc::MessageRole::User => true,
-                cypher_doc::MessageRole::Assistant => false,
-                _ => return None,
-            };
-            let text: String = entry
-                .parts
-                .iter()
-                .filter_map(|part| match part {
-                    cypher_doc::MessagePart::Text { text, .. } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            let text = plain_preview(&text);
-            (!text.is_empty()).then(|| (user, cypher_proto::clip(&text, 280)))
-        })
-        .take(n)
-        .collect();
-    out.reverse();
-    out
+/// What a card draws under its head: its title (a session's question; the
+/// other kinds are titled by their item) and its body with the buttons.
+struct NeedContent {
+    title: String,
+    body: gpui::Div,
 }
 
-/// Markdown read as one plain line for a preview: headings, list and quote
-/// markers, emphasis and code ticks dropped, fenced code left out.
-fn plain_preview(text: &str) -> String {
-    let mut fenced = false;
-    let mut words: Vec<&str> = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with("```") {
-            fenced = !fenced;
-            continue;
+impl NeedContent {
+    fn of(body: gpui::Div) -> Self {
+        Self {
+            title: String::new(),
+            body,
         }
-        if fenced {
-            continue;
-        }
-        let line = line.trim_start_matches(['#', '>']).trim_start();
-        let line = line
-            .strip_prefix("- ")
-            .or_else(|| line.strip_prefix("* "))
-            .or_else(|| {
-                let (number, rest) = line.split_once(". ")?;
-                number.chars().all(|c| c.is_ascii_digit()).then_some(rest)
-            })
-            .unwrap_or(line);
-        words.extend(line.split_whitespace());
     }
-    words
-        .join(" ")
-        .replace("**", "")
-        .replace("__", "")
-        .replace('`', "")
 }
 
 #[cfg(test)]
@@ -888,39 +1413,117 @@ mod tests {
     use super::*;
 
     #[test]
-    fn previews_read_markdown_as_plain_text() {
+    fn options_fold_to_icons_only_as_far_as_the_line_needs() {
+        use OptionRole::{Deny, Primary, Secondary, Stop};
+        // As the extension lists them: the narrowest approval first.
+        let roles = [Primary, Secondary, Secondary, Deny, Stop];
+        let widths = [82.0, 143.0, 106.0, 55.0, 112.0];
+        let fold = |room: f32| folded_options(&roles, &widths, room);
+        // 498 of buttons and five gaps.
+        assert_eq!(fold(528.0), [false; 5]);
+        // The refusals go first, together.
+        assert_eq!(fold(527.0), [false, false, false, true, true]);
+        assert_eq!(fold(417.0), [false, false, false, true, true]);
+        // Then the broadest approval, then the next one.
+        assert_eq!(fold(416.0), [false, false, true, true, true]);
+        assert_eq!(fold(339.0), [false, false, true, true, true]);
+        assert_eq!(fold(338.0), [false, true, true, true, true]);
+        // The narrowest approval keeps its label however little room.
+        assert_eq!(fold(0.0), [false, true, true, true, true]);
+        // An ordinary pair fits anywhere.
         assert_eq!(
-            plain_preview(
-                "## Streaming pipeline\n\n1. **Doc command** queues a `run` entry\n- Fold\n```rust\nlet x = 1;\n```\nDone."
-            ),
-            "Streaming pipeline Doc command queues a run entry Fold Done."
+            folded_options(&[Primary, Deny], &[90.0, 55.0], 288.0),
+            [false; 2]
         );
+    }
+    use crate::test_fixtures;
+
+    fn bot() -> Bot {
+        Bot {
+            id: "b".into(),
+            name: "Atlas".into(),
+            chat_id: "bot-chat".into(),
+            ..test_fixtures::bot()
+        }
     }
 
     #[test]
-    fn recent_messages_keep_the_text_of_the_last_few() {
-        let entry = |id: &str, role, text: &str| cypher_doc::SessionMessageEntry {
-            id: id.into(),
-            role,
-            parts: vec![cypher_doc::MessagePart::Text {
-                id: "t".into(),
-                text: text.into(),
-                agent_text: None,
-            }],
-            ..crate::test_fixtures::entry()
+    fn a_question_reads_from_its_text_else_its_header() {
+        let mut question = UserInputQuestion {
+            id: "q".into(),
+            header: "Table".into(),
+            question: "Migrate invoices or credits?".into(),
+            options: vec![],
+            multi_select: false,
+            permission: None,
+            asked_by: None,
         };
-        let entries = vec![
-            entry("1", cypher_doc::MessageRole::User, "first"),
-            entry("2", cypher_doc::MessageRole::Assistant, "  second\n\nline "),
-            entry("3", cypher_doc::MessageRole::Assistant, ""),
-            entry("4", cypher_doc::MessageRole::User, "third"),
+        assert_eq!(question_text(&question), "Migrate invoices or credits?");
+        question.question = "  ".into();
+        assert_eq!(question_text(&question), "Table");
+    }
+
+    #[test]
+    fn items_name_where_they_come_from() {
+        let mut state = crate::state::AppState::new();
+        let bot = bot();
+        state.spaces = vec![cypher_proto::Space {
+            id: "sp".into(),
+            name: Some("web-api".into()),
+            ..test_fixtures::space()
+        }];
+        let mut worker = cypher_proto::Chat {
+            id: "s1".into(),
+            title: Some("Migrate tables".into()),
+            space_id: Some("sp".into()),
+            ..test_fixtures::chat()
+        };
+        worker.started_by = Some(cypher_proto::ChatStartedBy {
+            bot_id: "b".into(),
+            work_id: Some("w".into()),
+        });
+        let mut routine_thread = cypher_proto::Chat {
+            id: "t1".into(),
+            title: Some("Morning brief".into()),
+            ..test_fixtures::chat()
+        };
+        routine_thread.bot = Some(cypher_proto::BotChat::thread(
+            "b",
+            cypher_proto::BotOrigin::Routine,
+            cypher_proto::BotThread::Routine {
+                routine_id: "r".into(),
+            },
+        ));
+        state.chats = vec![worker, routine_thread];
+        let mut work = test_fixtures::bot_work("w", "b");
+        work.title = "Fix invoice rounding".into();
+        work.steps[0].sessions = vec!["s1".into()];
+        let mut routine = test_fixtures::bot_routine("r", "b");
+        routine.name = "Morning brief".into();
+        state.bot_records.work = vec![work];
+        state.bot_records.routines = vec![routine];
+        let needs = vec![
+            Need::Record(NeedsYou::Asking {
+                chat_id: "s1".into(),
+                work_id: Some("w".into()),
+            }),
+            Need::Record(NeedsYou::Asking {
+                chat_id: "t1".into(),
+                work_id: None,
+            }),
+            Need::Record(NeedsYou::Plan("w".into())),
         ];
+        let items = need_items(&state, &bot, needs);
+        let sources: Vec<&str> = items.iter().map(|i| i.source.as_str()).collect();
         assert_eq!(
-            recent_messages(&entries, 2),
-            vec![
-                (false, "second line".to_string()),
-                (true, "third".to_string())
+            sources,
+            [
+                "Fix invoice rounding › Migrate tables",
+                "Morning brief · routine",
+                "Plan to approve",
             ]
         );
+        let keys: Vec<&str> = items.iter().map(|i| i.key.as_str()).collect();
+        assert_eq!(keys, ["ask-s1", "ask-t1", "plan-w"]);
     }
 }

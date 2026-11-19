@@ -379,11 +379,6 @@ pub struct Transcript {
     rewind_armed: Option<(String, String)>,
     /// Disarms [`Self::rewind_armed`] after the window elapses.
     rewind_disarm: Option<Task<()>>,
-    /// The plan whose Stop is armed on its card (work id): a second click
-    /// stops it ([`bot_plan`]).
-    bot_plan_armed: Option<String>,
-    /// Disarms [`Self::bot_plan_armed`] after the window elapses.
-    bot_plan_disarm: Option<Task<()>>,
     /// The memory cards' calls ([`memory_card`]), as rows were built, and
     /// the held writes answered from them (on their way, or failed with
     /// what to say), by held write id.
@@ -616,8 +611,6 @@ impl Transcript {
             rewind_pending: std::collections::HashSet::new(),
             rewind_armed: None,
             rewind_disarm: None,
-            bot_plan_armed: None,
-            bot_plan_disarm: None,
             memory_cards: Default::default(),
             memory_busy: Default::default(),
             memory_errors: HashMap::new(),

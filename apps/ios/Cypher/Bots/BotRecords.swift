@@ -373,28 +373,48 @@ extension RunRecord: Codable {
 }
 
 /// Who posted a message into a workspace chat outside any turn (the doc's
-/// `post` message part, tag `kind`): a routine's output.
+/// `post` message part, tag `kind`): a routine's output, or how a plan
+/// ended (bot_records.rs `BotPost`).
 enum BotPost: Hashable, Sendable {
     case routine(routineId: String, name: String, outcome: RunOutcome, runAt: Int64, threadChatId: String?)
+    /// A plan's end: `outcome` is done, failed or stopped; the post's text
+    /// is its result.
+    case work(workId: String, title: String, outcome: WorkState, startedAt: Int64?, endedAt: Int64)
     /// A source from a newer engine: shown as plain text.
     case unknown
+
+    /// The id prefix of the turn a host starts in a workspace chat to tell
+    /// its agent that a job ended (bot_records.rs `BOT_EVENT_PREFIX`): the
+    /// post before it is what the owner sees, so its own message draws
+    /// nothing.
+    static let eventPrefix = "bot-event-"
 }
 
 extension BotPost: Codable {
-    private enum CodingKeys: String, CodingKey { case kind, routineId, name, outcome, runAt, threadChatId }
+    private enum CodingKeys: String, CodingKey {
+        case kind, routineId, name, outcome, runAt, threadChatId, workId, title, startedAt, endedAt
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        guard try c.decode(String.self, forKey: .kind) == "routine" else {
+        switch try c.decode(String.self, forKey: .kind) {
+        case "routine":
+            self = .routine(
+                routineId: try c.decode(String.self, forKey: .routineId),
+                name: try c.decode(String.self, forKey: .name),
+                outcome: try c.decode(RunOutcome.self, forKey: .outcome),
+                runAt: try c.decode(Int64.self, forKey: .runAt),
+                threadChatId: try c.decodeIfPresent(String.self, forKey: .threadChatId))
+        case "work":
+            self = .work(
+                workId: try c.decode(String.self, forKey: .workId),
+                title: try c.decode(String.self, forKey: .title),
+                outcome: try c.decode(WorkState.self, forKey: .outcome),
+                startedAt: try c.decodeIfPresent(Int64.self, forKey: .startedAt),
+                endedAt: try c.decode(Int64.self, forKey: .endedAt))
+        default:
             self = .unknown
-            return
         }
-        self = .routine(
-            routineId: try c.decode(String.self, forKey: .routineId),
-            name: try c.decode(String.self, forKey: .name),
-            outcome: try c.decode(RunOutcome.self, forKey: .outcome),
-            runAt: try c.decode(Int64.self, forKey: .runAt),
-            threadChatId: try c.decodeIfPresent(String.self, forKey: .threadChatId))
     }
 
     func encode(to encoder: Encoder) throws {
@@ -407,6 +427,13 @@ extension BotPost: Codable {
             try c.encode(outcome, forKey: .outcome)
             try c.encode(runAt, forKey: .runAt)
             try c.encodeIfPresent(threadChatId, forKey: .threadChatId)
+        case .work(let workId, let title, let outcome, let startedAt, let endedAt):
+            try c.encode("work", forKey: .kind)
+            try c.encode(workId, forKey: .workId)
+            try c.encode(title, forKey: .title)
+            try c.encode(outcome, forKey: .outcome)
+            try c.encodeIfPresent(startedAt, forKey: .startedAt)
+            try c.encode(endedAt, forKey: .endedAt)
         case .unknown:
             try c.encode("unknown", forKey: .kind)
         }

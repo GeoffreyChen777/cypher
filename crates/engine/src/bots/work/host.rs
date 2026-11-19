@@ -34,6 +34,7 @@ use super::coordinate::{commands_of, last_answer, last_error};
 use super::{text, workspace_roots};
 use crate::EngineError;
 use crate::bots::Bots;
+use crate::bots::notice::{Notice, Wake};
 use crate::host::workspace_host::Fields;
 use crate::util::new_id;
 
@@ -46,6 +47,9 @@ const KEEP_APPROVALS: usize = 100;
 /// A pending approval with no waiter left (its call timed out or the run
 /// died) expires this long after its wait ran out.
 const APPROVAL_GRACE: Duration = Duration::from_secs(60);
+/// A plan's result is announced in its chat only this long after it ended
+/// (a host that was off for longer drops it; the plan's page still has it).
+const NOTICE_WITHIN_MS: i64 = 24 * 3_600_000;
 
 pub(super) async fn run(bots: Bots, cancel: CancellationToken) {
     let ws = bots.inner.workspace.clone();
@@ -204,6 +208,8 @@ impl Bots {
                 if let Err(err) = step {
                     tracing::warn!(work = %w.id, error = %err, "bot work item pass failed");
                 }
+                self.mark_sessions(bot, w);
+                self.post_work_notice(bot, w, p::now_ms());
             }
             // Approved plans start oldest decision first, while the bot may
             // start work and a slot is free.
@@ -250,6 +256,87 @@ impl Bots {
         }
         self.expire_approvals(false);
         Ok(())
+    }
+
+    /// Stamp the sessions `work` started as its workspace's
+    /// ([`Chat::started_by`]): the Sessions view leaves them out and the
+    /// workspace lists them. `start_session` stamps a new one; this covers
+    /// the ones started before the field existed, once each.
+    fn mark_sessions(&self, bot: &Bot, work: &BotWork) {
+        let ws = &self.inner.workspace;
+        for id in work.session_ids() {
+            if crate::util::lock(&self.inner.work.marked).contains(id) {
+                continue;
+            }
+            match ws.chat(id) {
+                Ok(Some(chat)) if chat.started_by.is_none() && chat.bot.is_none() => {
+                    let by = p::ChatStartedBy {
+                        bot_id: bot.id.clone(),
+                        work_id: Some(work.id.clone()),
+                    };
+                    if let Err(err) = ws.set_chat_started_by(id, &by) {
+                        tracing::warn!(session = %id, error = %err, "could not mark a session");
+                        continue;
+                    }
+                }
+                Ok(Some(_)) => {}
+                // Its row may still be on its way (another device's), or it
+                // was deleted: look again next pass, it costs one lookup.
+                _ => continue,
+            }
+            crate::util::lock(&self.inner.work.marked).insert(id.to_string());
+        }
+    }
+
+    /// Tell the workspace's chat a plan ended, once ([`crate::bots::notice`]):
+    /// its result as a post, and the agent's short turn about it. A plan
+    /// the owner stopped gets the post alone: they know.
+    fn post_work_notice(&self, bot: &Bot, work: &BotWork, now_ms: i64) {
+        let Some(ended) = work.ended_at else {
+            return;
+        };
+        if !work.notify
+            || !matches!(
+                work.state,
+                WorkState::Done | WorkState::Failed | WorkState::Stopped
+            )
+            || now_ms - ended > NOTICE_WITHIN_MS
+        {
+            return;
+        }
+        let entry_id = p::work_post_id(&work.id);
+        if self.notice_posted(&entry_id) {
+            return;
+        }
+        let (word, fallback) = match work.state {
+            WorkState::Done => ("finished", "The plan finished."),
+            WorkState::Failed => ("failed", "The plan failed."),
+            _ => ("was stopped", "The plan was stopped."),
+        };
+        let text = work
+            .result
+            .clone()
+            .filter(|r| !r.trim().is_empty())
+            .unwrap_or_else(|| fallback.to_string());
+        let owner_stopped = work.state == WorkState::Stopped && work.stop_requested_at.is_some();
+        let notice = Notice {
+            preview: format!("{}: {text}", work.title),
+            from: p::BotPost::Work {
+                work_id: work.id.clone(),
+                title: work.title.clone(),
+                outcome: work.state,
+                started_at: work.started_at,
+                ended_at: ended,
+            },
+            text,
+            wake: (!owner_stopped).then(|| Wake {
+                headline: format!("Plan \"{}\" {word}", work.title),
+                what: "the plan you proposed just ended",
+                author: cypher_doc::command_author::PLAN,
+            }),
+            entry_id,
+        };
+        self.post_notice(bot, notice, now_ms);
     }
 
     /// Expire this device's bots' pending approvals: all of them at start
@@ -374,6 +461,7 @@ impl Bots {
             room_gen: Some(2),
             child: None,
             memory: None,
+            started_by: None,
             bot: Some(BotChat::thread(
                 &bot.id,
                 BotOrigin::Owner,
@@ -674,6 +762,7 @@ mod tests {
             result: None,
             decision: None,
             stop_requested_at: None,
+            notify: false,
         }
     }
 

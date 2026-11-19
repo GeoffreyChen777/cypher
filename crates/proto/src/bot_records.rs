@@ -196,6 +196,11 @@ pub struct BotWork {
     /// Owner-written: stop the orchestration and its sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_requested_at: Option<i64>,
+    /// Host-written when the orchestration ends: its workspace's chat is
+    /// owed a result notice (the card, and the agent's short turn). A row
+    /// that ended under an engine without notices lacks it and gets none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notify: bool,
 }
 
 impl BotWork {
@@ -641,9 +646,33 @@ pub enum BotPost {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thread_chat_id: Option<String>,
     },
+    /// A plan's end (§6.6): how it ended, with the result as the post's
+    /// text. The plan's own page holds the rest while its record is kept.
+    #[serde(rename_all = "camelCase")]
+    Work {
+        work_id: String,
+        /// The plan's title when it ended.
+        title: String,
+        /// `Done`, `Failed` or `Stopped`.
+        outcome: WorkState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<i64>,
+        ended_at: i64,
+    },
     /// A source from a newer engine: shown as plain text.
     #[serde(other)]
     Unknown,
+}
+
+/// The id prefix of the turn a host starts in a workspace chat to tell its
+/// agent that a background job ended (`bot-event-<post entry id>`). The
+/// post before it is what the owner sees; apps draw nothing for the turn's
+/// own message.
+pub const BOT_EVENT_PREFIX: &str = "bot-event-";
+
+/// The workspace-chat entry id of a plan's result post: one per plan.
+pub fn work_post_id(work_id: &str) -> String {
+    format!("work-{work_id}-ended")
 }
 
 /// Where a routine runs and what it can reach.
@@ -1401,6 +1430,7 @@ mod tests {
             result: Some("r".repeat(9_000)),
             decision: None,
             stop_requested_at: None,
+            notify: false,
         };
         work.clamp();
         let units = serde_json::to_string(&work).unwrap().encode_utf16().count();
@@ -1462,6 +1492,7 @@ mod tests {
             result: None,
             decision: None,
             stop_requested_at: None,
+            notify: false,
         };
         let before = work.clone();
         work.clamp();
@@ -1503,6 +1534,7 @@ mod tests {
             result: None,
             decision: None,
             stop_requested_at: None,
+            notify: false,
         };
         let states = |w: &BotWork| w.steps.iter().map(|s| s.state).collect::<Vec<_>>();
         use StepState::{Asking, Done, Failed, Pending, Running, Skipped};
@@ -1562,6 +1594,7 @@ mod tests {
             result: None,
             decision: None,
             stop_requested_at: None,
+            notify: false,
         };
         records.work = vec![
             work("plan", WorkState::Proposed, vec![]),

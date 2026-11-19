@@ -205,9 +205,46 @@ pub struct Chat {
     /// hidden everywhere, run with only the memory tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<crate::MemoryChat>,
+    /// The workspace that started this session for one of its plans
+    /// (docs/design/agent-bots.md §6.3). It stays an ordinary coding
+    /// session in its project, but belongs to that workspace: the Sessions
+    /// view leaves it out and the workspace lists it under its project.
+    /// Written once by the workspace's host; a row without it predates the
+    /// field or is the owner's own session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<ChatStartedBy>,
+}
+
+/// Who started a session when a workspace did ([`Chat::started_by`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatStartedBy {
+    pub bot_id: String,
+    /// The plan it was started for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_id: Option<String>,
 }
 
 impl Chat {
+    /// True for a session a workspace started: listed in that workspace,
+    /// not in the Sessions view.
+    pub fn is_workspace_session(&self) -> bool {
+        self.started_by.is_some()
+    }
+
+    /// The workspace a chat belongs to and is shown in, when it is one of a
+    /// workspace's sessions in a project: a session one of its plans
+    /// started, or a project routine's session.
+    pub fn workspace_session_of(&self) -> Option<&str> {
+        if let Some(by) = &self.started_by {
+            return Some(&by.bot_id);
+        }
+        self.bot
+            .as_ref()
+            .filter(|marker| matches!(marker.thread, crate::BotThread::RoutineSession { .. }))
+            .map(|marker| marker.bot_id.as_str())
+    }
+
     /// True for a bot's own conversation (see [`crate::BotChat`]).
     pub fn is_bot(&self) -> bool {
         self.bot.is_some()
@@ -235,11 +272,14 @@ impl Chat {
     /// chats, child subagent chats, memory passes and every hidden bot
     /// thread (work, routine, peer and routine-session threads) are not —
     /// they must neither chime nor count on the Dock badge, since nothing
-    /// in the main UI would show why.
+    /// in the main UI would show why. A session a workspace started is not
+    /// either: its workspace reports on it, and only its questions reach
+    /// the owner directly ([`Self::is_workspace_session`]).
     pub fn is_user_facing(&self) -> bool {
         !self.archived
             && !self.is_child()
             && !self.is_memory_pass()
+            && !self.is_workspace_session()
             && self
                 .bot
                 .as_ref()

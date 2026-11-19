@@ -118,13 +118,22 @@ struct ThreadOrigin: Equatable {
     var memory: MemoryScope?
 
     /// The origin of a hidden chat; nil for the workspace chat itself and
-    /// every ordinary session.
+    /// every session of the owner's own.
     @MainActor static func of(_ chat: Chat, in data: any WorkspaceData) -> ThreadOrigin? {
         if let pass = chat.memory {
             let botId: String? = if case .workspace(let id) = pass.scope { id } else { nil }
             return ThreadOrigin(
                 symbol: "book.closed", text: "Memory · \(memoryWords(pass.scope, data))",
                 botId: botId, page: botId != nil ? .memory(pass.scope) : nil, memory: pass.scope)
+        }
+        // A session one of the workspace's plans started: its plan.
+        if let startedBy = chat.startedBy {
+            let work = startedBy.workId.flatMap { data.work(id: $0) }
+            let name = data.bot(id: startedBy.botId)?.name
+            return ThreadOrigin(
+                symbol: "checklist",
+                text: work.map { "Plan · \(oneLine($0.title))" } ?? name.map { "Workspace · \($0)" } ?? "Workspace",
+                botId: startedBy.botId, page: work.map { .workItem($0.id) } ?? .overview)
         }
         guard let marker = chat.bot else { return nil }
         let bot = data.bot(id: marker.botId)

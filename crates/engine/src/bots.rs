@@ -39,6 +39,7 @@ mod history;
 mod index;
 mod memory;
 mod network;
+mod notice;
 pub mod profile;
 mod prompt;
 mod shortcuts;
@@ -103,6 +104,8 @@ struct Inner {
     hosts: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// The scheduler's in-memory state (routines and recurring tasks).
     schedule: memory::ScheduleState,
+    /// Result notices already in their chats.
+    notices: notice::NoticeState,
 }
 
 struct Indexer {
@@ -128,6 +131,7 @@ impl Bots {
                 hosts_cancel: Default::default(),
                 hosts: Default::default(),
                 schedule: Default::default(),
+                notices: Default::default(),
             }),
         }
     }
@@ -262,6 +266,7 @@ impl Bots {
             child: None,
             bot: Some(BotChat::owner(&bot.id)),
             memory: None,
+            started_by: None,
         };
         self.inner.workspace.create_bot(&bot, &chat)?;
         tracing::info!(bot = %bot.id, chat = %bot.chat_id, "bot created");

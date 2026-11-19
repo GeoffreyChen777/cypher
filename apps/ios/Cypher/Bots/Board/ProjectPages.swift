@@ -64,7 +64,7 @@ struct ProjectRow: View {
                     }
                     if load.running > 0 {
                         HStack(spacing: 5) {
-                            MiniSpinner(cellSize: 1.8).foregroundStyle(Theme.statusWorking)
+                            ProgressRing(state: .running, size: 12)
                             Text("\(load.running) running")
                         }
                         .foregroundStyle(Theme.text)
@@ -129,8 +129,30 @@ struct BotProjectPage: View {
         }
     }
 
+    /// Session rows that open their session.
+    private func sessionRows(_ sessions: [Chat]) -> some View {
+        let slot = ChatRow.needsStatusSlot(sessions, in: model)
+        return ForEach(sessions) { chat in
+            Button {
+                openChat(chat.id)
+            } label: {
+                HStack(spacing: 8) {
+                    ChatRow(chat: chat, showLocation: false, statusSlot: slot)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.textFaint)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("project-session-\(chat.id)")
+        }
+    }
+
     private func page(_ bot: Bot, space: Space) -> some View {
-        let sessions = ProjectLoads.sessions(bot.scope, chats: model.allChats, spaceId: space.id)
+        // The workspace's own sessions here, then the owner's it reads.
+        let sessions = ProjectLoads.workspaceSessions(botId: bot.id, chats: model.allChats, spaceId: space.id)
+        let read = ProjectLoads.sessions(bot.scope, chats: model.allChats, spaceId: space.id)
         let work = ProjectLoads.work(model.data?.work(of: bot.id) ?? [], spaceId: space.id)
         let routines = ProjectLoads.routines(model.data?.routinesInOrder(of: bot.id) ?? [], spaceId: space.id)
         return BotPageList(title: "Project") {
@@ -166,30 +188,24 @@ struct BotProjectPage: View {
 
             Section {
                 if sessions.isEmpty {
-                    Text("No sessions here yet.")
+                    Text("No sessions of this workspace here yet.")
                         .font(Theme.sans(15, relativeTo: .body))
                         .foregroundStyle(Theme.textMuted)
                 }
-                let slot = ChatRow.needsStatusSlot(sessions, in: model)
-                ForEach(sessions) { chat in
-                    Button {
-                        openChat(chat.id)
-                    } label: {
-                        HStack(spacing: 8) {
-                            ChatRow(chat: chat, showLocation: false, statusSlot: slot)
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(Theme.textFaint)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("project-session-\(chat.id)")
-                }
+                sessionRows(sessions)
             } header: {
                 ListSectionHeader(title: "Sessions")
             }
             .groupedRowStyle()
+
+            if !read.isEmpty {
+                Section {
+                    sessionRows(read)
+                } header: {
+                    ListSectionHeader(title: "Your sessions it reads")
+                }
+                .groupedRowStyle()
+            }
 
             if !work.isEmpty {
                 Section {

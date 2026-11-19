@@ -10,6 +10,9 @@ extension EnvironmentValues {
     /// thread opens read-only). The board's pages use it too: from a sheet
     /// it closes the sheet first. nil where nothing can be opened.
     @Entry var openBotChat: ((String) -> Void)? = nil
+    /// Opens the workspace's board at a page (a plan's or a result's
+    /// details, from their cards in the chat). nil outside a workspace chat.
+    @Entry var openBotPage: ((BotPage) -> Void)? = nil
     /// Replaces the composer's draft with the text, caret at its end.
     @Entry var seedComposer: ((String) -> Void)? = nil
     /// The `memory` calls (tool part ids) drawn as held-write cards.

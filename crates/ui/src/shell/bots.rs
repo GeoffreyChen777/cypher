@@ -28,6 +28,7 @@ mod parts;
 mod picker;
 mod projects;
 mod schedule;
+mod sessions;
 mod shortcuts;
 mod work;
 
@@ -51,12 +52,24 @@ pub(super) struct BoardUi {
     pub(super) panel: Option<PanelItem>,
     /// What it showed as it slides shut (rendered until the tween ends).
     panel_last: Option<PanelItem>,
+    /// What it showed when it was last shut: what the header's button
+    /// opens it on again.
+    panel_recent: Option<PanelItem>,
     /// The panel's width tween (0 ↔ its width and gap).
     panel_tween: Option<WidthTween>,
-    /// A session the panel looks into (an asking worker, an orchestration
-    /// thread): a session context watching its transcript, and for a thread
-    /// the read-only transcript drawn from it.
-    peek: Option<items::Peek>,
+    /// The sessions the panel looks into, by chat id (the asking sessions of
+    /// the Needs you page, a hidden thread): for each a session context
+    /// watching its transcript, and for a thread the read-only transcript
+    /// drawn from it. Pruned to what the open item needs.
+    peeks: std::collections::HashMap<String, items::Peek>,
+    /// The slot of the session the panel shows live
+    /// ([`PanelItem::Session`]): like [`Self::slot`], beside the tabs'
+    /// slots and never in the tile tree. It lives while the panel shows
+    /// that session (or slides shut on it).
+    pub(super) session_slot: Option<SlotId>,
+    /// The Needs you card the page should scroll to (its key), once.
+    needs_focus: Option<String>,
+    needs_scroll: gpui::ScrollHandle,
     /// The Review panel's editable draft, for the exchange it was opened on.
     review: Option<(String, Entity<TextInput>)>,
     /// Questions answered from the Asking panel, until their session says
@@ -78,6 +91,10 @@ pub(super) struct BoardUi {
     /// Cards folded to their header, by card key; like the project cards'
     /// collapse, local to this window and never saved.
     collapsed: std::collections::HashSet<&'static str>,
+    /// Lists showing every row instead of their first few, by key (a card's,
+    /// or `project-<space id>` for a project's sessions); local to this
+    /// window like the folds.
+    expanded: std::collections::HashSet<String>,
     focus_tween: Option<WidthTween>,
     /// The Schedule and Network panels' forms and drafts.
     schedule: schedule::ScheduleUi,
@@ -98,12 +115,16 @@ pub(super) struct BoardUi {
     /// A quiet note after the item's title (a project's device), set and
     /// taken likewise.
     panel_title_note: Option<AnyElement>,
+    /// An item's own header in place of the panel's (a work item's bar of
+    /// controls over its title); set and taken likewise.
+    panel_header: Option<AnyElement>,
     /// An empty item's message, centred in the card under the header in
     /// place of its body; set and taken likewise.
     panel_empty: Option<AnyElement>,
-    /// Work steps folded to their title in the work panel, by (work id,
-    /// step index); local to this window like the cards' folds.
-    work_folded: std::collections::HashSet<(String, usize)>,
+    /// Work steps the owner opened or closed in the work panel, by (work
+    /// id, step index); the rest follow their state. Local to this window
+    /// like the cards' folds.
+    work_open: std::collections::HashMap<(String, usize), bool>,
     /// The Copy button just pressed (its key), and the task that turns its
     /// check back into Copy.
     copied: Option<String>,
@@ -256,7 +277,7 @@ impl Shell {
         }
         if self.settings.botboard_bot.as_deref() != Some(bot_id) {
             self.settings.botboard_bot = Some(bot_id.to_string());
-            self.close_panel_now();
+            self.close_panel_now(cx);
             self.schedule_save(cx);
         }
         if self.botboard() {
@@ -320,7 +341,7 @@ impl Shell {
         };
         if current != self.settings.botboard_bot {
             self.settings.botboard_bot = current;
-            self.close_panel_now();
+            self.close_panel_now(cx);
             self.schedule_save(cx);
         }
         if pending.is_some() && pending == wanted {
@@ -355,7 +376,7 @@ impl Shell {
     fn show_new_bot(&mut self, bot: Bot, cx: &mut Context<Self>) {
         self.expect_chat(&bot.chat_id);
         self.settings.botboard_bot = Some(bot.id.clone());
-        self.close_panel_now();
+        self.close_panel_now(cx);
         if let Some(sid) = self.board.slot.take() {
             self.dispose_slot(sid, cx);
         }
@@ -369,20 +390,16 @@ impl Shell {
         }
     }
 
-    /// A plan card's Edit: cancel the proposal and start a reply asking for
-    /// the change, so the bot proposes a revised plan.
-    pub(super) fn edit_bot_plan(
-        &mut self,
-        sid: SlotId,
-        work_id: &str,
-        title: &str,
-        cx: &mut Context<Self>,
-    ) {
+    /// A waiting plan's Edit: cancel the proposal and start a reply asking
+    /// for the change in the workspace's chat, so its agent proposes a
+    /// revised plan.
+    pub(super) fn edit_bot_plan(&mut self, work_id: &str, title: &str, cx: &mut Context<Self>) {
         self.mutate(
             serde_json::json!({ "op": "resolveBotPlan", "workId": work_id, "approve": false }),
             cx,
         );
-        let Some(slot) = self.tiles.slots.get(&sid) else {
+        self.close_panel(cx);
+        let Some(slot) = self.board.slot.and_then(|sid| self.tiles.slots.get(&sid)) else {
             return;
         };
         let (composer, chat_id) = (slot.composer.clone(), slot.tab.chat_id().map(str::to_owned));
