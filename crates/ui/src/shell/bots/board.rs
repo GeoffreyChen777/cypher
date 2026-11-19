@@ -565,10 +565,18 @@ impl Shell {
         } else {
             format!("{hidden} more")
         };
+        // Each of its two faces is a row of its own (id and hover fade).
+        let row_key = format!("bot-{}-{key}", if expanded { "less" } else { "more" });
+        let fade_key = row_key.clone();
         Some(
-            card_item(&format!("bot-more-{key}"), None, label, None, false, theme)
+            card_item(&row_key, None, label, None, false, theme)
                 .text_color(theme.text_muted)
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    // The click moves the row out from under the pointer
+                    // (the list grows or shrinks), and nothing tells a row
+                    // that the pointer left it that way: without this its
+                    // hover wash stays on, here and when it comes back.
+                    motion::set_hover(&fade_key, false, true);
                     if !this.board.expanded.remove(&key) {
                         this.board.expanded.insert(key.clone());
                     }
