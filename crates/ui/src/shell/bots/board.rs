@@ -459,14 +459,31 @@ impl Shell {
                 let item = PanelItem::Session(session.id.clone());
                 let menu_id = session.id.clone();
                 let selected = open.as_ref() == Some(&item);
-                let corner = super::super::render::status_mark(session.status, ticker, theme)
-                    .unwrap_or_else(|| card_corner(session.time_ago, None, theme));
+                // Its state is its mark, at the left like every row's on
+                // this panel (under its project's glyph); the right keeps
+                // to when it last moved. A session at rest has no mark.
+                let mark = match session.status {
+                    ChatIndicator::Working => Some(super::items::ring_mark(
+                        super::items::RingState::Running,
+                        (0, 0),
+                        ticker,
+                        theme,
+                    )),
+                    ChatIndicator::AwaitingInput => {
+                        Some(card_glyph(icons::QUESTION_CIRCLE, theme.warning))
+                    }
+                    ChatIndicator::Completed => {
+                        Some(card_glyph(icons::CHECK, theme.success.opacity(0.9)))
+                    }
+                    ChatIndicator::Errored => Some(card_glyph(icons::CLOSE_CIRCLE, theme.danger)),
+                    ChatIndicator::Idle => None,
+                };
                 rows.push(
                     card_item(
                         &format!("bot-session-{}", session.id),
-                        None,
+                        mark,
                         session.title,
-                        Some(corner),
+                        Some(card_corner(session.time_ago, None, theme)),
                         selected,
                         theme,
                     )

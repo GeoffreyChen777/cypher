@@ -407,11 +407,12 @@ impl Shell {
     }
 
     /// The sidebar card: one line per connected workspace, like the other
-    /// cards. Who it is, and at the right the one thing that matters most
-    /// about it now ([`Standing`]): an amber paper plane when an answer waits for
-    /// review, the ring while a question is on its way, else when the last
-    /// question was, or that replies are off. An open invite is one quiet
-    /// last row. With nothing yet, the header alone says how to start.
+    /// cards. Its mark at the left says how it stands ([`Standing`]): the
+    /// amber paper plane when an answer waits for review, the ring while a
+    /// question is on its way, else the person's photo. Then who it is,
+    /// and at the right when the last question was, or that replies are
+    /// off. An open invite is one quiet last row. With nothing yet, the
+    /// header alone says how to start.
     pub(super) fn render_network_card(
         &self,
         bot: &Bot,
@@ -497,31 +498,33 @@ impl Shell {
             .iter()
             .map(|(conn, standing)| {
                 let item = PanelItem::Connection(conn.id.clone());
-                let corner = match standing {
-                    Standing::Review => icon(super::items::REVIEW_GLYPH)
-                        .size(px(12.0))
-                        .flex_none()
-                        .text_color(theme.warning)
-                        .into_any_element(),
+                // Its state is its mark, at the left like every row's on
+                // this panel; at rest the mark is the person. The right
+                // keeps to one quiet note.
+                let mark = match standing {
+                    Standing::Review => {
+                        super::board::card_glyph(super::items::REVIEW_GLYPH, theme.warning)
+                    }
                     Standing::Answering | Standing::Asking => {
                         flight_ring(moving.contains(&conn.id), ticker, theme)
                     }
-                    Standing::Leaving => super::board::card_corner("leaving", None, theme),
-                    Standing::Off => super::board::card_corner("off", None, theme),
-                    Standing::Idle => super::board::card_corner(
-                        conn.last_exchange_at
-                            .map(|at| super::items::ago(at, now))
-                            .unwrap_or_default(),
-                        None,
-                        theme,
-                    ),
+                    _ => peer_avatar(&conn.peer, 14.0, theme),
                 };
+                let note = match standing {
+                    Standing::Leaving => "leaving".to_string(),
+                    Standing::Off => "off".to_string(),
+                    _ => conn
+                        .last_exchange_at
+                        .map(|at| super::items::ago(at, now))
+                        .unwrap_or_default(),
+                };
+                let corner = super::board::card_corner(note, None, theme);
                 let (who, theirs) = peer_names(&conn.peer);
                 let dim = matches!(standing, Standing::Off | Standing::Leaving);
                 let selected = open.as_ref() == Some(&item);
                 super::board::card_item_aside(
                     &format!("bot-connection-{}", conn.id),
-                    Some(peer_avatar(&conn.peer, 14.0, theme)),
+                    Some(mark),
                     who,
                     theirs,
                     Some(corner),
