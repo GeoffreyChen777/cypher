@@ -158,6 +158,16 @@ reseed. `--work` seeds a run whose thoughts and commands fold into one row;
 `--slow` paces mock replies to watch streaming. Quitting the app stops the
 engine.
 
+Workspaces: start the instance with
+`CYPHER_MOCK_RULES=~/.cypher-development/local-engine-<name>/mock-rules.json`
+in the environment of `dev-instance.sh start` (the engine reads it on every
+mock run), then run
+`scripts/demo/seed-workspace.py ~/.cypher-development/local-engine-<name> <projects-dir>`.
+It seeds two workspaces (plans in every state, routines, their sessions,
+pending permission prompts and questions) in about a minute; a second run
+does nothing. To seed again, stop the instance and start it on a new engine
+data dir.
+
 ## Troubleshooting
 
 - `cargo: command not found`: the toolchain is pinned by `rust-toolchain.toml`;

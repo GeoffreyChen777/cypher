@@ -22,6 +22,7 @@ mod mermaid_themes;
 mod permissions;
 mod progress;
 mod refs;
+mod script;
 mod translation;
 
 pub use artifacts::{
@@ -45,6 +46,7 @@ pub use permissions::{
 };
 pub use progress::MARKER as PROGRESS_MARKER;
 pub use refs::MARKER as REFS_MARKER;
+pub use script::{END as SCRIPT_END, MARKER as SCRIPT_MARKER};
 pub use translation::{
     MARKER as TRANSLATION_MARKER, Mode as TranslationMode, PROMPT as TRANSLATION_PROMPT,
     REPLACE_MARKER as TRANSLATION_REPLACE_MARKER, settled as translation_settled,
@@ -69,8 +71,8 @@ pub const HOLD_TOOL_ID: &str = "mock-hold-tool";
 /// One step of a marked run: a scripted event, or a pause on the controls.
 enum Step {
     Event(AgentEvent),
-    /// Wait on a question: the tall one when true.
-    Ask(bool),
+    /// Wait on these questions' answers.
+    Ask(Vec<UserInputQuestion>),
     Hold,
 }
 
@@ -235,6 +237,12 @@ impl Harness for MockHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        // A development instance's rules answer this prompt as another
+        // ([`script`]).
+        let request = match script::rewrite(&request.prompt) {
+            Some(prompt) => RunRequest { prompt, ..request },
+            None => request,
+        };
         // The engine's progress narrator asking for a reading of a long turn
         // ([`PROGRESS_MARKER`] runs one): answered at once from the plan it
         // quotes.
@@ -298,6 +306,31 @@ impl Harness for MockHarness {
             .iter()
             .take_while(|e| matches!(e, AgentEvent::SessionStarted { .. }))
             .count();
+        // A scripted reply ([`SCRIPT_MARKER`]): its steps between the
+        // script's session start and its end, or up to a hold.
+        if let Some(scripted) = script::steps(&request.prompt) {
+            let mut steps: Vec<Step> = body[..lead].iter().cloned().map(Step::Event).collect();
+            let mut held = false;
+            for step in scripted {
+                match step {
+                    script::ScriptStep::Event(event) => steps.push(Step::Event(event)),
+                    script::ScriptStep::Ask(questions) => steps.push(Step::Ask(questions)),
+                    script::ScriptStep::Hold(command) => {
+                        steps.push(Step::Event(AgentEvent::ToolCall {
+                            id: HOLD_TOOL_ID.into(),
+                            call: cypher_proto::ToolCall::Exec { command },
+                        }));
+                        steps.push(Step::Hold);
+                        held = true;
+                        break;
+                    }
+                }
+            }
+            if !held {
+                steps.extend(tail.iter().cloned().map(Step::Event));
+            }
+            return Ok(marked_run(steps, controls, delay));
+        }
         // Permission control demos ([`PERMISSIONS_MARKER`],
         // [`PERMISSION_CARD_MARKER`], [`TALL_PERMISSION_CARD_MARKER`],
         // [`MULTILINE_PERMISSION_CARD_MARKER`]): the
@@ -415,7 +448,11 @@ impl Harness for MockHarness {
                 .chain(body[lead..].iter().cloned());
             let mut steps: Vec<Step> = body[..lead].iter().cloned().map(Step::Event).collect();
             if ask {
-                steps.push(Step::Ask(tall_ask));
+                steps.push(Step::Ask(vec![if tall_ask {
+                    tall_question()
+                } else {
+                    short_question()
+                }]));
             }
             if hold {
                 steps.extend(rest.take(1).map(Step::Event));
@@ -449,6 +486,19 @@ impl Harness for MockHarness {
                 event
             })
             .boxed())
+    }
+}
+
+/// The [`ASK_MARKER`] question.
+fn short_question() -> UserInputQuestion {
+    UserInputQuestion {
+        id: "mock-question".into(),
+        header: "Approach".into(),
+        question: "Which approach should I take?".into(),
+        options: vec!["Patch it in place".into(), "Rewrite the module".into()],
+        multi_select: false,
+        permission: None,
+        asked_by: None,
     }
 }
 
@@ -519,23 +569,8 @@ fn marked_run(
                         }
                         return Some((Ok(event), (steps, Some((request_input, interrupt)))));
                     }
-                    Step::Ask(tall) => {
-                        let answer = (request_input)(vec![if tall {
-                            tall_question()
-                        } else {
-                            UserInputQuestion {
-                                id: "mock-question".into(),
-                                header: "Approach".into(),
-                                question: "Which approach should I take?".into(),
-                                options: vec![
-                                    "Patch it in place".into(),
-                                    "Rewrite the module".into(),
-                                ],
-                                multi_select: false,
-                                permission: None,
-                                asked_by: None,
-                            }
-                        }]);
+                    Step::Ask(questions) => {
+                        let answer = (request_input)(questions);
                         tokio::select! {
                             _ = answer => {}
                             _ = interrupt.cancelled() => {

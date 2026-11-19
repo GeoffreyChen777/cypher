@@ -144,6 +144,15 @@ Tests per platform:
   paced, and every typed message plays the same run). A prompt containing
   `[mock:refs]` gets an answer citing this repository's files as inline code, to try
   the file-reference chips in a chat opened on a Cypher checkout.
+- `scripts/demo/seed-workspace.py <engine-data-dir> <projects-dir>` seeds a running mock
+  engine with two workspaces: plans in every state, routines, the sessions they run and
+  a full Needs you page. The engine must have been started with
+  `CYPHER_MOCK_RULES=<engine-data-dir>/mock-rules.json`: the script writes the mock's
+  replies there as rules (`[{"match": [...], "script": [...]}]`, first match wins), so
+  prompts it cannot write itself (a plan's brief, a routine's run, a result notice) get
+  a fitting reply and no marker shows in a transcript. A prompt can also carry its own
+  reply as `[mock:script]<json steps>[/mock:script]` (text, think, tool, ask, hold;
+  `crates/harness/src/mock/script.rs`).
 - `scripts/dev-ios.sh` runs the iOS Dev bundle against a local Edge.
 - `dev` mode syncs through a local Edge: [Local Edge development](local-edge.md).
 - `scripts/e2e-smoke.sh` runs two headless engines against a local Edge.

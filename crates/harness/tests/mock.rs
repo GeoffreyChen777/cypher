@@ -11,7 +11,9 @@ use futures::StreamExt;
 
 use common::{controls_answering, dones, request, run_to_end};
 use cypher_harness::Harness;
-use cypher_harness::mock::{ASK_MARKER, CHANGES_MARKER, HOLD_MARKER, HOLD_TOOL_ID, MockHarness};
+use cypher_harness::mock::{
+    ASK_MARKER, CHANGES_MARKER, HOLD_MARKER, HOLD_TOOL_ID, MockHarness, SCRIPT_END, SCRIPT_MARKER,
+};
 use cypher_proto::{AgentEvent, DoneStatus, RunRequest, SandboxLevel};
 
 fn harness() -> MockHarness {
@@ -85,6 +87,54 @@ async fn unmarked_prompts_replay_the_whole_script() {
     let events = run_to_end(&harness(), request("fix it", None), controls).await;
     assert_eq!(texts(&events), ["first", "second"]);
     assert_eq!(dones(&events), [(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn a_scripted_reply_replaces_the_stock_one_and_waits_on_its_question() {
+    let script = serde_json::json!([
+        { "tool": { "id": "t1", "call": { "kind": "exec", "command": "cargo test" }, "output": "ok" } },
+        { "ask": [{ "id": "q", "header": "Table", "question": "Which table?", "options": ["invoices", "credits"] }] },
+        { "text": "Migrated invoices." },
+    ]);
+    let (controls, _steer, _token) = controls_answering("invoices");
+    let events = run_to_end(
+        &harness(),
+        request(
+            &format!("migrate {SCRIPT_MARKER}{script}{SCRIPT_END}"),
+            None,
+        ),
+        controls,
+    )
+    .await;
+    assert_eq!(texts(&events), ["Migrated invoices."]);
+    assert!(matches!(&events[0], AgentEvent::ToolCall { id, .. } if id == "t1"));
+    assert!(
+        matches!(&events[1], AgentEvent::ToolResult { output: Some(output), .. } if output == "ok")
+    );
+    assert_eq!(dones(&events), [(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn a_scripted_hold_keeps_its_command_running() {
+    let script =
+        serde_json::json!([{ "text": "On it." }, { "hold": "npm test" }, { "text": "never" }]);
+    let (controls, _steer, token) = controls_answering("unused");
+    let mut stream = harness()
+        .run(request(&format!("{SCRIPT_MARKER}{script}"), None), controls)
+        .await
+        .expect("run starts");
+    let first = stream.next().await.expect("text").expect("event");
+    assert_eq!(texts(&[first]), ["On it."]);
+    let command = stream.next().await.expect("command").expect("event");
+    assert!(matches!(
+        command,
+        AgentEvent::ToolCall { ref id, call: cypher_proto::ToolCall::Exec { ref command } }
+            if id == HOLD_TOOL_ID && command == "npm test"
+    ));
+    token.cancel();
+    let rest: Vec<AgentEvent> = stream.map(|e| e.expect("event")).collect().await;
+    assert!(texts(&rest).is_empty(), "nothing after the hold runs");
+    assert_eq!(dones(&rest), [(DoneStatus::Interrupted, None)]);
 }
 
 /// Every file under `root`, relative path → content.
