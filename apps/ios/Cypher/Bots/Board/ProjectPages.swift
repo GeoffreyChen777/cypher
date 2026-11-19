@@ -64,7 +64,7 @@ struct ProjectRow: View {
                     }
                     if load.running > 0 {
                         HStack(spacing: 5) {
-                            MiniSpinner(cellSize: 1.8).foregroundStyle(Theme.statusWorking)
+                            ProgressRing(state: .running, size: 12)
                             Text("\(load.running) running")
                         }
                         .foregroundStyle(Theme.text)

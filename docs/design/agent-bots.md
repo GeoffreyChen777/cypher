@@ -1413,14 +1413,27 @@ app has the desktop's whole surface, laid out for a phone.
 - **The board** replaces the sidebar cards and the detail panel: the toolbar's grid
   button (badged with the Needs-you count) opens it as a sheet on iPhone and as the
   inspector beside the chat on iPad. Its overview holds Needs you, Work, Routines,
-  Projects, Connections, Activity and Memory; each item opens a page of its own with
-  the panel's layout (header, facts, lists, a decision bar at the foot). **Needs you**
+  Projects, Connections, Activity and Memory; each item opens a page of its own. The
+  desktop's rules hold here too. *Marks at the left, a note at the right:* a row's
+  state is its mark (the progress ring for what is under way, amber for what waits on
+  the owner, a red mark for a failed last run, the paper plane for an answer to send),
+  and its right end is one quiet note. *Each thing once, and no defaults:* a work
+  item's, a routine's, a connection's and a question's page open on how the item
+  stands (its mark and a word; a tap shows its times, which the page then does not
+  list), its title, and at most one line under it (the shared project; a routine's
+  setup where it is not the default; a connection's workspace and what it can read).
+  A work page then has the result before the steps, quotes the request only while the
+  plan awaits approval, and makes a step with one session the way into it. Connections
+  are rows on the overview, with the open invites on the connect page. What differs
+  from the desktop is where decisions sit: on a phone they stay in a bar at the foot
+  (Approve, Stop, Run now, Send), in reach of the thumb, and item actions (Delete, the
+  coordinator, Disconnect) in the navigation bar. **Needs you**
   is the one place for what waits on the owner: each item is a section with its row and,
   under it, its decision (Decline / Approve, Reject / Approve, a permission prompt's
   card with the extension's options, a question's answers); the row still opens the
   item's own page. A project's page lists the workspace's sessions there, then the
-  owner's sessions it reads. A result notice has a page of its own (how it ended, when,
-  what it wrote, the way to its routine and session).
+  owner's sessions it reads. A result notice has a page of its own (how it ended, what
+  it wrote, the way to its routine and session).
 - **Memory** is in Home's account menu (the desktop's Settings › Memory) and on the
   board; a store's page watches it live (`WatchMemory` over the relay).
 - **Writes.** A decision is a registry write of the same owner fields

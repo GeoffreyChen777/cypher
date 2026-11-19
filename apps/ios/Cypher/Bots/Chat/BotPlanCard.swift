@@ -220,7 +220,8 @@ struct BotPostNotice: Equatable {
         case .work(_, let title, let outcome, let startedAt, let endedAt):
             symbol = "checklist"
             self.title = title
-            subtitle = startedAt.map { "Plan · took \(BotTime.span(endedAt - $0))" }
+            subtitle =
+                startedAt.map { "Plan · took \(BotTime.span(endedAt - $0))" }
                 ?? "Plan · \(BotTime.past(endedAt, now: now))"
             status =
                 switch outcome {

@@ -38,32 +38,31 @@ struct BotPostPage: View {
         return nil
     }
 
+    /// When it ran or ended, and how long it took.
+    private func times(_ from: BotPost) -> [(label: String, value: String)] {
+        switch from {
+        case .routine(_, _, _, let runAt, _): [("Ran", BotTime.past(runAt))]
+        case .work(_, _, _, let startedAt, let endedAt):
+            [("Ended", BotTime.past(endedAt))] + (startedAt.map { [("Took", BotTime.span(endedAt - $0))] } ?? [])
+        case .unknown: []
+        }
+    }
+
     private func page(_ from: BotPost, text: String, notice: BotPostNotice) -> some View {
         BotPageList(title: "Result") {
+            // How it ended (when, on a tap), what it was, and what it wrote.
             Section {
-                BotPageHeader(title: singleLine(notice.title)) {
-                    BotHeaderGlyph(symbol: notice.symbol, tint: notice.status.tone.color)
-                }
-            }
-            .groupedRowStyle()
-            Section {
-                BotFact(status: notice.status)
-                switch from {
-                case .routine(_, _, _, let runAt, _):
-                    BotFact(label: "Ran", value: BotTime.past(runAt))
-                case .work(_, _, _, let startedAt, let endedAt):
-                    BotFact(label: "Ended", value: BotTime.past(endedAt))
-                    if let startedAt { BotFact(label: "Took", value: BotTime.span(endedAt - startedAt)) }
-                case .unknown:
-                    EmptyView()
+                BotItemHeader(
+                    status: notice.status, title: singleLine(notice.title), details: times(from),
+                    statusIdentifier: "post-status"
+                ) {
+                    BoardGlyph(symbol: notice.status.tone.symbol ?? "stop.circle", color: notice.status.tone.color)
                 }
             }
             .groupedRowStyle()
             Section {
                 BotMarkdown(text: text, cacheKey: "post-\(entryId)")
                     .padding(.vertical, 4)
-            } header: {
-                ListSectionHeader(title: "Result")
             }
             .groupedRowStyle()
             if case .routine(let routineId, _, _, _, let threadChatId) = from {

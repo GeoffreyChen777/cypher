@@ -67,10 +67,71 @@ final class BoardModelTests: XCTestCase {
         var item = work("w", .proposed, at: 0)
         item.steps = [WorkStep(id: "1", title: "a", project: "p"), WorkStep(id: "2", title: "b", project: "p")]
         XCTAssertEqual(item.commonProject, "p")
-        item.steps.append(WorkStep(id: "3", title: "c", project: "q"))
+        // A step with no project (a report) does not break it.
+        item.steps.append(WorkStep(id: "3", title: "report"))
+        XCTAssertEqual(item.commonProject, "p")
+        item.steps.append(WorkStep(id: "4", title: "c", project: "q"))
         XCTAssertNil(item.commonProject)
         item.steps = []
         XCTAssertNil(item.commonProject)
+    }
+
+    func testAWorkItemsHeadSaysHowItStandsOnce() {
+        var item = work("w", .proposed, at: 1_000)
+        item.steps = [WorkStep(id: "1", title: "a", state: .done), WorkStep(id: "2", title: "b", state: .running)]
+        XCTAssertEqual(item.statusWord, BotStatusLabel("Awaiting approval", .waiting))
+        XCTAssertNil(item.ring, "a plan to approve wears its checklist")
+        item.decision = PlanDecision(approve: true, at: 2_000)
+        XCTAssertEqual(item.statusWord.text, "Waiting to start")
+        XCTAssertEqual(item.ring, .waiting)
+        item.state = .running
+        item.startedAt = 3_000
+        XCTAssertEqual(item.statusWord.text, "Running")
+        XCTAssertEqual(item.ring, .running)
+        // Parked on a question, it waits on the owner, as its ring says.
+        item.steps[1].state = .asking
+        XCTAssertEqual(item.statusWord, BotStatusLabel("Waiting on you", .waiting))
+        XCTAssertEqual(item.ring, .asking)
+        item.stopRequestedAt = 4_000
+        XCTAssertEqual(item.ring, .stopping)
+        item.state = .failed
+        item.endedAt = 3_000 + 600_000
+        XCTAssertEqual(item.statusWord, BotStatusLabel("Failed", .failed))
+        XCTAssertNil(item.ring)
+        // Its times live behind the status, nowhere else.
+        XCTAssertEqual(item.times(now: 10_000_000).map(\.label), ["Proposed", "Approved", "Started", "Ended", "Took"])
+        XCTAssertEqual(item.times(now: 10_000_000).last?.value, "10m")
+    }
+
+    func testStepsOpenWhenTheyAreUnderWayOrStillToRead() {
+        for state in [StepState.running, .asking, .failed] {
+            XCTAssertTrue(WorkFlow.stepOpens(state, numbered: false), "\(state)")
+        }
+        for state in [StepState.done, .pending, .skipped] {
+            XCTAssertFalse(WorkFlow.stepOpens(state, numbered: false), "\(state)")
+            XCTAssertTrue(WorkFlow.stepOpens(state, numbered: true), "\(state)")
+        }
+    }
+
+    func testTheRingsCometLeavesTheTipAndComesBackToIt() {
+        XCTAssertEqual(ProgressRing.comet(0).head, 0)
+        XCTAssertEqual(ProgressRing.comet(0).tail, 0)
+        // It rests in the tip once it has gone round.
+        for phase in [ProgressRing.travel, 0.93, 0.999] {
+            XCTAssertEqual(ProgressRing.comet(phase).tail, 1, accuracy: 1e-9)
+            XCTAssertEqual(ProgressRing.comet(phase).head, 1, accuracy: 1e-9)
+        }
+        // It only moves forward and never turns inside out.
+        var last = (tail: 0.0, head: 0.0)
+        for step in 0..<200 {
+            let now = ProgressRing.comet(Double(step) / 200)
+            XCTAssertLessThanOrEqual(now.tail, now.head + 1e-9)
+            XCTAssertGreaterThanOrEqual(now.tail + 1e-9, last.tail)
+            XCTAssertGreaterThanOrEqual(now.head + 1e-9, last.head)
+            last = now
+        }
+        XCTAssertEqual(ProgressRing(done: 1, total: 4).fraction, 0.25)
+        XCTAssertEqual(ProgressRing(done: 0, total: 0).fraction, 0)
     }
 
     func testMarkdownReadsPlainly() {
@@ -98,7 +159,7 @@ final class BoardModelTests: XCTestCase {
         XCTAssertEqual(rows[1].sub, "Asking · in webapp")
         XCTAssertEqual(rows[2].sub, "Plan to approve · 3 steps")
         XCTAssertEqual(rows[3].sub, "Review the answer to Ledger")
-        XCTAssertEqual(rows.map(\.symbol), ["checkmark.shield", "questionmark.circle", "checklist", "person.2"])
+        XCTAssertEqual(rows.map(\.symbol), ["checkmark.shield", "questionmark.circle", "checklist", "paperplane"])
 
         let chat = try XCTUnwrap(demo.boardNeedRow(.chat("chat-atlas"), bot: bot))
         XCTAssertEqual(chat.title, "Atlas asked you something")
@@ -145,10 +206,11 @@ final class BoardModelTests: XCTestCase {
         off.enabled = false
         ordered = BoardRoutineState.ordered(demo.routines(of: DemoDataset.atlasId) + [off])
         XCTAssertEqual(ordered.last?.enabled, false, "switched off last")
+        // A routine says how it is set up only where that is not the default.
         XCTAssertEqual(
-            demo.routine(id: "routine-tests")?.whereAndWhen { _ in "cypher" }, "cypher · Daily 02:00")
-        XCTAssertEqual(
-            demo.routine(id: "routine-brief")?.whereAndWhen { _ in nil }, "This workspace · Weekdays 09:00")
+            demo.routine(id: "routine-tests")?.setupLine(place: "cypher"), "Daily 02:00 · cypher · own worktree")
+        XCTAssertEqual(demo.routine(id: "routine-brief")?.setupLine(place: nil), "Weekdays 09:00")
+        XCTAssertEqual(demo.routine(id: "routine-triage")?.setupLine(place: nil, model: "Opus"), "Opus")
     }
 
     // MARK: Projects, connections, notice
@@ -178,13 +240,16 @@ final class BoardModelTests: XCTestCase {
             BoardProjectLoad(space: webapp.space, sessions: 3, running: 2, asking: 1).note, "1 asking · 2 running")
     }
 
-    func testConnectionsSayWhatWaitsForReviewElseHowManyThereAre() async throws {
+    func testConnectionsListWhatWaitsOnTheOwnerFirst() async throws {
         let demo = DemoDataset.standard()
-        XCTAssertEqual(demo.boardConnections(DemoDataset.atlasId).text, "1 to review")
-        XCTAssertEqual(demo.boardConnections(DemoDataset.atlasId).reviews, ["ex-review"])
+        var rows = demo.boardConnectionRows(DemoDataset.atlasId)
+        XCTAssertEqual(rows.first?.connection.id, "conn-ledger")
+        XCTAssertEqual(rows.first?.standing, .review)
+        XCTAssertEqual(rows.count, 3)
         try await demo.reviewExchange(exchangeId: "ex-review", send: false, text: nil)
-        XCTAssertEqual(demo.boardConnections(DemoDataset.atlasId).text, "3 connected · 1 open invite")
-        XCTAssertEqual(demo.boardConnections(DemoDataset.scoutId).text, "None yet")
+        rows = demo.boardConnectionRows(DemoDataset.atlasId)
+        XCTAssertNotEqual(rows.first { $0.connection.id == "conn-ledger" }?.standing, .review)
+        XCTAssertTrue(demo.boardConnectionRows(DemoDataset.scoutId).isEmpty)
     }
 
     func testOnlySomethingOffEarnsANotice() {

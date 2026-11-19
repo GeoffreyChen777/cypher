@@ -69,6 +69,24 @@ extension BotRoutine {
     }
 
     var lastRunFailed: Bool { lastRun?.outcome == .failed }
+
+    /// How it is set up, on one line, each part only when it is not the
+    /// default (schedule.rs `setup_line`): its schedule (a manual one has
+    /// none, a once-only one is just "Once": its status names the time),
+    /// the project it runs in, its own worktree, its model. "Weekdays
+    /// 09:00 · billing · own worktree"; empty for a manual routine in the
+    /// workspace.
+    func setupLine(place: String?, model: String? = nil) -> String {
+        let when: String? =
+            switch schedule {
+            case .manual: nil
+            case .once: "Once"
+            default: schedule.describe
+            }
+        var worktree = false
+        if case .project(_, true, _) = target { worktree = true }
+        return [when, place, worktree ? "own worktree" : nil, model].compactMap { $0 }.joined(separator: " · ")
+    }
 }
 
 extension BoardRoutineState {
@@ -102,21 +120,46 @@ enum RoutineWords {
         }
     }
 
-    /// The Trigger fact: the schedule in words, a manual one as how it runs.
-    static func trigger(_ schedule: Schedule) -> String {
-        schedule == .manual ? "Only when you press Run now" : schedule.describe
+    /// How a routine stands, in a word or two for its page's head
+    /// (schedule.rs `status_word`): what its run is doing, else why none is
+    /// coming, else how soon the next one comes ("Next in 3h"; a once-only
+    /// one names its time, "Tomorrow 09:00", which its setup line then
+    /// leaves out).
+    static func status(
+        _ state: BoardRoutineState, schedule: Schedule, asking: Bool, paused: Bool, now: Int64 = nowMs()
+    ) -> BotStatusLabel {
+        switch state {
+        case .running:
+            return asking ? BotStatusLabel("Waiting on you", .waiting) : BotStatusLabel("Running", .active)
+        case .starting: return BotStatusLabel("Starting…", .active)
+        case .done: return BotStatusLabel("Done", .muted)
+        case .off: return BotStatusLabel("Off", .muted)
+        default: break
+        }
+        // A paused workspace runs nothing on a schedule; Run now still works.
+        if paused { return BotStatusLabel("Workspace paused", .waiting) }
+        switch state {
+        case .manual: return BotStatusLabel("Manual", .muted)
+        case .next(let at):
+            if case .once = schedule { return BotStatusLabel(BotTime.nextFull(at, now: now), .active) }
+            return BotStatusLabel("Next \(inWords(at, now: now))", .active)
+        default: return BotStatusLabel("No next run", .muted)
+        }
     }
 
-    /// The Next run fact: "Tomorrow 09:00 · in 14h", "Off", "Done".
-    static func nextRun(_ state: BoardRoutineState, now: Int64 = nowMs()) -> String {
+    /// What a tap on the status adds: the exact time of the next run, or
+    /// when the run under way started (schedule.rs `status_tip`).
+    static func statusDetails(
+        _ routine: BotRoutine, state: BoardRoutineState, now: Int64 = nowMs()
+    ) -> [(label: String, value: String)] {
         switch state {
-        case .next(let at): "\(BotTime.nextFull(at, now: now)) · \(inWords(at, now: now))"
-        case .running: "Running now"
-        case .starting: "Run requested"
-        case .manual: "When you press Run now"
-        case .done: "Done; it ran once"
-        case .unplanned: "Not planned yet"
-        case .off: "Off"
+        case .running:
+            guard let run = routine.lastRun else { return [] }
+            return [("Started", BotTime.past(run.at, now: now) + (run.manual ? " · by hand" : ""))]
+        case .next(let at):
+            if case .once = routine.schedule { return [] }
+            return [("Next run", BotTime.nextFull(at, now: now))]
+        default: return []
         }
     }
 }

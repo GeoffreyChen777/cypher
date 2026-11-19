@@ -132,10 +132,53 @@ extension BotWork {
         return line.isEmpty ? phaseLine(now: now) : line
     }
 
-    /// The project (space id) every step names, named once over the steps.
+    /// The one project (space id) every step that names a project works
+    /// in: its page names it once, in its head (work.rs `shared_project`).
+    /// A step with no project (a report) does not break it.
     var commonProject: String? {
-        guard let first = steps.first?.project, steps.allSatisfy({ $0.project == first }) else { return nil }
+        let named = steps.compactMap(\.project)
+        guard let first = named.first, named.allSatisfy({ $0 == first }) else { return nil }
         return first
+    }
+
+    /// Its state in a word for its page's head (work.rs `phase_word`): a
+    /// running plan parked on a question says it waits on the owner.
+    var statusWord: BotStatusLabel {
+        if asking { return BotStatusLabel("Waiting on you", .waiting) }
+        let word =
+            switch phase {
+            case .awaiting: "Awaiting approval"
+            case .starting: "Waiting to start"
+            case .cancelling, .cancelled: "Rejected"
+            case .running: "Running"
+            case .stopping: "Stopping"
+            case .done: "Done"
+            case .failed: "Failed"
+            case .stopped: "Stopped"
+            }
+        return BotStatusLabel(word, phase.tone)
+    }
+
+    /// When it was proposed, decided, started and ended, and how long it
+    /// took or has run (work.rs `WorkStatusTip`): what a tap on its status
+    /// shows, and its page nowhere else.
+    func times(now: Int64 = nowMs()) -> [(label: String, value: String)] {
+        var rows = [("Proposed", BotTime.past(createdAt, now: now))]
+        if let decision {
+            rows.append((decision.approve ? "Approved" : "Rejected", BotTime.past(decision.at, now: now)))
+        }
+        if let startedAt {
+            rows.append(("Started", BotTime.past(startedAt, now: now)))
+            if let endedAt {
+                rows.append(("Ended", BotTime.past(endedAt, now: now)))
+                rows.append(("Took", BotTime.span(endedAt - startedAt)))
+            } else {
+                rows.append(("Running", BotTime.span(now - startedAt)))
+            }
+        } else if let endedAt {
+            rows.append(("Ended", BotTime.past(endedAt, now: now)))
+        }
+        return rows
     }
 
     /// The SF Symbol its state wears (items.rs `work_mark`).
@@ -222,15 +265,6 @@ enum BoardRoutineState: Equatable {
             if x != y { return x < y }
             return a.name.lowercased() < b.name.lowercased()
         }
-    }
-}
-
-extension BotRoutine {
-    /// Where and when it runs: "This workspace · Daily 09:00",
-    /// "cypher · Weekdays 18:30" (schedule.rs `job_sub`).
-    func whereAndWhen(projectName: (String) -> String?) -> String {
-        let lead = target.spaceId.map { projectName($0) ?? "A project" } ?? "This workspace"
-        return "\(lead) · \(schedule.describe)"
     }
 }
 
@@ -490,7 +524,7 @@ extension WorkspaceData {
             guard let exchange = exchange(id: id) else { return nil }
             let peer = connection(id: exchange.connectionId)?.peer.name ?? "a connected workspace"
             return BoardNeedRow(
-                item: item, symbol: "person.2", title: singleLine(exchange.question),
+                item: item, symbol: reviewSymbol, title: singleLine(exchange.question),
                 sub: "Review the answer to \(peer)", at: exchange.askedAt)
         }
     }
@@ -525,16 +559,20 @@ extension WorkspaceData {
         return bot.capabilities.coordinate ? "via sessions" : "reads only"
     }
 
-    /// The Connections row: "3 connected · 1 open invite", or what waits for
-    /// review (its exchange ids).
-    func boardConnections(_ botId: String, now: Int64 = nowMs()) -> (text: String, reviews: [String]) {
-        let reviews = exchanges(of: botId).filter(\.awaitingReview).sorted { $0.askedAt < $1.askedAt }.map(\.id)
-        if !reviews.isEmpty { return ("\(reviews.count) to review", reviews) }
-        let live = connections(of: botId).count
-        let invites = openInvites(of: botId, now: now).count
-        var parts = [live == 0 ? "None yet" : "\(live) connected"]
-        if invites > 0 { parts.append("\(invites) open invite\(invites == 1 ? "" : "s")") }
-        return (parts.joined(separator: " · "), [])
+    /// The bot's live connections as rows: what waits on the owner first,
+    /// then what is on its way; the rest stay by last question.
+    func boardConnectionRows(_ botId: String, now: Int64 = nowMs()) -> [BoardConnectionRow] {
+        let exchanges = exchanges(of: botId)
+        return connections(of: botId)
+            .map { connection in
+                let own = exchanges.filter { $0.connectionId == connection.id }
+                return BoardConnectionRow(
+                    connection: connection, standing: ConnectionStanding(connection, exchanges: own),
+                    moving: own.contains { $0.moving(now: now) })
+            }
+            .enumerated()
+            .sorted { a, b in (a.element.standing.rank, a.offset) < (b.element.standing.rank, b.offset) }
+            .map(\.element)
     }
 
     /// How an Activity row's chat opens; nil when this replica doesn't list

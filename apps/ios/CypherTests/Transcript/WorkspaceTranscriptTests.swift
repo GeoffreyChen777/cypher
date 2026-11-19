@@ -134,7 +134,8 @@ final class WorkspaceTranscriptTests: XCTestCase {
     /// A saved routine's card is named by the call's answer.
     func testASavedRoutineIsNamedByItsAnswer() throws {
         let saved = try XCTUnwrap(
-            SavedRoutine(output: "Saved routine \"Morning brief\" (id 2974bf05-4a69): Manual. It runs in the background."))
+            SavedRoutine(
+                output: "Saved routine \"Morning brief\" (id 2974bf05-4a69): Manual. It runs in the background."))
         XCTAssertEqual(saved.name, "Morning brief")
         XCTAssertEqual(saved.id, "2974bf05-4a69")
         XCTAssertNil(SavedRoutine(output: "No routine \"x\"."))
@@ -218,7 +219,8 @@ final class WorkspaceTranscriptTests: XCTestCase {
         let unknown = MessageEntry.fixture("u", parts: [.post(id: "y", text: "Hello", from: .unknown)], createdAt: 3)
         // The turn that tells the workspace's agent draws nothing.
         let told = MessageEntry.fixture(
-            "\(BotPost.eventPrefix)p", role: .user, parts: [.text(id: "t", text: "[Routine \"Brief\" finished]", agentText: nil)],
+            "\(BotPost.eventPrefix)p", role: .user,
+            parts: [.text(id: "t", text: "[Routine \"Brief\" finished]", agentText: nil)],
             createdAt: 4)
         var parsers: [String: IncrementalMarkdownParser] = [:]
         var completed: [String: CompletedParse] = [:]

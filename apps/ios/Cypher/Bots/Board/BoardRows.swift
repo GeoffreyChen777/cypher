@@ -1,13 +1,13 @@
 // The rows the board's overview and its list pages share, so an item reads
 // the same wherever it is listed (items.rs, needs.rs `need_row`, work.rs
-// `running_row` / `settled_row`): a small mark in a leading gutter, the
-// title, one muted line and a quiet trailing note; agent-written text as
+// `running_row` / `settled_row`): its state as a small mark in a leading
+// gutter, the title, one muted line and a quiet trailing note; agent-written text as
 // markdown; and the one way a page runs an action and says why it failed.
 
 import SwiftUI
 
 /// A list row: a mark in the leading gutter, the title, a muted sub-line,
-/// and a trailing note. `extra` sits under the sub-line (a step bar).
+/// and a trailing note. `extra` sits under the sub-line.
 struct BoardRow<Mark: View, Extra: View>: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @ScaledMetric(relativeTo: .body) private var markLift: CGFloat = 5.5
@@ -77,17 +77,18 @@ struct BoardGlyph: View {
     }
 }
 
-/// A work item's mark: a spinner while it runs, then how it ended
+/// A work item's mark: its progress ring while it is under way (the steps
+/// done, the comet going round; amber and still when a step waits on the
+/// owner, empty while an approved plan waits to start), then how it ended
 /// (items.rs `work_mark`).
 struct WorkMark: View {
     let work: BotWork
 
     var body: some View {
-        switch work.phase {
-        case .running, .starting, .stopping:
-            MiniSpinner(cellSize: 2.2).foregroundStyle(Theme.statusWorking)
-                .accessibilityLabel("Running")
-        default:
+        if let ring = work.ring {
+            let (done, total) = work.progress
+            ProgressRing(state: ring, done: done, total: total)
+        } else {
             BoardGlyph(symbol: work.phaseSymbol, color: work.phase.tone.color)
         }
     }
@@ -120,25 +121,6 @@ struct StepMark: View {
     }
 }
 
-/// A thin step bar: done steps of all.
-struct BoardProgressBar: View {
-    let done: Int
-    let total: Int
-
-    var body: some View {
-        GeometryReader { geo in
-            Capsule().fill(Theme.text.opacity(0.08))
-                .overlay(alignment: .leading) {
-                    Capsule().fill(Theme.success.opacity(0.8))
-                        .frame(width: total > 0 ? geo.size.width * CGFloat(done) / CGFloat(total) : 0)
-                }
-        }
-        .frame(height: 3)
-        .accessibilityElement()
-        .accessibilityLabel("\(done) of \(total) steps done")
-    }
-}
-
 // MARK: - Item rows
 
 /// A Needs you row: what it is, what it needs, and when.
@@ -152,24 +134,19 @@ struct NeedRowView: View {
     }
 }
 
-/// A running item: its title, the current step over a step bar, and the
-/// time it has run.
+/// A running item: its progress ring, its title, the step it is on, and
+/// the time it has run.
 struct WorkRunningRow: View {
     let work: BotWork
     var now: Int64 = nowMs()
 
     var body: some View {
-        let (done, total) = work.progress
         BoardRow(
             title: singleLine(work.title),
             sub: work.phase == .stopping ? "Stopping…" : work.currentStepLine,
             trailing: BotTime.span(now - (work.startedAt ?? work.createdAt))
         ) {
             WorkMark(work: work)
-        } extra: {
-            BoardProgressBar(done: done, total: total)
-                .padding(.top, 5)
-                .padding(.bottom, 2)
         }
     }
 }

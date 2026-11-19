@@ -152,7 +152,8 @@ private struct NeedDecisions: View {
             ForEach(decisions) { decision in
                 BotCardButton(
                     title: decision.title,
-                    role: decision.role == .primary ? .primary : decision.role == .destructive ? .destructive : .secondary,
+                    role: decision.role == .primary
+                        ? .primary : decision.role == .destructive ? .destructive : .secondary,
                     busy: busy && decision.role == .primary, action: decision.action)
             }
         }
