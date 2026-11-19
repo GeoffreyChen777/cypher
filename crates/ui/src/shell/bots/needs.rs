@@ -32,6 +32,18 @@ const CARD_ROWS: usize = 5;
 /// it says how many more there are.
 const BLOCK_LINES: usize = 14;
 
+/// The page's inset around its cards, the gap between them, and a card's
+/// own padding.
+const PAGE_PAD: f32 = 12.0;
+const CARD_GAP: f32 = 10.0;
+const CARD_PAD: f32 = 14.0;
+
+/// The gap between a card's buttons, a text button's side padding, and an
+/// icon button's side.
+const BUTTON_GAP: f32 = 6.0;
+const BUTTON_PAD: f32 = 12.0;
+const ICON_BUTTON: f32 = 30.0;
+
 /// The key of the workspace's own question among the items.
 const CHAT_KEY: &str = "chat";
 
@@ -295,16 +307,149 @@ fn primary_button(key: &str, label: &str, theme: &Theme) -> gpui::Stateful<gpui:
         .py(px(5.0))
 }
 
-/// The row a card's buttons sit in, at its foot: at the right, wrapping.
+/// The row a card's buttons sit in, at its foot under a hairline: at the
+/// right, wrapping.
 fn card_actions() -> gpui::Div {
     div()
-        .mt(px(10.0))
+        .mt(px(12.0))
+        .pt(px(10.0))
+        .border_t_1()
+        .border_color(crate::kit::theme::hairline(0.07))
         .flex()
         .flex_row()
         .flex_wrap()
         .justify_end()
         .items_center()
-        .gap(px(6.0))
+        .gap(px(BUTTON_GAP))
+}
+
+/// A label's width in a card's button.
+fn label_width(label: &str, weight: gpui::FontWeight, theme: &Theme, window: &Window) -> f32 {
+    let run = gpui::TextRun {
+        len: label.len(),
+        font: gpui::Font {
+            weight,
+            ..gpui::font(theme.font_sans.clone())
+        },
+        color: theme.text,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window.text_system().shape_line(
+        SharedString::from(label.to_string()),
+        px(13.0),
+        &[run],
+        None,
+    );
+    f32::from(line.width).ceil()
+}
+
+/// Which of a permission prompt's options draw as icons so that all of them
+/// share one line `room` wide: none while their labels fit, then the
+/// refusals, then the broader approvals from the broadest in. The narrowest
+/// approval always keeps its label. `widths` are the buttons with labels.
+fn folded_options(roles: &[OptionRole], widths: &[f32], room: f32) -> Vec<bool> {
+    let mut folded = vec![false; roles.len()];
+    let fits = |folded: &[bool]| {
+        let buttons: f32 = folded
+            .iter()
+            .zip(widths)
+            .map(|(folded, width)| if *folded { ICON_BUTTON } else { *width })
+            .sum();
+        // The buttons and the space that parts refusals from approvals.
+        buttons + BUTTON_GAP * roles.len() as f32 <= room
+    };
+    if fits(&folded) {
+        return folded;
+    }
+    for (ix, role) in roles.iter().enumerate() {
+        folded[ix] = matches!(role, OptionRole::Deny | OptionRole::Stop);
+    }
+    // The extension lists approvals from the narrowest out.
+    for ix in (0..roles.len()).rev() {
+        if fits(&folded) {
+            break;
+        }
+        folded[ix] |= roles[ix] == OptionRole::Secondary;
+    }
+    folded
+}
+
+/// The glyph a folded approval draws: what it lasts for.
+fn approval_glyph(label: &str) -> &'static str {
+    if label.starts_with("Always") {
+        icons::SHIELD_CHECK
+    } else if label.ends_with("this chat") {
+        icons::CHAT_ROUND_LINE
+    } else {
+        icons::CHECK
+    }
+}
+
+/// A permission option folded to its icon, its label in the tooltip: a
+/// cross for Deny, the stop square for Deny and stop, an outlined glyph for
+/// a broader approval.
+fn icon_option(
+    key: &str,
+    label: &str,
+    role: OptionRole,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let tip = SharedString::from(label.to_string());
+    let base = div()
+        .id(SharedString::from(key.to_string()))
+        .flex_none()
+        .size(px(ICON_BUTTON))
+        .rounded(px(8.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .on_hover(motion::hover_listener(key.to_string()))
+        .tooltip(move |_, cx| {
+            cx.new(|_| super::super::session::FindTooltip(tip.clone()))
+                .into()
+        });
+    // A refusal's label is bare text; alone, its icon needs a plate to read
+    // as a button.
+    match role {
+        OptionRole::Stop => base
+            .bg(motion::hover_blend(
+                key,
+                theme.danger.opacity(0.08),
+                theme.danger.opacity(0.16),
+            ))
+            .child(div().size(px(9.0)).rounded(px(2.0)).bg(theme.danger)),
+        OptionRole::Deny => base
+            .bg(motion::hover_blend(
+                key,
+                crate::kit::theme::ink(0.045),
+                crate::kit::theme::ink(0.09),
+            ))
+            .child(
+                icon(icons::CLOSE)
+                    .size(px(12.0))
+                    .text_color(motion::hover_blend(
+                        key,
+                        theme.text.opacity(0.7),
+                        theme.text,
+                    )),
+            ),
+        OptionRole::Secondary | OptionRole::Primary => base
+            .border_1()
+            .border_color(theme.border)
+            .bg(motion::hover_blend(
+                key,
+                crate::kit::theme::ink(0.02),
+                crate::kit::theme::ink(0.07),
+            ))
+            .child(
+                icon(approval_glyph(label))
+                    .size(px(14.0))
+                    .text_color(theme.text.opacity(0.85)),
+            ),
+    }
 }
 
 /// A line of card copy under its title.
@@ -422,7 +567,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         match item {
-            PanelItem::NeedsYou => Some(self.render_needs_page(bot, theme, cx)),
+            PanelItem::NeedsYou => Some(self.render_needs_page(bot, theme, window, cx)),
             // A plan is a work item waiting on its approval: one page.
             PanelItem::Plan(id) => self.render_work_item(id, theme, window, cx),
             PanelItem::Review(id) => self.render_question_panel(id, theme, cx),
@@ -430,11 +575,13 @@ impl Shell {
         }
     }
 
-    /// The page: a card per item, answered in place.
+    /// The page: a card per item, answered in place. It scrolls itself, so
+    /// a row can bring its card into view.
     fn render_needs_page(
         &mut self,
         bot: &Bot,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> (PanelHead, gpui::Div) {
         let items = self.current_need_items(bot, cx);
@@ -484,24 +631,24 @@ impl Shell {
         {
             self.board.needs_scroll.scroll_to_item(ix);
         }
-        let last = items.len() - 1;
+        // What a card's buttons have to share.
+        let room = self.panel_width_in(window) - 2.0 * (PAGE_PAD + CARD_PAD + 1.0);
         let now = Utc::now();
         let cards: Vec<AnyElement> = items
             .into_iter()
-            .enumerate()
-            .map(|(ix, item)| {
-                let content = self.need_content(&item, theme, cx);
+            .map(|item| {
+                let content = self.need_content(&item, room, theme, window, cx);
                 let head = self.need_head(&item, now, theme, cx);
                 div()
-                    .px(px(16.0))
-                    .pt(px(12.0))
-                    .pb(px(14.0))
+                    .flex_none()
+                    .p(px(CARD_PAD))
+                    .pt(px(10.0))
+                    .rounded(px(12.0))
+                    .bg(theme.surface_card)
+                    .border_1()
+                    .border_color(theme.border)
                     .flex()
                     .flex_col()
-                    .when(ix < last, |el| {
-                        el.border_b_1()
-                            .border_color(crate::kit::theme::hairline(0.07))
-                    })
                     .child(head)
                     .child(
                         div()
@@ -526,6 +673,10 @@ impl Shell {
                 .size_full()
                 .overflow_y_scroll()
                 .track_scroll(&self.board.needs_scroll)
+                .p(px(PAGE_PAD))
+                .flex()
+                .flex_col()
+                .gap(px(CARD_GAP))
                 .children(cards),
         );
         (head, body)
@@ -592,7 +743,9 @@ impl Shell {
     fn need_content(
         &mut self,
         item: &NeedItem,
+        room: f32,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> NeedContent {
         let key = &item.key;
@@ -724,7 +877,9 @@ impl Shell {
                     ),
                 )))
             }
-            NeedKind::Asking { chat_id } => self.asking_content(key, chat_id, theme, cx),
+            NeedKind::Asking { chat_id } => {
+                self.asking_content(key, chat_id, room, theme, window, cx)
+            }
         }
     }
 
@@ -736,7 +891,9 @@ impl Shell {
         &mut self,
         key: &str,
         chat_id: &str,
+        room: f32,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> NeedContent {
         let peek = self.peek(chat_id, false, cx);
@@ -889,17 +1046,38 @@ impl Shell {
                         )
                     })
             });
-            // Weighed as the session's own card weighs them.
+            // Weighed and placed as the session's own card does it, on one
+            // line: the refusals at the left, the approvals at the right
+            // with the narrowest one last. Where the card is too narrow for
+            // every label, options fold to icons.
             let roles = permission_card::option_roles(&question.options);
+            let widths: Vec<f32> = question
+                .options
+                .iter()
+                .zip(&roles)
+                .map(|(label, role)| {
+                    let (weight, border) = match role {
+                        OptionRole::Primary => (gpui::FontWeight::MEDIUM, 0.0),
+                        OptionRole::Secondary => (gpui::FontWeight::NORMAL, 2.0),
+                        _ => (gpui::FontWeight::NORMAL, 0.0),
+                    };
+                    label_width(label, weight, theme, window) + 2.0 * BUTTON_PAD + border
+                })
+                .collect();
+            let folded = folded_options(&roles, &widths, room);
             let (mut refusals, mut broader, mut primary) = (Vec::new(), Vec::new(), None);
             for (ix, (label, role)) in question.options.iter().zip(roles).enumerate() {
                 let button_key = format!("{key}-option-{ix}");
-                let button = match role {
-                    OptionRole::Primary => primary_button(&button_key, label, theme),
-                    OptionRole::Secondary => outline_button(&button_key, label, theme),
-                    OptionRole::Deny => quiet_button(&button_key, label, theme),
-                    OptionRole::Stop => quiet_button(&button_key, label, theme)
-                        .text_color(theme.danger.opacity(0.85)),
+                let button = if folded[ix] {
+                    icon_option(&button_key, label, role, theme)
+                } else {
+                    match role {
+                        OptionRole::Primary => primary_button(&button_key, label, theme),
+                        OptionRole::Secondary => outline_button(&button_key, label, theme),
+                        OptionRole::Deny => quiet_button(&button_key, label, theme),
+                        OptionRole::Stop => quiet_button(&button_key, label, theme)
+                            .text_color(theme.danger.opacity(0.85)),
+                    }
                 };
                 let button = button.on_click(answer(label, cx)).into_any_element();
                 match role {
@@ -909,13 +1087,12 @@ impl Shell {
                 }
             }
             broader.reverse();
-            // Two rows in the panel's width: the approvals, the narrowest
-            // one last, then the refusals under them.
-            let buttons = div()
-                .flex()
-                .flex_col()
-                .child(card_actions().children(broader).children(primary))
-                .child(card_actions().mt(px(4.0)).children(refusals));
+            let buttons = card_actions()
+                .justify_start()
+                .children(refusals)
+                .child(div().flex_1())
+                .children(broader)
+                .children(primary);
             let body = div()
                 .flex()
                 .flex_col()
@@ -1246,6 +1423,30 @@ impl NeedContent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn options_fold_to_icons_only_as_far_as_the_line_needs() {
+        use OptionRole::{Deny, Primary, Secondary, Stop};
+        // As the extension lists them: the narrowest approval first.
+        let roles = [Primary, Secondary, Secondary, Deny, Stop];
+        let widths = [82.0, 143.0, 106.0, 55.0, 112.0];
+        let fold = |room: f32| folded_options(&roles, &widths, room);
+        // 498 of buttons and five gaps.
+        assert_eq!(fold(528.0), [false; 5]);
+        // The refusals go first, together.
+        assert_eq!(fold(527.0), [false, false, false, true, true]);
+        assert_eq!(fold(421.0), [false, false, false, true, true]);
+        // Then the broadest approval, then the next one.
+        assert_eq!(fold(420.0), [false, false, true, true, true]);
+        assert_eq!(fold(344.0), [false, true, true, true, true]);
+        // The narrowest approval keeps its label however little room.
+        assert_eq!(fold(0.0), [false, true, true, true, true]);
+        // An ordinary pair fits anywhere.
+        assert_eq!(
+            folded_options(&[Primary, Deny], &[90.0, 55.0], 288.0),
+            [false; 2]
+        );
+    }
     use crate::test_fixtures;
 
     fn bot() -> Bot {

@@ -302,7 +302,8 @@ impl Shell {
             .children(self.board.panel_actions.take())
             .child(close);
         // Replacing the content fades the new item in. A thread's
-        // transcript scrolls itself, so its body fills the card unscrolled.
+        // transcript and the Needs you page scroll themselves, so their
+        // bodies fill the card unscrolled.
         let content_key = SharedString::from(format!("bot-panel-{item:?}"));
         // An empty item: what its body still shows (a filter, say) on top,
         // the message centred in the rest.
@@ -325,25 +326,21 @@ impl Shell {
                         .child(motion::fade_quick(content_key, div().child(empty))),
                 )
                 .into_any_element()
-        } else if matches!(item, PanelItem::Thread(_) | PanelItem::Session(_)) {
+        } else if matches!(
+            item,
+            PanelItem::Thread(_) | PanelItem::Session(_) | PanelItem::NeedsYou
+        ) {
             div()
                 .flex_1()
                 .min_h_0()
                 .child(motion::fade_quick(content_key, body.size_full()))
                 .into_any_element()
         } else {
-            let frame = div()
+            div()
                 .id("bot-panel-body")
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll();
-            // The Needs you page scrolls to the card a row asked for.
-            let frame = if matches!(item, PanelItem::NeedsYou) {
-                frame.track_scroll(&self.board.needs_scroll)
-            } else {
-                frame
-            };
-            frame
+                .overflow_y_scroll()
                 .child(motion::fade_quick(content_key, body))
                 .into_any_element()
         };

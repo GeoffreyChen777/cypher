@@ -331,6 +331,11 @@ impl Shell {
         self.settings.bot_panel_width + PANEL_GAP
     }
 
+    /// The panel's own width as drawn.
+    pub(super) fn panel_width_in(&self, window: &Window) -> f32 {
+        self.panel_span_in(window) - PANEL_GAP
+    }
+
     /// The panel and its gap as drawn: the stored width, less what the chat
     /// needs to keep its minimum in this window.
     fn panel_span_in(&self, window: &Window) -> f32 {

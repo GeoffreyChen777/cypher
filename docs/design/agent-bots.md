@@ -1127,7 +1127,8 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 **Needs you is one page.** Whatever waits on the owner, wherever it comes from (the bot's
 own chat, a plan, a worker session of a plan, a routine's run in the workspace or in a
 project, a connected workspace), is listed in one place and answered there. The page
-stacks a card per item, most pressing first. Each card names its source ("Fix invoice
+stacks a card per item, most pressing first, each its own bordered card with its buttons
+at its foot under a hairline; the page scrolls. Each card names its source ("Fix invoice
 rounding › Migrate tables", "Nightly tests · routine", "Plan to approve"), says what is
 asked, and holds the buttons that decide it:
 
@@ -1135,7 +1136,12 @@ asked, and holds the buttons that decide it:
   gives (the command or path, why, what a lasting approval would cover), a change or
   input block (its first lines), and the extension's own options, weighed as the
   session's own card weighs them (the narrowest approval filled, broader ones outlined,
-  Deny quiet, Deny and stop in red).
+  Deny quiet, Deny and stop in red). They share one line, the refusals at the left and
+  the approvals at the right. In a panel too narrow for every label, options fold to
+  icons with their label as the tooltip, only as far as the line needs: first the two
+  refusals (a cross, a red stop square), then the broader approvals from the broadest
+  in (a shield for "Always…", a chat bubble for "…this chat"). The narrowest approval
+  always keeps its label.
 - **A question** with answers to choose one of: each answer is a button. A question that
   takes more (several questions, several answers, one to type) says so and offers
   "Answer in the session", which opens the session live in the panel.
