@@ -58,6 +58,10 @@ pub(super) struct Dock {
     pub(super) rail_shown: bool,
     pub(super) rail_from: f32,
     pub(super) rail_since: Option<std::time::Instant>,
+    /// What the collapsed rail showed when it started to expand: those
+    /// buttons stay first, where they were, until it has collapsed again
+    /// ([`rail_order`]). `None` while collapsed.
+    pub(super) rail_pins: Option<RailPins>,
 }
 
 impl Dock {
@@ -76,8 +80,95 @@ impl Dock {
             rail_shown: false,
             rail_from: 0.0,
             rail_since: None,
+            rail_pins: None,
         }
     }
+}
+
+/// What the collapsed rail shows besides the side panel toggle: the
+/// terminal while open (or where there is no dock), the zoom while
+/// zoomed, and the side panel's shown surface.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RailPins {
+    pub(super) terminal: bool,
+    pub(super) zoom: bool,
+    pub(super) surface: Option<DockSurface>,
+}
+
+/// One button of the rail's card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RailItem {
+    Terminal,
+    Dock,
+    Split,
+    Zoom,
+    Surface(DockSurface),
+    Plus,
+}
+
+impl RailItem {
+    /// Whether the collapsed rail shows it under `pins`.
+    fn pinned(self, pins: RailPins) -> bool {
+        match self {
+            Self::Dock => true,
+            Self::Terminal => pins.terminal,
+            Self::Zoom => pins.zoom,
+            Self::Surface(surface) => pins.surface == Some(surface),
+            Self::Split | Self::Plus => false,
+        }
+    }
+
+    /// Surfaces and the `+` sit apart from the tile actions, a divider
+    /// between them.
+    fn is_surface(self) -> bool {
+        matches!(self, Self::Surface(_) | Self::Plus)
+    }
+}
+
+/// The rail's buttons top-down: what the collapsed rail shows (`pins`)
+/// first, in their usual order, then the rest in theirs. Expanding only
+/// adds buttons under the ones already shown, so the button under the
+/// pointer never moves away (user request). `available` is every button
+/// in the usual order. Pure.
+fn rail_order(available: &[RailItem], pins: RailPins) -> Vec<RailItem> {
+    let (mut head, tail): (Vec<_>, Vec<_>) = available.iter().partition(|item| item.pinned(pins));
+    head.extend(tail);
+    head
+}
+
+/// The surfaces the rail's draggable column holds: every row but the
+/// pinned one, which stays at the top. Pure.
+fn rail_column(rows: &[DockSurface], pins: Option<RailPins>) -> Vec<DockSurface> {
+    let pinned = pins.and_then(|pins| pins.surface);
+    rows.iter()
+        .copied()
+        .filter(|s| Some(*s) != pinned)
+        .collect()
+}
+
+/// Move the `column` surface at `from` to `to` inside `surfaces`: the
+/// column's entries keep their places in `surfaces` and swap contents, so
+/// what the column leaves out (the pinned surface, stale entries) stays
+/// put. Returns whether anything moved. Pure.
+fn reorder_dock_column(
+    surfaces: &mut [DockSurface],
+    column: &[DockSurface],
+    from: usize,
+    to: usize,
+) -> bool {
+    let mut moved = column.to_vec();
+    if !reorder_dock_surfaces(&mut moved, from, to) {
+        return false;
+    }
+    let mut next = moved.into_iter();
+    for surface in surfaces.iter_mut() {
+        if column.contains(surface)
+            && let Some(new) = next.next()
+        {
+            *surface = new;
+        }
+    }
+    true
 }
 
 /// How long the rail stays expanded after the pointer leaves it.
@@ -158,14 +249,6 @@ impl RailStack {
                 .opacity(shown)
                 .child(el);
             self.place(reveal.into_any_element(), shown);
-        }
-    }
-
-    /// Add a nested column, shown as much as its most shown item.
-    fn push_stack(&mut self, stack: RailStack) {
-        let shown = stack.shown;
-        if shown > 0.0 {
-            self.place(stack.into_div().into_any_element(), shown);
         }
     }
 
@@ -517,10 +600,20 @@ impl Shell {
         }
     }
 
-    /// Drag-reorder a surface tab within this dock's strip.
+    /// Drag-reorder a surface within the rail's surface column (`from` and
+    /// `to` index the column, which leaves out the pinned surface).
     fn reorder_dock_tabs(&mut self, sid: SlotId, from: usize, to: usize, cx: &mut Context<Self>) {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
+            return;
+        };
+        let rows: Vec<DockSurface> = self
+            .dock_surface_rows(slot, cx)
+            .into_iter()
+            .map(|(surface, _)| surface)
+            .collect();
+        let column = rail_column(&rows, slot.dock.rail_pins);
         if let Some(slot) = self.tiles.slots.get_mut(&sid)
-            && reorder_dock_surfaces(&mut slot.dock.surfaces, from, to)
+            && reorder_dock_column(&mut slot.dock.surfaces, &column, from, to)
         {
             cx.notify();
         }
@@ -1353,8 +1446,9 @@ impl Shell {
     /// Collapsed until hovered (user request): only the side-panel toggle and
     /// what is on — an open terminal, a zoomed tile, the side panel's shown
     /// surface. It stays expanded while its `+` menu is open or a surface
-    /// drags. Expanding slides the other buttons open and fades them in;
-    /// collapsing reverses it.
+    /// drags. Expanding slides the other buttons open under those, which
+    /// keep their places (the button you point at never moves away — user
+    /// request), and fades them in; collapsing reverses it.
     pub(super) fn render_session_rail(
         &mut self,
         sid: SlotId,
@@ -1374,7 +1468,6 @@ impl Shell {
             return Empty.into_any_element();
         };
         let rows = self.dock_surface_rows(slot, cx);
-        let count = rows.len();
         let dock_open = slot.dock.open;
         // A bot's conversation has no checkout to show and no terminal (its
         // settings open from the access note over its composer).
@@ -1400,75 +1493,151 @@ impl Shell {
             .map(|d| (d.from, d.over, d.epoch, d.prev_over));
 
         let phase = self.rail_phase(sid, expanded, window, cx);
-        // Collapsed, the surfaces column is the shown surface alone.
         let shows_surface = dock_open && rows.iter().any(|(surface, _)| *surface == active);
-        // Settled and expanded, the surfaces are their draggable column;
-        // otherwise plain rows.
-        let mut tabs = RailStack::new(phase);
-        let mut tab_column = None;
-        if phase == RailPhase::Expanded {
-            tab_column = (count > 0).then(|| {
-                render_rail_tabs(
-                    RailTabs {
-                        sid,
-                        rows,
-                        dock_open,
-                        active,
-                        drag,
-                        tab_scroll,
-                    },
-                    &theme,
-                    cx,
-                )
-            });
-        } else {
-            for (ix, (surface, title)) in rows.into_iter().enumerate() {
-                let is_active = dock_open && surface == active;
-                let button = rail_tab_button(sid, ix, surface, title, is_active, &theme, cx);
-                tabs.push(button, phase.shown(!is_active), RAIL_BUTTON);
+        // What the collapsed rail shows now. While it is (or is heading)
+        // open, the buttons it showed when it started to open stay first,
+        // where they were; the order settles once it has collapsed.
+        let current = RailPins {
+            terminal: terminal_open || !has_dock,
+            zoom: zoomed,
+            surface: shows_surface.then_some(active),
+        };
+        let pins = match self.tiles.slots.get_mut(&sid) {
+            Some(slot) if phase != RailPhase::Collapsed => {
+                *slot.dock.rail_pins.get_or_insert(current)
+            }
+            Some(slot) => {
+                slot.dock.rail_pins = None;
+                current
+            }
+            None => current,
+        };
+        let mut available = Vec::new();
+        // A bot's conversation has no terminal.
+        if !bot_chat {
+            available.push(RailItem::Terminal);
+        }
+        if has_dock {
+            available.push(RailItem::Dock);
+        }
+        if group.is_some() {
+            available.push(RailItem::Split);
+            if can_zoom {
+                available.push(RailItem::Zoom);
             }
         }
-        let plus = (phase != RailPhase::Collapsed)
-            .then(|| self.render_rail_plus(sid, files_available, git, &theme, cx));
+        // The dock's surfaces + `+` (not on a canvas — no dock there).
+        if has_dock {
+            available.extend(rows.iter().map(|(surface, _)| RailItem::Surface(*surface)));
+            available.push(RailItem::Plus);
+        }
+        let surfaces: Vec<DockSurface> = rows.iter().map(|(surface, _)| *surface).collect();
+        let column = rail_column(&surfaces, Some(pins));
+        let title_of = |surface: DockSurface| {
+            rows.iter()
+                .find(|(s, _)| *s == surface)
+                .map(|(_, title)| title.clone())
+                .unwrap_or_default()
+        };
         let raised_bg = Theme::of(cx).surface_raised;
         let (on, off) = (theme.text, theme.text_muted.opacity(0.55));
         let hover = theme.text_muted;
         let tone = RailTone { on, off, hover };
-        let actions = render_rail_actions(
-            sid,
-            RailActions {
-                terminal_open,
-                terminal: !bot_chat,
-                has_dock,
-                dock_open,
-                group,
-                zoomed,
-                can_zoom,
-                phase,
-            },
-            tone,
-            cx,
-        );
+        let state = RailActions {
+            terminal_open,
+            dock_open,
+            group,
+            zoomed,
+        };
+        // Each button with whether it is a surface (or the `+`), how much
+        // of it shows, and its height. What the rail shows collapsed is
+        // always whole; the rest comes and goes with the tween. Settled and
+        // expanded, the unpinned surfaces are one draggable column.
+        let mut entries: Vec<(bool, AnyElement, f32, f32)> = Vec::new();
+        let mut column_placed = false;
+        for item in rail_order(&available, pins) {
+            let shown = if item.pinned(current) {
+                1.0
+            } else {
+                phase.shown(true)
+            };
+            let element = match item {
+                RailItem::Surface(surface) => {
+                    let in_column = column.iter().position(|s| *s == surface);
+                    if phase == RailPhase::Expanded && in_column.is_some() {
+                        if !column_placed {
+                            column_placed = true;
+                            let rows = column.iter().map(|s| (*s, title_of(*s))).collect();
+                            let tabs = render_rail_tabs(
+                                RailTabs {
+                                    sid,
+                                    rows,
+                                    dock_open,
+                                    active,
+                                    drag,
+                                    tab_scroll: tab_scroll.clone(),
+                                },
+                                &theme,
+                                cx,
+                            );
+                            entries.push((true, tabs.into_any_element(), 1.0, 0.0));
+                        }
+                        continue;
+                    }
+                    let is_active = dock_open && surface == active;
+                    rail_tab_button(
+                        sid,
+                        in_column,
+                        surface,
+                        title_of(surface),
+                        is_active,
+                        &theme,
+                        cx,
+                    )
+                    .into_any_element()
+                }
+                RailItem::Plus if phase == RailPhase::Collapsed => continue,
+                RailItem::Plus => self
+                    .render_rail_plus(sid, files_available, git, &theme, cx)
+                    .into_any_element(),
+                action => rail_action_button(sid, action, state, tone, cx).into_any_element(),
+            };
+            entries.push((item.is_surface(), element, shown, RAIL_BUTTON));
+        }
+        // A divider between the actions and the surfaces wherever one kind
+        // follows the other, as shown as the less shown of the two runs.
         // 5px: the 1px line and its 2px margins, as one box the reveal can
         // size.
-        let divider = div()
-            .flex_none()
-            .h(px(5.0))
-            .flex()
-            .items_center()
-            .child(div().w(px(RAIL_BUTTON - 10.0)).h(px(1.0)).bg(theme.border));
+        let divider = || {
+            div()
+                .flex_none()
+                .h(px(5.0))
+                .flex()
+                .items_center()
+                .child(div().w(px(RAIL_BUTTON - 10.0)).h(px(1.0)).bg(theme.border))
+        };
         let mut card = RailStack::new(phase);
-        card.push_stack(actions);
-        // The dock's surfaces + `+` (not on a canvas — no dock there).
-        if has_dock {
-            card.push(divider, phase.shown(!shows_surface), 5.0);
-            match tab_column {
-                Some(column) => card.place(column.into_any_element(), 1.0),
-                None => card.push_stack(tabs),
+        let mut run: Option<(bool, f32)> = None;
+        let run_shown = |entries: &[(bool, AnyElement, f32, f32)], from: usize| {
+            let kind = entries[from].0;
+            entries[from..]
+                .iter()
+                .take_while(|entry| entry.0 == kind)
+                .fold(0.0_f32, |most, entry| most.max(entry.2))
+        };
+        let shown_runs: Vec<f32> = (0..entries.len())
+            .map(|ix| run_shown(&entries, ix))
+            .collect();
+        for (ix, (kind, element, shown, height)) in entries.into_iter().enumerate() {
+            match run {
+                Some((prev_kind, prev_shown)) if prev_kind != kind => {
+                    card.push(divider(), prev_shown.min(shown_runs[ix]), 5.0);
+                    run = Some((kind, shown));
+                }
+                Some((_, prev_shown)) => run = Some((kind, prev_shown.max(shown))),
+                None => run = Some((kind, shown)),
             }
-            if let Some(plus) = plus {
-                card.push(plus, phase.shown(true), RAIL_BUTTON);
-            }
+            card.push(element, shown, height);
         }
         // Hover by position: the buttons occlude the card, so its own
         // hitbox never reads as hovered under them.
@@ -1665,17 +1834,31 @@ fn render_rail_tabs(
         }));
     for (ix, (surface, title)) in rows.into_iter().enumerate() {
         let is_active = dock_open && surface == active;
-        let button = rail_tab_button(sid, ix, surface, title, is_active, theme, cx);
+        let button = rail_tab_button(sid, Some(ix), surface, title, is_active, theme, cx);
         tabs = tabs.child(slide_rail_tab(button, ix, drag));
     }
     tabs
 }
 
+/// A stable per-surface key for a rail button's element ids, wherever the
+/// button sits.
+fn surface_key(surface: DockSurface) -> usize {
+    let (tag, id) = match surface {
+        DockSurface::Picker => (0, 0),
+        DockSurface::Diff(id) => (1, id),
+        DockSurface::Files(id) => (2, id),
+        DockSurface::SideChat(id) => (3, id),
+        DockSurface::Artifact(id) => (4, id),
+    };
+    ((id as usize) << 3) | tag
+}
+
 /// One surface's icon button: activates on click, closes on middle-click or
-/// its hover ✕, drags to reorder.
+/// its hover ✕, and drags to reorder from its place `drag_ix` in the
+/// surface column (`None`: the pinned surface, which stays put).
 fn rail_tab_button(
     sid: SlotId,
-    ix: usize,
+    drag_ix: Option<usize>,
     surface: DockSurface,
     title: SharedString,
     is_active: bool,
@@ -1688,7 +1871,8 @@ fn rail_tab_button(
         DockSurface::Artifact(_) => icons::CODE,
         _ => icons::CHAT_ROUND_LINE,
     };
-    let group: SharedString = format!("dock-rail-tab-{sid}-{ix}").into();
+    let key = surface_key(surface);
+    let group: SharedString = format!("dock-rail-tab-{sid}-{key}").into();
     let ghost_title = title.clone();
     // A diff tab's title is its scope ("Working tree", a commit
     // subject) — name the surface too, the icon alone is ambiguous.
@@ -1697,7 +1881,7 @@ fn rail_tab_button(
         _ => title.clone(),
     };
     div()
-        .id(("dock-rail-tab", ix))
+        .id(("dock-rail-tab", key))
         .group(group.clone())
         .size(px(RAIL_BUTTON))
         .flex_none()
@@ -1731,18 +1915,20 @@ fn rail_tab_button(
                 this.close_dock_surface(sid, surface, cx);
             }),
         )
-        .on_drag(
-            DockTabDrag {
-                slot: sid,
-                from: ix,
-                title: ghost_title,
-            },
-            |payload, _point, _, cx| {
-                let title = payload.title.clone();
-                cx.stop_propagation();
-                cx.new(|_| SurfaceTabGhost { title })
-            },
-        )
+        .when_some(drag_ix, |el, ix| {
+            el.on_drag(
+                DockTabDrag {
+                    slot: sid,
+                    from: ix,
+                    title: ghost_title,
+                },
+                |payload, _point, _, cx| {
+                    let title = payload.title.clone();
+                    cx.stop_propagation();
+                    cx.new(|_| SurfaceTabGhost { title })
+                },
+            )
+        })
         .child(
             icon(icon_path)
                 .size(px(15.0))
@@ -1758,7 +1944,7 @@ fn rail_tab_button(
         // Hover ✕ badge in the corner — closes this surface.
         .child(
             div()
-                .id(("dock-rail-close", ix))
+                .id(("dock-rail-close", key))
                 // Inside the button: the scrolling column clips
                 // anything past its edge.
                 .absolute()
@@ -1875,103 +2061,75 @@ fn rail_plus_menu(
 }
 
 /// The tile state the rail's action buttons reflect.
+#[derive(Clone, Copy)]
 struct RailActions {
     terminal_open: bool,
-    /// The terminal button shows (not in a bot's conversation).
-    terminal: bool,
-    has_dock: bool,
     dock_open: bool,
     group: Option<crate::workspace::GroupId>,
     zoomed: bool,
-    can_zoom: bool,
-    /// Collapsed, only the dock toggle and what is on show.
-    phase: RailPhase,
 }
 
-/// The tile actions — moved here from the tab row (user request).
-/// Collapsed: the dock toggle (the terminal where there is no dock), and
-/// the terminal and zoom while they are on.
-fn render_rail_actions(
+/// One tile action button (terminal, side panel, split, zoom) — moved
+/// here from the tab row (user request). Split and zoom need the tile's
+/// group; [`Shell::render_session_rail`] offers them only with one.
+fn rail_action_button(
     sid: SlotId,
+    item: RailItem,
     state: RailActions,
     tone: RailTone,
     cx: &mut Context<Shell>,
-) -> RailStack {
+) -> AnyElement {
     let RailActions {
         terminal_open,
-        terminal,
-        has_dock,
         dock_open,
         group,
         zoomed,
-        can_zoom,
-        phase,
     } = state;
-    let mut actions = RailStack::new(phase);
-    // A bot conversation has no terminal.
-    if terminal {
-        actions.push(
-            rail_button(
-                format!("rail-terminal-{sid}").into(),
-                icons::TERMINAL,
-                terminal_open,
-                "Terminal",
-                tone,
-                cx.listener(move |this, _, window, cx| this.toggle_terminal(sid, window, cx)),
-            ),
-            phase.shown(!terminal_open && has_dock),
-            RAIL_BUTTON,
-        );
+    match (item, group) {
+        (RailItem::Terminal, _) => rail_button(
+            format!("rail-terminal-{sid}").into(),
+            icons::TERMINAL,
+            terminal_open,
+            "Terminal",
+            tone,
+            cx.listener(move |this, _, window, cx| this.toggle_terminal(sid, window, cx)),
+        )
+        .into_any_element(),
+        (RailItem::Dock, _) => rail_button(
+            format!("rail-dock-{sid}").into(),
+            icons::SIDEBAR_MINIMALISTIC,
+            dock_open,
+            "Side panel",
+            tone,
+            cx.listener(move |this, _, _, cx| this.toggle_dock(sid, cx)),
+        )
+        .into_any_element(),
+        (RailItem::Split, Some(group)) => rail_button(
+            format!("rail-split-{sid}").into(),
+            icons::DIFF_SPLIT,
+            false,
+            "Split right",
+            tone,
+            cx.listener(move |this, _, _, cx| {
+                this.workspace.focus(group);
+                this.split_focused(crate::workspace::Edge::Right, cx);
+            }),
+        )
+        .into_any_element(),
+        (RailItem::Zoom, Some(group)) => rail_button(
+            format!("rail-zoom-{sid}").into(),
+            icons::EXPAND_ARROWS,
+            zoomed,
+            if zoomed { "Restore tiles" } else { "Zoom tile" },
+            tone,
+            cx.listener(move |this, _, _, cx| {
+                this.workspace.toggle_zoom(group);
+                this.workspace_changed(cx);
+            }),
+        )
+        .into_any_element(),
+        _ => Empty.into_any_element(),
     }
-    if has_dock {
-        actions.push(
-            rail_button(
-                format!("rail-dock-{sid}").into(),
-                icons::SIDEBAR_MINIMALISTIC,
-                dock_open,
-                "Side panel",
-                tone,
-                cx.listener(move |this, _, _, cx| this.toggle_dock(sid, cx)),
-            ),
-            1.0,
-            RAIL_BUTTON,
-        );
-    }
-    if let Some(group) = group {
-        actions.push(
-            rail_button(
-                format!("rail-split-{sid}").into(),
-                icons::DIFF_SPLIT,
-                false,
-                "Split right",
-                tone,
-                cx.listener(move |this, _, _, cx| {
-                    this.workspace.focus(group);
-                    this.split_focused(crate::workspace::Edge::Right, cx);
-                }),
-            ),
-            phase.shown(true),
-            RAIL_BUTTON,
-        );
-        if can_zoom {
-            actions.push(
-                rail_button(
-                    format!("rail-zoom-{sid}").into(),
-                    icons::EXPAND_ARROWS,
-                    zoomed,
-                    if zoomed { "Restore tiles" } else { "Zoom tile" },
-                    tone,
-                    cx.listener(move |this, _, _, cx| {
-                        this.workspace.toggle_zoom(group);
-                        this.workspace_changed(cx);
-                    }),
-                ),
-                phase.shown(!zoomed),
-                RAIL_BUTTON,
-            );
-        }
-    }
-    actions
 }
 
 /// The rail's margin around its card (room for the card's shadow too).
@@ -2063,6 +2221,102 @@ mod tests {
         assert!(!reorder_dock_surfaces(&mut tabs, 1, 1));
         assert!(!reorder_dock_surfaces(&mut tabs, 1, 9));
         assert_eq!(tabs, before);
+    }
+
+    /// What the collapsed rail shows comes first, in the same order, so
+    /// expanding only adds buttons under it.
+    #[test]
+    fn the_rail_keeps_its_collapsed_buttons_in_place() {
+        use RailItem::*;
+        let (git, files) = (DockSurface::Diff(1), DockSurface::Files(2));
+        let available = [
+            Terminal,
+            Dock,
+            Split,
+            Zoom,
+            Surface(files),
+            Surface(git),
+            Plus,
+        ];
+        // Git open: the side panel toggle and Git stay on top.
+        let pins = RailPins {
+            surface: Some(git),
+            ..Default::default()
+        };
+        let order = rail_order(&available, pins);
+        assert_eq!(
+            order,
+            vec![
+                Dock,
+                Surface(git),
+                Terminal,
+                Split,
+                Zoom,
+                Surface(files),
+                Plus
+            ]
+        );
+        // Whatever is pinned, the collapsed buttons are the order's head.
+        for pins in [
+            RailPins::default(),
+            pins,
+            RailPins {
+                terminal: true,
+                zoom: true,
+                surface: Some(files),
+            },
+        ] {
+            let order = rail_order(&available, pins);
+            let shown: Vec<_> = available
+                .iter()
+                .copied()
+                .filter(|item| item.pinned(pins))
+                .collect();
+            assert_eq!(order[..shown.len()], shown[..], "{pins:?}");
+            assert_eq!(order.len(), available.len());
+        }
+        // Nothing open: the toggle alone, then the usual order.
+        assert_eq!(
+            rail_order(&available, RailPins::default()),
+            vec![
+                Dock,
+                Terminal,
+                Split,
+                Zoom,
+                Surface(files),
+                Surface(git),
+                Plus
+            ]
+        );
+    }
+
+    /// Dragging in the surface column moves surfaces around the pinned one
+    /// (and stale entries), which stays where it is.
+    #[test]
+    fn the_surface_column_reorders_around_the_pinned_surface() {
+        let (a, b, c, d) = (
+            DockSurface::Diff(1),
+            DockSurface::Files(2),
+            DockSurface::Artifact(3),
+            DockSurface::SideChat(4),
+        );
+        let mut surfaces = vec![a, b, c, d];
+        let pins = RailPins {
+            surface: Some(b),
+            ..Default::default()
+        };
+        let column = rail_column(&surfaces, Some(pins));
+        assert_eq!(column, vec![a, c, d]);
+        // d (column 2) to the front.
+        assert!(reorder_dock_column(&mut surfaces, &column, 2, 0));
+        assert_eq!(surfaces, vec![d, b, a, c]);
+        // No-ops change nothing.
+        let column = rail_column(&surfaces, Some(pins));
+        assert!(!reorder_dock_column(&mut surfaces, &column, 1, 1));
+        assert!(!reorder_dock_column(&mut surfaces, &column, 0, 9));
+        assert_eq!(surfaces, vec![d, b, a, c]);
+        // Without a pin the column is every surface.
+        assert_eq!(rail_column(&surfaces, None), surfaces);
     }
 
     /// A rail card of three buttons, the outer two expanded-only.
