@@ -569,13 +569,12 @@ impl Shell {
         let row_key = format!("bot-{}-{key}", if expanded { "less" } else { "more" });
         let fade_key = row_key.clone();
         Some(
-            card_item(&row_key, None, label, None, false, theme)
-                .text_color(theme.text_muted)
+            more_label(&row_key, label, theme)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     // The click moves the row out from under the pointer
                     // (the list grows or shrinks), and nothing tells a row
                     // that the pointer left it that way: without this its
-                    // hover wash stays on, here and when it comes back.
+                    // hover tint stays on, here and when it comes back.
                     motion::set_hover(&fade_key, false, true);
                     if !this.board.expanded.remove(&key) {
                         this.board.expanded.insert(key.clone());
@@ -783,6 +782,37 @@ pub(super) fn card_item_detail(
                 .pl(px(if has_mark { 14.0 + ROW_MARK_GAP } else { 0.0 }))
                 .child(detail)
         }))
+}
+
+/// The quiet last line of a list that holds more than it shows ("2 more",
+/// "Show less"): a small label at the row's right end, on the corners'
+/// column and in their faint ink, with no wash of its own. Hovering it
+/// only firms the ink up.
+pub(super) fn more_label(
+    key: &str,
+    label: impl Into<SharedString>,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(key.to_string()))
+        .flex()
+        .flex_row()
+        .justify_end()
+        .mx(px(ROW_MARGIN))
+        .mb(px(2.0))
+        .pr(px(8.0))
+        .py(px(4.0))
+        .cursor_pointer()
+        .text_size(px(10.5))
+        .line_height(px(14.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(motion::hover_blend(
+            key,
+            theme.text_muted.opacity(0.5),
+            theme.text_muted,
+        ))
+        .on_hover(motion::hover_listener(key.to_string()))
+        .child(label.into())
 }
 
 /// A card row's corner: the session rows' 10px time-and-state note, in the

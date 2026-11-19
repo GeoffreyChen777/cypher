@@ -400,18 +400,16 @@ impl Shell {
             })
             .collect();
         let more = (total > CARD_ROWS).then(|| {
-            card_item(
+            super::board::more_label(
                 "bot-needs-more",
-                None,
                 format!("{} more", total - CARD_ROWS),
-                None,
-                false,
                 theme,
             )
-            .text_color(theme.text_muted)
             .on_click(cx.listener(|this, _, _, cx| this.open_need(None, cx)))
+            .into_any_element()
         });
-        Some(self.fold_card("needs", header, shown.into_iter().chain(more), theme))
+        let shown = shown.into_iter().map(IntoElement::into_any_element);
+        Some(self.fold_card("needs", header, shown.chain(more), theme))
     }
 
     /// The detail panel for this card's items; `None` when the item no
