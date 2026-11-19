@@ -543,9 +543,9 @@ impl Shell {
         .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
     }
 
-    /// The sidebar card: the routines by next run (the first few, the rest
-    /// in place on "N more"), or the one-line way to make the first. The
-    /// header's + adds one.
+    /// The sidebar card: the routines by next run (those running and the
+    /// next few, the rest in place on "N more"), or the one-line way to
+    /// make the first. The header's + adds one.
     pub(super) fn render_schedule_card(
         &self,
         bot: &Bot,
@@ -590,26 +590,29 @@ impl Shell {
             theme,
             cx,
         );
-        let shown = if self.list_expanded("schedule") {
-            jobs.len()
+        // A run under way (or asked for) always shows, then the next few.
+        let live = |(job, _): &(Job, Option<Space>)| {
+            matches!(job.state(), JobState::Running | JobState::Starting)
+        };
+        let (jobs, hidden) = if self.list_expanded("schedule") {
+            let hidden =
+                super::board::short_rows(jobs.iter().map(live).collect::<Vec<bool>>(), |live| {
+                    *live
+                })
+                .1;
+            (jobs, hidden)
         } else {
-            parts::CARD_ROWS
+            super::board::short_rows(jobs, live)
         };
         let mut rows: Vec<AnyElement> = jobs
             .iter()
-            .take(shown)
             .map(|(job, space)| {
                 let selected = open.as_ref() == Some(&job.item());
                 self.job_item(job, space.as_ref(), tint, selected, theme, cx)
                     .into_any_element()
             })
             .collect();
-        rows.extend(self.more_row(
-            "schedule".into(),
-            jobs.len().saturating_sub(parts::CARD_ROWS),
-            theme,
-            cx,
-        ));
+        rows.extend(self.more_row("schedule".into(), hidden, theme, cx));
         Some(self.fold_card("schedule", header, rows, theme))
     }
 

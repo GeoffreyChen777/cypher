@@ -16,8 +16,7 @@ use super::*;
 use crate::transcript::bot_plan::{PlanPhase, format_span, phase_line, plan_phase, step_span};
 use cypher_proto::{BotWork, StepState, WorkState};
 
-/// Finished work the card keeps under the running ones.
-const CARD_FINISHED: usize = 3;
+use super::board::CARD_SHORT;
 
 /// A bot's work as its card lists it.
 pub(super) struct WorkCard<'a> {
@@ -26,7 +25,7 @@ pub(super) struct WorkCard<'a> {
     /// the order they start in). A plan still awaiting approval is in
     /// Needs you, not here.
     pub live: Vec<&'a BotWork>,
-    /// Ended, newest end first: the last [`CARD_FINISHED`] that ran, or
+    /// Ended, newest end first: the last [`CARD_SHORT`] that ran, or
     /// every one (rejected plans included) once the card is expanded.
     pub ended: Vec<&'a BotWork>,
     /// How many ended items the short list leaves out.
@@ -60,7 +59,7 @@ pub(super) fn work_card<'a>(
         .iter()
         .copied()
         .filter(|w| w.state != WorkState::Cancelled)
-        .take(CARD_FINISHED)
+        .take(CARD_SHORT)
         .collect();
     let hidden = total - short.len();
     running.extend(waiting);

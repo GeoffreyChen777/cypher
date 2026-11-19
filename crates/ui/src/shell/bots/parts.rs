@@ -7,9 +7,6 @@ use super::panel::PanelItem;
 use super::*;
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
 
-/// Rows a card lists before its "N more" row.
-pub(super) const CARD_ROWS: usize = 4;
-
 /// What the confirm dialog asks before it does it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Confirm {

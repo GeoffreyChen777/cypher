@@ -1120,8 +1120,8 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 |---|---|---|
 | **Needs you** | Everything that waits on the owner, one row each: the bot's own question, actions awaiting approval, sessions the workspace runs that are asking (a permission prompt, a question), plans awaiting approval, and answers to review | The **Needs you page**: a card per item, answered in place (below). A row opens the page on its card |
 | **Work** | Running orchestrations, each with its current step ("Step 2 of 4 · Run the tests") over a small step bar and the time it has run; approved plans that have not started yet ("waiting": for a free slot, or a paused workspace); then the last three that ended, with their outcome mark. "N more" brings in everything that ended, rejected plans included | The orchestration: its status as the title's tile (state, progress and times on hover), its request, then one flow on one rail: each step with its state, duration, note and sessions, ending in the result; Approve / Edit / Reject while it waits, Stop while it runs. Agent-written text (request, summary, notes, result) renders as markdown. A step's title folds its details; hovering a node washes it and firms up its rail segment, a duration shows its exact times, the result offers Copy, and the shared project opens its page |
-| **Routines** | Its routines in order of next run: name, next run, and what a run under way is doing; the first four, then "N more". The header's **+** (on hover) adds one | The routine: where it runs, trigger, prompt, settings, the last run and links to its scheduled and manual sessions, edit, run now |
-| **Projects** | Each granted project, and under it the sessions the workspace runs there (a plan's workers, a project routine's), newest first, each with the mark a session row has in the Sessions view (working, asking, finished unseen, else its time); six per project, then "N more" | A project's row: its page (its device beside the title, the folder on hover; the workspace's sessions there, the owner's sessions it reads, its work and its routines there). A session's row: the session, live |
+| **Routines** | Its routines in order of next run: name, next run, and what a run under way is doing; those running and the next three, then "N more". The header's **+** (on hover) adds one | The routine: where it runs, trigger, prompt, settings, the last run and links to its scheduled and manual sessions, edit, run now |
+| **Projects** | Each granted project, and under it the sessions the workspace runs there (a plan's workers, a project routine's), newest first, each with the mark a session row has in the Sessions view (working, asking, finished unseen, else its time); per project, those working or asking and the newest three of the rest, then "N more" | A project's row: its page (its device beside the title, the folder on hover; the workspace's sessions there, the owner's sessions it reads, its work and its routines there). A session's row: the session, live |
 | **Connections** (P4; "network" in code) | Just its header: how many workspaces are connected ("3 · 1 open invite"), or "N to review" in amber when answers wait in Needs you (a click opens the review) | The Connections panel lists the connected workspaces, invites and recent questions; its header's + opens the connect page (create an invite code, or paste one). A connection opens its own page (scope, reply mode, exchanges, revoke), and a question its own (who asked whom, the question, the answer, how it ended; a waiting one opens as its review), each with a back arrow to Connections |
 
 **Needs you is one page.** Whatever waits on the owner, wherever it comes from (the bot's
@@ -1167,14 +1167,17 @@ chip's menu only moves or deletes it. Shortcuts are `botShortcuts` registry rows
 deletion (`Mutate orderBotShortcuts`, `deleteBotShortcut`), and they are deleted with their
 workspace.
 
-**Lists live in the sidebar; the panel is for details.** A card shows its first few rows.
-When it holds more, its last row says "N more": a click brings the rest in, in place, and
-the row becomes "Show less". The panel never shows a card's list (there is no Work,
+**Lists live in the sidebar; the panel is for details.** Every card keeps a short list by
+one rule: what is under way always shows (a running plan, a routine mid-run, a session
+working or asking), then three of the rest (the last plans that ended, the next routines
+to run, a project's newest sessions). Needs you, whose every row waits on the owner,
+shows five. When a list holds more, its last line is a small faint "N more" under the
+titles: a click brings the rest in, in place, and the line becomes "Show less". The panel never shows a card's list (there is no Work,
 Routines or Projects list page): a row opens that item's page.
 What is expanded is kept for this window only, like the folds. Two cards have a page of
 their own that is not a list of their rows: **Needs you** (the page that answers its
-items, opened by any row and by the arrow at its header's end) and **Connections** (whose
-card is only a header).
+items, opened by any row and by the arrow at its header's end; its "N more" still
+expands the card in place) and **Connections** (whose card is only a header).
 
 There is no Activity card: it mostly repeated Work, Routines and Connections. The full audit
 log, filterable as Plans, Sessions, Routines, Memory or Connections, opens from the chat

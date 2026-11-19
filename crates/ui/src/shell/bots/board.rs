@@ -17,8 +17,29 @@ use cypher_proto::{Chat, Space};
 const CARD_PAD: f32 = 12.0;
 const CARD_RADIUS: f32 = 12.0;
 
-/// The sessions a project shows on the Projects card before "N more".
-const PROJECT_SESSIONS: usize = 6;
+/// How many settled rows a short list keeps, on every card: what is under
+/// way always shows, then this many of the rest, then "N more".
+pub(super) const CARD_SHORT: usize = 3;
+
+/// A list as its card shows it before "N more" ([`CARD_SHORT`]): every row
+/// under way (`live`) and the first few of the rest, in their order. Returns
+/// the rows kept and how many were left out.
+pub(super) fn short_rows<T>(rows: Vec<T>, live: impl Fn(&T) -> bool) -> (Vec<T>, usize) {
+    let total = rows.len();
+    let mut settled = 0;
+    let kept: Vec<T> = rows
+        .into_iter()
+        .filter(|row| {
+            if live(row) {
+                return true;
+            }
+            settled += 1;
+            settled <= CARD_SHORT
+        })
+        .collect();
+    let hidden = total - kept.len();
+    (kept, hidden)
+}
 
 /// A project's key among the expanded lists.
 fn project_key(space_id: &str) -> String {
@@ -37,9 +58,11 @@ pub(super) enum HeaderAction {
 /// One project on the Projects card with the workspace's sessions there.
 struct ProjectSessions {
     space: Space,
-    /// The newest [`PROJECT_SESSIONS`] of them, or all once expanded.
+    /// The ones its short list keeps ([`short_rows`]: those working or
+    /// asking, and the newest few of the rest), or all once expanded.
     sessions: Vec<SessionLine>,
-    total: usize,
+    /// How many the short list leaves out.
+    hidden: usize,
 }
 
 /// A workspace session's row under its project.
@@ -335,8 +358,8 @@ impl Shell {
     /// The projects the workspace covers, each with the sessions the
     /// workspace runs there (the ones its plans started, its project
     /// routines'), the way the Sessions view lists a project's sessions:
-    /// they are listed nowhere else. A project shows its newest few and
-    /// the rest in place on "N more". A project's row opens its page, a
+    /// they are listed nowhere else. A project shows the ones working or
+    /// asking and its newest few, and the rest in place on "N more". A project's row opens its page, a
     /// session's the session, live, in the panel. `None` with nothing
     /// granted.
     fn render_projects_card(
@@ -354,31 +377,42 @@ impl Shell {
                 .into_iter()
                 .filter(|space| bot.scope.sees_space(&space.id))
                 .map(|space| {
-                    let sessions = state.workspace_sessions(&bot.id, &space.id);
-                    // Its newest few, or all of them once expanded.
-                    let shown = if self.board.expanded.contains(&project_key(&space.id)) {
-                        sessions.len()
-                    } else {
-                        PROJECT_SESSIONS
+                    let sessions: Vec<SessionLine> = state
+                        .workspace_sessions(&bot.id, &space.id)
+                        .into_iter()
+                        .map(|chat| SessionLine {
+                            id: chat.id.clone(),
+                            title: transcript::single_line(&super::items::plain_markdown(
+                                chat.title.as_deref().unwrap_or("New session"),
+                            )),
+                            status: state.display_status_for(chat, now),
+                            time_ago: format_time_ago(
+                                chat.last_message_at.unwrap_or(chat.created_at),
+                                now,
+                            ),
+                        })
+                        .collect();
+                    let live = |line: &SessionLine| {
+                        matches!(
+                            line.status,
+                            ChatIndicator::Working | ChatIndicator::AwaitingInput
+                        )
                     };
+                    let (sessions, hidden) =
+                        if self.board.expanded.contains(&project_key(&space.id)) {
+                            let hidden = short_rows(
+                                sessions.iter().map(live).collect::<Vec<bool>>(),
+                                |live| *live,
+                            )
+                            .1;
+                            (sessions, hidden)
+                        } else {
+                            short_rows(sessions, live)
+                        };
                     ProjectSessions {
                         space: space.clone(),
-                        total: sessions.len(),
-                        sessions: sessions
-                            .into_iter()
-                            .take(shown)
-                            .map(|chat| SessionLine {
-                                id: chat.id.clone(),
-                                title: transcript::single_line(&super::items::plain_markdown(
-                                    chat.title.as_deref().unwrap_or("New session"),
-                                )),
-                                status: state.display_status_for(chat, now),
-                                time_ago: format_time_ago(
-                                    chat.last_message_at.unwrap_or(chat.created_at),
-                                    now,
-                                ),
-                            })
-                            .collect(),
+                        sessions,
+                        hidden,
                     }
                 })
                 .collect()
@@ -421,9 +455,7 @@ impl Shell {
                 )
                 .into_any_element(),
             );
-            let more = project
-                .total
-                .saturating_sub(project.sessions.len().min(PROJECT_SESSIONS));
+            let more = project.hidden;
             for session in project.sessions {
                 let item = PanelItem::Session(session.id.clone());
                 let menu_id = session.id.clone();
@@ -969,6 +1001,29 @@ mod tests {
         assert_eq!(focused_card(Some("work"), &drawn), Some("work"));
         assert_eq!(focused_card(Some("schedule"), &drawn), None);
         assert_eq!(focused_card(None, &["empty"]), Some("empty"));
+    }
+
+    #[test]
+    fn a_short_list_keeps_whats_under_way_and_the_first_few_of_the_rest() {
+        // (id, under way), in the list's order.
+        let rows = vec![
+            ("a", false),
+            ("b", true),
+            ("c", false),
+            ("d", false),
+            ("e", false),
+            ("f", true),
+            ("g", false),
+        ];
+        let (kept, hidden) = short_rows(rows.clone(), |row| row.1);
+        let ids: Vec<&str> = kept.iter().map(|row| row.0).collect();
+        assert_eq!(ids, ["a", "b", "c", "d", "f"], "in order, live ones kept");
+        assert_eq!(hidden, 2);
+        // Nothing to leave out: no "N more".
+        let (kept, hidden) = short_rows(rows[..4].to_vec(), |row| row.1);
+        assert_eq!((kept.len(), hidden), (4, 0));
+        let (kept, hidden) = short_rows(Vec::<(&str, bool)>::new(), |row| row.1);
+        assert_eq!((kept.len(), hidden), (0, 0));
     }
 
     #[test]

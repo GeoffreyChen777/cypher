@@ -24,7 +24,8 @@ use crate::composer::permission_card::{self, FactKind, OptionRole};
 use crate::kit::theme::MonoStyled;
 use cypher_proto::{ExchangeDirection, ExchangeState, NeedsYou, UserInputQuestion};
 
-/// Rows the card shows before it points at the page.
+/// Rows the card shows before "N more". More than the other cards' short
+/// lists: every one of these waits on the owner.
 const CARD_ROWS: usize = 5;
 
 /// The lines of a tool's input or a change a permission card shows before
@@ -382,9 +383,14 @@ impl Shell {
             theme,
             cx,
         );
-        let shown: Vec<_> = items
+        let shown = if self.list_expanded("needs") {
+            total
+        } else {
+            CARD_ROWS
+        };
+        let mut rows: Vec<AnyElement> = items
             .into_iter()
-            .take(CARD_ROWS)
+            .take(shown)
             .map(|item| {
                 let key = item.key.clone();
                 card_item(
@@ -397,19 +403,12 @@ impl Shell {
                     theme,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.open_need(Some(key.clone()), cx)))
+                .into_any_element()
             })
             .collect();
-        let more = (total > CARD_ROWS).then(|| {
-            super::board::more_label(
-                "bot-needs-more",
-                format!("{} more", total - CARD_ROWS),
-                theme,
-            )
-            .on_click(cx.listener(|this, _, _, cx| this.open_need(None, cx)))
-            .into_any_element()
-        });
-        let shown = shown.into_iter().map(IntoElement::into_any_element);
-        Some(self.fold_card("needs", header, shown.chain(more), theme))
+        // The rest come in in place, like any card's.
+        rows.extend(self.more_row("needs".into(), total.saturating_sub(CARD_ROWS), theme, cx));
+        Some(self.fold_card("needs", header, rows, theme))
     }
 
     /// The detail panel for this card's items; `None` when the item no
