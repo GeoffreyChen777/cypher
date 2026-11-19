@@ -1240,8 +1240,11 @@ motion (`kit/progress_ring.rs`).
 - **Result**, once it ended and wrote one: before the steps, with Copy on hover.
 - **Steps** on one rail, with how many are done while some are not, and the plan's
   summary until it ends. A step shows its state, title and duration (exact times on
-  hover). One that is running, asking or failed is open: what it reported and its
-  sessions, each a row that opens the session. The rest keep to their title and one
+  hover). Where steps work in different projects, each names its
+  project quietly before its duration ("web-api · 2h 10m"): the name alone, with the
+  device added only when it is another machine (the tooltip has both). One that is
+  running, asking or failed is open: what it reported and its sessions, each a row of
+  its status mark and title that opens the session (its state in words is the tooltip). The rest keep to their title and one
   line of what they reported; a click on a title opens or closes a step. Every step of
   a plan still to approve is open on its description. Agent-written text renders as
   markdown.

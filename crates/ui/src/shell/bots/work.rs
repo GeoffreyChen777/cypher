@@ -964,7 +964,8 @@ impl Shell {
             .filter(|d| !d.trim().is_empty());
             let asking = step.state == StepState::Asking;
             let sessions_n = sessions.len();
-            let foldable = project.is_some() || detail.is_some() || sessions_n > 0;
+            let foldable = detail.is_some() || sessions_n > 0;
+            let (timed, placed) = (span.is_some(), project.is_some());
             let toggle = (work.id.clone(), ix);
             let open = foldable
                 && self
@@ -1002,30 +1003,72 @@ impl Shell {
                         })
                         .child(SharedString::from(step.title.clone())),
                 )
-                .children(span.map(|span| {
-                    // Its exact times on hover.
-                    let tip = match (step.started_at, step.ended_at) {
-                        (Some(start), Some(end)) => format!(
-                            "{} → {}",
-                            parts::past_full_ms(start),
-                            parts::past_full_ms(end)
-                        ),
-                        (Some(start), None) => format!("Since {}", parts::past_full_ms(start)),
-                        _ => String::new(),
-                    };
+                // Where it works, quietly before its time: the name, and
+                // the device only when that is another machine (it is in
+                // the tooltip either way).
+                .child(
                     div()
-                        .id(SharedString::from(format!("{key}-span")))
                         .flex_none()
-                        .pt(px(2.0))
-                        .when(!tip.is_empty(), |el| {
-                            el.tooltip(move |_, cx| {
-                                let tip = tip.clone();
-                                cx.new(|_| super::super::session::FindTooltip(tip.into()))
-                                    .into()
-                            })
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(4.0))
+                        .children(project.map(|project| {
+                            let tip = SharedString::from(format!(
+                                "{} · on {}",
+                                project.name, project.device
+                            ));
+                            div()
+                                .id(SharedString::from(format!("{key}-place")))
+                                .flex_none()
+                                .max_w(px(120.0))
+                                .pt(px(2.0))
+                                .truncate()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted.opacity(0.85))
+                                .tooltip(move |_, cx| {
+                                    let tip = tip.clone();
+                                    cx.new(|_| super::super::session::FindTooltip(tip)).into()
+                                })
+                                .child(SharedString::from(project.short()))
+                        }))
+                        .when(timed && placed, |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .pt(px(2.0))
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_faint)
+                                    .child("·"),
+                            )
                         })
-                        .child(trailing(span, theme.text_faint))
-                }))
+                        .children(span.map(|span| {
+                            // Its exact times on hover.
+                            let tip = match (step.started_at, step.ended_at) {
+                                (Some(start), Some(end)) => format!(
+                                    "{} → {}",
+                                    parts::past_full_ms(start),
+                                    parts::past_full_ms(end)
+                                ),
+                                (Some(start), None) => {
+                                    format!("Since {}", parts::past_full_ms(start))
+                                }
+                                _ => String::new(),
+                            };
+                            div()
+                                .id(SharedString::from(format!("{key}-span")))
+                                .flex_none()
+                                .pt(px(2.0))
+                                .when(!tip.is_empty(), |el| {
+                                    el.tooltip(move |_, cx| {
+                                        let tip = tip.clone();
+                                        cx.new(|_| super::super::session::FindTooltip(tip.into()))
+                                            .into()
+                                    })
+                                })
+                                .child(trailing(span, theme.text_faint))
+                        })),
+                )
                 // The chevron's slot is kept on every step, so the times
                 // line up in one column. A closed step shows it faintly:
                 // there is more under it.
@@ -1056,29 +1099,6 @@ impl Shell {
             let mut content = div().flex_1().min_w_0().flex().flex_col().child(title);
             if open {
                 let mut details = div().flex().flex_col().gap(px(2.0)).pt(px(2.0));
-                if let Some(project) = project {
-                    details = details.child(
-                        div()
-                            .min_w_0()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(5.0))
-                            .text_size(px(11.5))
-                            .line_height(px(16.0))
-                            .text_color(theme.text_muted.opacity(0.85))
-                            .child(
-                                icon(project.glyph)
-                                    .size(px(11.0))
-                                    .flex_none()
-                                    .text_color(project.tint),
-                            )
-                            .child(div().min_w_0().truncate().child(SharedString::from(format!(
-                                "{} · {}",
-                                project.name, project.device
-                            )))),
-                    );
-                }
                 if let Some(detail) = &detail {
                     details = details.child(md(
                         detail,
@@ -1125,8 +1145,8 @@ impl Shell {
         flow
     }
 
-    /// A session a step started, under the step: its status, title, and a
-    /// click that opens it.
+    /// A session a step started, under the step: its status mark, its
+    /// title, and a click that opens it.
     fn flow_session(
         &self,
         chat_id: String,
@@ -1166,13 +1186,13 @@ impl Shell {
                         .text_color(motion::hover_blend(&key, theme.text_muted, theme.text))
                         .child(SharedString::from(title)),
                 )
-                .children(session_word(status, theme).map(|(word, color)| {
-                    div()
-                        .flex_none()
-                        .text_size(px(11.0))
-                        .text_color(color)
-                        .child(word)
-                }))
+                // Its mark says how it stands; the word is in the tooltip.
+                .when_some(session_word(status, theme), |el, (word, _)| {
+                    el.tooltip(move |_, cx| {
+                        cx.new(|_| super::super::session::FindTooltip(word.into()))
+                            .into()
+                    })
+                })
                 .child(arrow_in(&key, theme)),
             None => row
                 .child(mark_cell(session_mark(ChatIndicator::Idle, ticker, theme)))
@@ -1385,6 +1405,20 @@ mod tests {
         assert_eq!(shared_project(&w), Some("billing"));
         w.steps[2].project = Some("web".into());
         assert_eq!(shared_project(&w), None);
+    }
+
+    #[test]
+    fn a_step_names_its_device_only_when_it_is_another_machine() {
+        let mut label = super::super::items::ProjectLabel {
+            glyph: icons::FOLDER,
+            tint: gpui::black(),
+            name: "web-api".into(),
+            device: "Build box".into(),
+            local: true,
+        };
+        assert_eq!(label.short(), "web-api");
+        label.local = false;
+        assert_eq!(label.short(), "web-api · Build box");
     }
 
     #[test]

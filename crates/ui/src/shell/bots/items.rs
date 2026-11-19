@@ -309,12 +309,26 @@ pub(super) fn icon_button(
         )))
 }
 
-/// A project as a step names it: glyph, tint, name and device.
+/// A project as a step names it: glyph, tint, name and device; `local`
+/// while it is on this device (or no one knows which this is).
 pub(super) struct ProjectLabel {
     pub glyph: &'static str,
     pub tint: gpui::Hsla,
     pub name: String,
     pub device: String,
+    pub local: bool,
+}
+
+impl ProjectLabel {
+    /// The project in a few words beside a step: its name, and its device
+    /// only when that is another machine.
+    pub(super) fn short(&self) -> String {
+        if self.local {
+            self.name.clone()
+        } else {
+            format!("{} · {}", self.name, self.device)
+        }
+    }
 }
 
 pub(super) fn project_label(
@@ -332,6 +346,10 @@ pub(super) fn project_label(
             .device_name(&space.device_id)
             .unwrap_or("Unknown device")
             .to_string(),
+        local: state
+            .local_device_id
+            .as_deref()
+            .is_none_or(|local| local == space.device_id),
     })
 }
 
