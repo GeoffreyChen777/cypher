@@ -308,7 +308,7 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
 ### 6.6 Control and limits
 
 - Live **progress** beside the bot chat, never in it: the plan's row in the sidebar (its
-  current step over a small step bar) and its page in the detail panel (each step's
+  progress ring and current step) and its page in the detail panel (each step's
   state, its sessions, elapsed time).
 - **Stop** ends the thread and interrupts every session it started.
 - Limits per bot: concurrent orchestrations (3), sessions per orchestration (8), turns per
@@ -1088,7 +1088,7 @@ A workspace
 **Each area has one job.** The chat **announces**: a plan was proposed (decide here or
 open it), a plan or a routine's run ended (how, in a word, with the bot's sentence or two).
 It holds no card that changes while work runs. The sidebar **shows where things stand**:
-what needs the owner, each running plan with its current step and a small step bar,
+what needs the owner, each running plan with its progress ring and current step,
 routines with their next run, and the sessions the workspace runs in each project. The
 detail panel **holds everything in full**: a plan's steps and result, a routine and its
 runs, a session live, and the one page where everything that needs the owner is answered.
@@ -1119,7 +1119,7 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 | Card | Shows | Opens in the detail panel |
 |---|---|---|
 | **Needs you** | Everything that waits on the owner, one row each: the bot's own question, actions awaiting approval, sessions the workspace runs that are asking (a permission prompt, a question), plans awaiting approval, and answers to review | The **Needs you page**: a card per item, answered in place (below). A row opens the page on its card |
-| **Work** | Running orchestrations, each with its current step ("Step 2 of 4 · Run the tests") over a small step bar and the time it has run; approved plans that have not started yet ("waiting": for a free slot, or a paused workspace); then the last three that ended, with their outcome mark. "N more" brings in everything that ended, rejected plans included | The orchestration: its status as the title's tile (state, progress and times on hover), its request, then one flow on one rail: each step with its state, duration, note and sessions, ending in the result; Approve / Edit / Reject while it waits, Stop while it runs. Agent-written text (request, summary, notes, result) renders as markdown. A step's title folds its details; hovering a node washes it and firms up its rail segment, a duration shows its exact times, the result offers Copy, and the shared project opens its page |
+| **Work** | Running orchestrations, each with its progress ring (below), its current step ("Step 2 of 4 · Run the tests") and the time it has run; approved plans that have not started yet ("waiting": for a free slot, or a paused workspace); then the last three that ended, with their outcome mark. "N more" brings in everything that ended, rejected plans included | The orchestration's page (below) |
 | **Routines** | Its routines in order of next run: name, next run, and what a run under way is doing; those running and the next three, then "N more". The header's **+** (on hover) adds one | The routine: where it runs, trigger, prompt, settings, the last run and links to its scheduled and manual sessions, edit, run now |
 | **Projects** | Each granted project, and under it the sessions the workspace runs there (a plan's workers, a project routine's), newest first, each with the mark a session row has in the Sessions view (working, asking, finished unseen, else its time); per project, those working or asking and the newest three of the rest, then "N more" | A project's row: its page (its device beside the title, the folder on hover; the workspace's sessions there, the owner's sessions it reads, its work and its routines there). A session's row: the session, live |
 | **Connections** (P4; "network" in code) | Just its header: how many workspaces are connected ("3 · 1 open invite"), or "N to review" in amber when answers wait in Needs you (a click opens the review) | The Connections panel lists the connected workspaces, invites and recent questions; its header's + opens the connect page (create an invite code, or paste one). A connection opens its own page (scope, reply mode, exchanges, revoke), and a question its own (who asked whom, the question, the answer, how it ended; a waiting one opens as its review), each with a back arrow to Connections |
@@ -1213,6 +1213,35 @@ plan or routine it belongs to. There is no Git / Files dock or terminal in the p
 workspace's own hidden threads (an orchestration's, a workspace routine's, a
 connection's) still open read-only: nobody writes there but the workspace.
 
+**The progress ring.** A running plan's mark is one ring that says how far it is and
+that it is alive. The steps done are an arc from twelve o'clock over a faint track. Once
+per 1.6s a comet leaves the tip of that arc, stretches as it speeds round the part still
+to do, crosses the finished arc as a glint and is taken back in at the tip, where the ring
+rests for a beat; with no step done it circles alone, a plain spinner. The ring turns
+amber and holds still while a step waits on the owner, grey while the plan is stopping,
+and is an empty ring while an approved plan waits to start. It holds still under reduced
+motion (`kit/progress_ring.rs`).
+
+**A work item's page** has its own header, with every control at the very top:
+
+- **The bar:** at the left its status, the mark and a word in its tone (Awaiting approval,
+  Approved, Running, Waiting on you, Stopping, Done, Failed, Stopped, Rejected), with its
+  times on hover. At the right every button: its session, Delete once it ended, the pen
+  (reject and start the reply that asks for a change), Reject and Approve while it waits,
+  Stop while it runs (a second click confirms). The page has no footer.
+- **Title**, then one line of where it stands ("Step 2 of 4 · 12m", "Took 12m · 3h ago",
+  "4 steps · proposed 5m ago") and the project, when every step that names one names
+  the same; it opens the project's page.
+- **The request** as a quote, left out when it repeats the title.
+- **Result**, once it ended and wrote one: before the steps, with Copy on hover.
+- **Steps** on one rail, with how many are done while some are not, and the plan's
+  summary until it ends. A step shows its state, title and duration (exact times on
+  hover). One that is running, asking or failed is open: what it reported and its
+  sessions, each a row that opens the session. The rest keep to their title and one
+  line of what they reported; a click on a title opens or closes a step. Every step of
+  a plan still to approve is open on its description. Agent-written text renders as
+  markdown.
+
 **A result opens in the panel.** A result notice's card opens the plan's own page while
 the plan's record is kept, else (and for a routine's run) a page with how it ended,
 when, and what it wrote in full, with the ways on to the routine and its session.
@@ -1226,8 +1255,9 @@ Every panel page shares one layout, so a page says each thing once:
   by every step is named once, as a fact; a request that repeats the title is left out.
 - **Lists:** a small caps label (Steps, Sessions, Connections…) only where a page holds
   more than one list.
-- **Decisions** (Approve, Send, Stop, Save) sit in a footer pinned to the panel's foot,
-  the primary button last, with at most one short note.
+- **Decisions** (Send, Save) sit in a footer pinned to the panel's foot, the primary
+  button last, with at most one short note. A work item is the exception: its
+  decisions (Approve, Reject, Stop) are in the bar at the top of its page.
 - Editable fields alone keep a grey well; read-only text is a fact.
 - **Empty:** a panel with nothing to list says so in the middle of the space under its
   header (a quiet glyph, a short line, a hint, and an action where one helps); what it

@@ -211,6 +211,7 @@ impl Shell {
         self.board.panel_mark = None;
         self.board.panel_title_note = None;
         self.board.panel_empty = None;
+        self.board.panel_header = None;
         let (head, body) = match item {
             PanelItem::Project(space_id) => {
                 self.render_project_panel(&bot, space_id, &theme, window, cx)?
@@ -301,6 +302,16 @@ impl Shell {
                     .children(self.board.panel_title_note.take()),
             )
             .children(self.board.panel_actions.take());
+        // An item with a header of its own: inset and ruled like the rest.
+        let header = match self.board.panel_header.take() {
+            Some(own) => div()
+                .flex_none()
+                .mx(px(16.0))
+                .border_b_1()
+                .border_color(theme.border)
+                .child(own),
+            None => header,
+        };
         // Replacing the content fades the new item in. A thread's
         // transcript scrolls itself, so its body fills the card unscrolled.
         let content_key = SharedString::from(format!("bot-panel-{item:?}"));

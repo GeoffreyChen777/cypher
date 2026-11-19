@@ -192,8 +192,16 @@ pub(super) fn step_mark(state: StepState, ticker: gpui::EntityId, theme: &Theme)
     }
 }
 
-/// A work item's mark: a spinner while it runs, then how it ended.
+/// The ring's side in a row's mark slot.
+pub(super) const RING: f32 = 14.0;
+
+/// A work item's mark: its progress ring while it runs (the steps done,
+/// its comet going round), then how it ended. The ring holds still, in
+/// amber, while a step waits on the owner, and empty while an approved
+/// plan waits to start.
 pub(super) fn work_mark(work: &BotWork, ticker: gpui::EntityId, theme: &Theme) -> AnyElement {
+    use crate::kit::progress_ring::ProgressRing;
+    let (done, total) = work.progress();
     let glyph_mark = |path, color| {
         icon(path)
             .size(px(12.0))
@@ -201,10 +209,37 @@ pub(super) fn work_mark(work: &BotWork, ticker: gpui::EntityId, theme: &Theme) -
             .into_any_element()
     };
     match plan_phase(work) {
-        PlanPhase::Running | PlanPhase::Starting | PlanPhase::Stopping => {
-            super::super::render::status_mark(ChatIndicator::Working, ticker, theme)
-                .unwrap_or_else(|| gpui::Empty.into_any_element())
+        PlanPhase::Starting => {
+            crate::kit::loaders::still_ring(ProgressRing::new(0, total, theme.accent, theme), RING)
+                .into_any_element()
         }
+        PlanPhase::Running
+            if work
+                .current_step()
+                .is_some_and(|(_, step)| step.state == StepState::Asking) =>
+        {
+            // Amber all the way round, so it shows with no step done yet.
+            crate::kit::loaders::still_ring(
+                ProgressRing {
+                    track: theme.warning.opacity(0.3),
+                    ..ProgressRing::new(done, total, theme.warning, theme)
+                },
+                RING,
+            )
+            .into_any_element()
+        }
+        PlanPhase::Running => crate::kit::loaders::progress_ring(
+            ProgressRing::new(done, total, theme.accent, theme),
+            RING,
+            ticker,
+        )
+        .into_any_element(),
+        PlanPhase::Stopping => crate::kit::loaders::progress_ring(
+            ProgressRing::new(done, total, theme.text_muted, theme),
+            RING,
+            ticker,
+        )
+        .into_any_element(),
         PlanPhase::Awaiting => glyph_mark(icons::CHECKLIST, theme.warning),
         PlanPhase::Done => glyph_mark(icons::CHECK, theme.success),
         PlanPhase::Failed => glyph_mark(icons::CLOSE_CIRCLE, theme.danger),
@@ -425,8 +460,17 @@ impl Shell {
         let work_id = work_id.to_string();
         div()
             .id(SharedString::from(key.to_string()))
+            .flex_none()
+            .tooltip(|_, cx| {
+                cx.new(|_| {
+                    super::super::session::FindTooltip(
+                        "Stop the work and every session it started".into(),
+                    )
+                })
+                .into()
+            })
             .px(px(10.0))
-            .py(px(5.0))
+            .py(px(4.0))
             .rounded(px(8.0))
             .flex()
             .flex_row()
@@ -452,11 +496,7 @@ impl Shell {
             } else {
                 theme.text_muted
             }))
-            .child(SharedString::from(if armed {
-                "Stop the work and its sessions?"
-            } else {
-                "Stop"
-            }))
+            .child(SharedString::from(if armed { "Stop it?" } else { "Stop" }))
     }
 
     fn arm_or_stop(&mut self, work_id: String, cx: &mut Context<Self>) {
