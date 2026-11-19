@@ -833,8 +833,14 @@ impl Shell {
     }
 
     /// A surface tab's ✕. The active fallback happens naturally through
-    /// [`Self::resolved_dock_active`] on the next frame.
-    fn close_dock_surface(&mut self, sid: SlotId, surface: DockSurface, cx: &mut Context<Self>) {
+    /// [`Self::resolved_dock_active`] on the next frame; closing the last
+    /// tab shuts the dock ([`Self::close_emptied_dock`]).
+    pub(super) fn close_dock_surface(
+        &mut self,
+        sid: SlotId,
+        surface: DockSurface,
+        cx: &mut Context<Self>,
+    ) {
         if let DockSurface::SideChat(id) = surface {
             self.close_side_chat_by_seq(sid, id, cx);
             return;
@@ -867,7 +873,23 @@ impl Shell {
         if slot.dock.active == surface {
             slot.dock.active = DockSurface::Picker;
         }
+        self.close_emptied_dock(sid, cx);
         cx.notify();
+    }
+
+    /// After a surface tab closed: with none left the dock has nothing to
+    /// show, so it shuts and the conversation has its room back (user
+    /// request — an empty picker left open after the last ✕ read as
+    /// clutter). Reopening lands on the picker as before.
+    pub(in crate::shell) fn close_emptied_dock(&mut self, sid: SlotId, cx: &mut Context<Self>) {
+        let emptied = self
+            .tiles
+            .slots
+            .get(&sid)
+            .is_some_and(|slot| slot.dock.open && self.dock_surface_rows(slot, cx).is_empty());
+        if emptied {
+            self.toggle_dock(sid, cx);
+        }
     }
 
     pub(super) fn close_right_plus(&mut self, cx: &mut Context<Self>) {

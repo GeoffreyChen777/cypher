@@ -416,6 +416,46 @@ fn boot_restores_the_saved_layout_and_docks(cx: &mut gpui::TestAppContext) {
     assert!(written.session_docks["c"].right_open);
 }
 
+/// Closing a session's last right-dock tab shuts the dock; closing one of
+/// several leaves it open.
+#[gpui::test]
+fn closing_the_last_dock_tab_shuts_the_dock(cx: &mut gpui::TestAppContext) {
+    use crate::markdown::artifact::ArtifactOpen;
+    use crate::markdown::parser::ArtifactKind;
+    use dock::DockSurface;
+    let (shell, state) = test_shell(cx);
+    set_chats(&state, vec![test_chat("a", false)], cx);
+    shell.update(cx, |shell, cx| shell.open_chat("a".into(), cx));
+    let sid = shell.read_with(cx, |shell, _| shell.focused_slot().unwrap());
+    let page = |title: &str| ArtifactOpen {
+        key: format!("row-{title}").into(),
+        kind: ArtifactKind::Svg,
+        title: title.to_string().into(),
+        named: true,
+        code: "<svg xmlns=\"http://www.w3.org/2000/svg\"/>".into(),
+    };
+    let open =
+        |cx: &mut gpui::TestAppContext| shell.read_with(cx, |s, _| s.tiles.slots[&sid].dock.open);
+    shell.update(cx, |shell, cx| {
+        shell.open_artifact(sid, page("one"), cx);
+        shell.open_artifact(sid, page("two"), cx);
+    });
+    let tabs = shell.read_with(cx, |s, _| s.tiles.slots[&sid].dock.surfaces.clone());
+    assert_eq!(tabs.len(), 2);
+    shell.update(cx, |shell, cx| shell.close_dock_surface(sid, tabs[0], cx));
+    assert!(open(cx), "one tab is left");
+    shell.update(cx, |shell, cx| shell.close_dock_surface(sid, tabs[1], cx));
+    assert!(!open(cx), "the last tab closed shuts the dock");
+    shell.read_with(cx, |s, _| {
+        let slot = &s.tiles.slots[&sid];
+        assert!(slot.dock.surfaces.is_empty());
+        assert_eq!(slot.dock.active, DockSurface::Picker);
+    });
+    // Reopening lands on the picker.
+    shell.update(cx, |shell, cx| shell.toggle_dock(sid, cx));
+    assert!(open(cx));
+}
+
 /// A ⌘N before the first chats frame joins the restored layout instead
 /// of replacing it, and the next save keeps the saved tabs.
 #[gpui::test]

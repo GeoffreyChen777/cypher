@@ -422,14 +422,10 @@ impl Shell {
         if slot.dock.active == DockSurface::SideChat(id) {
             slot.dock.active = DockSurface::Picker;
         }
-        let emptied = slot.dock.open && slot.dock.surfaces.is_empty();
         panel.update(cx, |panel, cx| panel.dispose(cx));
-        // With its last side chat gone, a workspace chat's dock has nothing
-        // to show and no rail to close it from: it shuts, and the
-        // conversation has its room back.
-        if emptied && self.slot_without_rail(sid) {
-            self.toggle_dock(sid, cx);
-        }
+        // The last tab gone, the dock shuts — every session's, and a
+        // workspace chat's has no rail to close it from anyway.
+        self.close_emptied_dock(sid, cx);
         cx.notify();
     }
 
