@@ -9,8 +9,8 @@
 
 use super::board::{card_corner, card_item};
 use super::items::{
-    ago, arrow_in, mark_cell, progress_bar, project_label, section_head, section_rule,
-    session_mark, session_word, step_mark, trailing, work_mark,
+    ago, arrow_in, mark_cell, project_label, section_head, section_rule, session_mark,
+    session_word, step_mark, trailing, work_mark,
 };
 use super::panel::{PanelHead, PanelItem};
 use super::*;
@@ -123,7 +123,7 @@ fn shared_project(work: &BotWork) -> Option<&str> {
 fn phase_word(phase: PlanPhase, theme: &Theme) -> (&'static str, gpui::Hsla) {
     let word = match phase {
         PlanPhase::Awaiting => "Awaiting approval",
-        PlanPhase::Starting => "Approved",
+        PlanPhase::Starting => "Waiting to start",
         PlanPhase::Cancelling | PlanPhase::Cancelled => "Rejected",
         PlanPhase::Running => "Running",
         PlanPhase::Stopping => "Stopping",
@@ -134,44 +134,13 @@ fn phase_word(phase: PlanPhase, theme: &Theme) -> (&'static str, gpui::Hsla) {
     (word, phase.tint(theme))
 }
 
-/// Where a work item stands, under its title: what the header's word does
-/// not say. "Step 2 of 4 · 12m", "Took 12m · 3h ago", "4 steps · proposed
-/// 5m ago".
-fn standing_line(work: &BotWork, phase: PlanPhase, now: chrono::DateTime<Utc>) -> String {
-    let now_ms = now.timestamp_millis();
-    let since = |ms: i64| match ago(ms, now).as_str() {
-        "now" => "just now".to_string(),
-        span => format!("{span} ago"),
-    };
-    let total = work.steps.len();
-    let steps = format!("{total} step{}", if total == 1 { "" } else { "s" });
-    let took = work
-        .started_at
-        .zip(work.ended_at)
-        .map(|(start, end)| format_span(end - start));
-    let ended = since(work.ended_at.unwrap_or(work.created_at));
-    match phase {
-        PlanPhase::Awaiting => format!("{steps} · proposed {}", since(work.created_at)),
-        PlanPhase::Starting => format!("{steps} · waiting to start"),
-        PlanPhase::Cancelling | PlanPhase::Cancelled => format!("{steps} · {ended}"),
-        PlanPhase::Running | PlanPhase::Stopping => {
-            let step = match work.current_step() {
-                Some((ix, _)) => format!("Step {} of {total}", ix + 1),
-                None => "Finishing".to_string(),
-            };
-            match work.started_at {
-                Some(start) => format!("{step} · {}", format_span(now_ms - start)),
-                None => step,
-            }
-        }
-        PlanPhase::Done => match took {
-            Some(took) => format!("Took {took} · {ended}"),
-            None => ended,
-        },
-        PlanPhase::Failed | PlanPhase::Stopped => match took {
-            Some(took) => format!("After {took} · {ended}"),
-            None => ended,
-        },
+/// A request as its tooltip shows it: at most a few lines' worth.
+fn clip_request(text: &str) -> String {
+    const MAX: usize = 400;
+    let text = text.trim();
+    match text.char_indices().nth(MAX) {
+        Some((end, _)) => format!("{}…", text[..end].trim_end()),
+        None => text.to_string(),
     }
 }
 
@@ -185,19 +154,16 @@ fn step_opens(state: StepState, numbered: bool) -> bool {
         )
 }
 
-/// The hover card of a work item's status tile: its state in its tone,
-/// its progress while it runs, then when it was proposed, approved,
-/// started and ended, and how long it took.
+/// The hover card of a work item's status: when it was proposed, approved,
+/// started and ended, and how long it took or has run. The page itself
+/// shows none of these; the status word and the steps say where it is.
 #[derive(Clone)]
 struct WorkStatusTip {
-    status: String,
-    tone: gpui::Hsla,
-    progress: Option<(usize, usize)>,
     times: Vec<(&'static str, String)>,
 }
 
 impl WorkStatusTip {
-    fn of(work: &BotWork, phase: PlanPhase, theme: &Theme) -> Self {
+    fn of(work: &BotWork) -> Self {
         let now = Utc::now().timestamp_millis();
         let when = parts::past_full_ms;
         let mut times = vec![("Proposed", when(work.created_at))];
@@ -224,16 +190,7 @@ impl WorkStatusTip {
             };
             times.push((label, format_span(until - start)));
         }
-        Self {
-            status: phase_line(work, now),
-            tone: match phase {
-                PlanPhase::Running | PlanPhase::Starting => theme.text,
-                _ => phase.tint(theme),
-            },
-            progress: matches!(phase, PlanPhase::Running | PlanPhase::Stopping)
-                .then(|| work.progress()),
-            times,
-        }
+        Self { times }
     }
 }
 
@@ -271,31 +228,37 @@ impl Render for WorkStatusTip {
                 .shadow_md()
                 .flex()
                 .flex_col()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_size(px(12.5))
-                        .line_height(px(17.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(self.tone)
-                        .child(SharedString::from(self.status.clone())),
-                )
-                .children(
-                    self.progress
-                        .map(|(done, total)| progress_bar(done, total, theme)),
-                )
-                .child(
-                    div()
-                        .pt(px(6.0))
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .flex()
-                        .flex_col()
-                        .gap(px(3.0))
-                        .text_size(px(11.5))
-                        .line_height(px(16.0))
-                        .children(rows),
-                ),
+                .gap(px(3.0))
+                .text_size(px(11.5))
+                .line_height(px(16.0))
+                .children(rows),
+        )
+    }
+}
+
+/// What the owner asked, on hover over the page's title once the plan is
+/// under way: wrapped, where the one-line tooltip would run off.
+#[derive(Clone)]
+struct RequestTip(SharedString);
+
+impl Render for RequestTip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        motion::fade_quick(
+            "bot-work-request-tip",
+            div()
+                .w(px(280.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .bg(theme.surface_raised)
+                .shadow_md()
+                .text_size(px(11.5))
+                .line_height(px(16.0))
+                .text_color(theme.text_muted)
+                .child(self.0.clone()),
         )
     }
 }
@@ -462,11 +425,11 @@ impl Shell {
 
     /// One work item in every phase, the plan to approve included.
     ///
-    /// Its header holds every control at the very top: how it stands at the
-    /// left (details on hover); its session, Delete, Reject / Edit / Approve
-    /// or Stop at the right. Under them its title and one line of where it
-    /// is. The body reads in the order that matters: what was asked, the
-    /// result once it ended, then the steps ([`Self::work_flow`]).
+    /// The page says each thing once and nothing it can leave out. Its
+    /// header holds every control at the very top beside a word of how it
+    /// stands (the times on hover), then its title. The body is the result
+    /// once it ended, then the steps ([`Self::work_flow`]); a plan still to
+    /// approve also quotes what was asked and gives its approach.
     pub(super) fn render_work_item(
         &mut self,
         work_id: &str,
@@ -532,13 +495,16 @@ impl Shell {
             Some(self.work_header(&work, phase, shared.as_ref(), thread_listed, theme, cx));
 
         let mut body = div().p(px(8.0)).pb(px(14.0)).flex().flex_col();
-        let mut first = true;
-        // What was asked: a quote, not a section.
-        if shows_request(&work) {
+        // What was asked, as a quote, while the plan is still to judge
+        // against it; after that the title stands for it (the request is
+        // its tooltip).
+        let quoted = phase.awaiting() && shows_request(&work);
+        if quoted {
             body = body.child(
                 div()
                     .mx(px(8.0))
                     .mt(px(6.0))
+                    .mb(px(10.0))
                     .pl(px(10.0))
                     .border_l_2()
                     .border_color(crate::kit::theme::hairline(0.2))
@@ -551,8 +517,8 @@ impl Shell {
                         window,
                     )),
             );
-            first = false;
         }
+        let mut resulted = false;
         // What it produced comes before how it got there.
         if let Some(result) = work
             .result
@@ -560,14 +526,14 @@ impl Shell {
             .filter(|r| phase.ended() && !r.trim().is_empty())
         {
             let key = format!("bot-work-result-{}", work.id);
-            body = body.when(!first, |el| el.child(section_rule())).child(
+            body = body.child(
                 div()
                     .id(SharedString::from(key.clone()))
                     .on_hover(motion::hover_listener(key.clone()))
                     .flex()
                     .flex_col()
                     .child(
-                        section_head("Result", first, theme)
+                        section_head("Result", true, theme)
                             .child(div().flex_1())
                             // Copy, shown with the pointer over the result.
                             .child(
@@ -590,14 +556,14 @@ impl Shell {
                         window,
                     ))),
             );
-            first = false;
+            resulted = true;
         }
         if !work.steps.is_empty() {
             body = body.child(self.work_flow(
                 &work,
                 steps,
                 phase,
-                first,
+                resulted,
                 shared.is_some(),
                 theme,
                 window,
@@ -609,8 +575,9 @@ impl Shell {
 
     /// The work page's header. A bar of controls at the very top: the
     /// status at the left (its mark and a word, the times on hover), every
-    /// button at the right. Then the title, and a line saying where it
-    /// stands and in which project.
+    /// button at the right. Then the title, and under it only the project
+    /// when every step shares one. Counts and times are not repeated here:
+    /// the steps show how far it is, the hover card when.
     fn work_header(
         &self,
         work: &BotWork,
@@ -620,8 +587,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = Utc::now();
-        let tip = WorkStatusTip::of(work, phase, theme);
+        let tip = WorkStatusTip::of(work);
         // A running plan parked on a question says so, as its ring does.
         let asking = phase.running()
             && work
@@ -748,6 +714,13 @@ impl Shell {
             );
         }
 
+        // Past its approval the page does not quote the request: it is
+        // here for whoever wants the exact words.
+        let request = (!phase.awaiting() && shows_request(work)).then(|| {
+            SharedString::from(clip_request(&super::items::plain_markdown(
+                &work.instruction,
+            )))
+        });
         let place = shared.map(|(space, label)| {
             let key = format!("bot-work-place-{}", work.id);
             let space = space.clone();
@@ -808,50 +781,44 @@ impl Shell {
             )
             .child(
                 div()
+                    .id(SharedString::from(format!("bot-work-title-{}", work.id)))
                     .mt(px(8.0))
                     .text_size(px(16.0))
                     .line_height(px(22.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
                     .line_clamp(3)
+                    .when_some(request, |el, request| {
+                        el.tooltip(move |_, cx| cx.new(|_| RequestTip(request.clone())).into())
+                    })
                     .child(SharedString::from(work.title.clone())),
             )
-            .child(
+            // The one project every step works in; nothing else needs a
+            // line here.
+            .children(place.map(|place| {
                 div()
                     .mt(px(3.0))
-                    .min_h(px(20.0))
                     .flex()
                     .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
                     .text_size(px(11.5))
-                    .text_color(theme.text_muted)
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .child(SharedString::from(standing_line(work, phase, now))),
-                    )
-                    .when(place.is_some(), |el| {
-                        el.child(div().flex_none().text_color(theme.text_faint).child("·"))
-                    })
-                    .children(place),
-            )
+                    .child(place)
+            }))
             .into_any_element()
     }
 
     /// The steps on one rail: each with its state, how long it took and
-    /// what it reported. A step that is running, asking or failed is open
-    /// (its sessions under it); the rest keep to a line, and a click on a
-    /// title opens or closes it. A plan still to approve shows every step's
-    /// description. `shared` says the header already names the one project.
+    /// what it reported. A step with one session is the way into it; one
+    /// with several lists them while it is running, asking or failed, and
+    /// otherwise keeps to a line that a click opens. A plan still to
+    /// approve shows every step's description. `heading` says a result
+    /// stands above; `shared` that the header already names the project.
     #[allow(clippy::too_many_arguments)]
     fn work_flow(
         &self,
         work: &BotWork,
         steps: Vec<FlowStep>,
         phase: PlanPhase,
-        first: bool,
+        heading: bool,
         shared: bool,
         theme: &Theme,
         window: &Window,
@@ -869,20 +836,15 @@ impl Shell {
                 | PlanPhase::Cancelling
                 | PlanPhase::Cancelled
         );
-        let (done, total) = work.progress();
-        // How far it got, unless every step says so already.
-        let note = (!numbered && done < total).then(|| format!("{done} of {total} done"));
-        let mut flow = div()
-            .flex()
-            .flex_col()
-            .when(!first, |el| el.child(section_rule()))
-            .child(
-                section_head("Steps", first, theme)
-                    .child(div().flex_1())
-                    .children(note.map(|note| super::items::head_note(note, theme))),
-            );
-        // The approach in a sentence, while it is still ahead.
-        if !phase.ended()
+        // A heading only where a result stands above the steps; alone on
+        // the page they need none.
+        let mut flow = div().flex().flex_col().pt(px(2.0)).when(heading, |el| {
+            el.child(section_rule())
+                .child(section_head("Steps", false, theme))
+        });
+        // The approach in a sentence, for the decision; once it runs the
+        // steps say it.
+        if phase.awaiting()
             && let Some(summary) = work.summary.as_ref().filter(|s| !s.trim().is_empty())
         {
             flow = flow.child(div().px(px(8.0)).pb(px(6.0)).child(md(
@@ -963,17 +925,29 @@ impl Shell {
             }
             .filter(|d| !d.trim().is_empty());
             let asking = step.state == StepState::Asking;
+            // A step with one session is that session: its row would say
+            // the step's title and state again, so the step is the link.
+            let (link, sessions) = match sessions.as_slice() {
+                [(chat_id, Some(_))] => (Some(chat_id.clone()), Vec::new()),
+                _ => (None, sessions),
+            };
             let sessions_n = sessions.len();
-            let foldable = detail.is_some() || sessions_n > 0;
+            let foldable = link.is_none() && (detail.is_some() || sessions_n > 0);
             let (timed, placed) = (span.is_some(), project.is_some());
             let toggle = (work.id.clone(), ix);
-            let open = foldable
-                && self
-                    .board
-                    .work_open
-                    .get(&toggle)
-                    .copied()
-                    .unwrap_or_else(|| step_opens(step.state, numbered));
+            let open = match link {
+                // No fold: its note in full while it is under way.
+                Some(_) => step_opens(step.state, numbered),
+                None => {
+                    foldable
+                        && self
+                            .board
+                            .work_open
+                            .get(&toggle)
+                            .copied()
+                            .unwrap_or_else(|| step_opens(step.state, numbered))
+                }
+            };
             let waiting = !numbered && step.state == StepState::Pending;
             let title_key = format!("{key}-title");
             let title = div()
@@ -989,6 +963,18 @@ impl Shell {
                             this.board.work_open.insert(toggle.clone(), !open);
                             cx.notify();
                         }))
+                })
+                .when_some(link.clone(), |el, chat_id| {
+                    el.cursor_pointer()
+                        .tooltip(|_, cx| {
+                            cx.new(|_| {
+                                super::super::session::FindTooltip("Open its session".into())
+                            })
+                            .into()
+                        })
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx)),
+                        )
                 })
                 .child(
                     div()
@@ -1077,6 +1063,9 @@ impl Shell {
                         .flex_none()
                         .w(px(CHEVRON_W))
                         .pt(px(4.0))
+                        // The way into its one session, shown on hover
+                        // like a session row's.
+                        .when(link.is_some(), |el| el.child(arrow_in(&key, theme)))
                         .when(foldable, |el| {
                             let hover = motion::hover_t(&key);
                             el.child(
@@ -1097,7 +1086,7 @@ impl Shell {
                         }),
                 );
             let mut content = div().flex_1().min_w_0().flex().flex_col().child(title);
-            if open {
+            if open && (detail.is_some() || sessions_n > 0) {
                 let mut details = div().flex().flex_col().gap(px(2.0)).pt(px(2.0));
                 if let Some(detail) = &detail {
                     details = details.child(md(
@@ -1368,26 +1357,12 @@ mod tests {
     }
 
     #[test]
-    fn the_header_says_where_a_work_item_stands() {
-        let now = super::super::items::at(10 * 3_600_000);
-        let mut w = work("w", WorkState::Proposed, 10 * 3_600_000 - 300_000);
-        w.steps = vec![
-            step("a", StepState::Done),
-            step("b", StepState::Running),
-            step("c", StepState::Pending),
-        ];
-        let line = |w: &BotWork| standing_line(w, plan_phase(w), now);
-        assert_eq!(line(&w), "3 steps · proposed 5m ago");
-        w.state = WorkState::Running;
-        w.started_at = Some(10 * 3_600_000 - 12 * 60_000);
-        assert_eq!(line(&w), "Step 2 of 3 · 12m");
-        w.state = WorkState::Done;
-        w.ended_at = Some(10 * 3_600_000 - 2 * 60_000);
-        assert_eq!(line(&w), "Took 10m · 2m ago");
-        w.state = WorkState::Failed;
-        assert_eq!(line(&w), "After 10m · 2m ago");
-        w.ended_at = Some(10 * 3_600_000);
-        assert_eq!(line(&w), "After 12m · just now");
+    fn a_long_request_is_clipped_for_its_tooltip() {
+        assert_eq!(clip_request("  Speed it up.  "), "Speed it up.");
+        let long = "é".repeat(450);
+        let clipped = clip_request(&long);
+        assert_eq!(clipped.chars().count(), 401);
+        assert!(clipped.ends_with('…'));
     }
 
     #[test]

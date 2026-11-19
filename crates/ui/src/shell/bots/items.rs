@@ -1,10 +1,9 @@
 //! Pieces the coordination cards and panels share (Needs you, Work,
 //! Activity and the chat header's bot actions): item rows led by a mark,
-//! section labels, text blocks, step and outcome marks, the progress bar,
+//! section labels, text blocks, step and outcome marks, the progress ring,
 //! the arm-then-confirm Stop, and the session a panel looks into.
 
 use super::*;
-pub(super) use crate::transcript::bot_plan::progress_bar;
 use crate::transcript::bot_plan::{PlanPhase, plan_phase};
 use cypher_proto::{BotWork, StepState};
 

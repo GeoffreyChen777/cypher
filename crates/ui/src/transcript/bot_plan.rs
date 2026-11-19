@@ -301,27 +301,6 @@ pub(super) fn plan_rule() -> gpui::Div {
         .bg(crate::kit::theme::hairline(0.07))
 }
 
-/// The steps-done bar of a running plan (the Work card's too).
-pub fn progress_bar(done: usize, total: usize, theme: &Theme) -> gpui::Div {
-    let fraction = if total == 0 {
-        0.0
-    } else {
-        (done as f32 / total as f32).clamp(0.0, 1.0)
-    };
-    div()
-        .w_full()
-        .h(px(3.0))
-        .rounded_full()
-        .bg(crate::kit::theme::ink(0.08))
-        .child(
-            div()
-                .h_full()
-                .w(gpui::relative(fraction))
-                .rounded_full()
-                .bg(theme.text.opacity(0.82)),
-        )
-}
-
 /// A notice card's corner radius.
 const NOTICE_RADIUS: f32 = 12.0;
 

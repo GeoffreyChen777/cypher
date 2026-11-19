@@ -1224,30 +1224,35 @@ amber and holds still while a step waits on the owner, a paler grey while the pl
 and is an empty ring while an approved plan waits to start. It holds still under reduced
 motion (`kit/progress_ring.rs`).
 
-**A work item's page** has its own header, with every control at the very top:
+**A work item's page** says each thing once, and nothing it can leave out: a count, a
+time or a sentence that another part of the page already gives is not shown again. It has
+its own header, with every control at the very top:
 
 - **The bar:** at the left its status, the mark and a word in its tone (Awaiting approval,
-  Approved, Running, Waiting on you, Stopping, Done, Failed, Stopped, Rejected), with its
-  times on hover. At the right every button: its coordinator (the hidden session that runs the plan and
-  starts each step's sessions, read-only; a step's own sessions open from their rows
-  under the step), Delete once it ended, the pen
+  Waiting to start, Running, Waiting on you, Stopping, Done, Failed, Stopped, Rejected).
+  Its times (proposed, approved, started, ended, how long) are the status's hover card and
+  nowhere on the page. At the right every button: its coordinator (the hidden session that
+  runs the plan and starts each step's sessions, read-only), Delete once it ended, the pen
   (reject and start the reply that asks for a change), Reject and Approve while it waits,
   Stop while it runs (a second click confirms). The page has no footer.
-- **Title**, then one line of where it stands ("Step 2 of 4 · 12m", "Took 12m · 3h ago",
-  "4 steps · proposed 5m ago") and the project, when every step that names one names
-  the same; it opens the project's page.
-- **The request** as a quote, left out when it repeats the title.
+- **Title**, and under it only the project, when every step that names one names the
+  same; it opens the project's page. No step count or progress line: the steps show it.
+- **The request** as a quote, and the plan's **summary**, only while the plan awaits
+  approval, where they are what the owner decides on. Afterwards the title stands for the
+  request, which is its tooltip.
 - **Result**, once it ended and wrote one: before the steps, with Copy on hover.
-- **Steps** on one rail, with how many are done while some are not, and the plan's
-  summary until it ends. A step shows its state, title and duration (exact times on
-  hover). Where steps work in different projects, each names its
-  project quietly before its duration ("web-api · 2h 10m"): the name alone, with the
-  device added only when it is another machine (the tooltip has both). One that is
-  running, asking or failed is open: what it reported and its sessions, each a row of
-  its status mark and title that opens the session (its state in words is the tooltip). The rest keep to their title and one
-  line of what they reported; a click on a title opens or closes a step. Every step of
-  a plan still to approve is open on its description. Agent-written text renders as
-  markdown.
+- **Steps** on one rail, under a heading only when a result stands above them. A step
+  shows its state, title and duration (exact times on hover). Where steps work in
+  different projects, each names its project quietly before its duration ("web-api · 2h
+  10m"): the name alone, with the device added only when it is another machine (the
+  tooltip has both). **A step with one session is the way into it**: no row repeats its
+  title and state under it, a click on the step opens the session, and what it reported
+  shows in full while it is under way and on one line after. A step with several
+  sessions lists them while it is running, asking or failed, each a row of its status
+  mark and title that opens the session (its state in words is the tooltip); otherwise
+  it keeps to its title and one line of what it reported, and a click opens or closes
+  it. Every step of a plan still to approve is open on its description. Agent-written
+  text renders as markdown.
 
 **A result opens in the panel.** A result notice's card opens the plan's own page while
 the plan's record is kept, else (and for a routine's run) a page with how it ended,
