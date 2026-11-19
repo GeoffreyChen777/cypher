@@ -194,15 +194,62 @@ pub(super) fn step_mark(state: StepState, ticker: gpui::EntityId, theme: &Theme)
 /// The ring's side in a row's mark slot.
 pub(super) const RING: f32 = 14.0;
 
-/// A work item's mark: its progress ring while it runs (the steps done,
-/// its comet going round), then how it ended. The ring is drawn in the
-/// text's ink, no accent: colour is kept for what needs the owner. It
-/// holds still, in amber, while a step waits on the owner, is paler while
-/// the plan stops, and empty while an approved plan waits to start.
-pub(super) fn work_mark(work: &BotWork, ticker: gpui::EntityId, theme: &Theme) -> AnyElement {
+/// How a run stands, as its ring shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RingState {
+    /// Not started yet: an empty ring, still.
+    Waiting,
+    /// Under way: the comet goes round.
+    Running,
+    /// Parked on its owner: amber, still.
+    Asking,
+    /// Being stopped: paler, the comet still going.
+    Stopping,
+}
+
+/// The mark of something under way (a plan, a routine's run): its progress
+/// ring, `done` of `total` steps as an arc (none for a run without steps,
+/// which leaves the comet circling alone). Drawn in the text's ink, no
+/// accent: colour is kept for what needs the owner.
+pub(super) fn ring_mark(
+    state: RingState,
+    (done, total): (usize, usize),
+    ticker: gpui::EntityId,
+    theme: &Theme,
+) -> AnyElement {
+    use crate::kit::loaders::{progress_ring, still_ring};
     use crate::kit::progress_ring::ProgressRing;
-    let (done, total) = work.progress();
     let ink = theme.text.opacity(0.82);
+    match state {
+        RingState::Waiting => {
+            still_ring(ProgressRing::new(0, total, ink, theme), RING).into_any_element()
+        }
+        RingState::Running => {
+            progress_ring(ProgressRing::new(done, total, ink, theme), RING, ticker)
+                .into_any_element()
+        }
+        // Amber all the way round, so it shows with no step done yet.
+        RingState::Asking => still_ring(
+            ProgressRing {
+                track: theme.warning.opacity(0.3),
+                ..ProgressRing::new(done, total, theme.warning, theme)
+            },
+            RING,
+        )
+        .into_any_element(),
+        RingState::Stopping => progress_ring(
+            ProgressRing::new(done, total, theme.text_muted.opacity(0.7), theme),
+            RING,
+            ticker,
+        )
+        .into_any_element(),
+    }
+}
+
+/// A work item's mark: its progress ring while it runs ([`ring_mark`]),
+/// then how it ended.
+pub(super) fn work_mark(work: &BotWork, ticker: gpui::EntityId, theme: &Theme) -> AnyElement {
+    let progress = work.progress();
     let glyph_mark = |path, color| {
         icon(path)
             .size(px(12.0))
@@ -210,37 +257,16 @@ pub(super) fn work_mark(work: &BotWork, ticker: gpui::EntityId, theme: &Theme) -
             .into_any_element()
     };
     match plan_phase(work) {
-        PlanPhase::Starting => {
-            crate::kit::loaders::still_ring(ProgressRing::new(0, total, ink, theme), RING)
-                .into_any_element()
-        }
+        PlanPhase::Starting => ring_mark(RingState::Waiting, progress, ticker, theme),
         PlanPhase::Running
             if work
                 .current_step()
                 .is_some_and(|(_, step)| step.state == StepState::Asking) =>
         {
-            // Amber all the way round, so it shows with no step done yet.
-            crate::kit::loaders::still_ring(
-                ProgressRing {
-                    track: theme.warning.opacity(0.3),
-                    ..ProgressRing::new(done, total, theme.warning, theme)
-                },
-                RING,
-            )
-            .into_any_element()
+            ring_mark(RingState::Asking, progress, ticker, theme)
         }
-        PlanPhase::Running => crate::kit::loaders::progress_ring(
-            ProgressRing::new(done, total, ink, theme),
-            RING,
-            ticker,
-        )
-        .into_any_element(),
-        PlanPhase::Stopping => crate::kit::loaders::progress_ring(
-            ProgressRing::new(done, total, theme.text_muted.opacity(0.7), theme),
-            RING,
-            ticker,
-        )
-        .into_any_element(),
+        PlanPhase::Running => ring_mark(RingState::Running, progress, ticker, theme),
+        PlanPhase::Stopping => ring_mark(RingState::Stopping, progress, ticker, theme),
         PlanPhase::Awaiting => glyph_mark(icons::CHECKLIST, theme.warning),
         PlanPhase::Done => glyph_mark(icons::CHECK, theme.success),
         PlanPhase::Failed => glyph_mark(icons::CLOSE_CIRCLE, theme.danger),
@@ -250,6 +276,98 @@ pub(super) fn work_mark(work: &BotWork, ticker: gpui::EntityId, theme: &Theme) -
             .bg(theme.text_faint)
             .into_any_element(),
     }
+}
+
+/// How an item stands, at the left of its page's bar: its mark and a word
+/// in its tone. The caller adds what a hover shows.
+pub(super) fn header_status(
+    key: impl Into<SharedString>,
+    mark: AnyElement,
+    word: impl Into<SharedString>,
+    tone: gpui::Hsla,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(key.into())
+        .min_w_0()
+        .h(px(28.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(7.0))
+        .child(
+            div()
+                .flex_none()
+                .size(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(mark),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(12.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(tone)
+                .child(word.into()),
+        )
+}
+
+/// A page's title under its bar. The caller adds what a hover shows.
+pub(super) fn header_title(
+    key: impl Into<SharedString>,
+    title: &str,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(key.into())
+        .mt(px(8.0))
+        .text_size(px(16.0))
+        .line_height(px(22.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+        .line_clamp(3)
+        .child(SharedString::from(title.to_string()))
+}
+
+/// The header of a page that is run and controlled (a work item, a
+/// routine): a bar at the very top with how it stands at the left and every
+/// control at the right, its title, and at most one quiet line under it for
+/// what nothing else on the page says.
+pub(super) fn item_header(
+    status: impl IntoElement,
+    controls: Vec<AnyElement>,
+    title: impl IntoElement,
+    line: Option<AnyElement>,
+    theme: &Theme,
+) -> AnyElement {
+    div()
+        .pt(px(10.0))
+        .pb(px(12.0))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .child(div().flex_1().min_w_0().flex().child(status))
+                .children(controls),
+        )
+        .child(title)
+        .children(line.map(|line| {
+            div()
+                .mt(px(3.0))
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .text_size(px(11.5))
+                .text_color(theme.text_muted)
+                .child(line)
+        }))
+        .into_any_element()
 }
 
 /// A session's status mark, with a quiet dot where the sidebar shows none.

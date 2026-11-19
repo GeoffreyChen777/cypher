@@ -598,33 +598,13 @@ impl Shell {
         } else {
             phase_word(phase, theme)
         };
-        let status = div()
-            .id(SharedString::from(format!("bot-work-status-{}", work.id)))
-            .min_w_0()
-            .h(px(28.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(7.0))
-            .tooltip(move |_, cx| cx.new(|_| tip.clone()).into())
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(16.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(work_mark(work, self.pulse_ticker.entity_id(), theme)),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(12.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(tone)
-                    .child(word),
-            );
+        let status = super::items::header_status(
+            format!("bot-work-status-{}", work.id),
+            work_mark(work, self.pulse_ticker.entity_id(), theme),
+            word,
+            tone,
+        )
+        .tooltip(move |_, cx| cx.new(|_| tip.clone()).into());
 
         let mut controls: Vec<AnyElement> = Vec::new();
         if thread_listed {
@@ -765,45 +745,19 @@ impl Shell {
                         .child(SharedString::from(label.name.clone())),
                 )
         });
-        div()
-            .pt(px(10.0))
-            .pb(px(12.0))
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .child(div().flex_1().min_w_0().flex().child(status))
-                    .children(controls),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!("bot-work-title-{}", work.id)))
-                    .mt(px(8.0))
-                    .text_size(px(16.0))
-                    .line_height(px(22.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .line_clamp(3)
-                    .when_some(request, |el, request| {
-                        el.tooltip(move |_, cx| cx.new(|_| RequestTip(request.clone())).into())
-                    })
-                    .child(SharedString::from(work.title.clone())),
-            )
-            // The one project every step works in; nothing else needs a
-            // line here.
-            .children(place.map(|place| {
-                div()
-                    .mt(px(3.0))
-                    .flex()
-                    .flex_row()
-                    .text_size(px(11.5))
-                    .child(place)
-            }))
-            .into_any_element()
+        let title =
+            super::items::header_title(format!("bot-work-title-{}", work.id), &work.title, theme)
+                .when_some(request, |el, request| {
+                    el.tooltip(move |_, cx| cx.new(|_| RequestTip(request.clone())).into())
+                });
+        // Under the title only the one project every step works in.
+        super::items::item_header(
+            status,
+            controls,
+            title,
+            place.map(IntoElement::into_any_element),
+            theme,
+        )
     }
 
     /// The steps on one rail: each with its state, how long it took and

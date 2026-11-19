@@ -1120,7 +1120,7 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 |---|---|---|
 | **Needs you** | Everything that waits on the owner, one row each: the bot's own question, actions awaiting approval, sessions the workspace runs that are asking (a permission prompt, a question), plans awaiting approval, and answers to review | The **Needs you page**: a card per item, answered in place (below). A row opens the page on its card |
 | **Work** | Running orchestrations, each with its progress ring (below), its current step ("Step 2 of 4 · Run the tests") and the time it has run; approved plans that have not started yet ("waiting": for a free slot, or a paused workspace); then the last three that ended, with their outcome mark. "N more" brings in everything that ended, rejected plans included | The orchestration's page (below) |
-| **Routines** | Its routines in order of next run: name, next run, and what a run under way is doing; those running and the next three, then "N more". The header's **+** (on hover) adds one | The routine: where it runs, trigger, prompt, settings, the last run and links to its scheduled and manual sessions, edit, run now |
+| **Routines** | Its routines in order of next run, one line each: a mark, the name, and at the right when it next runs ("in 3h", "Mon", "off", "manual") or, while a run is under way, how long it has gone. The mark alone carries the state: the progress ring while it runs (amber and still when its session waits on the owner), a red mark when its last run failed, else the glyph of its kind (the workspace's repeat, a project's code). Those running and the next three show, then "N more". The header's **+** (on hover) adds one | The routine's page (below), or its form |
 | **Projects** | Each granted project, and under it the sessions the workspace runs there (a plan's workers, a project routine's), newest first, each with the mark a session row has in the Sessions view (working, asking, finished unseen, else its time); per project, those working or asking and the newest three of the rest, then "N more" | A project's row: its page (its device beside the title, the folder on hover; the workspace's sessions there, the owner's sessions it reads, its work and its routines there). A session's row: the session, live |
 | **Connections** (P4; "network" in code) | Just its header: how many workspaces are connected ("3 · 1 open invite"), or "N to review" in amber when answers wait in Needs you (a click opens the review) | The Connections panel lists the connected workspaces, invites and recent questions; its header's + opens the connect page (create an invite code, or paste one). A connection opens its own page (scope, reply mode, exchanges, revoke), and a question its own (who asked whom, the question, the answer, how it ended; a waiting one opens as its review), each with a back arrow to Connections |
 
@@ -1253,6 +1253,29 @@ its own header, with every control at the very top:
   it keeps to its title and one line of what it reported, and a click opens or closes
   it. Every step of a plan still to approve is open on its description. Agent-written
   text renders as markdown.
+
+**A routine's page** follows a work item's: every control at the very top, each thing
+said once, and nothing that is the default.
+
+- **The bar:** at the left how it stands, its mark and a word or two: Running, Waiting on
+  you, Starting…, how soon the next run comes ("Next in 3h"; the exact time is the
+  tooltip), the time itself for a once-only one ("Tomorrow 09:00"), Manual, Off, Done (a
+  once-only one that ran), or Workspace paused. At the right the Enabled switch (for a
+  routine on a schedule), Run now, Edit, the last run's session and Delete.
+- **Title**, then one line of how it is set up, each part only when it is not the
+  default: the schedule ("Weekdays 09:00"; none for a manual routine, just "Once" for a
+  once-only one), the project it runs in (and its device when that is another machine),
+  "own worktree", the model. A manual routine in the workspace on the default model has
+  no line.
+- **The prompt** as a quote.
+- **Last run**, once one has ended: when (with Failed or Skipped in words, a check for
+  one that went well; "Run by hand" is the tooltip) and what it said, as markdown. A run
+  under way is the status's to say, so it has no section.
+
+Its form follows the same rule: the schedule kinds take their row without a label of
+their own, the line at the schedule's foot says how soon the next run comes rather than
+the day and hour its fields already show, and a project names its device only when that
+is another machine.
 
 **A result opens in the panel.** A result notice's card opens the plan's own page while
 the plan's record is kept, else (and for a routine's run) a page with how it ended,

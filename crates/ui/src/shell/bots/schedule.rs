@@ -451,25 +451,33 @@ impl Shell {
             .collect()
     }
 
-    /// The bot's projects a routine may run in, in sidebar order.
+    /// The bot's projects a routine may run in, in sidebar order, each with
+    /// its device's name when that is another machine (empty on this one).
     fn routine_projects(&self, bot: &Bot, cx: &App) -> Vec<(Space, String)> {
         let state = self.state.read(cx);
+        let local = state.local_device_id.as_deref();
         state
             .spaces_sorted()
             .into_iter()
             .filter(|s| bot.scope.sees_space(&s.id))
             .map(|s| {
-                let device = state
-                    .device_name(&s.device_id)
-                    .unwrap_or("Unknown device")
-                    .to_string();
+                let device = if local.is_none_or(|local| local == s.device_id) {
+                    String::new()
+                } else {
+                    state
+                        .device_name(&s.device_id)
+                        .unwrap_or("Unknown device")
+                        .to_string()
+                };
                 (s.clone(), device)
             })
             .collect()
     }
 
-    /// A job on the card: its glyph, name and when it runs next (a spinner
-    /// while it runs, the note in red when its last run failed).
+    /// A job on the card, one line: its mark ([`Self::job_status_mark`]),
+    /// its name, and at the right how long its run has gone or when the
+    /// next one comes. The mark alone says that it runs, waits on the owner
+    /// or failed last time.
     fn job_item(
         &self,
         job: &Job,
@@ -479,63 +487,22 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let (glyph, tint) = job_mark(job, space, bot_tint, theme);
+        let asking = self.job_asking(job, cx);
+        let mark = self.job_status_mark(job, space, bot_tint, asking, true, theme);
         let state = job.state();
-        let corner = match state {
-            JobState::Running => super::super::render::status_mark(
-                ChatIndicator::Working,
-                self.pulse_ticker.entity_id(),
-                theme,
-            )
-            .unwrap_or_else(|| card_corner("running", None, theme)),
-            _ => card_corner(
-                state_note(state, &Local::now()),
-                job.failed().then_some(theme.danger),
-                theme,
-            ),
+        let note = match (state, job.last.as_ref()) {
+            (JobState::Running, Some(run)) => {
+                crate::transcript::bot_plan::format_span(Utc::now().timestamp_millis() - run.at)
+            }
+            _ => state_note(state, &Local::now()),
         };
         let dim = job.dim();
         let item = job.item();
-        // A run under way says so under the name, as a plan says its step:
-        // how long it has run, or that its session waits on the owner.
-        let detail =
-            job.last
-                .as_ref()
-                .filter(|_| state == JobState::Running)
-                .map(|run| {
-                    let now = Utc::now();
-                    let asking = run.chat_id.as_deref().is_some_and(|chat_id| {
-                        super::chat_asking(self.state.read(cx), chat_id, now)
-                    });
-                    let (text, color) = if asking {
-                        ("Waiting on you".to_string(), theme.warning)
-                    } else {
-                        (
-                            format!(
-                                "Running · {}",
-                                crate::transcript::bot_plan::format_span(
-                                    now.timestamp_millis() - run.at
-                                )
-                            ),
-                            theme.text_muted.opacity(0.85),
-                        )
-                    };
-                    div()
-                        .pt(px(3.0))
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(11.0))
-                        .line_height(px(14.0))
-                        .text_color(color)
-                        .child(SharedString::from(text))
-                        .into_any_element()
-                });
-        super::board::card_item_detail(
+        super::board::card_item(
             &format!("bot-job-{}", job.id),
-            Some(card_glyph(glyph, tint.opacity(0.82))),
+            Some(mark),
             job.name.clone(),
-            Some(corner),
-            detail,
+            Some(card_corner(note, None, theme)),
             selected,
             theme,
         )
@@ -623,6 +590,7 @@ impl Shell {
         bot: &Bot,
         item: &PanelItem,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         match item {
@@ -634,7 +602,7 @@ impl Shell {
                 if self.form_open(&target) {
                     return Some(self.render_job_form(bot, target, theme, cx));
                 }
-                self.render_routine(bot, id, theme, cx)
+                self.render_routine(bot, id, theme, window, cx)
                     .or_else(|| self.render_saving(id))
             }
             _ => None,
@@ -666,11 +634,17 @@ impl Shell {
 
     // ── one routine ─────────────────────────────────────────────────────────
 
+    /// One routine's page, laid out like a work item's: every control at
+    /// the very top beside a word of how it stands, its title, then what it
+    /// is told to do and what its last run said. Each thing is said once,
+    /// and what is the default (it runs in the workspace, on the default
+    /// model, in the project's checkout) is not said at all.
     fn render_routine(
         &mut self,
         bot: &Bot,
         id: &str,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         let routine = {
@@ -691,109 +665,209 @@ impl Shell {
         {
             self.board.schedule.saving = None;
         }
-        let (space, device) = {
+        // Where it runs, when that is a project: its name, and its device
+        // when that is another machine.
+        let (space, place) = {
             let state = self.state.read(cx);
             let space = routine
                 .target
                 .space_id()
                 .and_then(|id| state.space_row(id).cloned());
-            let device = space.as_ref().map(|s| {
-                state
-                    .device_name(&s.device_id)
-                    .unwrap_or("Unknown device")
-                    .to_string()
+            let place = routine.target.space_id().map(|id| {
+                super::items::project_label(state, id, theme).map_or_else(
+                    || "a project it can't see".to_string(),
+                    |label| label.short(),
+                )
             });
-            (space, device)
+            (space, place)
         };
         let now = Local::now();
         let job = Job::routine(&routine, &now);
+        let asking = self.job_asking(&job, cx);
+        let model = routine.chosen_model().map(|model| {
+            let host = space
+                .as_ref()
+                .map_or(bot.host_device_id.clone(), |s| s.device_id.clone());
+            self.model_label(Some(host), model, cx)
+        });
+        let worktree = matches!(
+            routine.target,
+            RoutineTarget::Project { worktree: true, .. }
+        );
         let (glyph, tint) = job_mark(&job, space.as_ref(), bot_tint(bot, theme), theme);
         let head = PanelHead {
             glyph,
             tint: Some(tint),
             title: routine.name.clone(),
         };
-        let mut body = div().p(px(8.0)).flex().flex_col();
-        self.board.panel_actions = Some(
-            self.job_actions(&routine, &job, theme, cx)
-                .into_any_element(),
-        );
-        if bot.paused {
-            body = body.child(
-                parts::quiet_line(
-                    theme,
-                    format!("{} is paused, so no routine runs.", bot.name),
-                )
-                .text_color(theme.warning),
-            );
-        }
-        // Where and when it runs, then what it last did.
-        match &routine.target {
-            RoutineTarget::Workspace => {
-                body = body.child(parts::fact(
-                    theme,
-                    "Runs in",
-                    SharedString::from("This workspace"),
-                ));
-            }
-            RoutineTarget::Project { worktree, .. } => {
-                body = body
-                    .child(parts::fact(
-                        theme,
-                        "Runs in",
-                        SharedString::from(format!(
-                            "{} · {}",
-                            space
-                                .as_ref()
-                                .map_or("A project it can't see", |s| s.display_name()),
-                            device.as_deref().unwrap_or("Unknown device"),
-                        )),
-                    ))
-                    .child(parts::fact(
-                        theme,
-                        "Checkout",
-                        SharedString::from(if *worktree {
-                            "Its own worktree"
-                        } else {
-                            "The project's checkout"
-                        }),
-                    ));
-            }
-        }
-        body = body.child(parts::fact(
-            theme,
-            "Model",
-            SharedString::from(match routine.chosen_model() {
-                Some(model) => {
-                    let host = space
-                        .as_ref()
-                        .map_or(bot.host_device_id.clone(), |s| s.device_id.clone());
-                    self.model_label(Some(host), model, cx)
-                }
-                None => "Default".to_string(),
-            }),
-        ));
-        body = body.child(parts::fact(
-            theme,
-            "Schedule",
-            SharedString::from(schedule_value(&job, &now)),
-        ));
-        body = body.child(parts::fact(
-            theme,
-            "Prompt",
-            super::items::text_value(&routine.prompt),
-        ));
-        if routine.last_run.is_some() {
-            body = body.child(parts::fact(
+
+        // ── header: status and controls, title, how it is set up ──
+        let (word, tone) = status_word(&job, asking, bot.paused, &now);
+        let tip = status_tip(&job, &now);
+        let status = super::items::header_status(
+            format!("bot-routine-status-{id}"),
+            // No failure mark here: Last run says it just below.
+            self.job_status_mark(
+                &job,
+                space.as_ref(),
+                bot_tint(bot, theme),
+                asking,
+                false,
                 theme,
-                "Last run",
-                self.last_run_value(routine.last_run.as_ref(), theme, cx),
-            ));
+            ),
+            word,
+            match tone {
+                StatusTone::Live => theme.text,
+                StatusTone::Warn => theme.warning,
+                StatusTone::Quiet => theme.text_muted,
+            },
+        )
+        .when_some(tip, |el, tip| {
+            el.tooltip(move |_, cx| {
+                let tip = tip.clone();
+                cx.new(|_| super::super::session::FindTooltip(tip.into()))
+                    .into()
+            })
+        });
+        let controls = self.job_actions(&routine, &job, theme, cx);
+        let line = setup_line(
+            &routine.schedule,
+            place.as_deref(),
+            worktree,
+            model.as_deref(),
+        );
+        self.board.panel_header = Some(super::items::item_header(
+            status,
+            controls,
+            super::items::header_title(format!("bot-routine-title-{id}"), &routine.name, theme),
+            (!line.is_empty()).then(|| {
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(line))
+                    .into_any_element()
+            }),
+            theme,
+        ));
+
+        // ── what it is told to do: a quote, as a plan's request is ──
+        let mut body = div().p(px(8.0)).pb(px(14.0)).flex().flex_col().child(
+            div()
+                .mx(px(8.0))
+                .mt(px(6.0))
+                .pl(px(10.0))
+                .border_l_2()
+                .border_color(crate::kit::theme::hairline(0.2))
+                .child(super::items::panel_markdown(
+                    &routine.prompt,
+                    format!("bot-routine-prompt-{id}"),
+                    12.5,
+                    theme.text_muted,
+                    theme,
+                    window,
+                )),
+        );
+        // ── what its last run said; a run under way is the status's to say ──
+        if let Some(run) = routine
+            .last_run
+            .as_ref()
+            .filter(|run| run.outcome != RunOutcome::Running)
+        {
+            let (word, glyph, color) = match run.outcome {
+                RunOutcome::Failed => (Some("Failed"), Some(icons::CLOSE_CIRCLE), theme.danger),
+                RunOutcome::Skipped => (Some("Skipped"), None, theme.text_muted),
+                _ => (None, Some(icons::CHECK), theme.success),
+            };
+            let when = parts::past_full_ms(run.at);
+            let manual = run.manual;
+            let note = div()
+                .id(SharedString::from(format!("bot-routine-ran-{id}")))
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(5.0))
+                .text_size(px(11.0))
+                .children(glyph.map(|glyph| icon(glyph).size(px(11.0)).text_color(color)))
+                .child(
+                    div()
+                        .text_color(if word.is_some() {
+                            color
+                        } else {
+                            theme.text_muted.opacity(0.85)
+                        })
+                        .child(SharedString::from(match word {
+                            Some(word) => format!("{word} · {when}"),
+                            None => when,
+                        })),
+                )
+                .when(manual, |el| {
+                    el.tooltip(|_, cx| {
+                        cx.new(|_| super::super::session::FindTooltip("Run by hand".into()))
+                            .into()
+                    })
+                });
+            body = body.child(
+                super::items::section_head("Last run", false, theme)
+                    .child(div().flex_1())
+                    .child(note),
+            );
+            if let Some(summary) = run.summary.as_ref().filter(|s| !s.trim().is_empty()) {
+                body = body.child(div().px(px(8.0)).child(super::items::panel_markdown(
+                    summary,
+                    format!("bot-routine-result-{id}"),
+                    13.0,
+                    theme.text,
+                    theme,
+                    window,
+                )));
+            }
         }
         Some((head, body))
     }
 
-    /// The header's buttons: the Enabled switch (for a routine on a
+    /// Whether the session a routine's run is in waits on the owner.
+    fn job_asking(&self, job: &Job, cx: &App) -> bool {
+        job.state() == JobState::Running
+            && job
+                .last
+                .as_ref()
+                .and_then(|run| run.chat_id.as_deref())
+                .is_some_and(|chat_id| super::chat_asking(self.state.read(cx), chat_id, Utc::now()))
+    }
+
+    /// A routine's mark, on its row and its page: the ring while a run is
+    /// under way (amber and still when it waits on the owner), a red mark
+    /// when its last run failed and `flag_failed` (its row, which has no
+    /// other place to say so), else the glyph of its kind.
+    fn job_status_mark(
+        &self,
+        job: &Job,
+        space: Option<&Space>,
+        bot_tint: gpui::Hsla,
+        asking: bool,
+        flag_failed: bool,
+        theme: &Theme,
+    ) -> AnyElement {
+        use super::items::{RingState, ring_mark};
+        let ticker = self.pulse_ticker.entity_id();
+        match job.state() {
+            JobState::Running if asking => ring_mark(RingState::Asking, (0, 0), ticker, theme),
+            JobState::Running => ring_mark(RingState::Running, (0, 0), ticker, theme),
+            JobState::Starting => ring_mark(RingState::Waiting, (0, 0), ticker, theme),
+            _ if flag_failed && job.failed() => icon(icons::CLOSE_CIRCLE)
+                .size(px(12.0))
+                .flex_none()
+                .text_color(theme.danger)
+                .into_any_element(),
+            _ => {
+                let (glyph, tint) = job_mark(job, space, bot_tint, theme);
+                card_glyph(glyph, tint.opacity(0.82))
+            }
+        }
+    }
+
+    /// The bar's controls: the Enabled switch (for a routine on a
     /// schedule), Run now, Edit, the last run's session and Delete. Its
     /// other settings live in the form.
     fn job_actions(
@@ -802,7 +876,7 @@ impl Shell {
         job: &Job,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> Vec<AnyElement> {
         let state = job.state();
         let busy = matches!(state, JobState::Running | JobState::Starting);
         let (run_id, edit_id, delete_id) = (job.id.clone(), job.id.clone(), job.id.clone());
@@ -893,90 +967,13 @@ impl Shell {
                     routine.enabled,
                 ))
         });
-        div()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(2.0))
-            .children(enabled)
-            .child(run)
-            .child(edit)
-            .children(session)
-            .child(delete)
-    }
-
-    /// The last run: its outcome and time (and whether it was run by
-    /// hand), and its summary. Its session opens from the actions.
-    fn last_run_value(&self, run: Option<&RunRecord>, theme: &Theme, cx: &App) -> AnyElement {
-        let Some(run) = run else {
-            return div()
-                .text_color(theme.text_muted)
-                .child(SharedString::from("Not run yet"))
-                .into_any_element();
-        };
-        let asking = run.outcome == RunOutcome::Running
-            && run.chat_id.as_deref().is_some_and(|id| {
-                let state = self.state.read(cx);
-                state
-                    .chats
-                    .iter()
-                    .find(|chat| chat.id == id)
-                    .is_some_and(|chat| {
-                        state.display_status_for(chat, Utc::now()) == ChatIndicator::AwaitingInput
-                    })
-            });
-        let (word, glyph, color) = match run.outcome {
-            RunOutcome::Running if asking => ("Needs you", None, theme.warning),
-            RunOutcome::Running => ("Running", None, theme.text),
-            RunOutcome::Done => ("Done", Some(icons::CHECK), theme.success),
-            RunOutcome::Failed => ("Failed", Some(icons::DANGER_TRIANGLE), theme.danger),
-            RunOutcome::Skipped => ("Skipped", None, theme.text_muted),
-        };
-        let mark = match run.outcome {
-            RunOutcome::Running => super::super::render::status_mark(
-                if asking {
-                    ChatIndicator::AwaitingInput
-                } else {
-                    ChatIndicator::Working
-                },
-                self.pulse_ticker.entity_id(),
-                theme,
-            ),
-            _ => glyph.map(|g| icon(g).size(px(12.0)).text_color(color).into_any_element()),
-        };
-        let line = div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap(px(5.0))
-            .children(mark)
-            .child(div().text_color(color).child(SharedString::from(word)))
-            .child(
-                div()
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(format!(
-                        "· {}{}",
-                        parts::past_full_ms(run.at),
-                        if run.manual { " · run by hand" } else { "" }
-                    ))),
-            );
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(3.0))
-            .child(line)
-            .when_some(run.summary.clone(), |el, summary| {
-                el.child(
-                    div()
-                        .text_size(px(12.0))
-                        .line_height(px(17.0))
-                        .text_color(theme.text_muted)
-                        .child(super::items::text_value(&summary)),
-                )
-            })
-            .into_any_element()
+        enabled
+            .map(IntoElement::into_any_element)
+            .into_iter()
+            .chain([run.into_any_element(), edit.into_any_element()])
+            .chain(session.map(IntoElement::into_any_element))
+            .chain([delete.into_any_element()])
+            .collect()
     }
 
     fn save_routine_now(&mut self, routine: BotRoutine, cx: &mut Context<Self>) {
@@ -1302,8 +1299,10 @@ impl Shell {
                 .text_size(px(12.5))
                 .child(input.clone().into_any_element())
         };
-        let mut when = parts::group_box().child(row("Runs", true).child(
-            div().w(px(272.0)).flex_none().child(parts::segmented(
+        // The kinds need no label of their own under "When": the control
+        // takes the row.
+        let mut when = parts::group_box().child(div().p(px(8.0)).child(div().w_full().child(
+            parts::segmented(
                 "bot-form-kind",
                 &[
                     (ScheduleKind::Daily, "Daily"),
@@ -1321,8 +1320,8 @@ impl Shell {
                 },
                 theme,
                 cx,
-            )),
-        ));
+            ),
+        )));
         match form.draft.kind {
             ScheduleKind::Daily => {
                 // Like the Repeats control: a track, the picked days lifted
@@ -1416,7 +1415,8 @@ impl Shell {
             Ok(schedule) => {
                 let next = schedule
                     .next_after(&now)
-                    .map(|at| format!(" · next run {}", lower_first(&parts::next_full(&at, &now))))
+                    // How soon: the day and hour are in the fields above.
+                    .map(|at| format!(" · next {}", in_words(&at, &now)))
                     .unwrap_or_default();
                 (format!("{}{next}", schedule.describe()), theme.text_muted)
             }
@@ -1927,6 +1927,95 @@ impl Shell {
     }
 }
 
+/// The tone of a routine's status word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusTone {
+    /// Something is happening or coming.
+    Live,
+    /// It waits on the owner, or cannot run.
+    Warn,
+    /// Nothing is coming.
+    Quiet,
+}
+
+/// How a routine stands, in a word or two for its page's bar: what its run
+/// is doing, else why none is coming, else how soon the next one comes
+/// ("Next in 3h", "Next in 4 days"; a once-only one names its time,
+/// "Tomorrow 09:00", which its schedule line then leaves out).
+fn status_word<Tz: TimeZone>(
+    job: &Job,
+    asking: bool,
+    paused: bool,
+    now: &DateTime<Tz>,
+) -> (String, StatusTone) {
+    let state = job.state();
+    match state {
+        JobState::Running if asking => ("Waiting on you".into(), StatusTone::Warn),
+        JobState::Running => ("Running".into(), StatusTone::Live),
+        JobState::Starting => ("Starting…".into(), StatusTone::Live),
+        JobState::Done => ("Done".into(), StatusTone::Quiet),
+        JobState::Off => ("Off".into(), StatusTone::Quiet),
+        // A paused workspace runs nothing on a schedule; Run now still works.
+        _ if paused => ("Workspace paused".into(), StatusTone::Warn),
+        JobState::Manual => ("Manual".into(), StatusTone::Quiet),
+        JobState::Unplanned => ("No next run".into(), StatusTone::Quiet),
+        JobState::Next(at) => {
+            let word = match now.timezone().timestamp_millis_opt(at).single() {
+                Some(at) if matches!(job.schedule, Schedule::Once { .. }) => {
+                    parts::next_full(&at, now)
+                }
+                // How soon, not the day or hour: the schedule under the
+                // title names those.
+                Some(at) => format!("Next {}", in_words(&at, now)),
+                None => "Scheduled".into(),
+            };
+            (word, StatusTone::Live)
+        }
+    }
+}
+
+/// What a hover on the status adds: the exact time of the next run, or
+/// when the run under way started.
+fn status_tip<Tz: TimeZone>(job: &Job, now: &DateTime<Tz>) -> Option<String> {
+    match (job.state(), job.last.as_ref()) {
+        (JobState::Running, Some(run)) => Some(format!(
+            "Since {}{}",
+            parts::past_full_ms(run.at),
+            if run.manual { " · run by hand" } else { "" }
+        )),
+        (JobState::Next(at), _) if !matches!(job.schedule, Schedule::Once { .. }) => now
+            .timezone()
+            .timestamp_millis_opt(at)
+            .single()
+            .map(|at| parts::next_full(&at, now)),
+        _ => None,
+    }
+}
+
+/// How a routine is set up, on one line under its title, each part only
+/// when it is not the default: its schedule (a manual one has none, a
+/// once-only one is just "Once": its status names the time), the project
+/// it runs in, its own worktree, its model. "Weekdays 09:00 · billing · own
+/// worktree"; empty for a manual routine in the workspace.
+fn setup_line(
+    schedule: &Schedule,
+    place: Option<&str>,
+    worktree: bool,
+    model: Option<&str>,
+) -> String {
+    let when = match schedule {
+        Schedule::Manual => None,
+        Schedule::Once { .. } => Some("Once".to_string()),
+        schedule => Some(schedule.describe()),
+    };
+    when.into_iter()
+        .chain(place.map(str::to_string))
+        .chain(worktree.then(|| "own worktree".to_string()))
+        .chain(model.map(str::to_string))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// A routine's Schedule fact: when it repeats, and how soon it next runs
 /// ("Weekdays 08:30 · next in 9h"), "off" while disabled, "done" once a
 /// once-only one ran; a manual one runs only when asked.
@@ -1960,22 +2049,13 @@ pub(super) fn routine_brief(routine: &BotRoutine) -> (&'static str, String) {
 }
 
 /// How soon `at` comes: "in 25m", "in 9h", "in 3 days".
-fn in_words(at: &DateTime<Local>, now: &DateTime<Local>) -> String {
-    let minutes = (*at - *now).num_minutes().max(0);
+fn in_words<Tz: TimeZone>(at: &DateTime<Tz>, now: &DateTime<Tz>) -> String {
+    let minutes = (at.clone() - now.clone()).num_minutes().max(0);
     match minutes {
         0 => "now".into(),
         1..=59 => format!("in {minutes}m"),
         60..=2879 => format!("in {}h", minutes / 60),
         _ => format!("in {} days", minutes / 1440),
-    }
-}
-
-/// "Today 09:00" → "today 09:00", for mid-sentence use.
-fn lower_first(text: &str) -> String {
-    let mut chars = text.chars();
-    match chars.next() {
-        Some(first) if text.starts_with("To") => first.to_lowercase().chain(chars).collect(),
-        _ => text.to_string(),
     }
 }
 
@@ -2131,6 +2211,75 @@ mod tests {
         assert_eq!(state_note(JobState::Next(next), &now), "Mon");
         assert_eq!(state_note(JobState::Off, &now), "off");
         assert_eq!(state_note(JobState::Manual, &now), "manual");
+    }
+
+    #[test]
+    fn a_routines_status_says_what_happens_now_or_next() {
+        let now = at("2026-10-18T10:00:00+01:00");
+        let next = at("2026-10-19T09:00:00+01:00").timestamp_millis();
+        let weekdays = || daily("09:00", vec![1, 2, 3, 4, 5]);
+        let word = |job: &Job, asking, paused| status_word(job, asking, paused, &now);
+
+        let idle = job("r", weekdays(), true, Some(next));
+        assert_eq!(
+            word(&idle, false, false),
+            ("Next in 23h".into(), StatusTone::Live)
+        );
+        assert_eq!(status_tip(&idle, &now).as_deref(), Some("Tomorrow 09:00"));
+        // A paused workspace runs nothing on a schedule.
+        assert_eq!(
+            word(&idle, false, true),
+            ("Workspace paused".into(), StatusTone::Warn)
+        );
+
+        // A once-only routine names its time; its line then says only Once.
+        let once = Schedule::Once {
+            at: "2026-10-19T09:00".into(),
+        };
+        let reminder = job("o", once.clone(), true, Some(next));
+        assert_eq!(
+            word(&reminder, false, false),
+            ("Tomorrow 09:00".into(), StatusTone::Live)
+        );
+        assert_eq!(status_tip(&reminder, &now), None);
+        assert_eq!(setup_line(&once, None, false, None), "Once");
+
+        let running = Job {
+            last: Some(run(now.timestamp_millis() - 60_000, RunOutcome::Running)),
+            ..job("r", weekdays(), true, Some(next))
+        };
+        assert_eq!(
+            word(&running, false, true),
+            ("Running".into(), StatusTone::Live)
+        );
+        assert_eq!(
+            word(&running, true, false),
+            ("Waiting on you".into(), StatusTone::Warn)
+        );
+
+        let off = job("r", weekdays(), false, None);
+        assert_eq!(word(&off, false, true), ("Off".into(), StatusTone::Quiet));
+        let manual = job("m", Schedule::Manual, true, None);
+        assert_eq!(
+            word(&manual, false, false),
+            ("Manual".into(), StatusTone::Quiet)
+        );
+    }
+
+    #[test]
+    fn the_setup_line_leaves_out_every_default() {
+        let weekdays = daily("09:00", vec![1, 2, 3, 4, 5]);
+        assert_eq!(setup_line(&weekdays, None, false, None), "Weekdays 09:00");
+        assert_eq!(
+            setup_line(&weekdays, Some("billing"), true, Some("Opus")),
+            "Weekdays 09:00 · billing · own worktree · Opus"
+        );
+        // A manual routine in the workspace needs no line at all.
+        assert_eq!(setup_line(&Schedule::Manual, None, false, None), "");
+        assert_eq!(
+            setup_line(&Schedule::Manual, Some("web"), false, None),
+            "web"
+        );
     }
 
     #[test]

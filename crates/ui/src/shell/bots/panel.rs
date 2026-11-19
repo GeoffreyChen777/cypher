@@ -232,7 +232,7 @@ impl Shell {
             }
             PanelItem::Post(entry_id) => self.render_post_panel(entry_id, &theme, window, cx)?,
             PanelItem::Routine(_) | PanelItem::NewRoutine => {
-                self.render_schedule_panel(&bot, item, &theme, cx)?
+                self.render_schedule_panel(&bot, item, &theme, window, cx)?
             }
             PanelItem::Activity => self.render_activity_panel(&bot, item, &theme, cx)?,
             PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => {
