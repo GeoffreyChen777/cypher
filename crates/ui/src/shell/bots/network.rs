@@ -53,6 +53,41 @@ fn in_flight(exchange: &BotExchange) -> bool {
     }
 }
 
+/// How long a question that waits on the other side keeps its ring moving.
+const FRESH_MS: i64 = 60_000;
+
+/// Whether a question in flight shows as moving. Its ring goes round while
+/// this workspace writes its answer, and for the first minute of a wait on
+/// the other side (their answer to a question asked, the sending of a
+/// reviewed one): that wait can last days, so after a minute the ring holds
+/// still until the question settles.
+fn moving(exchange: &BotExchange, now_ms: i64) -> bool {
+    if !in_flight(exchange) {
+        return false;
+    }
+    let since = match (&exchange.review, exchange.direction) {
+        (Some(review), _) => review.at,
+        (None, ExchangeDirection::Outgoing) => exchange.asked_at,
+        (None, ExchangeDirection::Incoming) => return true,
+    };
+    now_ms - since < FRESH_MS
+}
+
+/// The ring of something in flight: going round, or still once its wait
+/// has gone on ([`moving`]).
+fn flight_ring(moving: bool, ticker: gpui::EntityId, theme: &Theme) -> AnyElement {
+    super::items::ring_mark(
+        if moving {
+            super::items::RingState::Running
+        } else {
+            super::items::RingState::Waiting
+        },
+        (0, 0),
+        ticker,
+        theme,
+    )
+}
+
 pub(super) fn standing<'a>(
     conn: &BotConnection,
     exchanges: impl IntoIterator<Item = &'a BotExchange>,
@@ -385,7 +420,7 @@ impl Shell {
     ) -> Option<AnyElement> {
         let now = Utc::now();
         let now_ms = now.timestamp_millis();
-        let (rows, invites) = {
+        let (rows, invites, moving) = {
             let state = self.state.read(cx);
             let records = &state.bot_records;
             let mut rows: Vec<(BotConnection, Standing)> =
@@ -393,6 +428,13 @@ impl Shell {
                     .into_iter()
                     .map(|conn| (conn.clone(), standing(conn, &records.exchanges)))
                     .collect();
+            // The connections with a question whose ring still goes round.
+            let moving: std::collections::HashSet<String> = records
+                .exchanges
+                .iter()
+                .filter(|exchange| moving(exchange, now_ms))
+                .map(|exchange| exchange.connection_id.clone())
+                .collect();
             // What waits on the owner first, then what is on its way; the
             // rest stay by last question.
             rows.sort_by_key(|(_, standing)| match standing {
@@ -404,7 +446,7 @@ impl Shell {
                 .iter()
                 .map(|invite| invite.expires_at)
                 .collect();
-            (rows, invites)
+            (rows, invites, moving)
         };
         if rows.is_empty() && invites.is_empty() {
             let key = "bot-network-card";
@@ -461,12 +503,9 @@ impl Shell {
                         .flex_none()
                         .text_color(theme.warning)
                         .into_any_element(),
-                    Standing::Answering | Standing::Asking => super::items::ring_mark(
-                        super::items::RingState::Running,
-                        (0, 0),
-                        ticker,
-                        theme,
-                    ),
+                    Standing::Answering | Standing::Asking => {
+                        flight_ring(moving.contains(&conn.id), ticker, theme)
+                    }
                     Standing::Leaving => super::board::card_corner("leaving", None, theme),
                     Standing::Off => super::board::card_corner("off", None, theme),
                     Standing::Idle => super::board::card_corner(
@@ -860,6 +899,14 @@ impl Shell {
         let standing = standing(&conn, &exchanges);
         let ticker = self.pulse_ticker.entity_id();
         let ring = |state| super::items::ring_mark(state, (0, 0), ticker, theme);
+        let now_ms = cypher_proto::now_ms();
+        let flight = || {
+            flight_ring(
+                exchanges.iter().any(|exchange| moving(exchange, now_ms)),
+                ticker,
+                theme,
+            )
+        };
         let (mark, word, tone) = match standing {
             _ if revoked => (
                 peer_avatar(&conn.peer, 16.0, theme),
@@ -879,13 +926,9 @@ impl Shell {
                 "Waiting on you".to_string(),
                 theme.warning,
             ),
-            Standing::Answering => (
-                ring(super::items::RingState::Running),
-                "Answering".to_string(),
-                theme.text,
-            ),
+            Standing::Answering => (flight(), "Answering".to_string(), theme.text),
             Standing::Asking => (
-                ring(super::items::RingState::Running),
+                flight(),
                 format!("Waiting for {}", first_name(&who)),
                 theme.text,
             ),
@@ -1268,9 +1311,8 @@ impl Shell {
                 .text_color(theme.warning)
                 .into_any_element()
         } else if in_flight(exchange) {
-            super::items::ring_mark(
-                super::items::RingState::Running,
-                (0, 0),
+            flight_ring(
+                moving(exchange, now.timestamp_millis()),
                 self.pulse_ticker.entity_id(),
                 theme,
             )
@@ -1703,6 +1745,33 @@ mod tests {
         assert_eq!(of(&c, &[asked]), Standing::Leaving);
         assert!(Standing::Review.live() && Standing::Asking.live());
         assert!(!Standing::Off.live() && !Standing::Idle.live());
+    }
+
+    #[test]
+    fn a_wait_on_the_other_side_moves_for_a_minute_then_holds_still() {
+        use ExchangeDirection::{Incoming, Outgoing};
+        let minute = 60_000;
+        // Asked at 0: their answer may take days.
+        let asked = exchange("o", Outgoing, ExchangeState::Delivered);
+        assert!(moving(&asked, 0) && moving(&asked, minute - 1));
+        assert!(!moving(&asked, minute) && !moving(&asked, 3 * 24 * 60 * minute));
+        // This workspace writing its answer is work under way: it moves.
+        let working = exchange("w", Incoming, ExchangeState::Working);
+        assert!(moving(&working, 10 * minute));
+        // A reviewed answer on its way: a minute from the review.
+        let mut sending = exchange("s", Incoming, ExchangeState::AwaitingReview);
+        assert!(!moving(&sending, 0), "still the owner's to decide");
+        sending.review = Some(cypher_proto::ReviewDecision {
+            send: true,
+            text: None,
+            at: 5 * minute,
+        });
+        assert!(moving(&sending, 5 * minute + 1) && !moving(&sending, 6 * minute));
+        // Settled questions never move.
+        assert!(!moving(
+            &exchange("a", Outgoing, ExchangeState::Answered),
+            0
+        ));
     }
 
     #[test]
