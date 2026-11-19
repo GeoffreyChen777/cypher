@@ -408,7 +408,7 @@ impl Shell {
 
     /// The sidebar card: one line per connected workspace, like the other
     /// cards. Who it is, and at the right the one thing that matters most
-    /// about it now ([`Standing`]): an amber mark when an answer waits for
+    /// about it now ([`Standing`]): an amber paper plane when an answer waits for
     /// review, the ring while a question is on its way, else when the last
     /// question was, or that replies are off. An open invite is one quiet
     /// last row. With nothing yet, the header alone says how to start.
@@ -498,7 +498,7 @@ impl Shell {
             .map(|(conn, standing)| {
                 let item = PanelItem::Connection(conn.id.clone());
                 let corner = match standing {
-                    Standing::Review => icon(icons::QUESTION_CIRCLE)
+                    Standing::Review => icon(super::items::REVIEW_GLYPH)
                         .size(px(12.0))
                         .flex_none()
                         .text_color(theme.warning)
@@ -919,7 +919,7 @@ impl Shell {
                 theme.text_muted,
             ),
             Standing::Review => (
-                icon(icons::QUESTION_CIRCLE)
+                icon(super::items::REVIEW_GLYPH)
                     .size(px(13.0))
                     .text_color(theme.warning)
                     .into_any_element(),
@@ -1306,7 +1306,7 @@ impl Shell {
         );
         let asked = super::items::ago(exchange.asked_at, now);
         let note: AnyElement = if awaiting {
-            icon(icons::QUESTION_CIRCLE)
+            icon(super::items::REVIEW_GLYPH)
                 .size(px(12.0))
                 .text_color(theme.warning)
                 .into_any_element()

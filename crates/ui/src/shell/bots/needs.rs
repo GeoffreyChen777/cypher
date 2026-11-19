@@ -224,7 +224,7 @@ fn need_items(state: &crate::state::AppState, bot: &Bot, needs: Vec<Need>) -> Ve
                     .unwrap_or_else(|| "a connected workspace".into());
                 Some(NeedItem {
                     key: format!("review-{id}"),
-                    glyph: icons::USERS,
+                    glyph: super::items::REVIEW_GLYPH,
                     title: transcript::single_line(&exchange.question),
                     source: format!("Answer to {peer}, to review"),
                     at: Some(super::items::at(exchange.asked_at)),
@@ -1257,7 +1257,7 @@ impl Shell {
             super::network::peer_names,
         );
         let head = PanelHead {
-            glyph: icons::USERS,
+            glyph: super::items::REVIEW_GLYPH,
             tint: Some(theme.warning),
             title: who.clone(),
         };
@@ -1265,7 +1265,7 @@ impl Shell {
         // ── the bar: it waits on the owner; the two ways to decide ──
         let status = super::items::header_status(
             format!("bot-review-status-{exchange_id}"),
-            icon(icons::QUESTION_CIRCLE)
+            icon(super::items::REVIEW_GLYPH)
                 .size(px(13.0))
                 .text_color(theme.warning)
                 .into_any_element(),

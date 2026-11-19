@@ -1122,7 +1122,7 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 | **Work** | Running orchestrations, each with its progress ring (below), its current step ("Step 2 of 4 · Run the tests") and the time it has run; approved plans that have not started yet ("waiting": for a free slot, or a paused workspace); then the last three that ended, with their outcome mark. "N more" brings in everything that ended, rejected plans included | The orchestration's page (below) |
 | **Routines** | Its routines in order of next run, one line each: a mark, the name, and at the right when it next runs ("in 3h", "Mon", "off", "manual") or, while a run is under way, how long it has gone. The mark alone carries the state: the progress ring while it runs (amber and still when its session waits on the owner), a red mark when its last run failed, else the glyph of its kind (the workspace's repeat, a project's code). Those running and the next three show, then "N more". The header's **+** (on hover) adds one | The routine's page (below), or its form |
 | **Projects** | Each granted project, and under it the sessions the workspace runs there (a plan's workers, a project routine's), newest first, each with the mark a session row has in the Sessions view (working, asking, finished unseen, else its time); per project, those working or asking and the newest three of the rest, then "N more" | A project's row: its page (its device beside the title, the folder on hover; the workspace's sessions there, the owner's sessions it reads, its work and its routines there). A session's row: the session, live |
-| **Connections** (P4; "network" in code) | One line per connected workspace: the person's photo and name, their workspace's name quieter beside it, and at the right the one thing that matters most now: an amber mark when an answer waits for review, the ring while a question is on its way either way, else when the last question was, "off" when replies are off. A wait on the other side (their answer, the sending of a reviewed one) can last days, so its ring goes round for its first minute and then holds still; while this workspace writes an answer it keeps going. Those with something under way show first and always, then three, then "N more". While an invite code is open it keeps one quiet last row ("Invite open · 4d left"). The header's **+** (on hover) opens the connect page | A connection's page, the connect page, or an answer to review (all below) |
+| **Connections** (P4; "network" in code) | One line per connected workspace: the person's photo and name, their workspace's name quieter beside it, and at the right the one thing that matters most now: an amber paper plane when an answer waits for review (its own mark: the question mark is a session asking), the ring while a question is on its way either way, else when the last question was, "off" when replies are off. A wait on the other side (their answer, the sending of a reviewed one) can last days, so its ring goes round for its first minute and then holds still; while this workspace writes an answer it keeps going. Those with something under way show first and always, then three, then "N more". While an invite code is open it keeps one quiet last row ("Invite open · 4d left"). The header's **+** (on hover) opens the connect page | A connection's page, the connect page, or an answer to review (all below) |
 
 **Needs you is one page.** Whatever waits on the owner, wherever it comes from (the bot's
 own chat, a plan, a worker session of a plan, a routine's run in the workspace or in a
@@ -1281,7 +1281,7 @@ is another machine.
 
 - **The bar:** at the left how it stands (Waiting on you while an answer waits for review,
   Answering, Waiting for Dana, Replies off, Disconnecting…, else Connected; since when is
-  the tooltip), led by the person's photo, or the ring or the amber mark while something
+  the tooltip), led by the person's photo, or the ring or the amber paper plane while something
   is under way. At the right the reply mode as one button naming it (Auto, Review, Off),
   which opens the three with what each does; its thread, when this device lists it; and
   Disconnect (confirmed).
@@ -1292,7 +1292,7 @@ is another machine.
   the projects ticked).
 - **Body:** only the questions between the two, newest first (the last eight), with no
   heading. Each is one row: an arrow for its direction (who asked whom is its tooltip),
-  the question in at most two lines, and at the right an amber mark when its answer
+  the question in at most two lines, and at the right the amber paper plane when its answer
   waits for review, the ring while it is on its way, "declined" or "expired" with its
   age, else just its age (exact times on hover). A click opens the answer in place, as
   it went (the owner's edit when there was one), or a line saying why there is none;
@@ -1307,7 +1307,7 @@ Connect). What crosses Cypher's servers is said here, once, where connecting is 
 Signed out, it says to sign in.
 
 **An answer to review** (from Needs you, or its row on the connection's page): Decline
-and Send at the top beside "Answer to review", who asks, their workspace and when, the
+and Send at the top beside the paper plane and "Answer to review", who asks, their workspace and when, the
 question as a quote, and the draft to edit. Once decided it shows the connection's page
 with that question open.
 

@@ -191,6 +191,12 @@ pub(super) fn step_mark(state: StepState, ticker: gpui::EntityId, theme: &Theme)
     }
 }
 
+/// The mark of an answer drafted for a connected workspace that waits for
+/// the owner to send it, in amber wherever it shows (the connection's row
+/// and page, the question, its review, Needs you). Its own glyph: the
+/// question mark is a session asking, the checklist a plan to approve.
+pub(super) const REVIEW_GLYPH: &str = icons::PLANE;
+
 /// The ring's side in a row's mark slot.
 pub(super) const RING: f32 = 14.0;
 
