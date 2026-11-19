@@ -196,12 +196,14 @@ pub(super) fn step_mark(state: StepState, ticker: gpui::EntityId, theme: &Theme)
 pub(super) const RING: f32 = 14.0;
 
 /// A work item's mark: its progress ring while it runs (the steps done,
-/// its comet going round), then how it ended. The ring holds still, in
-/// amber, while a step waits on the owner, and empty while an approved
-/// plan waits to start.
+/// its comet going round), then how it ended. The ring is drawn in the
+/// text's ink, no accent: colour is kept for what needs the owner. It
+/// holds still, in amber, while a step waits on the owner, is paler while
+/// the plan stops, and empty while an approved plan waits to start.
 pub(super) fn work_mark(work: &BotWork, ticker: gpui::EntityId, theme: &Theme) -> AnyElement {
     use crate::kit::progress_ring::ProgressRing;
     let (done, total) = work.progress();
+    let ink = theme.text.opacity(0.82);
     let glyph_mark = |path, color| {
         icon(path)
             .size(px(12.0))
@@ -210,7 +212,7 @@ pub(super) fn work_mark(work: &BotWork, ticker: gpui::EntityId, theme: &Theme) -
     };
     match plan_phase(work) {
         PlanPhase::Starting => {
-            crate::kit::loaders::still_ring(ProgressRing::new(0, total, theme.accent, theme), RING)
+            crate::kit::loaders::still_ring(ProgressRing::new(0, total, ink, theme), RING)
                 .into_any_element()
         }
         PlanPhase::Running
@@ -229,13 +231,13 @@ pub(super) fn work_mark(work: &BotWork, ticker: gpui::EntityId, theme: &Theme) -
             .into_any_element()
         }
         PlanPhase::Running => crate::kit::loaders::progress_ring(
-            ProgressRing::new(done, total, theme.accent, theme),
+            ProgressRing::new(done, total, ink, theme),
             RING,
             ticker,
         )
         .into_any_element(),
         PlanPhase::Stopping => crate::kit::loaders::progress_ring(
-            ProgressRing::new(done, total, theme.text_muted, theme),
+            ProgressRing::new(done, total, theme.text_muted.opacity(0.7), theme),
             RING,
             ticker,
         )

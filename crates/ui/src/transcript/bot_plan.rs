@@ -318,7 +318,7 @@ pub fn progress_bar(done: usize, total: usize, theme: &Theme) -> gpui::Div {
                 .h_full()
                 .w(gpui::relative(fraction))
                 .rounded_full()
-                .bg(theme.accent),
+                .bg(theme.text.opacity(0.82)),
         )
 }
 

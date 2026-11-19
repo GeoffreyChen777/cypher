@@ -51,7 +51,8 @@ impl ProgressRing {
             stroke: 2.0,
             ink,
             track: theme.ink(0.11),
-            glint: gpui::white().opacity(0.72),
+            // What reads on the ink: light on a dark arc, dark on a light one.
+            glint: theme.on_solid.opacity(0.72),
         }
     }
 

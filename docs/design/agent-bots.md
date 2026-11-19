@@ -1214,11 +1214,13 @@ workspace's own hidden threads (an orchestration's, a workspace routine's, a
 connection's) still open read-only: nobody writes there but the workspace.
 
 **The progress ring.** A running plan's mark is one ring that says how far it is and
-that it is alive. The steps done are an arc from twelve o'clock over a faint track. Once
+that it is alive. The steps done are an arc from twelve o'clock over a faint track, in the text's
+ink (near black on light, near white on dark), not the accent: colour is kept for what
+needs the owner. Once
 per 1.6s a comet leaves the tip of that arc, stretches as it speeds round the part still
 to do, crosses the finished arc as a glint and is taken back in at the tip, where the ring
 rests for a beat; with no step done it circles alone, a plain spinner. The ring turns
-amber and holds still while a step waits on the owner, grey while the plan is stopping,
+amber and holds still while a step waits on the owner, a paler grey while the plan is stopping,
 and is an empty ring while an approved plan waits to start. It holds still under reduced
 motion (`kit/progress_ring.rs`).
 
