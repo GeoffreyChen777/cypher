@@ -227,6 +227,11 @@ impl Shell {
                 cx,
             )
         });
+        // A workspace's chat has no rail to close a side chat from: its
+        // bar carries the close button.
+        if self.slot_without_rail(sid) {
+            panel.update(cx, |panel, cx| panel.set_closable(true, cx));
+        }
         let Some(slot) = self.tiles.slots.get_mut(&sid) else {
             return;
         };
@@ -238,6 +243,9 @@ impl Shell {
                 side_chat_id,
             } => {
                 this.promote_side_chat(sid, chat_id.clone(), side_chat_id.clone(), cx);
+            }
+            crate::side_chats::SideChatEvent::CloseRequested { side_chat_id } => {
+                this.close_side_chat_tab(sid, side_chat_id.clone(), cx);
             }
         });
         slot.side_chats.insert(id, panel);
@@ -414,7 +422,20 @@ impl Shell {
         if slot.dock.active == DockSurface::SideChat(id) {
             slot.dock.active = DockSurface::Picker;
         }
+        let emptied = slot.dock.open && slot.dock.surfaces.is_empty();
         panel.update(cx, |panel, cx| panel.dispose(cx));
+        // With its last side chat gone, a workspace chat's dock has nothing
+        // to show and no rail to close it from: it shuts, and the
+        // conversation has its room back.
+        if emptied && self.slot_without_rail(sid) {
+            self.toggle_dock(sid, cx);
+        }
         cx.notify();
+    }
+
+    /// Whether `sid` is drawn without the session rail: a workspace's own
+    /// chat, or the session its panel shows live.
+    fn slot_without_rail(&self, sid: SlotId) -> bool {
+        self.board.slot == Some(sid) || self.board.session_slot == Some(sid)
     }
 }

@@ -1369,6 +1369,11 @@ As built, beyond the table:
   ("Connect a workspace") opens the connect page.
 - **After a delete** (a routine, finished work) or a cancelled new-routine form, the
   panel shuts: there is no list page to fall back to.
+- **A side chat** opened from a selection in the workspace's chat (or in a session the
+  panel shows live) opens beside the conversation inside that card, or over it when the
+  card is narrow. These cards have no session rail, so the side chat's own bar carries
+  its close button; closing the last one shuts the dock and gives the conversation its
+  room back.
 - **Signed out**, the Connections card says "Sign in to connect"; records stay visible.
 
 ### 13.2 iPhone and iPad
