@@ -7,7 +7,7 @@ use super::panel::PanelItem;
 use super::*;
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
 
-/// Rows a card lists before its header's panel takes over.
+/// Rows a card lists before its "N more" row.
 pub(super) const CARD_ROWS: usize = 4;
 
 /// What the confirm dialog asks before it does it.
@@ -16,22 +16,6 @@ pub(super) enum Confirm {
     DeleteRoutine { id: String, name: String },
     DeleteWork { id: String, name: String },
     RevokeConnection { id: String, name: String },
-}
-
-/// A card for a section with nothing in it yet: its header alone, with a
-/// quiet hint where the count would be. The header opens the section's
-/// panel like any card's, and the panel offers the way to add the first.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn empty_card(
-    key: &'static str,
-    title: &'static str,
-    hint: impl Into<SharedString>,
-    open: PanelItem,
-    focused: bool,
-    theme: &Theme,
-    cx: &mut Context<Shell>,
-) -> AnyElement {
-    header_card(key, title, hint, None, open, focused, theme, cx)
 }
 
 /// A card that is only its header: its glyph, title and a one-line hint
@@ -61,15 +45,6 @@ pub(super) fn header_card(
                 .child(hint.into()),
         );
     super::board::card(theme).child(header).into_any_element()
-}
-
-/// A card row's right-hand note.
-pub(super) fn row_note(text: impl Into<SharedString>, color: gpui::Hsla) -> gpui::Div {
-    div()
-        .flex_none()
-        .text_size(px(11.0))
-        .text_color(color)
-        .child(text.into())
 }
 
 /// A panel's small upper-case section label ("ROUTINES").
@@ -365,21 +340,6 @@ pub(super) fn action(
         .child(SharedString::from(label.to_string()))
 }
 
-/// Inline link text that underlines on hover. The caller adds the click.
-pub(super) fn link(
-    key: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(key.into())
-        .flex_none()
-        .text_color(theme.text_muted)
-        .cursor_pointer()
-        .hover(|s| s.text_color(theme.text).underline())
-        .child(label.into())
-}
-
 /// A form's footer: the error on the left, then Cancel and the primary
 /// button. The caller wires the two buttons by their ids.
 pub(super) fn form_footer(
@@ -483,14 +443,14 @@ impl Shell {
                     serde_json::json!({ "op": "deleteBotRoutine", "routineId": id }),
                     cx,
                 );
-                self.open_panel(PanelItem::Schedule, cx);
+                self.close_panel(cx);
             }
             Confirm::DeleteWork { id, .. } => {
                 self.board_mutate(
                     serde_json::json!({ "op": "deleteBotWork", "workId": id }),
                     cx,
                 );
-                self.open_panel(PanelItem::Work, cx);
+                self.close_panel(cx);
             }
             Confirm::RevokeConnection { id, .. } => {
                 self.board_mutate(

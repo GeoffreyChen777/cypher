@@ -5,9 +5,10 @@
 //! runs there). A
 //! card with nothing to show is not drawn; with no bots the sidebar says so and
 //! offers a new one. Cards hold no state: everything is read from the main
-//! state on render. A card's header opens its whole list in the detail
-//! panel ([`super::panel`]); a row opens that item, and stays highlighted
-//! while it is open.
+//! state on render. A card is its list: it shows its first rows and grows
+//! in place on "N more" ([`Shell::more_row`]); the detail panel
+//! ([`super::panel`]) never lists a card's rows. A row opens that item
+//! there, and stays highlighted while it is open.
 
 use super::*;
 use cypher_proto::{Chat, Space};
@@ -19,10 +20,24 @@ const CARD_RADIUS: f32 = 12.0;
 /// The sessions a project shows on the Projects card before "N more".
 const PROJECT_SESSIONS: usize = 6;
 
+/// A project's key among the expanded lists.
+fn project_key(space_id: &str) -> String {
+    format!("project-{space_id}")
+}
+
+/// What a card's header offers at its end, on hover.
+pub(super) enum HeaderAction {
+    /// The card's own page in the panel (Needs you, where its items are
+    /// answered); it stays shown while that page is open.
+    Page(PanelItem),
+    /// Add a routine: the form, in the panel.
+    NewRoutine,
+}
+
 /// One project on the Projects card with the workspace's sessions there.
 struct ProjectSessions {
     space: Space,
-    /// The newest [`PROJECT_SESSIONS`] of them.
+    /// The newest [`PROJECT_SESSIONS`] of them, or all once expanded.
     sessions: Vec<SessionLine>,
     total: usize,
 }
@@ -33,46 +48,6 @@ struct SessionLine {
     title: String,
     status: ChatIndicator,
     time_ago: String,
-}
-
-/// One granted project in the Projects list: its sessions in the bot's
-/// scope, and how many of them run or ask.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ProjectLoad {
-    pub space_id: String,
-    pub sessions: usize,
-    pub running: usize,
-    pub asking: usize,
-}
-
-/// The projects `scope` grants, in `spaces` order (every one under "All
-/// projects"), each with its sessions in scope ([`scoped_sessions`]) counted
-/// by `status`.
-pub(super) fn project_loads(
-    scope: &BotScope,
-    spaces: &[&Space],
-    chats: &[Chat],
-    status: impl Fn(&Chat) -> ChatIndicator,
-) -> Vec<ProjectLoad> {
-    let visible = scope.visible_chats(chats);
-    spaces
-        .iter()
-        .filter(|space| scope.sees_space(&space.id))
-        .map(|space| {
-            let sessions: Vec<&Chat> = visible
-                .iter()
-                .copied()
-                .filter(|c| in_project(c, &space.id))
-                .collect();
-            let count = |want: ChatIndicator| sessions.iter().filter(|c| status(c) == want).count();
-            ProjectLoad {
-                space_id: space.id.clone(),
-                sessions: sessions.len(),
-                running: count(ChatIndicator::Working),
-                asking: count(ChatIndicator::AwaitingInput),
-            }
-        })
-        .collect()
 }
 
 /// The owner's sessions in a project that the bot can read, newest activity
@@ -141,13 +116,13 @@ pub(super) fn card_of(
     thread_kind: impl Fn(&str) -> Option<cypher_proto::BotThread>,
 ) -> &'static str {
     match item {
-        PanelItem::Projects | PanelItem::Project(_) | PanelItem::Session(_) => "projects",
+        PanelItem::Project(_) | PanelItem::Session(_) => "projects",
         PanelItem::NeedsYou | PanelItem::Plan(_) | PanelItem::Review(_) => "needs",
-        PanelItem::Work | PanelItem::WorkItem(_) => "work",
+        PanelItem::WorkItem(_) => "work",
         // A result notice names a routine's run or an ended plan.
         PanelItem::Post(id) if id.starts_with("routine-") => "schedule",
         PanelItem::Post(_) => "work",
-        PanelItem::Schedule | PanelItem::Routine(_) | PanelItem::NewRoutine => "schedule",
+        PanelItem::Routine(_) | PanelItem::NewRoutine => "schedule",
         // The log opens from the Work panel and the chat header.
         PanelItem::Activity => "work",
         PanelItem::Network
@@ -360,7 +335,8 @@ impl Shell {
     /// The projects the workspace covers, each with the sessions the
     /// workspace runs there (the ones its plans started, its project
     /// routines'), the way the Sessions view lists a project's sessions:
-    /// they are listed nowhere else. A project's row opens its page, a
+    /// they are listed nowhere else. A project shows its newest few and
+    /// the rest in place on "N more". A project's row opens its page, a
     /// session's the session, live, in the panel. `None` with nothing
     /// granted.
     fn render_projects_card(
@@ -379,12 +355,18 @@ impl Shell {
                 .filter(|space| bot.scope.sees_space(&space.id))
                 .map(|space| {
                     let sessions = state.workspace_sessions(&bot.id, &space.id);
+                    // Its newest few, or all of them once expanded.
+                    let shown = if self.board.expanded.contains(&project_key(&space.id)) {
+                        sessions.len()
+                    } else {
+                        PROJECT_SESSIONS
+                    };
                     ProjectSessions {
                         space: space.clone(),
                         total: sessions.len(),
                         sessions: sessions
                             .into_iter()
-                            .take(PROJECT_SESSIONS)
+                            .take(shown)
                             .map(|chat| SessionLine {
                                 id: chat.id.clone(),
                                 title: transcript::single_line(&super::items::plain_markdown(
@@ -410,7 +392,7 @@ impl Shell {
             "bot-projects-header",
             "Projects",
             projects.len(),
-            PanelItem::Projects,
+            None,
             None,
             theme,
             cx,
@@ -439,7 +421,9 @@ impl Shell {
                 )
                 .into_any_element(),
             );
-            let more = project.total.saturating_sub(project.sessions.len());
+            let more = project
+                .total
+                .saturating_sub(project.sessions.len().min(PROJECT_SESSIONS));
             for session in project.sessions {
                 let item = PanelItem::Session(session.id.clone());
                 let menu_id = session.id.clone();
@@ -468,33 +452,19 @@ impl Shell {
                     .into_any_element(),
                 );
             }
-            if more > 0 {
-                rows.push(
-                    card_item(
-                        &format!("bot-project-more-{}", space.id),
-                        None,
-                        format!("{more} more"),
-                        None,
-                        false,
-                        theme,
-                    )
-                    .text_color(theme.text_muted)
-                    .on_click(cx.listener(move |this, _, _, cx| this.show_panel(item.clone(), cx)))
-                    .into_any_element(),
-                );
-            }
+            rows.extend(self.more_row(project_key(&space.id), more, theme, cx));
         }
         Some(self.fold_card("projects", header, rows, theme))
     }
 
-    /// Whether `card` is the one floating: the open panel item's card
-    /// ([`focused_card`]).
     /// A full card's header, the project card header's twin: 36px tall, its
     /// title in text (semibold only on the focused card, medium elsewhere,
     /// as the project sidebar weighs its projects), and a count only when
-    /// `count_tint` gives it one (Needs you). A click folds the card to this row and
-    /// back, as a project header does; the arrow at its end, shown on hover
-    /// and while the list is open, opens the whole list.
+    /// `count_tint` gives it one (Needs you). A click folds the card to this
+    /// row and back, as a project header does. `action` is the one small
+    /// button at its end, shown on hover. A header never opens the card's
+    /// list in the panel: the list is the card, which grows in place
+    /// ([`Self::more_row`]).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn card_header(
         &self,
@@ -502,17 +472,24 @@ impl Shell {
         key: &'static str,
         title: &'static str,
         count: usize,
-        list: PanelItem,
+        action: Option<HeaderAction>,
         count_tint: Option<gpui::Hsla>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let open = self.board.panel.as_ref() == Some(&list);
-        let shown = if open { 1.0 } else { motion::hover_t(key) };
-        let arrow_key = SharedString::from(format!("{key}-open"));
-        let arrow =
+        let button = action.map(|action| {
+            let (glyph, tip, open) = match &action {
+                HeaderAction::Page(page) => (
+                    icons::ALT_ARROW_RIGHT,
+                    "Open",
+                    self.board.panel.as_ref() == Some(page),
+                ),
+                HeaderAction::NewRoutine => (icons::PLUS, "New routine", false),
+            };
+            let shown = if open { 1.0 } else { motion::hover_t(key) };
+            let button_key = SharedString::from(format!("{key}-action"));
             div()
-                .id(arrow_key.clone())
+                .id(button_key.clone())
                 .flex_none()
                 .size(px(22.0))
                 .mr(px(-5.0))
@@ -522,26 +499,32 @@ impl Shell {
                 .justify_center()
                 .cursor_pointer()
                 .bg(motion::hover_blend(
-                    &arrow_key,
+                    &button_key,
                     crate::kit::theme::wash(0.0),
                     crate::kit::theme::wash(0.12),
                 ))
-                .on_hover(motion::hover_listener(arrow_key.clone()))
-                .tooltip(|_, cx| {
-                    cx.new(|_| super::super::session::FindTooltip("Show all".into()))
+                .on_hover(motion::hover_listener(button_key.clone()))
+                .tooltip(move |_, cx| {
+                    cx.new(|_| super::super::session::FindTooltip(tip.into()))
                         .into()
                 })
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    this.open_panel(list.clone(), cx);
+                    match &action {
+                        HeaderAction::Page(page) => this.open_panel(page.clone(), cx),
+                        HeaderAction::NewRoutine => this.open_job_form(
+                            super::schedule::FormTarget::NewRoutine,
+                            Some(window),
+                            cx,
+                        ),
+                    }
                 }))
-                .child(icon(icons::ALT_ARROW_RIGHT).size(px(11.0)).text_color(
-                    motion::hover_blend(
-                        &arrow_key,
-                        theme.text_muted.opacity(0.8 * shown),
-                        theme.text,
-                    ),
-                ));
+                .child(icon(glyph).size(px(11.0)).text_color(motion::hover_blend(
+                    &button_key,
+                    theme.text_muted.opacity(0.8 * shown),
+                    theme.text,
+                )))
+        });
         header_frame(key, title, self.card_focused(card, cx), theme)
             .pr(px(7.0))
             .cursor_pointer()
@@ -558,7 +541,46 @@ impl Shell {
                     .child(SharedString::from(count.to_string()))
             }))
             .child(div().flex_1())
-            .child(arrow)
+            .children(button)
+    }
+
+    /// The last row of a list that holds more than it shows: "N more"
+    /// brings the rest in, in place, and "Show less" puts them away again.
+    /// `None` when the list is whole and was never expanded. `key` names
+    /// the list among the expanded ones; `hidden` is what the short list
+    /// leaves out.
+    pub(super) fn more_row(
+        &self,
+        key: String,
+        hidden: usize,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let expanded = self.board.expanded.contains(&key);
+        if hidden == 0 {
+            return None;
+        }
+        let label = if expanded {
+            "Show less".to_string()
+        } else {
+            format!("{hidden} more")
+        };
+        Some(
+            card_item(&format!("bot-more-{key}"), None, label, None, false, theme)
+                .text_color(theme.text_muted)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.board.expanded.remove(&key) {
+                        this.board.expanded.insert(key.clone());
+                    }
+                    cx.notify();
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// Whether the list `key` shows every row ([`Self::more_row`]).
+    pub(super) fn list_expanded(&self, key: &str) -> bool {
+        self.board.expanded.contains(key)
     }
 
     /// A full card: its header over its rows, or the header alone while it
@@ -583,6 +605,8 @@ impl Shell {
         cx.notify();
     }
 
+    /// Whether `card` is the one floating: the open panel item's card
+    /// ([`focused_card`]).
     pub(super) fn card_focused(&self, card: &str, cx: &App) -> bool {
         let wanted = self.board.panel.as_ref().map(|item| {
             let state = self.state.read(cx);
@@ -865,14 +889,6 @@ mod tests {
     use super::*;
     use crate::test_fixtures;
 
-    fn space(id: &str) -> Space {
-        Space {
-            id: id.into(),
-            name: Some(id.to_uppercase()),
-            ..test_fixtures::space()
-        }
-    }
-
     fn chat(id: &str, space: &str, minutes: i64) -> Chat {
         Chat {
             id: id.into(),
@@ -915,79 +931,6 @@ mod tests {
         assert_eq!(focused_card(Some("work"), &drawn), Some("work"));
         assert_eq!(focused_card(Some("schedule"), &drawn), None);
         assert_eq!(focused_card(None, &["empty"]), Some("empty"));
-    }
-
-    #[test]
-    fn project_loads_count_sessions_in_scope() {
-        let spaces = [space("a"), space("b"), space("c")];
-        let spaces: Vec<&Space> = spaces.iter().collect();
-        let mut archived = chat("a3", "a", 3);
-        archived.archived = true;
-        let mut child = chat("a4", "a", 4);
-        child.child = Some(cypher_proto::ChildChat {
-            parent_chat_id: "a1".into(),
-            parent_run_id: "run".into(),
-            agent: "worker".into(),
-            task: "task".into(),
-            mode: cypher_proto::SubagentRunMode::Sync,
-            tool_call_id: None,
-            profile: cypher_proto::ChildAgentProfile {
-                system_prompt: String::new(),
-                tools: vec![],
-                model: None,
-                thinking: None,
-            },
-        });
-        let excluded = chat("b2", "b", 2);
-        let mut bot_chat = chat("bot", "a", 5);
-        bot_chat.bot = Some(cypher_proto::BotChat::owner("x"));
-        let chats = vec![
-            chat("a1", "a", 1),
-            chat("a2", "a", 2),
-            archived,
-            child,
-            chat("b1", "b", 1),
-            excluded,
-            chat("c1", "c", 1),
-            bot_chat,
-        ];
-        let status = |c: &Chat| match c.id.as_str() {
-            "a1" => ChatIndicator::Working,
-            "a2" | "b1" => ChatIndicator::AwaitingInput,
-            _ => ChatIndicator::Idle,
-        };
-        let scope = BotScope {
-            exclude_sessions: vec!["b2".into()],
-            ..selected(&["a", "b", "gone"])
-        };
-        let loads = project_loads(&scope, &spaces, &chats, status);
-        assert_eq!(
-            loads,
-            vec![
-                ProjectLoad {
-                    space_id: "a".into(),
-                    sessions: 2,
-                    running: 1,
-                    asking: 1,
-                },
-                ProjectLoad {
-                    space_id: "b".into(),
-                    sessions: 1,
-                    running: 0,
-                    asking: 1,
-                },
-            ]
-        );
-        let all = BotScope {
-            projects: ProjectGrant::All,
-            ..Default::default()
-        };
-        let ids: Vec<String> = project_loads(&all, &spaces, &chats, status)
-            .into_iter()
-            .map(|l| l.space_id)
-            .collect();
-        assert_eq!(ids, ["a", "b", "c"], "all projects lists every project");
-        assert!(project_loads(&BotScope::default(), &spaces, &chats, status).is_empty());
     }
 
     #[test]

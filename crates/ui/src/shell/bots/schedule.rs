@@ -9,7 +9,7 @@
 //! Mutate; the run state (last run, next run, runs today, its sessions) is
 //! the host's and only read here.
 
-use super::board::{card_corner, card_glyph, two_lines};
+use super::board::{card_corner, card_glyph};
 use super::panel::{PanelHead, PanelItem};
 use super::parts::{self, CallError};
 use super::*;
@@ -167,16 +167,6 @@ pub(super) fn order_jobs(jobs: &mut [Job]) {
         };
         (rank, at, job.name.to_lowercase())
     });
-}
-
-/// A row's sub-line, where it runs and when: "This workspace · Daily
-/// 09:00", "<project> · Weekdays 18:30".
-pub(super) fn job_sub(job: &Job, project: Option<&str>) -> String {
-    let lead = match job.kind {
-        JobKind::Workspace => "This workspace",
-        JobKind::Project { .. } => project.unwrap_or("A project"),
-    };
-    format!("{lead} · {}", job.schedule.describe())
 }
 
 /// A row's right-hand note.
@@ -478,97 +468,6 @@ impl Shell {
             .collect()
     }
 
-    /// One routine row: its mark (the workspace's or the project's), name
-    /// over where and when it runs, and the next run.
-    #[allow(clippy::too_many_arguments)]
-    fn job_row(
-        &self,
-        key: String,
-        job: &Job,
-        space: Option<&Space>,
-        bot_tint: gpui::Hsla,
-        selected: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let (glyph, tint) = job_mark(job, space, bot_tint, theme);
-        let state = job.state();
-        let note_color = match state {
-            JobState::Running => theme.text,
-            JobState::Starting | JobState::Next(_) => theme.text_muted,
-            JobState::Manual | JobState::Done | JobState::Unplanned | JobState::Off => {
-                theme.text_faint
-            }
-        };
-        let mark = match state {
-            JobState::Running => super::super::render::status_mark(
-                ChatIndicator::Working,
-                self.pulse_ticker.entity_id(),
-                theme,
-            ),
-            JobState::Starting => None,
-            _ if job.failed() => Some(
-                icon(icons::DANGER_TRIANGLE)
-                    .size(px(11.0))
-                    .text_color(theme.danger)
-                    .into_any_element(),
-            ),
-            _ => None,
-        };
-        let item = job.item();
-        let dim = job.dim();
-        div()
-            .id(SharedString::from(key.clone()))
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(8.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .cursor_pointer()
-            .bg(if selected {
-                crate::kit::theme::wash(0.08)
-            } else {
-                motion::hover_blend(
-                    &key,
-                    crate::kit::theme::wash(0.0),
-                    crate::kit::theme::wash(0.05),
-                )
-            })
-            .on_hover(motion::hover_listener(key.clone()))
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
-            .child(
-                icon(glyph)
-                    .size(px(14.0))
-                    .flex_none()
-                    .text_color(tint)
-                    .when(dim, |el| el.opacity(0.5)),
-            )
-            .child(
-                two_lines(
-                    job.name.clone(),
-                    job_sub(job, space.map(|s| s.display_name())),
-                    String::new(),
-                    theme,
-                )
-                .when(dim, |el| el.opacity(0.55)),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(5.0))
-                    .children(mark)
-                    .child(parts::row_note(
-                        state_note(state, &Local::now()),
-                        note_color,
-                    )),
-            )
-    }
-
     /// A job on the card: its glyph, name and when it runs next (a spinner
     /// while it runs, the note in red when its last run failed).
     fn job_item(
@@ -644,8 +543,9 @@ impl Shell {
         .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
     }
 
-    /// The sidebar card: every job by next run, or the one-line way to
-    /// make the first routine.
+    /// The sidebar card: the routines by next run (the first few, the rest
+    /// in place on "N more"), or the one-line way to make the first. The
+    /// header's + adds one.
     pub(super) fn render_schedule_card(
         &self,
         bot: &Bot,
@@ -654,15 +554,29 @@ impl Shell {
     ) -> Option<AnyElement> {
         let jobs = self.schedule_jobs(bot, cx);
         if jobs.is_empty() {
-            return Some(parts::empty_card(
-                "bot-schedule-empty",
+            // Its header alone, with a quiet hint; a click starts the first.
+            let key = "bot-schedule-empty";
+            let header = super::board::header_frame(
+                key,
                 "Routines",
-                "No routines yet",
-                PanelItem::Schedule,
                 self.card_focused("schedule", cx),
                 theme,
-                cx,
-            ));
+            )
+            .cursor_pointer()
+            .on_hover(motion::hover_listener(key))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_job_form(FormTarget::NewRoutine, Some(window), cx)
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(11.5))
+                    .text_color(theme.text_muted.opacity(0.6))
+                    .child(SharedString::from("Add the first")),
+            );
+            return Some(super::board::card(theme).child(header).into_any_element());
         }
         let open = self.board.panel.clone();
         let tint = bot_tint(bot, theme);
@@ -671,19 +585,31 @@ impl Shell {
             "bot-schedule-header",
             "Routines",
             jobs.len(),
-            PanelItem::Schedule,
+            Some(super::board::HeaderAction::NewRoutine),
             None,
             theme,
             cx,
         );
-        let rows: Vec<_> = jobs
+        let shown = if self.list_expanded("schedule") {
+            jobs.len()
+        } else {
+            parts::CARD_ROWS
+        };
+        let mut rows: Vec<AnyElement> = jobs
             .iter()
-            .take(parts::CARD_ROWS)
+            .take(shown)
             .map(|(job, space)| {
                 let selected = open.as_ref() == Some(&job.item());
                 self.job_item(job, space.as_ref(), tint, selected, theme, cx)
+                    .into_any_element()
             })
             .collect();
+        rows.extend(self.more_row(
+            "schedule".into(),
+            jobs.len().saturating_sub(parts::CARD_ROWS),
+            theme,
+            cx,
+        ));
         Some(self.fold_card("schedule", header, rows, theme))
     }
 
@@ -697,7 +623,6 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         match item {
-            PanelItem::Schedule => Some(self.render_schedule_list(bot, theme, cx)),
             PanelItem::NewRoutine => {
                 Some(self.render_job_form(bot, FormTarget::NewRoutine, theme, cx))
             }
@@ -734,61 +659,6 @@ impl Shell {
                 div().p(px(8.0)),
             )
         })
-    }
-
-    /// Every routine, with the way to add one.
-    fn render_schedule_list(
-        &mut self,
-        bot: &Bot,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> (PanelHead, gpui::Div) {
-        let jobs = self.schedule_jobs(bot, cx);
-        let tint = bot_tint(bot, theme);
-        let head = PanelHead {
-            glyph: icons::CLOCK,
-            tint: None,
-            title: "Routines".into(),
-        };
-        // The header's one button, like Memory's: + adds a routine.
-        self.set_panel_actions(vec![
-            super::items::icon_button(
-                "bot-schedule-new-routine",
-                icons::PLUS,
-                "New routine",
-                theme,
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.open_job_form(FormTarget::NewRoutine, Some(window), cx)
-            }))
-            .into_any_element(),
-        ]);
-        if jobs.is_empty() {
-            self.board.panel_empty = Some(
-                parts::panel_empty(
-                    theme,
-                    icons::CLOCK,
-                    "No routines yet",
-                    "Press + to run a prompt on a schedule, like a morning brief or a nightly \
-                     test run.",
-                )
-                .into_any_element(),
-            );
-        }
-        let mut body = div().p(px(8.0)).flex().flex_col().gap(px(1.0));
-        for (job, space) in &jobs {
-            let row = self.job_row(
-                format!("bot-panel-job-{}", job.id),
-                job,
-                space.as_ref(),
-                tint,
-                false,
-                theme,
-                cx,
-            );
-            body = body.child(row.py(px(8.0)));
-        }
-        (head, body)
     }
 
     // ── one routine ─────────────────────────────────────────────────────────
@@ -1248,9 +1118,10 @@ impl Shell {
             return;
         };
         match form.target {
-            // An edit goes back to the item; a new one back to the list.
+            // An edit goes back to the item; a new one has none: the panel
+            // shuts.
             FormTarget::Routine(_) => {}
-            FormTarget::NewRoutine => self.show_panel(PanelItem::Schedule, cx),
+            FormTarget::NewRoutine => self.close_panel(cx),
         }
         cx.notify();
     }
@@ -2245,15 +2116,12 @@ mod tests {
 
     #[test]
     fn rows_name_their_trigger_and_next_run() {
-        let routine = job("r", daily("09:00", vec![]), true, None);
-        assert_eq!(job_sub(&routine, None), "This workspace · Daily 09:00");
         let project = Job {
             kind: JobKind::Project {
                 space_id: "web".into(),
             },
             ..job("t", daily("18:30", vec![1, 2, 3, 4, 5]), true, None)
         };
-        assert_eq!(job_sub(&project, Some("Web")), "Web · Weekdays 18:30");
         assert_eq!(project.item(), PanelItem::Routine("t".into()));
         let now = at("2026-10-18T10:00:00+01:00");
         let next = at("2026-10-19T02:00:00+01:00").timestamp_millis();

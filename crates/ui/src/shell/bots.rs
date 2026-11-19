@@ -88,6 +88,10 @@ pub(super) struct BoardUi {
     /// Cards folded to their header, by card key; like the project cards'
     /// collapse, local to this window and never saved.
     collapsed: std::collections::HashSet<&'static str>,
+    /// Lists showing every row instead of their first few, by key (a card's,
+    /// or `project-<space id>` for a project's sessions); local to this
+    /// window like the folds.
+    expanded: std::collections::HashSet<String>,
     focus_tween: Option<WidthTween>,
     /// The Schedule and Network panels' forms and drafts.
     schedule: schedule::ScheduleUi,

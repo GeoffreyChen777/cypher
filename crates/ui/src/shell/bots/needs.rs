@@ -377,7 +377,7 @@ impl Shell {
             "bot-needs-header",
             "Needs you",
             total,
-            PanelItem::NeedsYou,
+            Some(super::board::HeaderAction::Page(PanelItem::NeedsYou)),
             Some(theme.warning),
             theme,
             cx,

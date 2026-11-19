@@ -1,14 +1,15 @@
 //! The **Work** card (§13.1): running orchestrations with their current step,
-//! a step bar and elapsed time, then the last few finished ones with a
-//! one-line result. A row opens the orchestration: its status and request,
+//! a step bar and elapsed time, approved plans waiting to start, then the
+//! last few that ended; "N more" brings the rest in, in place. The panel
+//! holds no list of work: a row opens the orchestration, its status and request,
 //! then the plan as one flow (each step with its state, duration and
 //! sessions, ending in the result), Stop while it runs, and its thread,
 //! read-only in the panel.
 
-use super::board::{card_corner, card_item, two_lines};
+use super::board::{card_corner, card_item};
 use super::items::{
-    ago, arrow_in, decision_bar, item_row, mark_cell, progress_bar, project_label, section_head,
-    section_label, section_rule, session_mark, session_word, step_mark, trailing, work_mark,
+    ago, arrow_in, decision_bar, mark_cell, progress_bar, project_label, section_head,
+    section_rule, session_mark, session_word, step_mark, trailing, work_mark,
 };
 use super::panel::{PanelHead, PanelItem};
 use super::*;
@@ -18,36 +19,55 @@ use cypher_proto::{BotWork, StepState, WorkState};
 /// Finished work the card keeps under the running ones.
 const CARD_FINISHED: usize = 3;
 
-/// A bot's work as the card and the list sort it: running first (newest
-/// start first), then work awaiting approval, then finished work, newest
-/// end first. Cancelled proposals only show in the full list.
-pub(super) struct WorkLists<'a> {
-    pub running: Vec<&'a BotWork>,
-    pub proposed: Vec<&'a BotWork>,
-    pub finished: Vec<&'a BotWork>,
+/// A bot's work as its card lists it.
+pub(super) struct WorkCard<'a> {
+    /// Under way, always shown: running plans (newest start first), then
+    /// approved plans that have not started yet (oldest approval first,
+    /// the order they start in). A plan still awaiting approval is in
+    /// Needs you, not here.
+    pub live: Vec<&'a BotWork>,
+    /// Ended, newest end first: the last [`CARD_FINISHED`] that ran, or
+    /// every one (rejected plans included) once the card is expanded.
+    pub ended: Vec<&'a BotWork>,
+    /// How many ended items the short list leaves out.
+    pub hidden: usize,
 }
 
-pub(super) fn work_lists<'a>(
+pub(super) fn work_card<'a>(
     records: &'a cypher_proto::BotRecords,
     bot_id: &'a str,
-) -> WorkLists<'a> {
+    expanded: bool,
+) -> WorkCard<'a> {
     let mut running: Vec<&BotWork> = Vec::new();
-    let mut proposed: Vec<&BotWork> = Vec::new();
-    let mut finished: Vec<&BotWork> = Vec::new();
+    let mut waiting: Vec<&BotWork> = Vec::new();
+    let mut ended: Vec<&BotWork> = Vec::new();
     for work in records.work_of(bot_id) {
         match work.state {
             WorkState::Running => running.push(work),
-            WorkState::Proposed => proposed.push(work),
-            _ => finished.push(work),
+            WorkState::Proposed => {
+                if work.decision.as_ref().is_some_and(|d| d.approve) {
+                    waiting.push(work)
+                }
+            }
+            _ => ended.push(work),
         }
     }
     running.sort_by_key(|w| std::cmp::Reverse(w.started_at.unwrap_or(w.created_at)));
-    proposed.sort_by_key(|w| std::cmp::Reverse(w.created_at));
-    finished.sort_by_key(|w| std::cmp::Reverse(w.ended_at.unwrap_or(w.created_at)));
-    WorkLists {
-        running,
-        proposed,
-        finished,
+    waiting.sort_by_key(|w| w.decision.as_ref().map_or(w.created_at, |d| d.at));
+    ended.sort_by_key(|w| std::cmp::Reverse(w.ended_at.unwrap_or(w.created_at)));
+    let total = ended.len();
+    let short: Vec<&BotWork> = ended
+        .iter()
+        .copied()
+        .filter(|w| w.state != WorkState::Cancelled)
+        .take(CARD_FINISHED)
+        .collect();
+    let hidden = total - short.len();
+    running.extend(waiting);
+    WorkCard {
+        live: running,
+        ended: if expanded { ended } else { short },
+        hidden,
     }
 }
 
@@ -242,13 +262,11 @@ fn flow_number(n: usize, theme: &Theme) -> AnyElement {
 }
 
 impl Shell {
-    /// A running item: spinner, title, its current step over a step bar,
-    /// and the time it has run.
+    /// A running item on the card: its mark, title and how long it has run,
+    /// then the step it is on over a small bar of the steps done.
     fn running_row(
         &self,
-        key: String,
         work: &BotWork,
-        roomy: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
@@ -258,188 +276,104 @@ impl Shell {
         let (done, total) = work.progress();
         let elapsed = format_span(now - work.started_at.unwrap_or(work.created_at));
         let stopping = plan_phase(work) == PlanPhase::Stopping;
-        if !roomy {
-            // On the card: its mark, title and how long it has run, then
-            // the step it is on over a small bar of the steps done.
-            let detail = div()
-                .pt(px(3.0))
-                .flex()
-                .flex_col()
-                .gap(px(5.0))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(11.0))
-                        .line_height(px(14.0))
-                        .text_color(theme.text_muted.opacity(0.85))
-                        .child(SharedString::from(if stopping {
-                            "Stopping…".to_string()
-                        } else {
-                            current_step_line(work)
-                        })),
-                )
-                .child(div().pb(px(2.0)).child(progress_bar(done, total, theme)))
-                .into_any_element();
-            return super::board::card_item_detail(
-                &key,
-                Some(work_mark(work, self.pulse_ticker.entity_id(), theme)),
-                transcript::single_line(&work.title),
-                Some(card_corner(elapsed, None, theme)),
-                Some(detail),
-                selected,
-                theme,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)));
-        }
-        item_row(&key, selected)
-            .items_start()
-            .py(px(8.0))
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
-            .child(div().pt(px(2.0)).child(mark_cell(work_mark(
-                work,
-                self.pulse_ticker.entity_id(),
-                theme,
-            ))))
+        let detail = div()
+            .pt(px(3.0))
+            .flex()
+            .flex_col()
+            .gap(px(5.0))
             .child(
                 div()
-                    .flex_1()
                     .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.0))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(13.0))
-                            .line_height(px(17.0))
-                            .text_color(theme.text)
-                            .child(SharedString::from(transcript::single_line(&work.title))),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(11.0))
-                            .line_height(px(14.0))
-                            .text_color(theme.text_muted.opacity(0.85))
-                            .child(SharedString::from(if stopping {
-                                "Stopping…".to_string()
-                            } else {
-                                current_step_line(work)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .pt(px(5.0))
-                            .pb(px(2.0))
-                            .child(progress_bar(done, total, theme)),
-                    ),
+                    .truncate()
+                    .text_size(px(11.0))
+                    .line_height(px(14.0))
+                    .text_color(theme.text_muted.opacity(0.85))
+                    .child(SharedString::from(if stopping {
+                        "Stopping…".to_string()
+                    } else {
+                        current_step_line(work)
+                    })),
             )
-            .child(div().pt(px(1.0)).child(trailing(elapsed, theme.text_muted)))
+            .child(div().pb(px(2.0)).child(progress_bar(done, total, theme)))
+            .into_any_element();
+        super::board::card_item_detail(
+            &format!("bot-work-{}", work.id),
+            Some(work_mark(work, self.pulse_ticker.entity_id(), theme)),
+            transcript::single_line(&work.title),
+            Some(card_corner(elapsed, None, theme)),
+            Some(detail),
+            selected,
+            theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
     }
 
-    /// A finished or waiting item: its outcome mark, title and one line.
+    /// An item that is not running, on the card: its mark, its title and
+    /// when it ended; an approved plan that has not started says it waits
+    /// (for a free slot, or for the workspace to be resumed).
     fn settled_row(
         &self,
-        key: String,
         work: &BotWork,
-        roomy: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let now = Utc::now();
-        let item = if work.awaiting_approval() {
-            PanelItem::Plan(work.id.clone())
-        } else {
-            PanelItem::WorkItem(work.id.clone())
-        };
+        let item = PanelItem::WorkItem(work.id.clone());
         let selected = self.board.panel.as_ref() == Some(&item);
-        let sub = if work.state == WorkState::Proposed {
-            phase_line(work, now.timestamp_millis())
+        let corner = if work.state == WorkState::Proposed {
+            "waiting".to_string()
         } else {
-            result_line(work)
+            ago(work.ended_at.unwrap_or(work.created_at), Utc::now())
         };
-        if !roomy {
-            return card_item(
-                &key,
-                Some(work_mark(work, self.pulse_ticker.entity_id(), theme)),
-                transcript::single_line(&work.title),
-                Some(card_corner(
-                    ago(work.ended_at.unwrap_or(work.created_at), now),
-                    None,
-                    theme,
-                )),
-                selected,
-                theme,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)));
-        }
-        item_row(&key, selected)
-            .py(px(8.0))
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
-            .child(mark_cell(work_mark(
-                work,
-                self.pulse_ticker.entity_id(),
-                theme,
-            )))
-            .child(two_lines(
-                transcript::single_line(&work.title),
-                sub,
-                String::new(),
-                theme,
-            ))
-            .child(trailing(
-                ago(work.ended_at.unwrap_or(work.created_at), now),
-                theme.text_faint,
-            ))
+        card_item(
+            &format!("bot-work-{}", work.id),
+            Some(work_mark(work, self.pulse_ticker.entity_id(), theme)),
+            transcript::single_line(&work.title),
+            Some(card_corner(corner, None, theme)),
+            selected,
+            theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
     }
 
-    /// The sidebar card; `None` when there is nothing to show.
+    /// The sidebar card; `None` when there is nothing to show. What is
+    /// under way always shows; of what ended, the last few, and the rest
+    /// in place on "N more" ([`work_card`]).
     pub(super) fn render_work_card(
         &self,
         bot: &Bot,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (running, finished) = {
+        let expanded = self.list_expanded("work");
+        let (live, ended, hidden) = {
             let state = self.state.read(cx);
-            let lists = work_lists(&state.bot_records, &bot.id);
-            let finished: Vec<BotWork> = lists
-                .finished
-                .into_iter()
-                .filter(|w| w.state != WorkState::Cancelled)
-                .take(CARD_FINISHED)
-                .cloned()
-                .collect();
-            let running: Vec<BotWork> = lists.running.into_iter().cloned().collect();
-            (running, finished)
+            let card = work_card(&state.bot_records, &bot.id, expanded);
+            let own = |list: Vec<&BotWork>| list.into_iter().cloned().collect::<Vec<_>>();
+            (own(card.live), own(card.ended), card.hidden)
         };
-        if running.is_empty() && finished.is_empty() {
+        if live.is_empty() && ended.is_empty() && hidden == 0 {
             return None;
         }
         let header = self.card_header(
             "work",
             "bot-work-header",
             "Work",
-            if running.is_empty() {
-                finished.len()
-            } else {
-                running.len()
-            },
-            PanelItem::Work,
+            live.len(),
+            None,
             None,
             theme,
             cx,
         );
-        let mut rows = Vec::new();
-        for w in &running {
-            rows.push(self.running_row(format!("bot-work-{}", w.id), w, false, theme, cx));
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for w in live.iter().chain(&ended) {
+            let row = if w.state == WorkState::Running {
+                self.running_row(w, theme, cx)
+            } else {
+                self.settled_row(w, theme, cx)
+            };
+            rows.push(row.into_any_element());
         }
-        for w in &finished {
-            rows.push(self.settled_row(format!("bot-work-{}", w.id), w, false, theme, cx));
-        }
+        rows.extend(self.more_row("work".into(), hidden, theme, cx));
         Some(self.fold_card("work", header, rows, theme))
     }
 
@@ -447,87 +381,16 @@ impl Shell {
     /// longer resolves.
     pub(super) fn render_work_panel(
         &mut self,
-        bot: &Bot,
         item: &PanelItem,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         match item {
-            PanelItem::Work => Some(self.render_work_list(bot, theme, cx)),
             PanelItem::WorkItem(id) => self.render_work_item(id, theme, window, cx),
             PanelItem::Thread(id) => self.render_thread(id, theme, cx),
             _ => None,
         }
-    }
-
-    fn render_work_list(
-        &mut self,
-        bot: &Bot,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> (PanelHead, gpui::Div) {
-        let (running, proposed, finished) = {
-            let state = self.state.read(cx);
-            let lists = work_lists(&state.bot_records, &bot.id);
-            let own = |list: Vec<&BotWork>| list.into_iter().cloned().collect::<Vec<_>>();
-            (own(lists.running), own(lists.proposed), own(lists.finished))
-        };
-        let head = PanelHead {
-            glyph: icons::HIERARCHY,
-            tint: None,
-            title: "Work".into(),
-        };
-        let mut body = div().p(px(8.0)).flex().flex_col().gap(px(1.0));
-        if !running.is_empty() {
-            body =
-                body.child(section_label("Running", theme))
-                    .children(running.iter().map(|w| {
-                        self.running_row(format!("bot-panel-work-{}", w.id), w, true, theme, cx)
-                    }));
-        }
-        if !proposed.is_empty() {
-            body =
-                body.child(section_label("Proposed", theme))
-                    .children(proposed.iter().map(|w| {
-                        self.settled_row(format!("bot-panel-work-{}", w.id), w, true, theme, cx)
-                    }));
-        }
-        if !finished.is_empty() {
-            body =
-                body.child(section_label("Finished", theme))
-                    .children(finished.iter().map(|w| {
-                        self.settled_row(format!("bot-panel-work-{}", w.id), w, true, theme, cx)
-                    }));
-        }
-        if running.is_empty() && proposed.is_empty() && finished.is_empty() {
-            self.board.panel_empty = Some(
-                parts::panel_empty(
-                    theme,
-                    icons::HIERARCHY,
-                    "No work yet",
-                    "Ask it for something that takes a few steps; it proposes a plan first.",
-                )
-                .child(
-                    div().pt(px(6.0)).text_size(px(12.0)).child(
-                        super::parts::link("bot-work-empty-activity", "View all activity", theme)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.open_panel(PanelItem::Activity, cx)
-                            })),
-                    ),
-                )
-                .into_any_element(),
-            );
-            return (head, div());
-        }
-        // The full log lives here, not in a card of its own.
-        body =
-            body.child(div().px(px(10.0)).pt(px(12.0)).text_size(px(12.0)).child(
-                super::parts::link("bot-work-all-activity", "View all activity", theme).on_click(
-                    cx.listener(|this, _, _, cx| this.open_panel(PanelItem::Activity, cx)),
-                ),
-            ));
-        (head, body)
     }
 
     /// One work item in every phase, the plan to approve included: its
@@ -1306,23 +1169,48 @@ mod tests {
     }
 
     #[test]
-    fn work_sorts_into_running_proposed_and_finished() {
+    fn the_card_keeps_whats_under_way_and_the_last_few_that_ended() {
         let mut records = cypher_proto::BotRecords::default();
         let mut other = work("other", WorkState::Running, 9);
         other.bot_id = "x".into();
+        let decided = |id: &str, approve: bool, at: i64| {
+            let mut plan = work(id, WorkState::Proposed, at);
+            plan.decision = Some(cypher_proto::PlanDecision { approve, at });
+            plan
+        };
         records.work = vec![
             work("old-run", WorkState::Running, 1),
             work("new-run", WorkState::Running, 5),
+            // Awaiting approval: Needs you lists it, not Work.
             work("plan", WorkState::Proposed, 2),
-            work("done", WorkState::Done, 3),
-            work("failed", WorkState::Failed, 4),
+            // Approved, not started yet (a full house, a paused workspace).
+            decided("second", true, 8),
+            decided("first", true, 7),
+            // Rejected here, not closed by its host yet.
+            decided("rejecting", false, 6),
+            work("done-1", WorkState::Done, 1),
+            work("failed-2", WorkState::Failed, 2),
+            work("rejected-3", WorkState::Cancelled, 3),
+            work("stopped-4", WorkState::Stopped, 4),
+            work("done-5", WorkState::Done, 5),
             other,
         ];
-        let lists = work_lists(&records, "b");
         let ids = |list: &[&BotWork]| list.iter().map(|w| w.id.clone()).collect::<Vec<_>>();
-        assert_eq!(ids(&lists.running), ["new-run", "old-run"]);
-        assert_eq!(ids(&lists.proposed), ["plan"]);
-        assert_eq!(ids(&lists.finished), ["failed", "done"]);
+        let short = work_card(&records, "b", false);
+        assert_eq!(ids(&short.live), ["new-run", "old-run", "first", "second"]);
+        assert_eq!(ids(&short.ended), ["done-5", "stopped-4", "failed-2"]);
+        assert_eq!(short.hidden, 2, "an older one and the rejected one");
+        // Expanded in place: everything that ended, rejected plans too.
+        let all = work_card(&records, "b", true);
+        assert_eq!(ids(&all.live), ids(&short.live));
+        assert_eq!(
+            ids(&all.ended),
+            ["done-5", "stopped-4", "rejected-3", "failed-2", "done-1"]
+        );
+        assert_eq!(all.hidden, 2, "what Show less puts away again");
+        // Nothing left out: no row to expand.
+        records.work.truncate(2);
+        assert_eq!(work_card(&records, "b", false).hidden, 0);
     }
 
     #[test]

@@ -5,12 +5,11 @@
 
 use super::*;
 
-/// What the panel shows: a card's whole list (its header) or one item (a
-/// row). Ids are record ids unless named otherwise.
+/// What the panel shows: one item in full (a row's, a card's own page).
+/// Never a card's list: the sidebar holds the lists, and expands them in
+/// place. Ids are record ids unless named otherwise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::shell) enum PanelItem {
-    /// Every project the bot reads (the Projects card's header).
-    Projects,
     /// One project's sessions in the bot's scope, by space id.
     Project(String),
     /// Everything that needs the owner, each item answered in place.
@@ -28,15 +27,12 @@ pub(in crate::shell) enum PanelItem {
     /// One question between workspaces, either way, opened from the
     /// Network panel (exchange id); a waiting review shows as `Review`.
     Question(String),
-    /// Running and recent work.
-    Work,
     /// One orchestration (work id).
     WorkItem(String),
     /// One of the bot's hidden threads, read-only (its chat id): an
     /// orchestration's, a routine's or a connection's.
     Thread(String),
-    /// Routines, by next run.
-    Schedule,
+    /// One routine.
     Routine(String),
     /// The new-routine form.
     NewRoutine,
@@ -194,21 +190,20 @@ impl Shell {
         self.board.panel_title_note = None;
         self.board.panel_empty = None;
         let (head, body) = match item {
-            PanelItem::Projects => self.render_projects_panel(&bot, &theme, cx),
             PanelItem::Project(space_id) => {
                 self.render_project_panel(&bot, space_id, &theme, window, cx)?
             }
             PanelItem::NeedsYou | PanelItem::Plan(_) | PanelItem::Review(_) => {
                 self.render_needs_panel(&bot, item, &theme, window, cx)?
             }
-            PanelItem::Work | PanelItem::WorkItem(_) | PanelItem::Thread(_) => {
-                self.render_work_panel(&bot, item, &theme, window, cx)?
+            PanelItem::WorkItem(_) | PanelItem::Thread(_) => {
+                self.render_work_panel(item, &theme, window, cx)?
             }
             PanelItem::Session(chat_id) => {
                 self.render_session_panel(&bot, chat_id, &theme, window, cx)?
             }
             PanelItem::Post(entry_id) => self.render_post_panel(entry_id, &theme, window, cx)?,
-            PanelItem::Schedule | PanelItem::Routine(_) | PanelItem::NewRoutine => {
+            PanelItem::Routine(_) | PanelItem::NewRoutine => {
                 self.render_schedule_panel(&bot, item, &theme, cx)?
             }
             PanelItem::Activity => self.render_activity_panel(&bot, item, &theme, cx)?,

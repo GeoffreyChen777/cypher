@@ -70,11 +70,6 @@ pub(super) fn trailing(text: String, color: gpui::Hsla) -> gpui::Div {
         .child(SharedString::from(text))
 }
 
-/// A panel section's small caps label ("STEPS", "RESULT").
-pub(super) fn section_label(text: &str, theme: &Theme) -> gpui::Div {
-    super::parts::section_label(theme, text)
-}
-
 /// Agent-written text in a panel (a request, a note, a result) as markdown
 /// at the panel's reading size: code, emphasis, lists and session links
 /// drawn as the chat draws them. `size` is the body size (the line height
