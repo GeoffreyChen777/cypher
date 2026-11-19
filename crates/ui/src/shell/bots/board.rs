@@ -785,9 +785,8 @@ pub(super) fn card_item_detail(
 }
 
 /// The quiet last line of a list that holds more than it shows ("2 more",
-/// "Show less"): a small label at the row's right end, on the corners'
-/// column and in their faint ink, with no wash of its own. Hovering it
-/// only firms the ink up.
+/// "Show less"): a small label under the rows' titles, in the corners'
+/// faint ink, with no wash of its own. Hovering it only firms the ink up.
 pub(super) fn more_label(
     key: &str,
     label: impl Into<SharedString>,
@@ -797,9 +796,10 @@ pub(super) fn more_label(
         .id(SharedString::from(key.to_string()))
         .flex()
         .flex_row()
-        .justify_end()
         .mx(px(ROW_MARGIN))
         .mb(px(2.0))
+        // On the titles' column, like a row without a mark.
+        .pl(px(ROW_MARK_INSET + 14.0 + ROW_MARK_GAP))
         .pr(px(8.0))
         .py(px(4.0))
         .cursor_pointer()
