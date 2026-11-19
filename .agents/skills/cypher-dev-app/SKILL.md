@@ -166,7 +166,11 @@ mock run), then run
 It seeds two workspaces (plans in every state, routines, their sessions,
 pending permission prompts and questions) in about a minute; a second run
 does nothing. To seed again, stop the instance and start it on a new engine
-data dir.
+data dir. Its connections are rows with no Edge behind them: add
+`CYPHER_DEV_NETWORK_PREVIEW=1` to the UI's environment (`restart-ui`) to see
+their controls while signed out; `--connections` as a third argument adds only
+them to an engine seeded earlier. Running plans are stopped by the engine
+after four hours, so an old seed shows none.
 
 ## Troubleshooting
 

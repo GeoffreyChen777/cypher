@@ -17,12 +17,12 @@
 //! made, and a decided card leaves the page.
 
 use super::board::{card_corner, card_glyph, card_item};
-use super::items::{ago, decision_bar, outcome_value, text_value};
+use super::items::ago;
 use super::panel::{PanelHead, PanelItem};
 use super::*;
 use crate::composer::permission_card::{self, FactKind, OptionRole};
 use crate::kit::theme::MonoStyled;
-use cypher_proto::{ExchangeDirection, ExchangeState, NeedsYou, UserInputQuestion};
+use cypher_proto::{NeedsYou, UserInputQuestion};
 
 /// Rows the card shows before "N more". More than the other cards' short
 /// lists: every one of these waits on the owner.
@@ -1202,19 +1202,21 @@ impl Shell {
         .detach();
     }
 
-    /// A peer's question and the answer the bot drafted, editable, then
-    /// Send / Decline.
-    /// One question between workspaces: who asked whom, the question and
-    /// its answer, and how it ended; while its answer waits on the owner,
-    /// the draft to edit and Send / Decline.
-    pub(super) fn render_question_panel(
+    /// An answer the workspace drafted for a connected workspace's
+    /// question, waiting for the owner: Decline and Send at the very top,
+    /// who asks, the question as a quote, and the draft to edit. Once it is
+    /// decided (here or on another device) the question lives on its
+    /// connection's page, which this then shows.
+    pub(super) fn render_review_panel(
         &mut self,
+        bot: &Bot,
         exchange_id: &str,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         let now = Utc::now();
-        let (exchange, peer, person) = {
+        let (exchange, peer) = {
             let state = self.state.read(cx);
             let exchange = state
                 .bot_records
@@ -1222,32 +1224,24 @@ impl Shell {
                 .iter()
                 .find(|e| e.id == exchange_id)?
                 .clone();
-            let person = state
+            let peer = state
                 .bot_records
                 .connections
                 .iter()
                 .find(|c| c.id == exchange.connection_id)
                 .map(|c| c.peer.clone());
-            let label = person.as_ref().map_or_else(
-                || "A connected workspace".to_string(),
-                |p| {
-                    if p.owner_name.is_empty() {
-                        p.name.clone()
-                    } else {
-                        format!("{} ({})", p.name, p.owner_name)
-                    }
-                },
-            );
-            (exchange, label, person)
+            (exchange, peer)
         };
-        let awaiting = exchange.awaiting_review();
-        let incoming = exchange.direction == ExchangeDirection::Incoming;
-        if awaiting
-            && self
-                .board
-                .review
-                .as_ref()
-                .is_none_or(|(id, _)| id != exchange_id)
+        if !exchange.awaiting_review() {
+            self.board.review = None;
+            self.board.network.opened.insert(exchange.id.clone());
+            return self.render_connection(bot, &exchange.connection_id, theme, window, cx);
+        }
+        if self
+            .board
+            .review
+            .as_ref()
+            .is_none_or(|(id, _)| id != exchange_id)
         {
             let draft = exchange.answer.clone().unwrap_or_default();
             let input = cx.new(|cx| {
@@ -1257,134 +1251,143 @@ impl Shell {
             });
             self.board.review = Some((exchange_id.to_string(), input));
         }
-        let head = PanelHead {
-            glyph: if awaiting {
-                icons::USERS
-            } else {
-                icons::CHAT_ROUND_LINE
-            },
-            tint: awaiting.then_some(theme.warning),
-            title: if awaiting {
-                "Review answer"
-            } else {
-                "Question"
-            }
-            .into(),
-        };
-        // The Network card opens a waiting review straight away; this is
-        // the way on to the connections.
-        self.set_panel_back(
-            "bot-review-back",
-            "Back to Connections",
-            PanelItem::Network,
-            cx,
+        let input = self.board.review.as_ref().map(|(_, input)| input.clone())?;
+        let (who, theirs) = peer.as_ref().map_or_else(
+            || ("A connected workspace".to_string(), None),
+            super::network::peer_names,
         );
-        let mut body = div()
+        let head = PanelHead {
+            glyph: icons::USERS,
+            tint: Some(theme.warning),
+            title: who.clone(),
+        };
+
+        // ── the bar: it waits on the owner; the two ways to decide ──
+        let status = super::items::header_status(
+            format!("bot-review-status-{exchange_id}"),
+            icon(icons::QUESTION_CIRCLE)
+                .size(px(13.0))
+                .text_color(theme.warning)
+                .into_any_element(),
+            "Answer to review",
+            theme.warning,
+        );
+        let (send_input, id_send, id_decline) =
+            (input.clone(), exchange.id.clone(), exchange.id.clone());
+        let original = exchange.answer.clone().unwrap_or_default();
+        let (after_send, after_decline) = (
+            PanelItem::Connection(exchange.connection_id.clone()),
+            PanelItem::Connection(exchange.connection_id.clone()),
+        );
+        let controls = vec![
+            popover::btn_ghost(theme, "Decline", "bot-review-decline")
+                .id("bot-review-decline")
+                .flex_none()
+                .px(px(10.0))
+                .py(px(4.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.mutate(
+                        serde_json::json!({
+                            "op": "reviewBotExchange",
+                            "exchangeId": id_decline,
+                            "send": false,
+                        }),
+                        cx,
+                    );
+                    this.board.network.opened.insert(id_decline.clone());
+                    this.show_panel(after_decline.clone(), cx);
+                }))
+                .into_any_element(),
+            popover::btn_primary(theme, "Send")
+                .id("bot-review-send")
+                .flex_none()
+                .py(px(4.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let text = send_input.read(cx).text().trim().to_string();
+                    let edited = (text != original.trim()).then_some(text);
+                    this.mutate(
+                        serde_json::json!({
+                            "op": "reviewBotExchange",
+                            "exchangeId": id_send,
+                            "send": true,
+                            "text": edited,
+                        }),
+                        cx,
+                    );
+                    this.board.network.opened.insert(id_send.clone());
+                    this.show_panel(after_send.clone(), cx);
+                }))
+                .into_any_element(),
+        ];
+        let asked = match ago(exchange.asked_at, now).as_str() {
+            "now" => "asked just now".to_string(),
+            span => format!("asked {span} ago"),
+        };
+        let line = match theirs {
+            Some(theirs) => format!("{theirs} · {asked}"),
+            None => asked,
+        };
+        self.board.panel_header = Some(super::items::item_header(
+            status,
+            controls,
+            div()
+                .mt(px(8.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .children(
+                    peer.as_ref()
+                        .map(|peer| super::network::peer_avatar(peer, 20.0, theme)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(16.0))
+                        .line_height(px(22.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(SharedString::from(who)),
+                ),
+            Some(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(line))
+                    .into_any_element(),
+            ),
+            theme,
+        ));
+
+        // ── what they asked, as a quote; then the draft, to edit ──
+        let body = div()
             .p(px(8.0))
+            .pb(px(14.0))
             .flex()
             .flex_col()
-            .child(parts::fact(
-                theme,
-                if incoming { "From" } else { "To" },
+            .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .children(
-                        person
-                            .as_ref()
-                            .map(|p| super::network::peer_avatar(p, 16.0, theme)),
-                    )
-                    .child(SharedString::from(format!(
-                        "{peer} · {}",
-                        ago(exchange.asked_at, now)
-                    ))),
-            ))
-            .child(parts::fact(
-                theme,
-                "Question",
-                text_value(&exchange.question),
-            ));
-        let input = self
-            .board
-            .review
-            .as_ref()
-            .filter(|(id, _)| awaiting && id == exchange_id)
-            .map(|(_, input)| input.clone());
-        match input {
-            Some(input) => {
-                let (send_input, id_send, id_decline) =
-                    (input.clone(), exchange.id.clone(), exchange.id.clone());
-                let original = exchange.answer.clone().unwrap_or_default();
-                body =
-                    body.child(parts::field_label(theme, "Answer"))
-                        .child(div().mx(px(8.0)).child(
-                            popover::dialog_field(input.into_any_element()).text_size(px(13.0)),
-                        ));
-                self.set_panel_footer(
-                    decision_bar(Some("Edit it before it goes, or decline."), theme)
-                        .child(
-                            popover::btn_ghost(theme, "Decline", "bot-review-decline")
-                                .id("bot-review-decline")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.mutate(
-                                        serde_json::json!({
-                                            "op": "reviewBotExchange",
-                                            "exchangeId": id_decline,
-                                            "send": false,
-                                        }),
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(theme, "Send")
-                                .id("bot-review-send")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let text = send_input.read(cx).text().trim().to_string();
-                                    let edited = (text != original.trim()).then_some(text);
-                                    this.mutate(
-                                        serde_json::json!({
-                                            "op": "reviewBotExchange",
-                                            "exchangeId": id_send,
-                                            "send": true,
-                                            "text": edited,
-                                        }),
-                                        cx,
-                                    )
-                                })),
-                        ),
-                );
-            }
-            None => {
-                let sent = exchange.review.as_ref().map(|r| (r.send, r.text.clone()));
-                let shown = sent
-                    .as_ref()
-                    .and_then(|(_, text)| text.clone())
-                    .or_else(|| exchange.answer.clone());
-                if let Some(answer) = shown.filter(|a| !a.trim().is_empty()) {
-                    body = body.child(parts::fact(theme, "Answer", text_value(&answer)));
-                }
-                let (text, ok) = if incoming {
-                    match (exchange.state, sent) {
-                        (ExchangeState::Answered, _) => ("Sent", true),
-                        (_, Some((true, _))) => ("Sending your answer", true),
-                        (ExchangeState::Declined, _) | (_, Some((false, _))) => ("Declined", false),
-                        (ExchangeState::Expired, _) => ("Expired", false),
-                        _ => ("Working on its answer", false),
-                    }
-                } else {
-                    match exchange.state {
-                        ExchangeState::Answered => ("Answered", true),
-                        ExchangeState::Declined => ("They declined to answer", false),
-                        ExchangeState::Expired => ("No answer came; it expired", false),
-                        _ => ("Waiting for their answer", false),
-                    }
-                };
-                body = body.child(parts::fact(theme, "Status", outcome_value(text, ok, theme)));
-            }
-        }
+                    .mx(px(8.0))
+                    .mt(px(6.0))
+                    .mb(px(12.0))
+                    .pl(px(10.0))
+                    .border_l_2()
+                    .border_color(crate::kit::theme::hairline(0.2))
+                    .child(super::items::panel_markdown(
+                        &exchange.question,
+                        format!("bot-review-question-{exchange_id}"),
+                        12.5,
+                        theme.text_muted,
+                        theme,
+                        window,
+                    )),
+            )
+            .child(
+                div()
+                    .mx(px(8.0))
+                    .child(popover::dialog_field(input.into_any_element()).text_size(px(13.0))),
+            );
         Some((head, body))
     }
 }

@@ -14,7 +14,17 @@ sessions and pending decisions to judge the whole workspace layout.
   "Scout"   a second workspace with one plan to approve, for the switcher
   Sessions  a few sessions of the owner's own in the same projects
 
+Atlas also gets connections to four other people's workspaces, with the
+questions that went between them (one answer waiting for review, one question
+still on its way) and an open invite. They are rows written as given: no
+Edge is behind them, so sending, inviting and disconnecting go nowhere.
+Start the UI with CYPHER_DEV_NETWORK_PREVIEW=1 to see their controls while
+signed out.
+
     scripts/demo/seed-workspace.py <engine-data-dir> <projects-dir>
+    scripts/demo/seed-workspace.py <engine-data-dir> <projects-dir> --connections
+
+The second form adds only the connections, to an engine seeded earlier.
 
 The engine must run the mock harness and have been started with
 CYPHER_MOCK_RULES=<engine-data-dir>/mock-rules.json: the replies come from
@@ -35,8 +45,9 @@ import uuid
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PROBE = os.path.join(ROOT, "target", "debug", "examples", "rpc_probe")
 
-if len(sys.argv) != 3:
-    sys.exit("Usage: seed-workspace.py <engine-data-dir> <projects-dir>")
+ONLY_CONNECTIONS = sys.argv[3:] == ["--connections"]
+if len(sys.argv) != 3 and not ONLY_CONNECTIONS:
+    sys.exit("Usage: seed-workspace.py <engine-data-dir> <projects-dir> [--connections]")
 ENGINE_DIR = os.path.abspath(os.path.expanduser(sys.argv[1]))
 PROJECTS = os.path.abspath(os.path.expanduser(sys.argv[2]))
 RULES_PATH = os.path.join(ENGINE_DIR, "mock-rules.json")
@@ -298,17 +309,91 @@ class Workspace:
         wait_said(self.chat, told)
 
 
+def seed_connections(bot_id, spaces):
+    """Four connected workspaces for the bot, their questions and an open
+    invite, as rows (development engines only: Mutate seedBotRecord)."""
+    now = int(time.time() * 1000)
+    minute, hour, day = 60_000, 3_600_000, 86_400_000
+
+    def row(kind, id, **fields):
+        mutate("seedBotRecord", kind=kind, id=id, fields={"id": id, "botId": bot_id, **fields})
+
+    def connect(id, person, workspace, days_ago, last=None, mode="auto", scope=None):
+        row("botConnections", id,
+            peer={"roomId": f"room-{id}", "name": workspace, "ownerName": person},
+            createdAt=now - days_ago * day, replyMode=mode, scope=scope,
+            lastExchangeAt=last and now - last)
+
+    def question(connection, n, direction, state, ago, text, answer=None, took=minute):
+        row("botExchanges", f"{connection}-q{n}",
+            connectionId=connection, direction=direction, question=text, answer=answer,
+            state=state, askedAt=now - ago,
+            answeredAt=now - ago + took if state == "answered" else None)
+
+    connect("demo-dana", "Dana Kim", "Harbor", 21, last=6 * minute, mode="review",
+            scope={"projects": {"mode": "selected", "spaceIds": [spaces["billing"], spaces["web-api"]]}})
+    question("demo-dana", 1, "incoming", "awaitingReview", 6 * minute,
+             "How far is the token migration? Has the gateway moved over yet?",
+             "The inventory step is still running: two sessions are waiting on answers from the owner, "
+             "so nothing has moved yet. The gateway is second in the plan, after the token exchange "
+             "endpoint. The old tokens expire on the 30th, which leaves eleven days.")
+    question("demo-dana", 2, "outgoing", "answered", 2 * hour,
+             "Which payments SDK version does Harbor's mobile app pin?",
+             "`payments-sdk` 4.9.1, pinned in `Podfile.lock` and `build.gradle`. An upgrade to 5.x is "
+             "planned but not started: it removes `Charge::capture_later`, which refunds use.")
+    question("demo-dana", 3, "incoming", "answered", day + 3 * hour,
+             "Is the 0.6 release still on for Friday?",
+             "Yes. The release plan is approved and starts when the CSV export work ends; nothing in it "
+             "is blocked.")
+    question("demo-dana", 4, "incoming", "declined", 3 * day,
+             "What is the staging database password?")
+
+    connect("demo-marco", "Marco Rossi", "Helm", 9, last=4 * minute)
+    question("demo-marco", 1, "outgoing", "delivered", 4 * minute,
+             "Did Helm's deploy on Tuesday change the rate limits on /auth? Our login tests started "
+             "failing that afternoon.")
+    question("demo-marco", 2, "incoming", "answered", 5 * hour,
+             "Which branch has the invoice rounding fix?",
+             "`atlas/round-totals` in billing. Both the export and the web app round once now, half-even.")
+
+    connect("demo-priya", "Priya Shah", "Ops desk", 40, last=3 * day)
+    question("demo-priya", 1, "incoming", "answered", 3 * day,
+             "Which services still issue old-format session tokens?",
+             "The gateway and the mobile app issue about 90% of them; the admin console and the webhook "
+             "worker the rest.")
+    question("demo-priya", 2, "outgoing", "expired", 12 * day,
+             "Can Ops desk share last month's incident list?")
+
+    connect("demo-jun", "Jun Ito", "Lab", 60, last=6 * day, mode="off")
+    question("demo-jun", 1, "incoming", "declined", 6 * day,
+             "What did the team ship last week?")
+
+    row("botInvites", "demo-invite", createdAt=now - 2 * day, expiresAt=now + 5 * day,
+        uses=0, maxUses=1)
+
+
 def link(title, chat_id):
     return f"[{title}](cypher://session/{chat_id})"
 
 
 # ── the data ──────────────────────────────────────────────────────────────────
 
+if not os.path.exists(PROBE):
+    sys.exit("build rpc_probe first: cargo build -p cypher-rpc --example rpc_probe")
+if ONLY_CONNECTIONS:
+    bot = next((b for b in frame("WatchBots") if b["name"] == "Atlas"), None)
+    if bot is None:
+        sys.exit("no workspace named Atlas: seed the demo first")
+    by_path = {s["path"]: s["id"] for s in frame("WatchSpaces")}
+    spaces = {name: by_path.get(os.path.join(PROJECTS, name)) for name in ("billing", "web-api")}
+    if None in spaces.values():
+        sys.exit(f"the demo's projects are not under {PROJECTS}")
+    seed_connections(bot["id"], spaces)
+    print("✓ connections seeded for Atlas")
+    sys.exit(0)
 if os.path.exists(MARKER):
     print(f"▸ workspace demo already seeded in {ENGINE_DIR}")
     sys.exit(0)
-if not os.path.exists(PROBE):
-    sys.exit("build rpc_probe first: cargo build -p cypher-rpc --example rpc_probe")
 
 DEVICE = call("EngineInfo", {})["deviceId"]
 # What the script does not stage itself (a plan approved later by hand, a
@@ -613,6 +698,9 @@ atlas.plan(
      {"title": "Report"}],
     looked=("list_projects", "search_sessions"),
     answer="Proposed in four steps; the first one changes nothing you can see. It waits for your approval.")
+
+print("▸ connections")
+seed_connections(atlas.id, SPACES)
 
 print("▸ Scout")
 scout = Workspace("Scout", {"projects": {"mode": "selected", "spaceIds": [SPACES["mobile-app"]]}})

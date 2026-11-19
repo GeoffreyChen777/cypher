@@ -6,62 +6,6 @@
 use super::super::session::SlotId;
 use super::*;
 
-/// What `bot` can see and do, in a few words: "Billing · reads
-/// conversations", or with capabilities "3 projects · works directly ·
-/// starts sessions".
-pub(in crate::shell) fn access_summary(bot: &Bot, state: &crate::state::AppState) -> String {
-    let scope = &bot.scope;
-    let projects = match &scope.projects {
-        ProjectGrant::All => "All projects".to_string(),
-        ProjectGrant::None => String::new(),
-        ProjectGrant::Selected { space_ids } => {
-            let names: Vec<String> = space_ids
-                .iter()
-                .filter_map(|id| state.space_row(id))
-                .map(|s| s.display_name().to_string())
-                .collect();
-            match names.as_slice() {
-                [] => String::new(),
-                [one] => one.clone(),
-                [first, second] => format!("{first} and {second}"),
-                many => format!("{} projects", many.len()),
-            }
-        }
-    };
-    let sessions = scope.include_sessions.len();
-    let reach = match (projects.is_empty(), sessions) {
-        (true, 0) => return "No access yet".to_string(),
-        (true, n) => format!("{n} shared session{}", if n == 1 { "" } else { "s" }),
-        (false, 0) => projects,
-        (false, n) => format!("{projects} + {n} session{}", if n == 1 { "" } else { "s" }),
-    };
-    let caps = &bot.capabilities;
-    let sessions = match (caps.coordinate, caps.steer) {
-        (true, true) => Some("starts and steers sessions"),
-        (true, false) => Some("starts sessions"),
-        (false, true) => Some("steers sessions"),
-        (false, false) => None,
-    };
-    let acts: Vec<&str> = caps
-        .work_directly
-        .then_some("works directly")
-        .into_iter()
-        .chain(sessions)
-        .collect();
-    // What it may do says more than how deep it reads, which only stays
-    // when it is the narrow kind.
-    let depth = match (scope.transcripts, acts.is_empty()) {
-        (true, false) => None,
-        (true, true) => Some("reads conversations"),
-        (false, _) => Some("titles and status only"),
-    };
-    std::iter::once(reach.as_str())
-        .chain(depth)
-        .chain(acts)
-        .collect::<Vec<_>>()
-        .join(" · ")
-}
-
 /// Questions a new bot offers, fitted to what it can see, each with its
 /// glyph.
 fn suggestions(bot: &Bot, state: &crate::state::AppState) -> Vec<(&'static str, String)> {
@@ -328,69 +272,6 @@ mod tests {
         ProjectGrant::Selected {
             space_ids: ids.iter().map(|id| (*id).into()).collect(),
         }
-    }
-
-    #[test]
-    fn access_reads_in_a_few_words() {
-        let state = state();
-        let summary = |scope| access_summary(&bot(scope), &state);
-        assert_eq!(summary(BotScope::default()), "No access yet");
-        assert_eq!(
-            summary(BotScope {
-                projects: ProjectGrant::All,
-                ..Default::default()
-            }),
-            "All projects · reads conversations"
-        );
-        assert_eq!(
-            summary(BotScope {
-                projects: selected(&["billing", "gone"]),
-                transcripts: false,
-                ..Default::default()
-            }),
-            "Billing · titles and status only"
-        );
-        assert_eq!(
-            summary(BotScope {
-                projects: selected(&["billing", "auth", "web"]),
-                include_sessions: vec!["x".into()],
-                ..Default::default()
-            }),
-            "3 projects + 1 session · reads conversations"
-        );
-        assert_eq!(
-            summary(BotScope {
-                include_sessions: vec!["x".into(), "y".into()],
-                ..Default::default()
-            }),
-            "2 shared sessions · reads conversations"
-        );
-    }
-
-    #[test]
-    fn access_names_what_the_bot_may_do() {
-        let state = state();
-        let mut acting = bot(BotScope {
-            projects: selected(&["billing", "auth", "web"]),
-            ..Default::default()
-        });
-        acting.capabilities = cypher_proto::BotCapabilities {
-            work_directly: true,
-            coordinate: true,
-            steer: false,
-        };
-        assert_eq!(
-            access_summary(&acting, &state),
-            "3 projects · works directly · starts sessions"
-        );
-        acting.scope.transcripts = false;
-        acting.capabilities = cypher_proto::BotCapabilities::new_bot();
-        assert_eq!(
-            access_summary(&acting, &state),
-            "3 projects · titles and status only · works directly · starts sessions"
-        );
-        acting.scope = BotScope::default();
-        assert_eq!(access_summary(&acting, &state), "No access yet");
     }
 
     #[test]

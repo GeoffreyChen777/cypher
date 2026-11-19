@@ -53,6 +53,8 @@ pub(super) enum HeaderAction {
     Page(PanelItem),
     /// Add a routine: the form, in the panel.
     NewRoutine,
+    /// Connect a workspace: the connect page, in the panel.
+    Connect,
 }
 
 /// One project on the Projects card with the workspace's sessions there.
@@ -148,10 +150,7 @@ pub(super) fn card_of(
         PanelItem::Routine(_) | PanelItem::NewRoutine => "schedule",
         // The log opens from the Work panel and the chat header.
         PanelItem::Activity => "work",
-        PanelItem::Network
-        | PanelItem::Connection(_)
-        | PanelItem::Invite
-        | PanelItem::Question(_) => "network",
+        PanelItem::Connection(_) | PanelItem::Invite => "network",
         PanelItem::Thread(chat_id) => match thread_kind(chat_id) {
             Some(
                 cypher_proto::BotThread::Routine { .. }
@@ -517,6 +516,7 @@ impl Shell {
                     self.board.panel.as_ref() == Some(page),
                 ),
                 HeaderAction::NewRoutine => (icons::PLUS, "New routine", false),
+                HeaderAction::Connect => (icons::PLUS, "Connect a workspace", false),
             };
             let shown = if open { 1.0 } else { motion::hover_t(key) };
             let button_key = SharedString::from(format!("{key}-action"));
@@ -549,6 +549,7 @@ impl Shell {
                             Some(window),
                             cx,
                         ),
+                        HeaderAction::Connect => this.open_connect(cx),
                     }
                 }))
                 .child(icon(glyph).size(px(11.0)).text_color(motion::hover_blend(
@@ -738,6 +739,58 @@ pub(super) fn card_item_detail(
     selected: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    let title = div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .text_size(px(12.5))
+        .line_height(px(16.0))
+        .child(title.into())
+        .into_any_element();
+    card_row(key, mark, title, corner, detail, selected, theme)
+}
+
+/// [`card_item`] whose title is followed by a quieter `aside` on the same
+/// line ("Dana Kim · Scout": who, then which of theirs).
+pub(super) fn card_item_aside(
+    key: &str,
+    mark: Option<AnyElement>,
+    title: impl Into<SharedString>,
+    aside: Option<String>,
+    corner: Option<AnyElement>,
+    selected: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let title = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .gap(px(4.0))
+        .text_size(px(12.5))
+        .line_height(px(16.0))
+        .child(div().min_w_0().truncate().child(title.into()))
+        .children(aside.map(|aside| {
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(theme.text_muted.opacity(0.7))
+                .child(SharedString::from(format!("· {aside}")))
+        }))
+        .into_any_element();
+    card_row(key, mark, title, corner, None, selected, theme)
+}
+
+/// A card's row around its `title` element (see [`card_item`]).
+fn card_row(
+    key: &str,
+    mark: Option<AnyElement>,
+    title: AnyElement,
+    corner: Option<AnyElement>,
+    detail: Option<AnyElement>,
+    selected: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
     let hover = crate::appearance::surface_style::sidebar_hover(theme);
     let selected_wash = crate::appearance::surface_style::sidebar_selected(theme);
     let rest_bg = if selected {
@@ -776,15 +829,7 @@ pub(super) fn card_item_detail(
                             .child(mark),
                     )
                 })
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(12.5))
-                        .line_height(px(16.0))
-                        .child(title.into()),
-                ),
+                .child(title),
         )
         .children(corner);
     div()
@@ -888,40 +933,6 @@ pub(super) fn card_with_rows(
                 .children(rows),
         )
         .into_any_element()
-}
-
-/// A row's title over its muted sub-line, taking the row's free width. The
-/// sub-line's lead (a device name) truncates before its `tail` does.
-pub(super) fn two_lines(title: String, sub: String, tail: String, theme: &Theme) -> gpui::Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(1.0))
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_size(px(13.0))
-                .line_height(px(17.0))
-                .text_color(theme.text)
-                .child(SharedString::from(title)),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .flex()
-                .flex_row()
-                .gap(px(3.0))
-                .text_size(px(11.0))
-                .line_height(px(14.0))
-                .text_color(theme.text_muted.opacity(0.85))
-                .child(div().min_w_0().truncate().child(SharedString::from(sub)))
-                .when(!tail.is_empty(), |el| {
-                    el.child(div().flex_none().child(SharedString::from(tail)))
-                }),
-        )
 }
 
 /// No bots yet: one line and the way to make one.

@@ -152,7 +152,10 @@ Tests per platform:
   prompts it cannot write itself (a plan's brief, a routine's run, a result notice) get
   a fitting reply and no marker shows in a transcript. A prompt can also carry its own
   reply as `[mock:script]<json steps>[/mock:script]` (text, think, tool, ask, hold;
-  `crates/harness/src/mock/script.rs`).
+  `crates/harness/src/mock/script.rs`). The first workspace also gets connections
+  to other people's workspaces with their questions and an open invite, written as rows
+  (no Edge is behind them); `--connections` adds only those to an engine seeded earlier,
+  and `CYPHER_DEV_NETWORK_PREVIEW=1` on the UI shows their controls while signed out.
 - `scripts/dev-ios.sh` runs the iOS Dev bundle against a local Edge.
 - `dev` mode syncs through a local Edge: [Local Edge development](local-edge.md).
 - `scripts/e2e-smoke.sh` runs two headless engines against a local Edge.

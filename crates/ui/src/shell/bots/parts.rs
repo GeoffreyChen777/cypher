@@ -15,35 +15,6 @@ pub(super) enum Confirm {
     RevokeConnection { id: String, name: String },
 }
 
-/// A card that is only its header: its glyph, title and a one-line hint
-/// (`hint_color`, else quiet), opening `open`.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn header_card(
-    key: &'static str,
-    title: &'static str,
-    hint: impl Into<SharedString>,
-    hint_color: Option<gpui::Hsla>,
-    open: PanelItem,
-    focused: bool,
-    theme: &Theme,
-    cx: &mut Context<Shell>,
-) -> AnyElement {
-    let header = super::board::header_frame(key, title, focused, theme)
-        .cursor_pointer()
-        .on_hover(motion::hover_listener(key))
-        .on_click(cx.listener(move |this, _, _, cx| this.open_panel(open.clone(), cx)))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_size(px(11.5))
-                .text_color(hint_color.unwrap_or(theme.text_muted.opacity(0.6)))
-                .child(hint.into()),
-        );
-    super::board::card(theme).child(header).into_any_element()
-}
-
 /// A panel's small upper-case section label ("ROUTINES").
 pub(super) fn section_label(theme: &Theme, text: &str) -> gpui::Div {
     div()
@@ -485,12 +456,12 @@ impl Shell {
                 "Delete",
             ),
             Confirm::RevokeConnection { name, .. } => (
-                "Revoke connection?",
+                "Disconnect?",
                 format!(
                     "{name} can no longer ask this workspace anything, and this \
                      workspace can no longer ask it. Connecting again takes a new invite."
                 ),
-                "Revoke",
+                "Disconnect",
             ),
         };
         let card = popover::dialog_card(theme)

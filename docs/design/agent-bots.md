@@ -1122,7 +1122,7 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 | **Work** | Running orchestrations, each with its progress ring (below), its current step ("Step 2 of 4 · Run the tests") and the time it has run; approved plans that have not started yet ("waiting": for a free slot, or a paused workspace); then the last three that ended, with their outcome mark. "N more" brings in everything that ended, rejected plans included | The orchestration's page (below) |
 | **Routines** | Its routines in order of next run, one line each: a mark, the name, and at the right when it next runs ("in 3h", "Mon", "off", "manual") or, while a run is under way, how long it has gone. The mark alone carries the state: the progress ring while it runs (amber and still when its session waits on the owner), a red mark when its last run failed, else the glyph of its kind (the workspace's repeat, a project's code). Those running and the next three show, then "N more". The header's **+** (on hover) adds one | The routine's page (below), or its form |
 | **Projects** | Each granted project, and under it the sessions the workspace runs there (a plan's workers, a project routine's), newest first, each with the mark a session row has in the Sessions view (working, asking, finished unseen, else its time); per project, those working or asking and the newest three of the rest, then "N more" | A project's row: its page (its device beside the title, the folder on hover; the workspace's sessions there, the owner's sessions it reads, its work and its routines there). A session's row: the session, live |
-| **Connections** (P4; "network" in code) | Just its header: how many workspaces are connected ("3 · 1 open invite"), or "N to review" in amber when answers wait in Needs you (a click opens the review) | The Connections panel lists the connected workspaces, invites and recent questions; its header's + opens the connect page (create an invite code, or paste one). A connection opens its own page (scope, reply mode, exchanges, revoke), and a question its own (who asked whom, the question, the answer, how it ended; a waiting one opens as its review), each with a back arrow to Connections |
+| **Connections** (P4; "network" in code) | One line per connected workspace: the person's photo and name, their workspace's name quieter beside it, and at the right the one thing that matters most now: an amber mark when an answer waits for review, the ring while a question is on its way either way, else when the last question was, "off" when replies are off. Those with something under way show first and always, then three, then "N more". While an invite code is open it keeps one quiet last row ("Invite open · 4d left"). The header's **+** (on hover) opens the connect page | A connection's page, the connect page, or an answer to review (all below) |
 
 **Needs you is one page.** Whatever waits on the owner, wherever it comes from (the bot's
 own chat, a plan, a worker session of a plan, a routine's run in the workspace or in a
@@ -1181,10 +1181,10 @@ to run, a project's newest sessions). Needs you, whose every row waits on the ow
 shows five. When a list holds more, its last line is a small faint "N more" under the
 titles: a click brings the rest in, in place, and the line becomes "Show less". The panel never shows a card's list (there is no Work,
 Routines or Projects list page): a row opens that item's page.
-What is expanded is kept for this window only, like the folds. Two cards have a page of
-their own that is not a list of their rows: **Needs you** (the page that answers its
+What is expanded is kept for this window only, like the folds. One card has a page of
+its own that is not a list of its rows: **Needs you** (the page that answers its
 items, opened by any row and by the arrow at its header's end; its "N more" still
-expands the card in place) and **Connections** (whose card is only a header).
+expands the card in place).
 
 There is no Activity card: it mostly repeated Work, Routines and Connections. The full audit
 log, filterable as Plans, Sessions, Routines, Memory or Connections, opens from the chat
@@ -1277,6 +1277,38 @@ their own, the line at the schedule's foot says how soon the next run comes rath
 the day and hour its fields already show, and a project names its device only when that
 is another machine.
 
+**A connection's page** follows a work item's and a routine's.
+
+- **The bar:** at the left how it stands (Waiting on you while an answer waits for review,
+  Answering, Waiting for Dana, Replies off, Disconnecting…, else Connected; since when is
+  the tooltip), led by the person's photo, or the ring or the amber mark while something
+  is under way. At the right the reply mode as one button naming it (Auto, Review, Off),
+  which opens the three with what each does; its thread, when this device lists it; and
+  Disconnect (confirmed).
+- **Title:** the person. Under it one line: their workspace's name and what its questions
+  can read ("Harbor · can read billing, web-api", "… everything Atlas reads"). It is
+  always said, the default included: it is the fact a connection turns on. A click on
+  the line opens the choice in place under the header (all the workspace reads, or only
+  the projects ticked).
+- **Body:** only the questions between the two, newest first (the last eight), with no
+  heading. Each is one row: an arrow for its direction (who asked whom is its tooltip),
+  the question in at most two lines, and at the right an amber mark when its answer
+  waits for review, the ring while it is on its way, "declined" or "expired" with its
+  age, else just its age (exact times on hover). A click opens the answer in place, as
+  it went (the owner's edit when there was one), or a line saying why there is none;
+  the one waiting for review opens its review. There is no page for a single question.
+
+**The connect page** (the card's +, its hint, the open invite's row): *Invite someone*
+(Create invite code, then the code once with Copy and its expiry; under it the invites
+still open, each with how long it has left and Revoke) and *Use their code* (paste,
+Connect). What crosses Cypher's servers is said here, once, where connecting is decided.
+Signed out, it says to sign in.
+
+**An answer to review** (from Needs you, or its row on the connection's page): Decline
+and Send at the top beside "Answer to review", who asks, their workspace and when, the
+question as a quote, and the draft to edit. Once decided it shows the connection's page
+with that question open.
+
 **A result opens in the panel.** A result notice's card opens the plan's own page while
 the plan's record is kept, else (and for a routine's run) a page with how it ended,
 when, and what it wrote in full, with the ways on to the routine and its session.
@@ -1331,8 +1363,8 @@ As built, beyond the table:
 - **A routine** can be granted *Work directly* ("May run commands"), only while the bot
   has it; anything that needs approval waits for the owner in Needs you.
 - **Empty cards** for Routines and Connections show only their header with a quiet
-  hint. The Routines header opens the new-routine form; the Connections header opens
-  its page, whose own button adds the first connection.
+  hint. The Routines header opens the new-routine form; the Connections header
+  ("Connect a workspace") opens the connect page.
 - **After a delete** (a routine, finished work) or a cancelled new-routine form, the
   panel shuts: there is no list page to fall back to.
 - **Signed out**, the Connections card says "Sign in to connect"; records stay visible.

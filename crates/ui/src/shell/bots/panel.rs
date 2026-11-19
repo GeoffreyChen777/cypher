@@ -28,9 +28,6 @@ pub(in crate::shell) enum PanelItem {
     Session(String),
     /// A result notice from the chat, in full (the post's entry id).
     Post(String),
-    /// One question between workspaces, either way, opened from the
-    /// Network panel (exchange id); a waiting review shows as `Review`.
-    Question(String),
     /// One orchestration (work id).
     WorkItem(String),
     /// One of the bot's hidden threads, read-only (its chat id): an
@@ -42,8 +39,7 @@ pub(in crate::shell) enum PanelItem {
     NewRoutine,
     /// The full audit log.
     Activity,
-    /// Connections and invites.
-    Network,
+    /// One connected workspace (connection id).
     Connection(String),
     /// Create an invite or redeem one.
     Invite,
@@ -101,10 +97,7 @@ impl Shell {
             }
             _ => self.board.peeks.clear(),
         }
-        if !matches!(
-            self.board.panel,
-            Some(PanelItem::Review(_) | PanelItem::Question(_))
-        ) {
+        if !matches!(self.board.panel, Some(PanelItem::Review(_))) {
             self.board.review = None;
         }
         if self.board.panel != Some(PanelItem::NeedsYou) {
@@ -223,7 +216,7 @@ impl Shell {
             }
             // A plan is a work item waiting on its approval: one page.
             PanelItem::Plan(id) => self.render_work_item(id, &theme, window, cx)?,
-            PanelItem::Review(id) => self.render_question_panel(id, &theme, cx)?,
+            PanelItem::Review(id) => self.render_review_panel(&bot, id, &theme, window, cx)?,
             PanelItem::WorkItem(_) | PanelItem::Thread(_) => {
                 self.render_work_panel(item, &theme, window, cx)?
             }
@@ -235,10 +228,9 @@ impl Shell {
                 self.render_schedule_panel(&bot, item, &theme, window, cx)?
             }
             PanelItem::Activity => self.render_activity_panel(&bot, item, &theme, cx)?,
-            PanelItem::Network | PanelItem::Connection(_) | PanelItem::Invite => {
-                self.render_network_panel(&bot, item, &theme, cx)?
+            PanelItem::Connection(_) | PanelItem::Invite => {
+                self.render_network_panel(&bot, item, &theme, window, cx)?
             }
-            PanelItem::Question(id) => self.render_question_panel(id, &theme, cx)?,
         };
         let card_bg = crate::appearance::chat_style::panel_background(
             crate::appearance::chat_style::settings(cx),

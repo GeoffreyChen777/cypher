@@ -509,20 +509,6 @@ pub(super) fn text_value(text: &str) -> crate::markdown::justified::JustifiedTex
     crate::markdown::justified::JustifiedText::new(plain_markdown(text), None)
 }
 
-/// The pinned footer of a panel that asks for a decision: a quiet note on
-/// the left, then the caller's buttons, the primary one last.
-pub(super) fn decision_bar(note: Option<&str>, theme: &Theme) -> gpui::Div {
-    div().flex().flex_row().items_center().gap(px(6.0)).child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .truncate()
-            .text_size(px(11.5))
-            .text_color(theme.text_muted)
-            .children(note.map(|n| SharedString::from(n.to_string()))),
-    )
-}
-
 impl Shell {
     /// The open panel item's own buttons, drawn in the panel header before
     /// its close button (icon buttons: edit, delete, open its session…).
@@ -540,11 +526,6 @@ impl Shell {
                 .children(buttons)
                 .into_any_element(),
         );
-    }
-
-    /// The open panel item's decision bar, pinned under its body.
-    pub(super) fn set_panel_footer(&mut self, footer: impl IntoElement) {
-        self.board.panel_footer = Some(footer.into_any_element());
     }
 
     /// The session context following `chat_id` for the panel, made on first

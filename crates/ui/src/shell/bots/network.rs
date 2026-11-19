@@ -1,10 +1,12 @@
-//! The **Network** card (§13.1): connections with their reply mode and last
-//! exchange, pending invites, and the connection and invite panels.
+//! The **Connections** card (§13.1; "network" in code): one row per
+//! connected workspace, and in the panel one connection's page (its reply
+//! mode, what it can read, and the questions between the two) or the
+//! connect page (make an invite code, or use someone's).
 //!
 //! Bots connect through the owner's account (§11), so a signed-out device
 //! shows a quiet "Sign in" state in place of the controls. Invites are
 //! RPCs on the bot's host; an engine that does not have them yet answers
-//! an unknown method, and the panel says so instead of failing.
+//! an unknown method, and the page says so instead of failing.
 
 use super::panel::{PanelHead, PanelItem};
 use super::parts::{self, CallError};
@@ -14,50 +16,135 @@ use cypher_proto::{
     BotConnection, BotExchange, BotInvite, ExchangeDirection, ExchangeState, PeerBot, ReplyMode,
 };
 
-/// The lead column of network rows (peer avatars, the invite and question
-/// glyphs): with its 6px inset and 8px gap the titles line up with the
-/// other cards' rows.
-const LEAD: f32 = 18.0;
-
-/// Exchanges a list shows.
+/// Exchanges a connection's page shows.
 const RECENT_EXCHANGES: usize = 8;
 
-/// "Auto replies · last question 2h ago", "Review replies · no questions
-/// yet", "Revoking…".
-pub(super) fn connection_sub(conn: &BotConnection, last: Option<&str>) -> String {
-    if conn.revoke_requested_at.is_some() {
-        return "Revoking…".into();
-    }
-    let mode = mode_words(conn.reply_mode);
-    match last {
-        Some(last) => format!("{mode} · {last}"),
-        None => format!("{mode} · no questions yet"),
+/// What a connection is doing, the most pressing thing first: what its row
+/// shows at its right and its page says in its bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Standing {
+    /// Being disconnected on both sides.
+    Leaving,
+    /// An answer waits for the owner's review.
+    Review,
+    /// The workspace is answering one of their questions.
+    Answering,
+    /// One of the workspace's questions waits for their answer.
+    Asking,
+    /// Replies are off: their questions are declined.
+    Off,
+    Idle,
+}
+
+impl Standing {
+    /// Something is under way: its row always shows.
+    fn live(self) -> bool {
+        matches!(self, Self::Review | Self::Answering | Self::Asking)
     }
 }
 
-fn mode_words(mode: ReplyMode) -> &'static str {
-    match mode {
-        ReplyMode::Auto => "Auto replies",
-        ReplyMode::Review => "Review replies",
-        ReplyMode::Off => "Replies off",
-    }
-}
-
-/// An exchange's state in words. A reviewed answer reads as on its way
-/// until its host has sent or declined it (an offline host does so later).
-pub(super) fn exchange_state_words(exchange: &BotExchange) -> &'static str {
+/// Whether a question is still on its way to an answer.
+fn in_flight(exchange: &BotExchange) -> bool {
     match exchange.state {
-        ExchangeState::Queued => "queued",
-        ExchangeState::Delivered => "delivered",
-        ExchangeState::Working => "working",
-        ExchangeState::AwaitingReview => match &exchange.review {
-            None => "awaiting your review",
-            Some(review) if review.send => "sending your answer",
-            Some(_) => "declining",
-        },
-        ExchangeState::Answered => "answered",
-        ExchangeState::Declined => "declined",
-        ExchangeState::Expired => "expired",
+        ExchangeState::Queued | ExchangeState::Delivered | ExchangeState::Working => true,
+        // Reviewed here; its host has not sent or declined it yet.
+        ExchangeState::AwaitingReview => exchange.review.is_some(),
+        _ => false,
+    }
+}
+
+pub(super) fn standing<'a>(
+    conn: &BotConnection,
+    exchanges: impl IntoIterator<Item = &'a BotExchange>,
+) -> Standing {
+    if conn.revoke_requested_at.is_some() {
+        return Standing::Leaving;
+    }
+    let (mut review, mut answering, mut asking) = (false, false, false);
+    for exchange in exchanges.into_iter().filter(|e| e.connection_id == conn.id) {
+        let incoming = exchange.direction == ExchangeDirection::Incoming;
+        review |= exchange.awaiting_review();
+        answering |= incoming && in_flight(exchange);
+        asking |= !incoming && in_flight(exchange);
+    }
+    match () {
+        _ if review => Standing::Review,
+        _ if answering => Standing::Answering,
+        _ if asking => Standing::Asking,
+        _ if conn.reply_mode == ReplyMode::Off => Standing::Off,
+        _ => Standing::Idle,
+    }
+}
+
+/// Who a connection is: the person, and their workspace's name beside it;
+/// the workspace alone when its owner is unnamed.
+pub(super) fn peer_names(peer: &PeerBot) -> (String, Option<String>) {
+    let owner = transcript::single_line(&peer.owner_name);
+    let name = transcript::single_line(&peer.name);
+    if owner.trim().is_empty() {
+        (name, None)
+    } else {
+        (owner, Some(name))
+    }
+}
+
+/// The first word of a person's name, for a short status ("Waiting for
+/// Dana").
+fn first_name(name: &str) -> &str {
+    name.split_whitespace().next().unwrap_or(name)
+}
+
+/// What a connection's questions can read, after "can read": everything
+/// the workspace reads, or the projects it is narrowed to ("billing,
+/// web-api", "billing, web-api +2", "no projects"). `projects` are the
+/// workspace's own, id and name.
+pub(super) fn reads_words(
+    scope: Option<&BotScope>,
+    projects: &[(String, String)],
+    bot: &str,
+) -> String {
+    let Some(scope) = scope else {
+        return format!("everything {bot} reads");
+    };
+    let names: Vec<&str> = projects
+        .iter()
+        .filter(|(id, _)| scope.sees_space(id))
+        .map(|(_, name)| name.as_str())
+        .collect();
+    match names.as_slice() {
+        [] => "no projects".into(),
+        names if names.len() == projects.len() => format!("everything {bot} reads"),
+        [one] => (*one).to_string(),
+        [one, two] => format!("{one}, {two}"),
+        [one, two, rest @ ..] => format!("{one}, {two} +{}", rest.len()),
+    }
+}
+
+/// What a question with no answer to show says once opened.
+fn unanswered_words(exchange: &BotExchange, bot: &str) -> String {
+    let incoming = exchange.direction == ExchangeDirection::Incoming;
+    let decided = exchange.review.as_ref().map(|review| review.send);
+    match (incoming, exchange.state, decided) {
+        (true, ExchangeState::Declined, _) | (true, _, Some(false)) => "Declined.".into(),
+        (true, ExchangeState::Expired, _) => "It expired before it was answered.".into(),
+        (true, _, Some(true)) => "Sending your answer…".into(),
+        (true, ExchangeState::Answered, _) => "Answered.".into(),
+        (true, _, _) => format!("{bot} is writing its answer…"),
+        (false, ExchangeState::Declined, _) => "They declined to answer.".into(),
+        (false, ExchangeState::Expired, _) => "No answer came; it expired.".into(),
+        (false, ExchangeState::Answered, _) => "Answered.".into(),
+        (false, _, _) => "Waiting for their answer.".into(),
+    }
+}
+
+/// How long an open invite has left, for a row's corner: "5d left", "3h
+/// left", "soon".
+fn left_words(expires_at: i64, now_ms: i64) -> String {
+    let minutes = (expires_at - now_ms).max(0) / 60_000;
+    match minutes {
+        0..60 => "soon".into(),
+        60..1440 => format!("{}h left", minutes / 60),
+        _ => format!("{}d left", minutes / 1440),
     }
 }
 
@@ -118,6 +205,12 @@ pub(super) struct NetworkUi {
     redeem: Option<(Entity<TextInput>, Subscription)>,
     redeeming: bool,
     redeem_error: Option<(SharedString, bool)>,
+    /// Questions opened on a connection's page (exchange ids).
+    pub(super) opened: std::collections::HashSet<String>,
+    /// The connection whose reply-mode menu is open, and the one whose
+    /// "can read" editor is.
+    mode_open: Option<String>,
+    scope_open: Option<String>,
 }
 
 impl Shell {
@@ -256,10 +349,11 @@ impl Shell {
                 match result {
                     Ok(value) => {
                         input.update(cx, |input, cx| input.set_text("", cx));
-                        let item = serde_json::from_value::<BotConnection>(value)
-                            .map(|c| PanelItem::Connection(c.id))
-                            .unwrap_or(PanelItem::Network);
-                        this.show_panel(item, cx);
+                        // Its row comes with the records either way.
+                        match serde_json::from_value::<BotConnection>(value) {
+                            Ok(conn) => this.show_panel(PanelItem::Connection(conn.id), cx),
+                            Err(_) => this.close_panel(cx),
+                        }
                     }
                     Err(err) => {
                         this.board.network.redeem_error = Some(this.network_failure(err, cx))
@@ -269,152 +363,164 @@ impl Shell {
         );
     }
 
-    /// The sidebar card: only its header. It says how many workspaces are
-    /// connected, or, in the amber of Needs you, how many answers wait on
-    /// the owner's review; those rows live in Needs you, so a click opens
-    /// the one review (or Needs you for several), else the Network panel.
+    /// Open the connect page (the card's +, its hint, an open invite's row).
+    pub(super) fn open_connect(&mut self, cx: &mut Context<Self>) {
+        let net = &mut self.board.network;
+        net.invite_error = None;
+        net.redeem_error = None;
+        self.show_panel(PanelItem::Invite, cx);
+    }
+
+    /// The sidebar card: one line per connected workspace, like the other
+    /// cards. Who it is, and at the right the one thing that matters most
+    /// about it now ([`Standing`]): an amber mark when an answer waits for
+    /// review, the ring while a question is on its way, else when the last
+    /// question was, or that replies are off. An open invite is one quiet
+    /// last row. With nothing yet, the header alone says how to start.
     pub(super) fn render_network_card(
         &self,
         bot: &Bot,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let now = cypher_proto::now_ms();
-        let (connections, invites, reviews) = {
+        let now = Utc::now();
+        let now_ms = now.timestamp_millis();
+        let (rows, invites) = {
             let state = self.state.read(cx);
             let records = &state.bot_records;
-            let reviews: Vec<String> = records
-                .exchanges
+            let mut rows: Vec<(BotConnection, Standing)> =
+                live_connections(&records.connections, &bot.id)
+                    .into_iter()
+                    .map(|conn| (conn.clone(), standing(conn, &records.exchanges)))
+                    .collect();
+            // What waits on the owner first, then what is on its way; the
+            // rest stay by last question.
+            rows.sort_by_key(|(_, standing)| match standing {
+                Standing::Review => 0,
+                Standing::Answering | Standing::Asking => 1,
+                _ => 2,
+            });
+            let invites: Vec<i64> = open_invites(&records.invites, &bot.id, now_ms)
                 .iter()
-                .filter(|e| e.bot_id == bot.id && e.awaiting_review())
-                .map(|e| e.id.clone())
+                .map(|invite| invite.expires_at)
                 .collect();
-            (
-                live_connections(&records.connections, &bot.id).len(),
-                open_invites(&records.invites, &bot.id, now).len(),
-                reviews,
+            (rows, invites)
+        };
+        if rows.is_empty() && invites.is_empty() {
+            let key = "bot-network-card";
+            let header = super::board::header_frame(
+                key,
+                "Connections",
+                self.card_focused("network", cx),
+                theme,
             )
-        };
-        let (hint, color, open) = match reviews.as_slice() {
-            [] => {
-                let hint = if !self.network_ready(cx) {
-                    "Sign in to connect".to_string()
-                } else {
-                    // The card is named Connections: its hint is the count.
-                    let mut parts = vec![match connections {
-                        0 => "None yet".to_string(),
-                        n => n.to_string(),
-                    }];
-                    if invites > 0 {
-                        parts.push(format!(
-                            "{invites} open invite{}",
-                            if invites == 1 { "" } else { "s" }
-                        ));
-                    }
-                    parts.join(" · ")
-                };
-                (hint, None, PanelItem::Network)
-            }
-            [one] => (
-                "1 to review".to_string(),
-                Some(theme.warning),
-                PanelItem::Review(one.clone()),
-            ),
-            many => (
-                format!("{} to review", many.len()),
-                Some(theme.warning),
-                PanelItem::NeedsYou,
-            ),
-        };
-        Some(parts::header_card(
-            "bot-network-card",
-            "Connections",
-            hint,
-            color,
-            open,
-            self.card_focused("network", cx),
-            theme,
-            cx,
-        ))
-    }
-
-    /// A connection row: the peer's neutral avatar, "<bot> · <owner>", and
-    /// its reply mode and last exchange.
-    fn connection_row(
-        &self,
-        conn: &BotConnection,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let key = format!("bot-panel-connection-{}", conn.id);
-        let item = PanelItem::Connection(conn.id.clone());
-        let last = conn.last_exchange_at.map(parts::ago_ms);
-        let revoking = conn.revoke_requested_at.is_some();
-        div()
-            .id(SharedString::from(key.clone()))
-            .pl(px(6.0))
-            .pr(px(8.0))
-            .py(px(8.0))
-            .rounded(px(8.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
             .cursor_pointer()
-            .bg(motion::hover_blend(
-                &key,
-                crate::kit::theme::wash(0.0),
-                crate::kit::theme::wash(0.05),
-            ))
-            .on_hover(motion::hover_listener(key.clone()))
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
-            .when(revoking, |el| el.opacity(0.6))
-            .child(peer_avatar(&conn.peer, LEAD, theme))
+            .on_hover(motion::hover_listener(key))
+            .on_click(cx.listener(|this, _, _, cx| this.open_connect(cx)))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.0))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex()
-                            .flex_row()
-                            .gap(px(4.0))
-                            .text_size(px(13.0))
-                            .line_height(px(17.0))
-                            .child(div().flex_none().text_color(theme.text).child(
-                                SharedString::from(transcript::single_line(&conn.peer.name)),
-                            ))
-                            .when(!conn.peer.owner_name.is_empty(), |el| {
-                                el.child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_color(theme.text_muted.opacity(0.85))
-                                        .child(SharedString::from(format!(
-                                            "· {}",
-                                            conn.peer.owner_name
-                                        ))),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(11.0))
-                            .line_height(px(14.0))
-                            .text_color(if conn.reply_mode == ReplyMode::Off && !revoking {
-                                theme.text_faint
-                            } else {
-                                theme.text_muted.opacity(0.85)
-                            })
-                            .child(SharedString::from(connection_sub(conn, last.as_deref()))),
+                    .truncate()
+                    .text_size(px(11.5))
+                    .text_color(theme.text_muted.opacity(0.6))
+                    .child(if self.network_ready(cx) {
+                        "Connect a workspace"
+                    } else {
+                        "Sign in to connect"
+                    }),
+            );
+            return Some(super::board::card(theme).child(header).into_any_element());
+        }
+        let header = self.card_header(
+            "network",
+            "bot-network-header",
+            "Connections",
+            rows.len(),
+            Some(super::board::HeaderAction::Connect),
+            None,
+            theme,
+            cx,
+        );
+        let live = |(_, standing): &(BotConnection, Standing)| standing.live();
+        let (rows, hidden) = if self.list_expanded("network") {
+            let hidden = super::board::short_rows(rows.iter().map(live).collect(), |l| *l).1;
+            (rows, hidden)
+        } else {
+            super::board::short_rows(rows, live)
+        };
+        let open = self.board.panel.clone();
+        let ticker = self.pulse_ticker.entity_id();
+        let mut items: Vec<AnyElement> = rows
+            .iter()
+            .map(|(conn, standing)| {
+                let item = PanelItem::Connection(conn.id.clone());
+                let corner = match standing {
+                    Standing::Review => icon(icons::QUESTION_CIRCLE)
+                        .size(px(12.0))
+                        .flex_none()
+                        .text_color(theme.warning)
+                        .into_any_element(),
+                    Standing::Answering | Standing::Asking => super::items::ring_mark(
+                        super::items::RingState::Running,
+                        (0, 0),
+                        ticker,
+                        theme,
                     ),
-            )
+                    Standing::Leaving => super::board::card_corner("leaving", None, theme),
+                    Standing::Off => super::board::card_corner("off", None, theme),
+                    Standing::Idle => super::board::card_corner(
+                        conn.last_exchange_at
+                            .map(|at| super::items::ago(at, now))
+                            .unwrap_or_default(),
+                        None,
+                        theme,
+                    ),
+                };
+                let (who, theirs) = peer_names(&conn.peer);
+                let dim = matches!(standing, Standing::Off | Standing::Leaving);
+                let selected = open.as_ref() == Some(&item);
+                super::board::card_item_aside(
+                    &format!("bot-connection-{}", conn.id),
+                    Some(peer_avatar(&conn.peer, 14.0, theme)),
+                    who,
+                    theirs,
+                    Some(corner),
+                    selected,
+                    theme,
+                )
+                .when(dim, |el| el.opacity(0.55))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
+                .into_any_element()
+            })
+            .collect();
+        items.extend(self.more_row("network".into(), hidden, theme, cx));
+        // An unused code is an open door: it keeps a row while it is open.
+        if let Some(soonest) = invites.iter().min() {
+            items.push(
+                super::board::card_item(
+                    "bot-network-invites",
+                    Some(super::board::card_glyph(
+                        icons::KEY_MINIMALISTIC,
+                        theme.text_muted.opacity(0.82),
+                    )),
+                    match invites.len() {
+                        1 => "Invite open".to_string(),
+                        n => format!("{n} invites open"),
+                    },
+                    Some(super::board::card_corner(
+                        left_words(*soonest, now_ms),
+                        None,
+                        theme,
+                    )),
+                    open == Some(PanelItem::Invite),
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.open_connect(cx)))
+                .into_any_element(),
+            );
+        }
+        Some(self.fold_card("network", header, items, theme))
     }
 
     /// The detail panel for this card's items; `None` when the item no
@@ -424,158 +530,73 @@ impl Shell {
         bot: &Bot,
         item: &PanelItem,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
-        // The code is shown once: leaving the invite panel drops it.
+        // The code is shown once: leaving the connect page drops it.
         if *item != PanelItem::Invite && self.board.network.issued.is_some() {
             self.board.network.issued = None;
             self.board.network.invite_error = None;
         }
         match item {
-            PanelItem::Network => Some(self.render_network_list(bot, theme, cx)),
             PanelItem::Invite => Some(self.render_invite_panel(bot, theme, cx)),
-            PanelItem::Connection(id) => self.render_connection(bot, id, theme, cx),
+            PanelItem::Connection(id) => self.render_connection(bot, id, theme, window, cx),
             _ => None,
         }
     }
 
-    fn render_network_list(
-        &mut self,
-        bot: &Bot,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> (PanelHead, gpui::Div) {
-        let now = cypher_proto::now_ms();
-        let ready = self.network_ready(cx);
-        let (connections, invites, exchanges) = {
-            let state = self.state.read(cx);
-            let records = &state.bot_records;
-            let mut exchanges: Vec<BotExchange> = records
-                .exchanges
-                .iter()
-                .filter(|e| e.bot_id == bot.id)
-                .cloned()
-                .collect();
-            exchanges.sort_by_key(|e| std::cmp::Reverse(e.asked_at));
-            exchanges.truncate(RECENT_EXCHANGES);
-            (
-                live_connections(&records.connections, &bot.id)
-                    .into_iter()
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                open_invites(&records.invites, &bot.id, now)
-                    .into_iter()
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                exchanges,
-            )
-        };
-        let head = PanelHead {
-            glyph: icons::GLOBAL,
-            tint: None,
-            title: "Connections".into(),
-        };
-        // The header's one button opens the connect page; a code is made
-        // there only when asked for.
-        if ready {
-            self.set_panel_actions(vec![
-                super::items::icon_button(
-                    "bot-network-connect",
-                    icons::PLUS,
-                    "Connect a workspace",
-                    theme,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let net = &mut this.board.network;
-                    net.invite_error = None;
-                    net.redeem_error = None;
-                    this.show_panel(PanelItem::Invite, cx);
-                }))
-                .into_any_element(),
-            ]);
-        }
-        // Nothing yet: one centred message.
-        if connections.is_empty() && invites.is_empty() && exchanges.is_empty() {
-            let empty = if ready {
-                parts::panel_empty(
-                    theme,
-                    icons::GLOBAL,
-                    "No connections yet",
-                    format!(
-                        "Press + to connect a workspace: invite someone with a code, or use \
-                         theirs. Connected workspaces can ask {} questions, read-only, within \
-                         what you allow.",
-                        bot.name
-                    ),
-                )
-            } else {
-                parts::panel_empty(
-                    theme,
-                    icons::CLOUD_OFF,
-                    "Sign in to connect workspaces",
-                    "Use the account menu. Connections go through your Cypher account.",
-                )
-            };
-            self.board.panel_empty = Some(empty.into_any_element());
-            return (head, div());
-        }
-        let mut body = div().p(px(8.0)).flex().flex_col();
-        if !ready {
-            body = body.child(signed_out(theme));
-        }
-        let peers: std::collections::HashMap<String, PeerBot> = connections
-            .iter()
-            .map(|c| (c.id.clone(), c.peer.clone()))
-            .collect();
-        body = body.child(parts::section_label(theme, "Workspaces"));
-        if connections.is_empty() {
-            body = body.child(parts::quiet_line(theme, "None yet."));
-        }
-        for conn in &connections {
-            body = body.child(self.connection_row(conn, theme, cx));
-        }
-        if !invites.is_empty() {
-            body = body.child(parts::section_label(theme, "Open invites"));
-            for invite in &invites {
-                body = body.child(self.invite_row(invite, ready, theme, cx));
-            }
-        }
-        if !exchanges.is_empty() {
-            body = body.child(parts::section_label(theme, "Recent questions"));
-            for exchange in &exchanges {
-                let peer = peers.get(&exchange.connection_id);
-                body = body.child(exchange_row(exchange, peer, &bot.name, theme, cx));
-            }
-        }
-        (head, body)
-    }
-
+    /// An open invite on the connect page: when it was made, how long it
+    /// has left, and Revoke.
     fn invite_row(
         &self,
         invite: &BotInvite,
         ready: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    ) -> gpui::Div {
         let id = invite.id.clone();
         let revoking = invite.revoke_requested_at.is_some();
-        invite_glyph_row(&format!("bot-panel-invite-{}", invite.id), theme)
-            .py(px(8.0))
-            .child(super::board::two_lines(
-                format!("Invite code · made {}", parts::ago_ms(invite.created_at)),
-                if revoking {
-                    "Revoking…".into()
-                } else {
-                    format!(
-                        "Expires {} · {} of {} used",
-                        expiry_words(invite.expires_at),
-                        invite.uses,
-                        invite.max_uses
-                    )
-                },
-                String::new(),
-                theme,
-            ))
+        let mut note = if revoking {
+            "revoking…".to_string()
+        } else {
+            left_words(invite.expires_at, cypher_proto::now_ms())
+        };
+        // Only a code that works more than once says how often it was used.
+        if invite.max_uses > 1 && !revoking {
+            note = format!("{} of {} used · {note}", invite.uses, invite.max_uses);
+        }
+        div()
+            .mx(px(8.0))
+            .h(px(30.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .text_size(px(12.0))
+            .child(
+                icon(icons::KEY_MINIMALISTIC)
+                    .size(px(13.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.text.opacity(0.85))
+                    .child(SharedString::from(format!(
+                        "Made {}",
+                        parts::ago_ms(invite.created_at)
+                    ))),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_muted.opacity(0.85))
+                    .child(SharedString::from(note)),
+            )
             .when(ready && !revoking, |el| {
                 el.child(
                     parts::action(
@@ -584,6 +605,7 @@ impl Shell {
                         "Revoke",
                         theme.text_muted,
                     )
+                    .mr(px(-9.0))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.board_mutate(
                             serde_json::json!({ "op": "revokeBotInvite", "inviteId": id }),
@@ -594,7 +616,9 @@ impl Shell {
             })
     }
 
-    /// Create an invite, or redeem another owner's code.
+    /// The connect page: make an invite code (and see the ones still
+    /// open), or use someone else's. What crosses Cypher's servers is said
+    /// here, once, where connecting is decided.
     fn render_invite_panel(
         &mut self,
         bot: &Bot,
@@ -606,22 +630,20 @@ impl Shell {
             tint: None,
             title: "Connect a workspace".into(),
         };
-        self.set_panel_back(
-            "bot-invite-back",
-            "Back to Connections",
-            PanelItem::Network,
-            cx,
-        );
-        if !self.network_ready(cx) {
-            return (
-                head,
-                div()
-                    .p(px(8.0))
-                    .flex()
-                    .flex_col()
-                    .child(signed_out(theme))
-                    .child(privacy_note(theme)),
-            );
+        let ready = self.network_ready(cx);
+        let invites: Vec<BotInvite> = {
+            let state = self.state.read(cx);
+            open_invites(&state.bot_records.invites, &bot.id, cypher_proto::now_ms())
+                .into_iter()
+                .cloned()
+                .collect()
+        };
+        if !ready {
+            let mut body = div().p(px(8.0)).flex().flex_col().child(signed_out(theme));
+            for invite in &invites {
+                body = body.child(self.invite_row(invite, false, theme, cx));
+            }
+            return (head, body.child(privacy_note(theme)));
         }
         let input = self.redeem_input(cx);
         let net = &self.board.network;
@@ -746,32 +768,26 @@ impl Shell {
                 .when(net.redeeming, |el| el.opacity(0.6))
                 .on_click(cx.listener(|this, _, _, cx| this.redeem_invite(cx))),
             );
-        let body = div()
+        let redeem_error = net.redeem_error.clone();
+        let mut body = div()
             .p(px(8.0))
             .flex()
             .flex_col()
-            .child(parts::section_label(theme, "Invite a workspace"))
-            .child(
-                parts::quiet_line(
-                    theme,
-                    "Send the code to the other person; they connect one of their workspaces with it.",
-                )
-                .pt(px(0.0)),
-            )
-            .child(invite_body)
-            .child(parts::section_label(theme, "Connect with a code"))
-            .child(
-                parts::quiet_line(
-                    theme,
-                    format!(
-                        "Got a code from someone? Connect {} to their workspace.",
-                        bot.name
-                    ),
-                )
-                .pt(px(0.0)),
-            )
+            .child(parts::section_label(theme, "Invite someone"))
+            .child(invite_body);
+        if !invites.is_empty() {
+            body = body.child(
+                div().pt(px(6.0)).flex().flex_col().children(
+                    invites
+                        .iter()
+                        .map(|invite| self.invite_row(invite, true, theme, cx)),
+                ),
+            );
+        }
+        body = body
+            .child(parts::section_label(theme, "Use their code"))
             .child(redeem)
-            .children(net.redeem_error.clone().map(|(error, quiet)| {
+            .children(redeem_error.map(|(error, quiet)| {
                 div()
                     .px(px(8.0))
                     .pt(px(6.0))
@@ -787,17 +803,20 @@ impl Shell {
         (head, body)
     }
 
-    /// One connection: its reply mode, what the peer may read, its
-    /// questions, and Revoke.
-    fn render_connection(
+    /// One connection's page, laid out like a work item's: every control at
+    /// the very top beside a word of how it stands, the person, one line of
+    /// which workspace it is and what it can read, then only the questions
+    /// between the two, newest first.
+    pub(super) fn render_connection(
         &mut self,
         bot: &Bot,
         id: &str,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
         let ready = self.network_ready(cx);
-        let (conn, exchanges, projects) = {
+        let (conn, exchanges, projects, thread_listed) = {
             let state = self.state.read(cx);
             let records = &state.bot_records;
             let conn = records
@@ -819,48 +838,101 @@ impl Shell {
                 .filter(|s| bot.scope.sees_space(&s.id))
                 .map(|s| (s.id.clone(), s.display_name().to_string()))
                 .collect();
-            (conn, exchanges, projects)
+            let thread_listed = conn
+                .thread_chat_id
+                .as_deref()
+                .is_some_and(|id| state.chats.iter().any(|c| c.id == id));
+            (conn, exchanges, projects, thread_listed)
         };
+        let (who, theirs) = peer_names(&conn.peer);
         let head = PanelHead {
             glyph: icons::LINK,
             tint: None,
-            title: conn.peer.name.clone(),
+            title: who.clone(),
         };
-        // Whose workspace it is, beside its name.
-        if !conn.peer.owner_name.trim().is_empty() || conn.peer.owner_avatar_url.is_some() {
-            self.board.panel_title_note = Some(
-                div()
-                    .min_w_0()
-                    .flex_shrink(1.0)
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(px(12.5))
-                    .text_color(theme.text_muted)
-                    .child(peer_avatar(&conn.peer, 16.0, theme))
-                    .child(div().min_w_0().truncate().child(SharedString::from(
-                        transcript::single_line(&conn.peer.owner_name),
-                    )))
+        let revoked = conn.revoked_at.is_some();
+        let editable = ready && !revoked && conn.revoke_requested_at.is_none();
+        let net = &self.board.network;
+        let mode_open = editable && net.mode_open.as_deref() == Some(id);
+        let scope_open = editable && net.scope_open.as_deref() == Some(id);
+
+        // ── the bar: how it stands, then every control ──
+        let standing = standing(&conn, &exchanges);
+        let ticker = self.pulse_ticker.entity_id();
+        let ring = |state| super::items::ring_mark(state, (0, 0), ticker, theme);
+        let (mark, word, tone) = match standing {
+            _ if revoked => (
+                peer_avatar(&conn.peer, 16.0, theme),
+                "Disconnected".to_string(),
+                theme.text_muted,
+            ),
+            Standing::Leaving => (
+                ring(super::items::RingState::Stopping),
+                "Disconnecting…".to_string(),
+                theme.text_muted,
+            ),
+            Standing::Review => (
+                icon(icons::QUESTION_CIRCLE)
+                    .size(px(13.0))
+                    .text_color(theme.warning)
                     .into_any_element(),
+                "Waiting on you".to_string(),
+                theme.warning,
+            ),
+            Standing::Answering => (
+                ring(super::items::RingState::Running),
+                "Answering".to_string(),
+                theme.text,
+            ),
+            Standing::Asking => (
+                ring(super::items::RingState::Running),
+                format!("Waiting for {}", first_name(&who)),
+                theme.text,
+            ),
+            Standing::Off => (
+                peer_avatar(&conn.peer, 16.0, theme),
+                "Replies off".to_string(),
+                theme.text_muted,
+            ),
+            Standing::Idle => (
+                peer_avatar(&conn.peer, 16.0, theme),
+                "Connected".to_string(),
+                theme.text,
+            ),
+        };
+        let since = SharedString::from(format!(
+            "Connected {}",
+            parts::past_full_ms(conn.created_at)
+        ));
+        let status = super::items::header_status(format!("bot-conn-status-{id}"), mark, word, tone)
+            .tooltip(move |_, cx| {
+                let since = since.clone();
+                cx.new(|_| super::super::session::FindTooltip(since)).into()
+            });
+        let mut controls: Vec<AnyElement> = Vec::new();
+        if editable {
+            controls.push(self.reply_mode_control(&conn, mode_open, theme, cx));
+        }
+        if thread_listed {
+            let thread = PanelItem::Thread(conn.thread_chat_id.clone().unwrap_or_default());
+            controls.push(
+                super::items::icon_button(
+                    "bot-conn-thread",
+                    icons::CHAT_ROUND_LINE,
+                    "Open its thread: where their questions are answered",
+                    theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.open_panel(thread.clone(), cx)))
+                .into_any_element(),
             );
         }
-        self.set_panel_back(
-            "bot-connection-back",
-            "Back to Connections",
-            PanelItem::Network,
-            cx,
-        );
-        let revoked = conn.revoked_at.is_some();
-        let revoking = conn.revoke_requested_at.is_some();
-        let editable = ready && !revoked && !revoking;
         if editable {
-            let (revoke_id, name) = (conn.id.clone(), conn.peer.name.clone());
-            self.set_panel_actions(vec![
+            let (revoke_id, name) = (conn.id.clone(), who.clone());
+            controls.push(
                 super::items::icon_button(
                     "bot-conn-revoke",
                     icons::TRASH_BIN_MINIMALISTIC,
-                    "Revoke connection",
+                    "Disconnect",
                     theme,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -873,166 +945,470 @@ impl Shell {
                     )
                 }))
                 .into_any_element(),
-            ]);
-        }
-        // The owner is beside the title, with their photo.
-        let mut body = div().p(px(8.0)).flex().flex_col();
-        body = body.child(parts::fact(
-            theme,
-            "Connected",
-            SharedString::from(parts::past_full_ms(conn.created_at)),
-        ));
-        if revoked || revoking {
-            body = body.child(parts::fact(
-                theme,
-                "Status",
-                super::items::outcome_value(
-                    if revoked {
-                        "Revoked"
-                    } else {
-                        "Revoking on both sides…"
-                    },
-                    false,
-                    theme,
-                ),
-            ));
-        }
-
-        // ── replies ──
-        let mode_detail = match conn.reply_mode {
-            ReplyMode::Auto => "Answers go back as soon as they are written.",
-            ReplyMode::Review => "Answers wait for you as drafts in Needs you.",
-            ReplyMode::Off => "Questions are declined.",
-        };
-        if editable {
-            body = body.child(parts::section_label(theme, "Replies"));
-            body = body.child(div().mx(px(8.0)).child(parts::segmented(
-                "bot-conn-mode",
-                &[
-                    (ReplyMode::Auto, "Auto"),
-                    (ReplyMode::Review, "Review"),
-                    (ReplyMode::Off, "Off"),
-                ],
-                conn.reply_mode,
-                |this, mode, cx| this.update_connection(None, Some(mode), None, cx),
-                theme,
-                cx,
-            )));
-            body = body.child(
-                div()
-                    .px(px(8.0))
-                    .pt(px(6.0))
-                    .text_size(px(11.5))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(mode_detail)),
             );
-        } else {
-            body = body.child(parts::fact(
-                theme,
-                "Replies",
-                SharedString::from(mode_detail),
-            ));
         }
 
-        // ── what the peer's questions may read ──
-        body = body.child(parts::section_label(theme, "May read"));
+        // ── under the name: which workspace, and what it can read ──
+        let reads = format!(
+            "can read {}",
+            reads_words(conn.scope.as_ref(), &projects, &bot.name)
+        );
+        let line_text = match &theirs {
+            Some(theirs) => format!("{theirs} · {reads}"),
+            None => reads,
+        };
+        let line_key = format!("bot-conn-reads-{id}");
+        let toggle_id = id.to_string();
+        let line = div()
+            .id(SharedString::from(line_key.clone()))
+            .min_w_0()
+            .ml(px(-5.0))
+            .px(px(5.0))
+            .h(px(20.0))
+            .rounded(px(6.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(5.0))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(line_text)),
+            )
+            // Changing what it can read opens in place, under the header.
+            .when(editable && !projects.is_empty(), |el| {
+                el.cursor_pointer()
+                    .text_color(motion::hover_blend(&line_key, theme.text_muted, theme.text))
+                    .bg(if scope_open {
+                        crate::kit::theme::wash(0.07)
+                    } else {
+                        motion::hover_blend(
+                            &line_key,
+                            crate::kit::theme::wash(0.0),
+                            crate::kit::theme::wash(0.07),
+                        )
+                    })
+                    .on_hover(motion::hover_listener(line_key.clone()))
+                    .tooltip(|_, cx| {
+                        cx.new(|_| {
+                            super::super::session::FindTooltip("Change what it can read".into())
+                        })
+                        .into()
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let net = &mut this.board.network;
+                        net.scope_open = match net.scope_open.take() {
+                            Some(open) if open == toggle_id => None,
+                            _ => Some(toggle_id.clone()),
+                        };
+                        cx.notify();
+                    }))
+                    .child(
+                        icon(if scope_open {
+                            icons::ALT_ARROW_DOWN
+                        } else {
+                            icons::PEN
+                        })
+                        .size(px(10.0))
+                        .flex_none()
+                        .text_color(theme.text_faint.opacity(if scope_open {
+                            1.0
+                        } else {
+                            motion::hover_t(&line_key)
+                        })),
+                    )
+            });
+        self.board.panel_header = Some(super::items::item_header(
+            status,
+            controls,
+            super::items::header_title(format!("bot-conn-title-{id}"), &who, theme),
+            Some(line.into_any_element()),
+            theme,
+        ));
+
+        let mut body = div().p(px(8.0)).pb(px(14.0)).flex().flex_col();
+        if scope_open {
+            body = body.child(self.scope_editor(bot, &conn, &projects, theme, cx));
+        }
+        if exchanges.is_empty() {
+            body = body.child(parts::quiet_line(theme, "No questions yet."));
+        }
+        let bot_name = bot.name.clone();
+        for exchange in &exchanges {
+            body = body.child(self.exchange_item(exchange, &who, &bot_name, theme, window, cx));
+        }
+        Some((head, body))
+    }
+
+    /// The reply mode in the bar: a button naming the mode, opening the
+    /// three to choose from with what each does.
+    fn reply_mode_control(
+        &self,
+        conn: &BotConnection,
+        open: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = |mode| match mode {
+            ReplyMode::Auto => "Auto",
+            ReplyMode::Review => "Review",
+            ReplyMode::Off => "Off",
+        };
+        let menu = open.then(|| {
+            let rows = [
+                (
+                    ReplyMode::Auto,
+                    "Answers go back as soon as they are written.",
+                ),
+                (ReplyMode::Review, "Answers wait for you in Needs you."),
+                (ReplyMode::Off, "Their questions are declined."),
+            ]
+            .map(|(mode, detail)| {
+                let on = mode == conn.reply_mode;
+                popover::menu_row(theme, on, format!("bot-conn-mode-{}", label(mode)))
+                    .id(SharedString::from(format!("bot-conn-mode-{}", label(mode))))
+                    .items_start()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.board.network.mode_open = None;
+                        if !on {
+                            this.update_connection(None, Some(mode), None, cx);
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.0))
+                            .child(div().text_color(theme.text).child(label(mode)))
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .line_height(px(15.0))
+                                    .text_color(theme.text_muted)
+                                    .child(detail),
+                            ),
+                    )
+                    .child(div().w(px(14.0)).flex_none().pt(px(3.0)).when(on, |el| {
+                        el.child(icon(icons::CHECK).size(px(12.0)).text_color(theme.text))
+                    }))
+            });
+            let card = popover::popover_card(theme)
+                .w(px(250.0))
+                .p(px(4.0))
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.board.network.mode_open = None;
+                    cx.notify();
+                }))
+                .children(rows);
+            popover::anchored_menu_below_end("bot-conn-mode-menu", card.into_any_element(), None)
+        });
+        let key = "bot-conn-mode";
+        let id = conn.id.clone();
+        div()
+            .id(key)
+            .relative()
+            .flex_none()
+            .h(px(26.0))
+            .pl(px(9.0))
+            .pr(px(7.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(5.0))
+            .cursor_pointer()
+            .text_size(px(12.5))
+            .text_color(theme.text)
+            .bg(if open {
+                crate::kit::theme::ink(0.07)
+            } else {
+                motion::hover_blend(
+                    key,
+                    crate::kit::theme::ink(0.02),
+                    crate::kit::theme::ink(0.07),
+                )
+            })
+            .on_hover(motion::hover_listener(key))
+            .when(!open, |el| {
+                el.tooltip(|_, cx| {
+                    cx.new(|_| {
+                        super::super::session::FindTooltip(
+                            "How their questions are answered".into(),
+                        )
+                    })
+                    .into()
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.board.network.mode_open = Some(id.clone());
+                    cx.notify();
+                }))
+            })
+            .child(label(conn.reply_mode))
+            .child(
+                icon(icons::ALT_ARROW_DOWN)
+                    .size(px(9.0))
+                    .text_color(theme.text_muted),
+            )
+            .children(menu)
+            .into_any_element()
+    }
+
+    /// What a connection can read, to change in place under its header:
+    /// everything the workspace reads, or only the projects ticked.
+    fn scope_editor(
+        &self,
+        bot: &Bot,
+        conn: &BotConnection,
+        projects: &[(String, String)],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let narrowed_ids: Option<Vec<String>> = conn.scope.as_ref().map(|s| match &s.projects {
             ProjectGrant::Selected { space_ids } => space_ids.clone(),
             ProjectGrant::All => projects.iter().map(|(id, _)| id.clone()).collect(),
             ProjectGrant::None => Vec::new(),
         });
-        let same_label = format!("Same as {}", bot.name);
+        let same_label = format!("All {} reads", bot.name);
         let mode = if narrowed_ids.is_some() { 1usize } else { 0 };
-        if editable && !projects.is_empty() {
-            body = body.child(div().mx(px(8.0)).child(parts::segmented(
+        let mut editor = div()
+            .mx(px(4.0))
+            .mb(px(10.0))
+            .p(px(6.0))
+            .rounded(px(10.0))
+            .bg(crate::kit::theme::ink(0.03))
+            .flex()
+            .flex_col()
+            .child(parts::segmented(
                 "bot-conn-scope",
                 &[
                     (0usize, same_label.as_str()),
                     (1usize, "Only some projects"),
                 ],
                 mode,
-                |this, pick, cx| {
-                    let narrow = pick == 1;
-                    this.update_connection(Some(narrow), None, None, cx)
-                },
-                theme,
-                cx,
-            )));
-        }
-        match &narrowed_ids {
-            None => {
-                body = body.child(
-                    div()
-                        .px(px(8.0))
-                        .pt(px(6.0))
-                        .text_size(px(11.5))
-                        .text_color(theme.text_muted)
-                        // A peer only ever reads: what the bot may do stays out.
-                        .child(SharedString::from(format!("{same_label}: {}.", {
-                            let reading = Bot {
-                                capabilities: Default::default(),
-                                ..bot.clone()
-                            };
-                            super::chat::access_summary(&reading, self.state.read(cx))
-                        }))),
-                );
-            }
-            Some(ids) => {
-                let rows = projects.iter().map(|(space_id, name)| {
-                    let on = ids.contains(space_id);
-                    let pick = space_id.clone();
-                    div()
-                        .id(SharedString::from(format!("bot-conn-project-{space_id}")))
-                        .h(px(28.0))
-                        .px(px(8.0))
-                        .rounded(px(7.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(9.0))
-                        .when(editable, |el| {
-                            el.cursor_pointer()
-                                .hover(|s| s.bg(theme.element_hover))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.update_connection(None, None, Some(pick.clone()), cx)
-                                }))
-                        })
-                        .child(check_box(on, theme))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(12.5))
-                                .text_color(theme.text)
-                                .child(SharedString::from(name.clone())),
-                        )
-                });
-                body = body.child(
-                    div()
-                        .mx(px(4.0))
-                        .mt(px(6.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.0))
-                        .children(rows),
-                );
-            }
-        }
-        body = body.child(parts::section_label(theme, "Recent questions"));
-        if exchanges.is_empty() {
-            body = body.child(parts::quiet_line(theme, "No questions yet."));
-        }
-        for exchange in &exchanges {
-            body = body.child(exchange_row(
-                exchange,
-                Some(&conn.peer),
-                &bot.name,
+                |this, pick, cx| this.update_connection(Some(pick == 1), None, None, cx),
                 theme,
                 cx,
             ));
+        if let Some(ids) = &narrowed_ids {
+            let rows = projects.iter().map(|(space_id, name)| {
+                let on = ids.contains(space_id);
+                let pick = space_id.clone();
+                div()
+                    .id(SharedString::from(format!("bot-conn-project-{space_id}")))
+                    .h(px(28.0))
+                    .px(px(6.0))
+                    .rounded(px(7.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(9.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.element_hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.update_connection(None, None, Some(pick.clone()), cx)
+                    }))
+                    .child(check_box(on, theme))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .text_color(theme.text)
+                            .child(SharedString::from(name.clone())),
+                    )
+            });
+            editor = editor.child(
+                div()
+                    .mt(px(4.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .children(rows),
+            );
         }
-        Some((head, body))
+        editor
+    }
+
+    /// One question on a connection's page: which way it went, the
+    /// question, and at the right how it stands (an amber mark when its
+    /// answer waits for review, the ring while it is on its way, that it
+    /// was declined or expired) or just when it was asked. A click opens
+    /// its answer in place; one waiting for review opens the review.
+    fn exchange_item(
+        &self,
+        exchange: &BotExchange,
+        who: &str,
+        bot: &str,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let now = Utc::now();
+        let incoming = exchange.direction == ExchangeDirection::Incoming;
+        let awaiting = exchange.awaiting_review();
+        let open = !awaiting && self.board.network.opened.contains(&exchange.id);
+        let ended = matches!(
+            exchange.state,
+            ExchangeState::Declined | ExchangeState::Expired
+        );
+        let asked = super::items::ago(exchange.asked_at, now);
+        let note: AnyElement = if awaiting {
+            icon(icons::QUESTION_CIRCLE)
+                .size(px(12.0))
+                .text_color(theme.warning)
+                .into_any_element()
+        } else if in_flight(exchange) {
+            super::items::ring_mark(
+                super::items::RingState::Running,
+                (0, 0),
+                self.pulse_ticker.entity_id(),
+                theme,
+            )
+        } else {
+            let text = match exchange.state {
+                ExchangeState::Declined => format!("declined · {asked}"),
+                ExchangeState::Expired => format!("expired · {asked}"),
+                _ => asked,
+            };
+            super::items::trailing(text, theme.text_faint).into_any_element()
+        };
+        let times = SharedString::from(match exchange.answered_at {
+            Some(answered) => format!(
+                "Asked {} · answered {}",
+                parts::past_full_ms(exchange.asked_at),
+                parts::past_full_ms(answered)
+            ),
+            None => format!("Asked {}", parts::past_full_ms(exchange.asked_at)),
+        });
+        let direction = SharedString::from(if incoming {
+            format!("{who} asked {bot}")
+        } else {
+            format!("{bot} asked {who}")
+        });
+        let key = format!("bot-conn-question-{}", exchange.id);
+        let question = div()
+            .text_size(px(12.5))
+            .line_height(px(18.0))
+            .text_color(if ended { theme.text_muted } else { theme.text });
+        let mut content = div().flex_1().min_w_0().flex().flex_col();
+        content = if open {
+            // Its answer as it went (the owner's edit, when there was one).
+            let answer = exchange
+                .review
+                .as_ref()
+                .and_then(|review| review.text.clone())
+                .or_else(|| exchange.answer.clone())
+                .filter(|answer| !answer.trim().is_empty() && !in_flight(exchange) && !ended);
+            content
+                .child(question.child(SharedString::from(exchange.question.trim().to_string())))
+                .child(
+                    div().pt(px(5.0)).child(match answer {
+                        Some(answer) => super::items::panel_markdown(
+                            &answer,
+                            format!("{key}-answer"),
+                            12.5,
+                            theme.text_muted,
+                            theme,
+                            window,
+                        ),
+                        None => div()
+                            .text_size(px(12.0))
+                            .line_height(px(17.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(unanswered_words(exchange, bot)))
+                            .into_any_element(),
+                    }),
+                )
+        } else {
+            content.child(
+                question
+                    .line_clamp(2)
+                    .text_ellipsis()
+                    .child(SharedString::from(transcript::single_line(
+                        &exchange.question,
+                    ))),
+            )
+        };
+        let (id, review) = (exchange.id.clone(), exchange.id.clone());
+        div()
+            .id(SharedString::from(key.clone()))
+            .mx(px(2.0))
+            .px(px(6.0))
+            .py(px(7.0))
+            .rounded(px(10.0))
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap(px(9.0))
+            .cursor_pointer()
+            .bg(if open {
+                crate::kit::theme::wash(0.05)
+            } else {
+                motion::hover_blend(
+                    &key,
+                    crate::kit::theme::wash(0.0),
+                    crate::kit::theme::wash(0.05),
+                )
+            })
+            .on_hover(motion::hover_listener(key.clone()))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if awaiting {
+                    return this.open_panel(PanelItem::Review(review.clone()), cx);
+                }
+                let opened = &mut this.board.network.opened;
+                if !opened.remove(&id) {
+                    opened.insert(id.clone());
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id(SharedString::from(format!("{key}-way")))
+                    .w(px(14.0))
+                    .h(px(18.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .tooltip(move |_, cx| {
+                        let direction = direction.clone();
+                        cx.new(|_| super::super::session::FindTooltip(direction))
+                            .into()
+                    })
+                    .child(
+                        icon(if incoming {
+                            icons::ARROW_DOWN
+                        } else {
+                            icons::ARROW_UP
+                        })
+                        .size(px(11.0))
+                        .text_color(theme.text_muted.opacity(0.8)),
+                    ),
+            )
+            .child(content)
+            .child(
+                div()
+                    .id(SharedString::from(format!("{key}-note")))
+                    .flex_none()
+                    .h(px(18.0))
+                    .flex()
+                    .items_center()
+                    .tooltip(move |_, cx| {
+                        let times = times.clone();
+                        cx.new(|_| super::super::session::FindTooltip(times)).into()
+                    })
+                    .child(note),
+            )
     }
 
     /// Change the open connection: narrow or widen its scope, its reply
@@ -1113,33 +1489,6 @@ fn expiry_words(at: i64) -> String {
     }
 }
 
-/// A row led by the invite glyph.
-fn invite_glyph_row(key: &str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(SharedString::from(key.to_string()))
-        .pl(px(6.0))
-        .pr(px(8.0))
-        .py(px(6.0))
-        .rounded(px(8.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .child(
-            div()
-                .size(px(LEAD))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    icon(icons::LINK)
-                        .size(px(14.0))
-                        .text_color(theme.text_muted),
-                ),
-        )
-}
-
 /// The person behind a connected workspace: their profile photo, round,
 /// or their initial on a neutral disc while it loads, when it fails, or
 /// when they have none (the workspace's initial when the owner is
@@ -1205,113 +1554,6 @@ fn check_box(on: bool, theme: &Theme) -> gpui::Div {
         })
 }
 
-/// One question between bots: the other person, who asked whom, the
-/// question, its state; a click opens it. A former connection's shows its
-/// direction instead.
-fn exchange_row(
-    exchange: &BotExchange,
-    peer: Option<&PeerBot>,
-    bot: &str,
-    theme: &Theme,
-    cx: &mut Context<Shell>,
-) -> gpui::Stateful<gpui::Div> {
-    let incoming = exchange.direction == ExchangeDirection::Incoming;
-    let who = match (incoming, peer) {
-        (true, Some(peer)) => format!("{} asked {bot}", peer.name),
-        (false, Some(peer)) => format!("{bot} asked {}", peer.name),
-        (true, None) => format!("A former connection asked {bot}"),
-        (false, None) => format!("{bot} asked a former connection"),
-    };
-    let lead = match peer {
-        Some(peer) => peer_avatar(peer, 16.0, theme),
-        None => icon(if incoming {
-            icons::ARROW_DOWN
-        } else {
-            icons::ARROW_UP
-        })
-        .size(px(12.0))
-        .text_color(theme.text_muted)
-        .into_any_element(),
-    };
-    let state_color = match exchange.state {
-        // Amber only while it waits on the owner.
-        ExchangeState::AwaitingReview if exchange.awaiting_review() => theme.warning,
-        ExchangeState::Declined | ExchangeState::Expired => theme.text_faint,
-        _ => theme.text_muted.opacity(0.85),
-    };
-    let key = format!("bot-panel-question-{}", exchange.id);
-    // A waiting answer opens where it is reviewed.
-    let item = if exchange.awaiting_review() {
-        PanelItem::Review(exchange.id.clone())
-    } else {
-        PanelItem::Question(exchange.id.clone())
-    };
-    div()
-        .id(SharedString::from(key.clone()))
-        .rounded(px(8.0))
-        .cursor_pointer()
-        .bg(motion::hover_blend(
-            &key,
-            crate::kit::theme::wash(0.0),
-            crate::kit::theme::wash(0.05),
-        ))
-        .on_hover(motion::hover_listener(key.clone()))
-        .on_click(cx.listener(move |this, _, _, cx| this.open_panel(item.clone(), cx)))
-        .pl(px(6.0))
-        .pr(px(8.0))
-        .py(px(6.0))
-        .flex()
-        .flex_row()
-        .items_start()
-        .gap(px(8.0))
-        .child(
-            div()
-                .w(px(LEAD))
-                .flex_none()
-                .flex()
-                .justify_center()
-                .pt(px(1.0))
-                .child(lead),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(1.0))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(12.5))
-                        .line_height(px(17.0))
-                        .text_color(theme.text)
-                        .child(SharedString::from(transcript::single_line(
-                            &exchange.question,
-                        ))),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap(px(4.0))
-                        .text_size(px(11.0))
-                        .line_height(px(14.0))
-                        .text_color(theme.text_muted.opacity(0.85))
-                        .child(SharedString::from(who))
-                        .child("·")
-                        .child(
-                            div()
-                                .text_color(state_color)
-                                .child(SharedString::from(exchange_state_words(exchange))),
-                        )
-                        .child("·")
-                        .child(SharedString::from(parts::ago_ms(exchange.asked_at))),
-                ),
-        )
-}
-
 /// The quiet state in place of the controls while signed out.
 fn signed_out(theme: &Theme) -> gpui::Div {
     div()
@@ -1365,8 +1607,8 @@ fn privacy_note(theme: &Theme) -> gpui::Div {
         .text_color(theme.text_faint)
         .child(
             "Questions and answers pass through Cypher's servers as plain text until \
-             delivered. Answers are scanned for secrets before they leave; that is a \
-             safety net, not a guarantee.",
+             delivered. Likely secrets are removed from answers before they leave, \
+             without guarantee.",
         )
 }
 
@@ -1408,36 +1650,141 @@ mod tests {
         }
     }
 
-    #[test]
-    fn connection_lines_read_mode_then_last_question() {
-        let mut c = conn("c", None, 0);
-        assert_eq!(connection_sub(&c, None), "Auto replies · no questions yet");
-        c.reply_mode = ReplyMode::Review;
-        assert_eq!(
-            connection_sub(&c, Some("last 2h")),
-            "Review replies · last 2h"
-        );
-        c.revoke_requested_at = Some(1);
-        assert_eq!(connection_sub(&c, Some("last 2h")), "Revoking…");
-        let mut asked = BotExchange {
-            id: "x".into(),
+    fn exchange(id: &str, direction: ExchangeDirection, state: ExchangeState) -> BotExchange {
+        BotExchange {
+            id: id.into(),
             bot_id: "b".into(),
             connection_id: "c".into(),
-            direction: ExchangeDirection::Incoming,
+            direction,
             question: "?".into(),
-            answer: Some("Yes.".into()),
-            state: ExchangeState::AwaitingReview,
+            answer: None,
+            state,
             asked_at: 0,
             answered_at: None,
             review: None,
-        };
-        assert_eq!(exchange_state_words(&asked), "awaiting your review");
-        asked.review = Some(cypher_proto::ReviewDecision {
+        }
+    }
+
+    #[test]
+    fn a_connection_stands_by_its_most_pressing_question() {
+        use ExchangeDirection::{Incoming, Outgoing};
+        let mut c = conn("c", None, 0);
+        let of = |c: &BotConnection, list: &[BotExchange]| standing(c, list);
+        assert_eq!(of(&c, &[]), Standing::Idle);
+        let answered = exchange("a", Incoming, ExchangeState::Answered);
+        assert_eq!(of(&c, std::slice::from_ref(&answered)), Standing::Idle);
+        let asked = exchange("o", Outgoing, ExchangeState::Delivered);
+        assert_eq!(of(&c, &[answered.clone(), asked.clone()]), Standing::Asking);
+        let working = exchange("w", Incoming, ExchangeState::Working);
+        assert_eq!(
+            of(&c, &[asked.clone(), working.clone()]),
+            Standing::Answering
+        );
+        let mut draft = exchange("d", Incoming, ExchangeState::AwaitingReview);
+        assert_eq!(
+            of(&c, &[asked.clone(), working, draft.clone()]),
+            Standing::Review
+        );
+        // Reviewed: it is on its way, no longer the owner's to decide.
+        draft.review = Some(cypher_proto::ReviewDecision {
             send: true,
             text: None,
             at: 1,
         });
-        assert_eq!(exchange_state_words(&asked), "sending your answer");
+        assert_eq!(of(&c, std::slice::from_ref(&draft)), Standing::Answering);
+        // Another connection's questions do not count.
+        let mut other = exchange("x", Incoming, ExchangeState::Working);
+        other.connection_id = "elsewhere".into();
+        assert_eq!(of(&c, &[other]), Standing::Idle);
+        c.reply_mode = ReplyMode::Off;
+        assert_eq!(of(&c, &[]), Standing::Off);
+        assert_eq!(of(&c, std::slice::from_ref(&asked)), Standing::Asking);
+        c.revoke_requested_at = Some(1);
+        assert_eq!(of(&c, &[asked]), Standing::Leaving);
+        assert!(Standing::Review.live() && Standing::Asking.live());
+        assert!(!Standing::Off.live() && !Standing::Idle.live());
+    }
+
+    #[test]
+    fn a_connection_names_the_person_then_their_workspace() {
+        let mut peer = conn("c", None, 0).peer;
+        assert_eq!(peer_names(&peer), ("Alice".into(), Some("Ada".into())));
+        peer.owner_name = "  ".into();
+        assert_eq!(peer_names(&peer), ("Ada".into(), None));
+        assert_eq!(first_name("Dana Kim"), "Dana");
+        assert_eq!(first_name("Dana"), "Dana");
+    }
+
+    #[test]
+    fn what_a_connection_reads_is_said_in_a_few_words() {
+        let projects: Vec<(String, String)> = ["billing", "web-api", "mobile-app", "docs"]
+            .iter()
+            .map(|name| (name.to_string(), name.to_string()))
+            .collect();
+        let only = |ids: &[&str]| {
+            narrowed(
+                &BotScope {
+                    projects: ProjectGrant::All,
+                    ..Default::default()
+                },
+                ids.iter().map(|id| id.to_string()).collect(),
+            )
+        };
+        let words = |scope: Option<&BotScope>| reads_words(scope, &projects, "Atlas");
+        assert_eq!(words(None), "everything Atlas reads");
+        assert_eq!(words(Some(&only(&[]))), "no projects");
+        assert_eq!(words(Some(&only(&["billing"]))), "billing");
+        assert_eq!(
+            words(Some(&only(&["web-api", "billing"]))),
+            "billing, web-api"
+        );
+        assert_eq!(
+            words(Some(&only(&["billing", "web-api", "docs"]))),
+            "billing, web-api +1"
+        );
+        // Every project ticked reads as the whole.
+        assert_eq!(
+            words(Some(&only(&["billing", "web-api", "mobile-app", "docs"]))),
+            "everything Atlas reads"
+        );
+    }
+
+    #[test]
+    fn an_opened_question_without_an_answer_says_why() {
+        use ExchangeDirection::{Incoming, Outgoing};
+        let words = |e: &BotExchange| unanswered_words(e, "Atlas");
+        assert_eq!(
+            words(&exchange("a", Incoming, ExchangeState::Working)),
+            "Atlas is writing its answer…"
+        );
+        assert_eq!(
+            words(&exchange("a", Incoming, ExchangeState::Declined)),
+            "Declined."
+        );
+        let mut sending = exchange("a", Incoming, ExchangeState::AwaitingReview);
+        sending.review = Some(cypher_proto::ReviewDecision {
+            send: true,
+            text: None,
+            at: 1,
+        });
+        assert_eq!(words(&sending), "Sending your answer…");
+        assert_eq!(
+            words(&exchange("a", Outgoing, ExchangeState::Queued)),
+            "Waiting for their answer."
+        );
+        assert_eq!(
+            words(&exchange("a", Outgoing, ExchangeState::Expired)),
+            "No answer came; it expired."
+        );
+    }
+
+    #[test]
+    fn an_open_invite_says_how_long_it_has_left() {
+        let hour = 3_600_000;
+        assert_eq!(left_words(5 * 24 * hour + 1, 0), "5d left");
+        assert_eq!(left_words(3 * hour, 0), "3h left");
+        assert_eq!(left_words(10 * 60_000, 0), "soon");
+        assert_eq!(left_words(0, hour), "soon");
     }
 
     #[test]
