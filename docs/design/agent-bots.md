@@ -1295,7 +1295,8 @@ As built, beyond the table:
   and recently ended plans to the agent (the transcript keeps the owner's words).
 - **Hidden threads** (orchestrations, workspace routines, peer questions) never appear
   in the Projects sidebar and never chime, banner or push; the panel's Thread view shows
-  one read-only with a way back to its work item, routine or connection.
+  one read-only, the way back to its work item, routine or connection an arrow left of its
+  title.
 - **A routine** can be granted *Work directly* ("May run commands"), only while the bot
   has it; anything that needs approval waits for the owner in Needs you.
 - **Empty cards** for Routines and Connections show only their header with a quiet

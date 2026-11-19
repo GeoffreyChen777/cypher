@@ -1184,10 +1184,10 @@ impl Shell {
         }
     }
 
-    /// The orchestration's thread, read-only, with the way back to its work.
-    /// The panel draws its body unscrolled: the transcript scrolls itself.
-    /// A hidden thread's transcript, read-only, with a way back to what
-    /// owns it: its work item, routine or connection.
+    /// A hidden thread's transcript, read-only, with the way back to what
+    /// owns it (its work item, routine or connection) as an arrow left of
+    /// the title. The panel draws its body unscrolled: the transcript
+    /// scrolls itself.
     fn render_thread(
         &mut self,
         thread: &str,
@@ -1236,18 +1236,16 @@ impl Shell {
         };
         self.peek(thread, true, cx);
         let view = self.board.peeks.get(thread)?.transcript.clone()?;
-        // A plan's thread is its coordinator, marked as the button that
-        // opened it and named after the title, so it is not taken for one
-        // of the steps' sessions.
+        // The way back is the arrow left of the title, where an item has
+        // its icon.
         let head = PanelHead {
-            glyph: if coordinator {
-                icons::HIERARCHY
-            } else {
-                icons::CHAT_ROUND_LINE
-            },
+            glyph: icons::CHAT_ROUND_LINE,
             tint: None,
             title,
         };
+        self.set_panel_back("bot-thread-back", back_label, back_item, cx);
+        // A plan's thread is its coordinator, named so beside the title: it
+        // is not one of the steps' sessions.
         if coordinator {
             self.board.panel_title_note = Some(
                 div()
@@ -1258,41 +1256,7 @@ impl Shell {
                     .into_any_element(),
             );
         }
-        let back_key = "bot-thread-back";
-        let back = div()
-            .id(back_key)
-            .flex_none()
-            .mx(px(8.0))
-            .mt(px(6.0))
-            .px(px(8.0))
-            .h(px(26.0))
-            .rounded(px(7.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .cursor_pointer()
-            .text_size(px(12.0))
-            .text_color(motion::hover_blend(back_key, theme.text_muted, theme.text))
-            .bg(motion::hover_blend(
-                back_key,
-                crate::kit::theme::wash(0.0),
-                crate::kit::theme::wash(0.06),
-            ))
-            .on_hover(motion::hover_listener(back_key))
-            .on_click(cx.listener(move |this, _, _, cx| this.open_panel(back_item.clone(), cx)))
-            .child(
-                icon(icons::ALT_ARROW_LEFT)
-                    .size(px(12.0))
-                    .text_color(theme.text_muted),
-            )
-            .child(SharedString::from(back_label));
-        let body = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(back)
-            .child(div().flex_1().min_h_0().child(view));
+        let body = div().size_full().child(view);
         Some((head, body))
     }
 }
