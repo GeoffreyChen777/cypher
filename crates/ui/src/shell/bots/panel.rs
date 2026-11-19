@@ -1,7 +1,11 @@
 //! The Botboard's detail panel (§13.1): one item from the sidebar's cards in
 //! full. It slides in from the window's right edge while the chat narrows
-//! ([`super::column`]), closes with × or Esc, and opening another row
-//! replaces its content; the opened row stays highlighted in the sidebar.
+//! ([`super::column`]), opens and closes with the button at the right of
+//! the chat's header (Esc closes it too), and opening another row replaces
+//! its content; the opened row stays highlighted in the sidebar.
+//!
+//! An item is one framed card under its title. The Needs you page is the
+//! exception: its cards stand in the column on their own.
 
 use super::*;
 
@@ -71,6 +75,20 @@ impl Shell {
         cx.notify();
     }
 
+    /// The chat header's button: shut the panel, or open it on what it
+    /// last showed (the Needs you page when that is nothing).
+    pub(in crate::shell) fn toggle_panel(&mut self, cx: &mut Context<Self>) {
+        if self.board.panel.is_some() {
+            return self.close_panel(cx);
+        }
+        let item = self
+            .board
+            .panel_recent
+            .clone()
+            .unwrap_or(PanelItem::NeedsYou);
+        self.open_panel(item, cx);
+    }
+
     /// What an item kept while it was open (the sessions it looked into, a
     /// draft being edited) goes with it.
     pub(super) fn drop_panel_extras(&mut self) {
@@ -132,6 +150,9 @@ impl Shell {
         };
         let from = self.eval_tween(self.board.panel_tween, self.panel_span());
         self.board.panel_tween = Some(WidthTween::new(from, 0.0));
+        // A form shut is a form dropped: the button does not bring it back.
+        self.board.panel_recent =
+            (!matches!(item, PanelItem::NewRoutine | PanelItem::Invite)).then(|| item.clone());
         self.board.panel_last = Some(item);
         // A live session's slot stays for the slide; the rest goes now.
         self.sync_panel_session(cx);
@@ -166,6 +187,7 @@ impl Shell {
     pub(super) fn close_panel_now(&mut self, cx: &mut Context<Self>) {
         self.board.panel = None;
         self.board.panel_last = None;
+        self.board.panel_recent = None;
         self.board.panel_tween = None;
         self.drop_panel_extras();
         self.sync_panel_session(cx);
@@ -193,9 +215,14 @@ impl Shell {
             PanelItem::Project(space_id) => {
                 self.render_project_panel(&bot, space_id, &theme, window, cx)?
             }
-            PanelItem::NeedsYou | PanelItem::Plan(_) | PanelItem::Review(_) => {
-                self.render_needs_panel(&bot, item, &theme, window, cx)?
+            // The Needs you page: its cards alone, no frame or title.
+            PanelItem::NeedsYou => {
+                let page = self.render_needs_page(&bot, &theme, window, cx);
+                return Some(motion::fade_quick("bot-panel-needs", page).into_any_element());
             }
+            // A plan is a work item waiting on its approval: one page.
+            PanelItem::Plan(id) => self.render_work_item(id, &theme, window, cx)?,
+            PanelItem::Review(id) => self.render_question_panel(id, &theme, cx)?,
             PanelItem::WorkItem(_) | PanelItem::Thread(_) => {
                 self.render_work_panel(item, &theme, window, cx)?
             }
@@ -232,32 +259,6 @@ impl Shell {
                 icon(head.glyph)
                     .size(px(15.0))
                     .text_color(head.tint.unwrap_or(theme.text_muted)),
-            );
-        let close_key = "bot-panel-close";
-        let close = div()
-            .id(close_key)
-            .flex_none()
-            .size(px(26.0))
-            .rounded(px(7.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .bg(motion::hover_blend(
-                close_key,
-                crate::kit::theme::wash(0.0),
-                crate::kit::theme::wash(0.12),
-            ))
-            .on_hover(motion::hover_listener(close_key))
-            .tooltip(|_, cx| {
-                cx.new(|_| super::super::session::FindTooltip("Close  esc".into()))
-                    .into()
-            })
-            .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx)))
-            .child(
-                icon(icons::CLOSE)
-                    .size(px(11.0))
-                    .text_color(theme.text_muted),
             );
         let header = div()
             .flex_none()
@@ -299,11 +300,9 @@ impl Shell {
                     )
                     .children(self.board.panel_title_note.take()),
             )
-            .children(self.board.panel_actions.take())
-            .child(close);
+            .children(self.board.panel_actions.take());
         // Replacing the content fades the new item in. A thread's
-        // transcript and the Needs you page scroll themselves, so their
-        // bodies fill the card unscrolled.
+        // transcript scrolls itself, so its body fills the card unscrolled.
         let content_key = SharedString::from(format!("bot-panel-{item:?}"));
         // An empty item: what its body still shows (a filter, say) on top,
         // the message centred in the rest.
@@ -326,10 +325,7 @@ impl Shell {
                         .child(motion::fade_quick(content_key, div().child(empty))),
                 )
                 .into_any_element()
-        } else if matches!(
-            item,
-            PanelItem::Thread(_) | PanelItem::Session(_) | PanelItem::NeedsYou
-        ) {
+        } else if matches!(item, PanelItem::Thread(_) | PanelItem::Session(_)) {
             div()
                 .flex_1()
                 .min_h_0()

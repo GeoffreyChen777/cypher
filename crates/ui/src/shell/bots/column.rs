@@ -125,7 +125,8 @@ impl Shell {
     }
 
     /// The bot's own actions where a tile keeps its own: the activity log,
-    /// pause (or resume) and settings. A press here never starts the window
+    /// pause (or resume), settings, and at the corner the button that opens
+    /// and closes the detail panel. A press here never starts the window
     /// drag the header is.
     fn render_board_actions(&self, bot: &Bot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let edit_id = bot.id.clone();
@@ -163,6 +164,17 @@ impl Shell {
                     cx,
                 )
             }));
+        let open = self.board.panel.is_some();
+        let panel = super::items::icon_button(
+            "bot-header-panel",
+            icons::SIDEBAR_MINIMALISTIC,
+            "Side panel",
+            theme,
+        )
+        // Held down while the panel is open.
+        .when(open, |el| el.bg(crate::kit::theme::ink(0.07)))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx)));
         div()
             .flex_none()
             .flex()
@@ -172,6 +184,7 @@ impl Shell {
             .child(activity)
             .child(pause)
             .child(settings)
+            .child(panel)
             .into_any_element()
     }
 
@@ -269,6 +282,10 @@ impl Shell {
                 if self.board.panel.as_ref() == Some(&item) {
                     self.close_panel(cx);
                 }
+                // Gone: the header's button opens the page instead.
+                if self.board.panel_recent.as_ref() == Some(&item) {
+                    self.board.panel_recent = None;
+                }
                 let card_bg = crate::appearance::chat_style::panel_background(
                     crate::appearance::chat_style::settings(cx),
                     Theme::of(cx),
@@ -307,11 +324,15 @@ impl Shell {
                     .rounded(px(2.0))
                     .hover(move |s| s.bg(wash)),
             );
+        // Clipped only while it slides: at rest the cards' shadows fall
+        // around them like the chat card's, into the gap and the window's
+        // inset.
+        let sliding = width < span - 0.5;
         Some(
             div()
                 .h_full()
                 .flex_none()
-                .overflow_hidden()
+                .when(sliding, |el| el.overflow_hidden())
                 .w(px(width))
                 .child(
                     div()

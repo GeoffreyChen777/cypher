@@ -1070,18 +1070,18 @@ the sidebar. One switcher, the sidebar's logo, picks the view:
 
 ```
 A workspace
-┌ sidebar: status ───┐┌─── chat: notices ─────┐┌─ detail: in full ─┐
-│ Cypher [Atlas] ⇅   ││                       ││ Needs you  2      │
-│ Needs you  2       ││ ▢ Plan · Fix rounding ││ Fix rounding ›    │
-│   Run npm test     ││   Approved  Details › ││ Run this command? │
-│   Plan: Release    ││                       ││   npm test        │
-│ Work               ││ ▢ Morning brief  Done ││ [Deny] [Run once] │
-│   Fix rounding     ││ Three sessions moved; ││───────────────────│
+┌ sidebar: status ───┐┌─── chat: notices ─[◨]┐┌─ detail: in full ─┐
+│ Cypher [Atlas] ⇅   ││                       ││ Fix rounding ›    │
+│ Needs you  2       ││ ▢ Plan · Fix rounding ││ Run this command? │
+│   Run npm test     ││   Approved  Details › ││   npm test        │
+│   Plan: Release    ││                       ││ [Deny] [Run once] │
+│ Work               ││ ▢ Morning brief  Done │└───────────────────┘
+│   Fix rounding     ││ Three sessions moved; │┌───────────────────┐
 │   Step 2 of 4 ▓▓░░ ││ nothing needs you.    ││ Plan to approve   │
 │ Routines           ││                       ││ Release 0.5       │
 │ Projects           ││    ( ▲ 2 need you )   ││ [Reject] [Approve]│
-│   billing          ││ [ Ask Atlas…        ] ││               [×] │
-│     Fix rounding ● │└───────────────────────┘└───────────────────┘
+│   billing          ││ [ Ask Atlas…        ] │└───────────────────┘
+│     Fix rounding ● │└───────────────────────┘
 └────────────────────┘
 ```
 
@@ -1127,8 +1127,9 @@ host: "Bob is paused" (with Resume), "<device> is offline", or "The last run fai
 **Needs you is one page.** Whatever waits on the owner, wherever it comes from (the bot's
 own chat, a plan, a worker session of a plan, a routine's run in the workspace or in a
 project, a connected workspace), is listed in one place and answered there. The page
-stacks a card per item, most pressing first, each its own bordered card with its buttons
-at its foot under a hairline; the page scrolls. Each card names its source ("Fix invoice
+stacks a card per item, most pressing first. The cards stand in the panel's column on
+their own, each shaped like the chat's card with its buttons at its foot under a
+hairline: the page has no frame or title around them, and it scrolls. Each card names its source ("Fix invoice
 rounding › Migrate tables", "Nightly tests · routine", "Plan to approve"), says what is
 asked, and holds the buttons that decide it:
 
@@ -1198,8 +1199,11 @@ no terminal and no session dock.
 
 **The detail panel** slides in from the window's right edge and the chat narrows to make
 room. Its left edge drags to resize it (340 to 760px, never squeezing the chat below
-380px); a double click restores 420px, and the width is saved with the UI settings. It shows one item in full with its actions, closes with × or Esc, and opening
-another row replaces its content; the opened row stays highlighted in the sidebar.
+380px); a double click restores 420px, and the width is saved with the UI settings. It shows one item in full with its actions, and opening
+another row replaces its content; the opened row stays highlighted in the sidebar. The
+button at the right end of the chat's header opens and closes it (Esc closes it too): it
+opens on what the panel last showed, or on Needs you. An item is one card under its
+title; the panel has no close button of its own.
 
 **A session opens live in the panel.** A session the workspace runs in a project (a
 plan's worker, a project routine's) is an ordinary coding session, so the panel shows it

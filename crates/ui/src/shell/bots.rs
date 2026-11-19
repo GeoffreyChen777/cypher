@@ -52,6 +52,9 @@ pub(super) struct BoardUi {
     pub(super) panel: Option<PanelItem>,
     /// What it showed as it slides shut (rendered until the tween ends).
     panel_last: Option<PanelItem>,
+    /// What it showed when it was last shut: what the header's button
+    /// opens it on again.
+    panel_recent: Option<PanelItem>,
     /// The panel's width tween (0 ↔ its width and gap).
     panel_tween: Option<WidthTween>,
     /// The sessions the panel looks into, by chat id (the asking sessions of

@@ -32,17 +32,18 @@ const CARD_ROWS: usize = 5;
 /// it says how many more there are.
 const BLOCK_LINES: usize = 14;
 
-/// The page's inset around its cards, the gap between them, and a card's
-/// own padding.
-const PAGE_PAD: f32 = 12.0;
-const CARD_GAP: f32 = 10.0;
+/// The gap between the page's cards (the gap between the chat and the
+/// panel) and a card's own padding.
+const CARD_GAP: f32 = 8.0;
 const CARD_PAD: f32 = 14.0;
+/// How far a card's shadow reaches past its sides.
+const SHADOW_ROOM: f32 = 4.0;
 
 /// The gap between a card's buttons, a text button's side padding, and an
 /// icon button's side.
 const BUTTON_GAP: f32 = 6.0;
 const BUTTON_PAD: f32 = 12.0;
-const ICON_BUTTON: f32 = 30.0;
+const ICON_BUTTON: f32 = 28.0;
 
 /// The key of the workspace's own question among the items.
 const CHAT_KEY: &str = "chat";
@@ -556,39 +557,31 @@ impl Shell {
         Some(self.fold_card("needs", header, rows, theme))
     }
 
-    /// The detail panel for this card's items; `None` when the item no
-    /// longer resolves.
-    pub(super) fn render_needs_panel(
-        &mut self,
-        bot: &Bot,
-        item: &PanelItem,
-        theme: &Theme,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<(PanelHead, gpui::Div)> {
-        match item {
-            PanelItem::NeedsYou => Some(self.render_needs_page(bot, theme, window, cx)),
-            // A plan is a work item waiting on its approval: one page.
-            PanelItem::Plan(id) => self.render_work_item(id, theme, window, cx),
-            PanelItem::Review(id) => self.render_question_panel(id, theme, cx),
-            _ => None,
-        }
-    }
-
-    /// The page: a card per item, answered in place. It scrolls itself, so
-    /// a row can bring its card into view.
-    fn render_needs_page(
+    /// The page: a card per item, answered in place. The cards stand in
+    /// the panel's column on their own, shaped like the chat's card, with no
+    /// frame or title around them; the page scrolls itself, so a row can
+    /// bring its card into view.
+    pub(super) fn render_needs_page(
         &mut self,
         bot: &Bot,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> (PanelHead, gpui::Div) {
+    ) -> gpui::Div {
         let items = self.current_need_items(bot, cx);
-        let head = PanelHead {
-            glyph: icons::BELL,
-            tint: (!items.is_empty()).then_some(theme.warning),
-            title: "Needs you".into(),
+        let card_bg = crate::appearance::chat_style::panel_background(
+            crate::appearance::chat_style::settings(cx),
+            theme,
+            true,
+        );
+        let card = || {
+            div()
+                .flex_none()
+                .rounded(px(PANEL_CORNER_RADIUS))
+                .bg(card_bg)
+                .shadow_sm()
+                .flex()
+                .flex_col()
         };
         // The sessions this page looks into are the ones still asking.
         let asking: Vec<&str> = items
@@ -603,26 +596,19 @@ impl Shell {
             .retain(|chat_id, _| asking.contains(&chat_id.as_str()));
         if items.is_empty() {
             self.board.needs_focus = None;
-            self.board.panel_empty = Some(
-                parts::panel_empty(
-                    theme,
-                    icons::CHECK,
-                    "You're all caught up",
-                    "Approvals, permission prompts, questions and answers to review land here.",
-                )
-                .into_any_element(),
+            return div().size_full().child(
+                card()
+                    .items_center()
+                    .px(px(CARD_PAD))
+                    .py(px(36.0))
+                    .child(parts::panel_empty(
+                        theme,
+                        icons::CHECK,
+                        "You're all caught up",
+                        "Approvals, permission prompts, questions and answers to review land here.",
+                    )),
             );
-            return (head, div());
         }
-        self.board.panel_title_note = Some(
-            div()
-                .flex_none()
-                .text_size(px(12.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.warning)
-                .child(SharedString::from(items.len().to_string()))
-                .into_any_element(),
-        );
         // A row asked for one card: bring it into view.
         let focus = self.board.needs_focus.take();
         if let Some(ix) = focus
@@ -632,23 +618,16 @@ impl Shell {
             self.board.needs_scroll.scroll_to_item(ix);
         }
         // What a card's buttons have to share.
-        let room = self.panel_width_in(window) - 2.0 * (PAGE_PAD + CARD_PAD + 1.0);
+        let room = self.panel_width_in(window) - 2.0 * CARD_PAD;
         let now = Utc::now();
         let cards: Vec<AnyElement> = items
             .into_iter()
             .map(|item| {
                 let content = self.need_content(&item, room, theme, window, cx);
                 let head = self.need_head(&item, now, theme, cx);
-                div()
-                    .flex_none()
+                card()
                     .p(px(CARD_PAD))
-                    .pt(px(10.0))
-                    .rounded(px(12.0))
-                    .bg(theme.surface_card)
-                    .border_1()
-                    .border_color(theme.border)
-                    .flex()
-                    .flex_col()
+                    .pt(px(12.0))
                     .child(head)
                     .child(
                         div()
@@ -667,19 +646,25 @@ impl Shell {
                     .into_any_element()
             })
             .collect();
-        let body = div().size_full().child(
+        // The list clips what scrolls out of it, so it reaches past the
+        // cards' sides and foot by the room their shadows take.
+        div().size_full().relative().child(
             div()
                 .id("bot-needs-page")
-                .size_full()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(-SHADOW_ROOM))
+                .right(px(-SHADOW_ROOM))
                 .overflow_y_scroll()
                 .track_scroll(&self.board.needs_scroll)
-                .p(px(PAGE_PAD))
+                .px(px(SHADOW_ROOM))
+                .pb(px(SHADOW_ROOM))
                 .flex()
                 .flex_col()
                 .gap(px(CARD_GAP))
                 .children(cards),
-        );
-        (head, body)
+        )
     }
 
     /// A card's first line: where the item comes from, when, and for a
@@ -1435,10 +1420,11 @@ mod tests {
         assert_eq!(fold(528.0), [false; 5]);
         // The refusals go first, together.
         assert_eq!(fold(527.0), [false, false, false, true, true]);
-        assert_eq!(fold(421.0), [false, false, false, true, true]);
+        assert_eq!(fold(417.0), [false, false, false, true, true]);
         // Then the broadest approval, then the next one.
-        assert_eq!(fold(420.0), [false, false, true, true, true]);
-        assert_eq!(fold(344.0), [false, true, true, true, true]);
+        assert_eq!(fold(416.0), [false, false, true, true, true]);
+        assert_eq!(fold(339.0), [false, false, true, true, true]);
+        assert_eq!(fold(338.0), [false, true, true, true, true]);
         // The narrowest approval keeps its label however little room.
         assert_eq!(fold(0.0), [false, true, true, true, true]);
         // An ordinary pair fits anywhere.
