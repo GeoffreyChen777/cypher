@@ -1487,6 +1487,23 @@ impl RegistryDoc {
                 .filter(|r| r.bot_id == bot_id)
                 .map(|r| (p::KIND_BOT_EXCHANGES, r.id.clone())),
         );
+        // The sessions its plans started are ordinary sessions and stay.
+        // With their workspace gone nothing would list them, so they go
+        // back to being the owner's own.
+        let started: Vec<String> = self
+            .read_chats()?
+            .into_iter()
+            .filter(|c| c.started_by.as_ref().is_some_and(|by| by.bot_id == bot_id))
+            .map(|c| c.id)
+            .collect();
+        for chat_id in &started {
+            self.write(
+                KIND_CHATS,
+                chat_id,
+                OpKind::Update,
+                fields([("startedBy", Value::Null)]),
+            );
+        }
         let mut keys: Vec<(&str, &str)> = vec![(KIND_BOTS, bot_id)];
         for chat_id in &chat_ids {
             keys.push((KIND_CHATS, chat_id));
