@@ -664,10 +664,12 @@ impl Shell {
         if thread_listed {
             let thread = PanelItem::Thread(work.thread_chat_id.clone().unwrap_or_default());
             controls.push(
+                // Not a step's session (those are rows under their step):
+                // the one that runs the plan and starts them.
                 super::items::icon_button(
                     "bot-work-thread",
-                    icons::CHAT_ROUND_LINE,
-                    "Open its session",
+                    icons::HIERARCHY,
+                    "Open the coordinator: the session that runs this plan",
                     theme,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.open_panel(thread.clone(), cx)))
@@ -1192,7 +1194,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<(PanelHead, gpui::Div)> {
-        let (title, back_item, back_label) = {
+        let (title, back_item, back_label, coordinator) = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|c| c.id == thread)?;
             let marker = chat.bot.as_ref()?;
@@ -1204,6 +1206,7 @@ impl Shell {
                         work.title.clone(),
                         PanelItem::WorkItem(work.id.clone()),
                         "Back to the work",
+                        true,
                     )
                 }
                 cypher_proto::BotThread::Routine { routine_id }
@@ -1213,6 +1216,7 @@ impl Shell {
                         routine.name.clone(),
                         PanelItem::Routine(routine.id.clone()),
                         "Back to the routine",
+                        false,
                     )
                 }
                 cypher_proto::BotThread::Peer { connection_id } => {
@@ -1224,6 +1228,7 @@ impl Shell {
                         format!("Questions from {}", connection.peer.name),
                         PanelItem::Connection(connection.id.clone()),
                         "Back to the connection",
+                        false,
                     )
                 }
                 cypher_proto::BotThread::Main | cypher_proto::BotThread::Unknown => return None,
@@ -1231,11 +1236,28 @@ impl Shell {
         };
         self.peek(thread, true, cx);
         let view = self.board.peeks.get(thread)?.transcript.clone()?;
+        // A plan's thread is its coordinator, marked as the button that
+        // opened it and named after the title, so it is not taken for one
+        // of the steps' sessions.
         let head = PanelHead {
-            glyph: icons::CHAT_ROUND_LINE,
+            glyph: if coordinator {
+                icons::HIERARCHY
+            } else {
+                icons::CHAT_ROUND_LINE
+            },
             tint: None,
             title,
         };
+        if coordinator {
+            self.board.panel_title_note = Some(
+                div()
+                    .flex_none()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child("Coordinator")
+                    .into_any_element(),
+            );
+        }
         let back_key = "bot-thread-back";
         let back = div()
             .id(back_key)

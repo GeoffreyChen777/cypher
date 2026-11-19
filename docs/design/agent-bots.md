@@ -1228,7 +1228,9 @@ motion (`kit/progress_ring.rs`).
 
 - **The bar:** at the left its status, the mark and a word in its tone (Awaiting approval,
   Approved, Running, Waiting on you, Stopping, Done, Failed, Stopped, Rejected), with its
-  times on hover. At the right every button: its session, Delete once it ended, the pen
+  times on hover. At the right every button: its coordinator (the hidden session that runs the plan and
+  starts each step's sessions, read-only; a step's own sessions open from their rows
+  under the step), Delete once it ended, the pen
   (reject and start the reply that asks for a change), Reject and Approve while it waits,
   Stop while it runs (a second click confirms). The page has no footer.
 - **Title**, then one line of where it stands ("Step 2 of 4 · 12m", "Took 12m · 3h ago",
