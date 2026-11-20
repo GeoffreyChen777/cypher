@@ -83,13 +83,10 @@ private final class NotificationFixture {
 
 @MainActor
 final class NotificationControllerTests: XCTestCase {
-    private func wait(_ condition: () -> Bool) async throws {
-        for _ in 0..<100 {
-            if condition() { return }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        XCTFail("Notification operation did not settle")
-        throw RelayError.timeout
+    private func wait(
+        file: StaticString = #filePath, line: UInt = #line, _ condition: @MainActor () -> Bool
+    ) async throws {
+        try await waitUntil("the notification operation to settle", file: file, line: line, condition)
     }
     private func payload(_ character: Character = "a") -> PushPayload {
         PushPayload(

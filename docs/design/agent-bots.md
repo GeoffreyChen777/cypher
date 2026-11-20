@@ -1508,7 +1508,7 @@ shared frame vectors, and a two-user smoke with one bot each.
 
 As built for P4: `apps/edge/test/workerd/bot-room.workerd.test.ts` (real BotRoom and
 DeviceRoom objects behind the route table), `bot-frames.test.ts` and
-`crates/proto/src/bot_wire.rs` on the shared vectors, `crates/engine/tests/bot_network.rs`
+`crates/proto/src/bot_wire.rs` on the shared vectors, `crates/engine/tests/it/bots/network.rs`
 (two engines as two users through an in-process fake Edge), and `scripts/e2e-bots.sh`
 (local `wrangler dev`, two headless engines, `crates/rpc/examples/bot_network_driver.rs`).
 

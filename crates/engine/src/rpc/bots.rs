@@ -198,11 +198,25 @@ impl EngineRpc {
                     .map(|r| [r.thread_chat_id, r.manual_chat_id])
                     .unwrap_or_default();
                 ws.delete_records(p::KIND_BOT_ROUTINES, &[routine_id]);
-                for chat in sessions.into_iter().flatten() {
-                    if let Err(err) = ws.delete_chat(&chat) {
+                let sessions: Vec<String> = sessions.into_iter().flatten().collect();
+                for chat in &sessions {
+                    if let Err(err) = ws.delete_chat(chat) {
                         tracing::warn!(chat = %chat, error = %err, "routine session not deleted");
                     }
                 }
+                // A run still going claims its deleted row back with its
+                // next write: stop it, then take the row again.
+                let engine = self.sessions.clone();
+                let workspace = ws.clone();
+                tokio::spawn(async move {
+                    for chat in sessions {
+                        if matches!(engine.interrupt(&chat).await, Ok(true))
+                            && let Err(err) = workspace.delete_chat(&chat)
+                        {
+                            tracing::warn!(chat = %chat, error = %err, "routine session not deleted");
+                        }
+                    }
+                });
             }
             MutateParams::DeleteBotShortcut { shortcut_id } => {
                 ws.delete_records(p::KIND_BOT_SHORTCUTS, &[shortcut_id]);

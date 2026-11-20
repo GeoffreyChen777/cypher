@@ -210,7 +210,7 @@ struct DocHostInner {
     moved_cwds: Mutex<HashMap<String, migration::MovedCwd>>,
     /// Shared client for sidecar blob fetches (30s timeout, uploads.rs
     /// discipline — diff_sync's untimed client hung on dead links).
-    http: reqwest::Client,
+    http: crate::util::LazyHttp,
     /// Device trust for commands (see `set_command_trust`); unset without
     /// it, when commands are neither signed nor checked.
     command_trust: Mutex<Option<Arc<dyn CommandTrust>>>,
@@ -532,10 +532,12 @@ impl DocHost {
                 attachment_wakes: Mutex::new(HashSet::new()),
                 held: Mutex::new(HashSet::new()),
                 moved_cwds: Mutex::new(HashMap::new()),
-                http: reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()
-                    .unwrap_or_else(|_| reqwest::Client::new()),
+                http: crate::util::LazyHttp::new(|| {
+                    reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .unwrap_or_else(|_| reqwest::Client::new())
+                }),
                 command_trust: Mutex::new(None),
             }),
         }

@@ -35,12 +35,12 @@ final class WorkspaceDiffWebTests: XCTestCase {
     /// once its rows are mounted; their highlighting, layout and scroll
     /// position settle over the frames after that.
     private func eventually(
-        _ web: WKWebView, _ script: String, timeout: Duration = .seconds(5)
+        _ web: WKWebView, _ script: String, timeout: Duration = waitBudget
     ) async throws -> Bool {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if (try await web.evaluateJavaScript(script)) as? Bool == true { return true }
-            try await Task.sleep(for: .milliseconds(50))
+            try await Task.sleep(for: .milliseconds(20))
         }
         return false
     }
@@ -102,15 +102,15 @@ final class WorkspaceDiffWebTests: XCTestCase {
                 try await Task.sleep(for: .milliseconds(100))
             }
         }
-        func waitForHighlight(in web: WKWebView, file: Bool = false) async throws {
-            for _ in 0..<50 {
+        func waitForHighlight(
+            in web: WKWebView, file: Bool = false, sourceFile: StaticString = #filePath, line: UInt = #line
+        ) async throws {
+            try await waitUntil("the worker's highlighted \(file ? "file" : "diff")", file: sourceFile, line: line) {
                 let count =
                     try await web.evaluateJavaScript(
                         "window.cypherDiff.inspect().\(file ? "cachedFiles" : "cachedDiffs")") as? Int
-                if (count ?? 0) > 0 { return }
-                try await Task.sleep(for: .milliseconds(100))
+                return (count ?? 0) > 0
             }
-            XCTFail("Worker did not produce the highlighted diff")
         }
     }
 
@@ -194,15 +194,10 @@ final class WorkspaceDiffWebTests: XCTestCase {
         print("[diff renderer] 3000-line fixture: \(nodes ?? -1) mounted shadow DOM elements")
         XCTAssertLessThan(try XCTUnwrap(nodes), 2_000, "Only a viewport of token spans should be mounted")
         _ = try await web.evaluateJavaScript("window.scrollTo(0, document.documentElement.scrollHeight)")
-        var reachedEnd = false
-        for _ in 0..<30 {
-            reachedEnd =
-                (try await web.evaluateJavaScript(
-                    "document.querySelector('diffs-container').shadowRoot.querySelector('pre').textContent.includes('let value3000 = 3000')"
-                ) as? Bool) == true
-            if reachedEnd { break }
-            try await Task.sleep(for: .milliseconds(100))
-        }
+        let reachedEnd = try await eventually(
+            web,
+            "document.querySelector('diffs-container').shadowRoot.querySelector('pre').textContent.includes('let value3000 = 3000')"
+        )
         XCTAssertTrue(reachedEnd, "Virtualized scrolling must reveal the final line, not truncate the document")
         let bottomNodes =
             try await web.evaluateJavaScript(
@@ -253,16 +248,11 @@ final class WorkspaceDiffWebTests: XCTestCase {
         XCTAssertEqual(focus, #"{"start":200,"end":202}"#)
         let scrolled = try await web.evaluateJavaScript("window.scrollY") as? Double
         XCTAssertGreaterThan(scrolled ?? 0, 1_000, "the cited lines are scrolled into view")
-        var selected = 0
-        for _ in 0..<30 {
-            selected =
-                (try await web.evaluateJavaScript(
-                    "document.querySelector('diffs-container').shadowRoot.querySelectorAll('[data-selected-line]').length"
-                ) as? Int) ?? 0
-            if selected > 0 { break }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        XCTAssertGreaterThan(selected, 0)
+        let selected = try await eventually(
+            web,
+            "document.querySelector('diffs-container').shadowRoot.querySelectorAll('[data-selected-line]').length > 0"
+        )
+        XCTAssertTrue(selected, "the cited lines are marked")
     }
 
     /// Pierre's whole-file window, centred on 50-line slices, dropped every
@@ -277,13 +267,8 @@ final class WorkspaceDiffWebTests: XCTestCase {
             Math.max(...[...document.querySelector('diffs-container').shadowRoot
               .querySelectorAll('[data-line]')].map(row => +row.getAttribute('data-line')))
             """
-        var last = 0
-        for _ in 0..<30 {
-            last = (try await web.evaluateJavaScript(lastRow) as? Int) ?? 0
-            if last >= 60 { break }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        XCTAssertGreaterThanOrEqual(last, 60)
+        let complete = try await eventually(web, "\(lastRow) >= 60")
+        XCTAssertTrue(complete, "every row of the file is mounted")
         let scrolled = try await web.evaluateJavaScript("window.scrollY") as? Double
         XCTAssertGreaterThan(scrolled ?? 0, 0)
     }
@@ -294,17 +279,25 @@ final class WorkspaceDiffWebTests: XCTestCase {
         let fixture = try Fixture(patch: "", source: .init(text: text), comment: { quotes.append($0) })
         defer { fixture.close() }
         let web = try await fixture.wait()
-        _ = try await web.evaluateJavaScript(
+        // The rows are mounted plain and replaced when their highlighting
+        // arrives, and a row replaced under a selection drops out of it (the
+        // comment then took two lines of three). Select once the highlighted
+        // rows are in, and until the selection holds all three lines.
+        try await fixture.waitForHighlight(in: web, file: true)
+        let selected = try await eventually(
+            web,
             """
             (() => { const lines = [...document.querySelector('diffs-container').shadowRoot
                 .querySelectorAll('[data-content] [data-line]')];
+              if (lines.length < 5) return false;
               document.getSelection().setBaseAndExtent(lines[2], 0, lines[4], lines[4].childNodes.length);
-              return true; })()
+              return document.getSelection().toString().includes('let value5 = 5'); })()
             """)
+        XCTAssertTrue(selected, "lines 3 to 5 are selected")
         let view = try XCTUnwrap(web as? WorkspaceWebView)
         XCTAssertTrue(view.commentsEnabled)
         view.commentOnSelection?()
-        for _ in 0..<20 where quotes.isEmpty { try await Task.sleep(for: .milliseconds(100)) }
+        try await waitUntil("the comment's quote") { !quotes.isEmpty }
         XCTAssertEqual(quotes, ["let value3 = 3\nlet value4 = 4\nlet value5 = 5"])
         let cleared = try await web.evaluateJavaScript("document.getSelection().toString()") as? String
         XCTAssertEqual(cleared, "", "the selection goes once commented on")
@@ -368,12 +361,7 @@ final class WorkspaceDiffWebTests: XCTestCase {
             """
             document.querySelector('diffs-container').shadowRoot.querySelector('[data-expand-button]').click()
             """)
-        var expanded = false
-        for _ in 0..<60 {
-            expanded = ((try await web.evaluateJavaScript(text)) as? String)?.contains("let value2 = 2") == true
-            if expanded { break }
-            try await Task.sleep(for: .milliseconds(100))
-        }
+        let expanded = try await eventually(web, "\(text).includes('let value2 = 2')")
         XCTAssertTrue(expanded, "Collapsed unchanged prefix should display its real source")
         XCTAssertEqual(requested, ["Sources/Example.swift"])
         _ = try await web.evaluateJavaScript(
@@ -403,15 +391,9 @@ final class WorkspaceDiffWebTests: XCTestCase {
         let web = try await fixture.wait()
         _ = try await web.evaluateJavaScript(
             "document.querySelector('diffs-container').shadowRoot.querySelector('[data-expand-button]').click()")
-        var notice = ""
-        for _ in 0..<40 {
-            notice =
-                (try await web.evaluateJavaScript("document.querySelector('.context-notice').textContent")) as? String
-                ?? ""
-            if notice.contains("Refresh") { break }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        XCTAssertTrue(notice.contains("Refresh"))
+        let noticed = try await eventually(
+            web, "(document.querySelector('.context-notice')?.textContent ?? '').includes('Refresh')")
+        XCTAssertTrue(noticed, "a stale context asks for a refresh")
         XCTAssertEqual(fixture.status, .rendered, "One failed expansion should not blank the whole list")
         let text =
             try await web.evaluateJavaScript(
@@ -437,16 +419,11 @@ final class WorkspaceDiffWebTests: XCTestCase {
         defer { fixture.close() }
         let web = try await fixture.wait()
         _ = try await web.evaluateJavaScript("document.querySelector('.context-notice button').click()")
-        var visible = false
-        for _ in 0..<50 {
-            visible =
-                (try await web.evaluateJavaScript(
-                    """
-                    document.querySelector('diffs-container')?.shadowRoot?.querySelector('pre')?.textContent.includes('unchanged') ?? false
-                    """)) as? Bool ?? false
-            if visible { break }
-            try await Task.sleep(for: .milliseconds(100))
-        }
+        let visible = try await eventually(
+            web,
+            """
+            document.querySelector('diffs-container')?.shadowRoot?.querySelector('pre')?.textContent.includes('unchanged') ?? false
+            """)
         XCTAssertTrue(visible)
         let editable = try await web.evaluateJavaScript(
             """
@@ -686,10 +663,7 @@ final class WorkspaceDiffWebTests: XCTestCase {
               event:'error', id:window.cypherDiff.inspect().id
             }); true
             """)
-        for _ in 0..<50 {
-            if firstSubview(UITextView.self, in: host.view) != nil { break }
-            try await Task.sleep(for: .milliseconds(100))
-        }
+        try await waitUntil("the plain-text fallback") { firstSubview(UITextView.self, in: host.view) != nil }
         let plain = try XCTUnwrap(firstSubview(UITextView.self, in: host.view))
         XCTAssertEqual(plain.text, source)
         XCTAssertFalse(plain.isEditable)

@@ -10,13 +10,11 @@ import SwiftUI
 /// pinned to compact width, the phone's stack, on any simulator.
 @MainActor
 final class NotificationNavigationTests: XCTestCase {
-    private func settle(_ what: String, _ condition: () -> Bool) async throws {
-        for _ in 0..<150 {
-            if condition() { return }
-            try await Task.sleep(for: .milliseconds(40))
-        }
-        XCTFail("Did not settle: \(what)")
-        throw NSError(domain: "NotificationNavigationTests", code: 1)
+    private func settle(
+        _ what: String, file: StaticString = #filePath, line: UInt = #line,
+        _ condition: @MainActor () -> Bool
+    ) async throws {
+        try await waitUntil(what, file: file, line: line, condition)
     }
 
     private func views<T: UIView>(of type: T.Type, in root: UIView) -> [T] {
@@ -142,13 +140,13 @@ final class NotificationNavigationTests: XCTestCase {
             nav.topViewController?.title ?? nav.navigationBar.topItem?.title
         }
 
-        func expect(_ what: String, depth: Int) async throws {
-            for tick in 0..<80 {
-                try await Task.sleep(for: .milliseconds(50))
-                if nav.viewControllers.count == depth && nav.transitionCoordinator == nil { return }
+        func expect(_ what: String, depth: Int, line: UInt = #line) async throws {
+            // The tap is consumed before the path moves, so a stack already
+            // at `depth` (a pop followed by a push) is not mistaken for done.
+            try await waitUntil(what, line: line) {
+                controller.pendingNavigation == nil && nav.viewControllers.count == depth
+                    && nav.transitionCoordinator == nil
             }
-            XCTFail("Did not settle: \(what)")
-            throw NSError(domain: "NotificationNavigationTests", code: 2)
         }
         // Cold-start shape: nothing pushed yet.
         tap("chat-tabs")
@@ -166,27 +164,29 @@ final class NotificationNavigationTests: XCTestCase {
         tap("chat-tabs")
         try await expect("pop to first", depth: 2)
         // Two taps in quick succession, the second landing mid-transition:
-        // the second waits for the first push to finish, then lands.
+        // the second waits for the first push to finish, then lands. The
+        // second is sent once the first push is on the stack, not after a
+        // fixed pause: a tap is held back while an earlier transition
+        // settles, and a second one arriving meanwhile replaces it.
         tap("chat-oklch")
-        try await Task.sleep(for: .milliseconds(120))
+        try await waitUntil("the first of two rapid taps to push") { nav.viewControllers.count == 3 }
         tap("chat-picker")
         try await expect("rapid taps", depth: 4)
         XCTAssertEqual(nav.topViewController?.navigationItem.title, "Model picker catalog sync")
         // A user pop with a tap arriving during the animation.
         nav.popViewController(animated: true)
-        try await Task.sleep(for: .milliseconds(60))
         tap("chat-deploy", project: "space-edge")
         try await expect("tap during pop", depth: 4)
         XCTAssertEqual(nav.topViewController?.navigationItem.title, "Wrangler deploy hygiene")
         // The same chat that is already visible: nothing is pushed again.
         let before = nav.viewControllers.count
         tap("chat-deploy", project: "space-edge")
-        try await Task.sleep(for: .seconds(1))
-        XCTAssertEqual(nav.viewControllers.count, before)
-        XCTAssertNil(controller.pendingNavigation)
+        try await expect("a tap on the visible chat", depth: before)
         // An input request notification.
         tap("chat-veil", kind: "input")
-        try await settle("input open") { nav.transitionCoordinator == nil }
+        try await settle("input open") {
+            controller.pendingNavigation == nil && nav.transitionCoordinator == nil
+        }
         XCTAssertNil(controller.navigationError)
     }
 }
@@ -230,21 +230,17 @@ extension NotificationNavigationTests {
                 userId: "u", orgId: "org", deviceId: "phone", deviceName: "Test",
                 devBearer: "u@org"))
         defer { controller.disconnect() }
-        for _ in 0..<100 where controller.pendingNavigation == nil {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        try await settle("the deferred tap to complete on bind") { controller.pendingNavigation != nil }
         XCTAssertEqual(controller.pendingNavigation?.chatId, "chat-veil", "deferred tap completes on bind/refresh")
         let hosted = try HostedWindow(HomeView().environment(model).environment(\.horizontalSizeClass, .compact))
         defer { hosted.close() }
         let hostVC = hosted.host
         try await settle("home mounted") { navigationController(in: hostVC) != nil }
         let nav = try XCTUnwrap(navigationController(in: hostVC))
-        for _ in 0..<100 {
-            try await Task.sleep(for: .milliseconds(50))
-            if nav.viewControllers.count == 2 && nav.transitionCoordinator == nil { break }
+        try await settle("the pending tap to open its session") {
+            controller.pendingNavigation == nil && nav.viewControllers.count == 2
+                && nav.transitionCoordinator == nil
         }
-        XCTAssertEqual(nav.viewControllers.count, 2)
-        XCTAssertNil(controller.pendingNavigation)
     }
 }
 

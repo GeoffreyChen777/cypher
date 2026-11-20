@@ -42,13 +42,11 @@ final class ComposerDraftTests: XCTestCase {
             if view is UITextField || view is UITextView { return view }
             return view.subviews.lazy.compactMap { editor($0) }.first
         }
-        func settle(_ message: String, _ condition: () -> Bool) async throws {
-            for _ in 0..<75 {
+        func settle(_ message: String, _ condition: @MainActor () -> Bool) async throws {
+            try await waitUntil("\(message); height=\(height)") {
                 host.view.layoutIfNeeded()
-                if condition() { return }
-                try await Task.sleep(for: .milliseconds(20))
+                return condition()
             }
-            XCTFail("\(message); height=\(height)")
         }
         try await settle("initial collapsed editor") { editor(host.view) != nil && height > 0 && height < 100 }
         let field = try XCTUnwrap(editor(host.view))
@@ -90,13 +88,11 @@ final class ComposerDraftTests: XCTestCase {
         func text(_ view: UIView) -> String {
             (view as? UITextView)?.text ?? (view as? UITextField)?.text ?? ""
         }
-        func settle(_ condition: () -> Bool) async throws {
-            for _ in 0..<50 {
+        func settle(_ condition: @MainActor () -> Bool) async throws {
+            try await waitUntil("the composer update to settle") {
                 host.view.layoutIfNeeded()
-                if condition() { return }
-                try await Task.sleep(for: .milliseconds(20))
+                return condition()
             }
-            XCTFail("Composer update did not settle")
         }
         try await settle { editors(host.view).contains { text($0) == draft.text } }
         let old = try XCTUnwrap(editors(host.view).first { text($0) == draft.text })

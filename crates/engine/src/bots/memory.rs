@@ -198,7 +198,7 @@ impl Bots {
                     format!("Delete the routine \"{}\"", routine.name),
                 )
                 .await?;
-                self.delete_routine(&bot, chat, &routine)
+                self.delete_routine(&bot, chat, &routine).await
             }
             _ => Err(refuse(tool)),
         }
@@ -260,7 +260,7 @@ impl Bots {
 
     /// Delete a routine, like the routine page's Delete: its sessions go
     /// with it; a worktree it made stays on disk.
-    fn delete_routine(
+    async fn delete_routine(
         &self,
         bot: &Bot,
         chat: &p::Chat,
@@ -272,6 +272,13 @@ impl Bots {
             .into_iter()
             .flatten()
         {
+            // A run still going stops first: its next write would claim the
+            // deleted row back.
+            if let Some(sessions) = self.inner.doc_host.sessions()
+                && let Err(err) = sessions.interrupt(session).await
+            {
+                tracing::debug!(chat = %session, error = %err, "routine run not interrupted");
+            }
             if let Err(err) = workspace.delete_chat(session) {
                 tracing::warn!(chat = %session, error = %err, "routine session not deleted");
             }

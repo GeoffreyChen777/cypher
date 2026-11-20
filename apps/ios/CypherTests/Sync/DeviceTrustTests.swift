@@ -138,9 +138,9 @@ final class DeviceTrustStoreTests: XCTestCase {
     /// The desktop's side of pairing: wait for the join, approve it.
     private func approve(on edge: FakeTrustEdge, desktop: Desktop, code: PairingCode) async throws -> TrustEntry {
         var request: Data?
-        for _ in 0..<200 where request == nil {
+        try await waitUntil("the phone's join request") {
             request = try await edge.get(mailbox: code.mailbox, slot: "join")
-            if request == nil { try await Task.sleep(for: .milliseconds(20)) }
+            return request != nil
         }
         struct Join: Decodable {
             let device: TrustDevicePublic
@@ -166,11 +166,6 @@ final class DeviceTrustStoreTests: XCTestCase {
         return edge
     }
 
-    private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
-        for _ in 0..<500 where !condition() { try await Task.sleep(for: .milliseconds(20)) }
-        XCTAssertTrue(condition())
-    }
-
     func testJoiningWithACodeMakesTheDesktopsTrusted() async throws {
         let desktop = Desktop(id: "mac-1")
         let edge = try await founded(by: desktop)
@@ -183,7 +178,7 @@ final class DeviceTrustStoreTests: XCTestCase {
         trust.join(code: code.display)
         XCTAssertTrue(trust.joining)
         _ = try await approve(on: edge, desktop: desktop, code: code)
-        try await waitUntil { trust.phase == .paired }
+        try await waitUntil("the trust state") { trust.phase == .paired }
         XCTAssertFalse(trust.joining)
         XCTAssertEqual(trust.hostKey(for: "mac-1")?.rawRepresentation, desktop.keys.dh.publicKey.rawRepresentation)
         XCTAssertEqual(trust.members.map(\.id).sorted(), ["ios-1", "mac-1"])
@@ -231,7 +226,7 @@ final class DeviceTrustStoreTests: XCTestCase {
         let code = try XCTUnwrap(PairingCode("ABCD-EFGH-JKMN-PQRS-TVWX"))
         trust.join(code: code.display)
         _ = try await approve(on: edge, desktop: desktop, code: code)
-        try await waitUntil { trust.phase == .paired }
+        try await waitUntil("the trust state") { trust.phase == .paired }
         let sig = try XCTUnwrap(trust.signCommand(bytes).flatMap(TrustHex.decode))
         XCTAssertTrue(trust.keys.sign.publicKey.isValidSignature(sig, for: bytes))
         // Only command bytes: never a trust entry.
@@ -246,7 +241,7 @@ final class DeviceTrustStoreTests: XCTestCase {
         let code = try XCTUnwrap(PairingCode("ABCD-EFGH-JKMN-PQRS-TVWX"))
         trust.join(code: code.display)
         _ = try await approve(on: edge, desktop: desktop, code: code)
-        try await waitUntil { trust.phase == .paired }
+        try await waitUntil("the trust state") { trust.phase == .paired }
 
         let bytes = CommandSigning.signingBytes(
             chatId: "chat",
@@ -276,7 +271,7 @@ final class DeviceTrustStoreTests: XCTestCase {
         let phone = trust.keys.record(id: "ios-1", name: "iPhone")
         let fake = [genesis, try attacker.sign(seq: 1, after: [genesis], kind: "add", device: phone)]
         await edge.replace(fake)
-        try await waitUntil { !trust.joining }
+        try await waitUntil("the trust state") { !trust.joining }
         XCTAssertNotEqual(trust.phase, .paired)
         XCTAssertNotNil(trust.error)
         XCTAssertNil(trust.hostKey(for: "attacker"))
@@ -291,7 +286,7 @@ final class DeviceTrustStoreTests: XCTestCase {
         let code = try XCTUnwrap(PairingCode("ABCD-EFGH-JKMN-PQRS-TVWX"))
         trust.join(code: code.display)
         _ = try await approve(on: edge, desktop: desktop, code: code)
-        try await waitUntil { trust.phase == .paired }
+        try await waitUntil("the trust state") { trust.phase == .paired }
 
         let attacker = Desktop(id: "attacker")
         await edge.replace([try attacker.sign(seq: 0, after: [], kind: "add", device: attacker.record)])
@@ -313,7 +308,7 @@ final class DeviceTrustStoreTests: XCTestCase {
         var code = try XCTUnwrap(PairingCode("ABCD-EFGH-JKMN-PQRS-TVWX"))
         trust.join(code: code.display)
         let added = try await approve(on: edge, desktop: desktop, code: code)
-        try await waitUntil { trust.phase == .paired }
+        try await waitUntil("the trust state") { trust.phase == .paired }
 
         var chain = try await edge.chain()
         try await edge.append(desktop.sign(seq: chain.count, after: chain, kind: "remove", device: added.device))
@@ -325,7 +320,7 @@ final class DeviceTrustStoreTests: XCTestCase {
         code = try XCTUnwrap(PairingCode("ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZ1"))
         trust.join(code: code.display)
         _ = try await approve(on: edge, desktop: desktop, code: code)
-        try await waitUntil { trust.phase == .paired }
+        try await waitUntil("the trust state") { trust.phase == .paired }
         XCTAssertNotEqual(trust.keys.dh.publicKey.rawRepresentation, oldKey)
         chain = try await edge.chain()
         XCTAssertEqual(chain.last?.device.dhPub, TrustHex.encode(trust.keys.dh.publicKey.rawRepresentation))

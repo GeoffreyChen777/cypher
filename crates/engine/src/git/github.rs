@@ -212,7 +212,7 @@ type LocalCredentials = HashMap<Option<PathBuf>, (Instant, Vec<Credential>)>;
 struct Inner {
     config: GithubConfig,
     account_path: PathBuf,
-    http: reqwest::Client,
+    http: crate::util::LazyHttp,
     /// Serializes load/refresh/sign-out: refresh tokens rotate, so two
     /// concurrent refreshes would invalidate each other.
     account: tokio::sync::Mutex<AccountSlot>,
@@ -373,11 +373,13 @@ impl Github {
     /// `data_dir` is the device root (the account is device-scoped, like
     /// agent CLI logins).
     pub fn new(config: GithubConfig, data_dir: &Path) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(API_TIMEOUT)
-            .user_agent(concat!("cypher/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http = crate::util::LazyHttp::new(|| {
+            reqwest::Client::builder()
+                .timeout(API_TIMEOUT)
+                .user_agent(concat!("cypher/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        });
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -479,6 +481,7 @@ impl Github {
         let response = self
             .inner
             .http
+            .get()
             .post(format!(
                 "{}/login/oauth/access_token",
                 self.inner.config.web_base
@@ -604,6 +607,7 @@ impl Github {
         let response = self
             .inner
             .http
+            .get()
             .get(format!("{}{path}", self.inner.config.api_base))
             .bearer_auth(token)
             .header("Accept", "application/vnd.github+json")
@@ -862,6 +866,7 @@ impl Github {
         let response = self
             .inner
             .http
+            .get()
             .post(format!("{}/login/device/code", self.inner.config.web_base))
             .header("Accept", "application/json")
             .form(&[("client_id", client_id.as_str())])
@@ -947,6 +952,7 @@ impl Github {
             let response = self
                 .inner
                 .http
+                .get()
                 .post(format!(
                     "{}/login/oauth/access_token",
                     self.inner.config.web_base

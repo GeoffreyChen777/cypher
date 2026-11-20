@@ -51,6 +51,8 @@ pub(super) struct PassState {
     /// Stores whose nightly check found nothing this hour (no row write
     /// per tick).
     skipped: std::sync::Mutex<HashSet<String>>,
+    /// No pass starts by the clock ([`Memory::hold_nightly_passes`]).
+    pub nightly_held: std::sync::atomic::AtomicBool,
 }
 
 /// One store this device may run passes for.
@@ -264,7 +266,12 @@ impl Memory {
             .and_then(|r| r.pass_requested_at)
             .filter(|at| last_at.is_none_or(|last| *at > last));
         let consolidation = row.as_ref().map(|r| r.consolidation).unwrap_or_default();
-        let nightly = consolidation.enabled
+        let nightly = !self
+            .inner
+            .passes
+            .nightly_held
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && consolidation.enabled
             && now.hour() as u8 == consolidation.hour
             && last_at.is_none_or(|last| now_ms - last >= NIGHTLY_GAP_MS);
         if requested.is_none() && !nightly {

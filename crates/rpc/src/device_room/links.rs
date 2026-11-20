@@ -25,12 +25,9 @@ use super::{
 };
 use crate::{RpcClient, RpcError, lock};
 
-/// In-call dial retries (see [`LinkCache::client`]): total attempts, and the
-/// spacing multiplier between them (1.5s, then 3s — ~4.5s of cover, several
-/// times the host's post-eviction rejoin window).
+/// In-call dial attempts (see [`LinkCache::client`]), spaced by
+/// [`LinkCacheConfig::dial_retry_spacing`].
 const DIAL_ATTEMPTS: u32 = 3;
-
-const DIAL_RETRY_SPACING: Duration = Duration::from_millis(1500);
 
 /// The client end: one WebSocket to a peer device's relay carrying a single RPC stream,
 /// exposed as an ordinary [`RpcClient`]. `host_offline` / `host_closed` relay frames (and
@@ -313,6 +310,10 @@ pub struct LinkCacheConfig {
     /// Readiness probe budget: the relay accepts client joins even when the host is
     /// offline, so a `ListHarnesses` round-trip proves the path before caching.
     pub probe_timeout: Duration,
+    /// Spacing multiplier between the in-call dial attempts: 1.5s, then 3s by
+    /// default, about 4.5s of cover and several times the host's
+    /// post-eviction rejoin window.
+    pub dial_retry_spacing: Duration,
     /// Device trust: which hosts get a Noise session, and whether unpaired
     /// hosts are refused.
     pub trust: Arc<dyn PeerTrust>,
@@ -332,6 +333,7 @@ impl LinkCacheConfig {
             cooldown_base: Duration::from_secs(5),
             cooldown_max: Duration::from_secs(60),
             probe_timeout: Duration::from_secs(10),
+            dial_retry_spacing: Duration::from_millis(1500),
             trust: Arc::new(NoTrust),
         }
     }
@@ -470,7 +472,7 @@ impl LinkCache {
         let mut last_err = None;
         for attempt in 0..DIAL_ATTEMPTS {
             if attempt > 0 {
-                tokio::time::sleep(DIAL_RETRY_SPACING * attempt).await;
+                tokio::time::sleep(self.config.dial_retry_spacing * attempt).await;
             }
             match self.dial(device_id).await {
                 Ok(link) => {

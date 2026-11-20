@@ -471,8 +471,11 @@ fn binary_probe_has_a_deadline_and_reaps_the_child() {
     let dir = tempfile::tempdir().unwrap();
     write_executable(&dir.path().join("cypher"), "#!/bin/sh\nexec sleep 60\n");
     let start = std::time::Instant::now();
-    assert!(!headless_binary_ready(dir.path()));
-    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    assert!(!headless_binary_ready_within(
+        dir.path(),
+        std::time::Duration::from_millis(300)
+    ));
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
 }
 
 #[test]
