@@ -135,6 +135,12 @@ fn description(id: ShortcutId) -> &'static str {
         ShortcutId::PrevSession => {
             "Select the previous session in the sidebar, wrapping at the start."
         }
+        ShortcutId::NextWorkspace => {
+            "Switch to the next view in the logo's list (Sessions, then each workspace), wrapping at the end."
+        }
+        ShortcutId::PrevWorkspace => {
+            "Switch to the previous view in the logo's list, wrapping at the start."
+        }
         ShortcutId::SplitRight => "Split the focused tile with a new empty tile on its right.",
         ShortcutId::SplitDown => "Split the focused tile with a new empty tile below it.",
         ShortcutId::FocusLeft => "Move focus to the tile on the left.",

@@ -337,6 +337,10 @@ pub enum ShortcutId {
     NewSession,
     NextSession,
     PrevSession,
+    /// Step the main window through the logo switcher's views: the
+    /// projects view, then each workspace.
+    NextWorkspace,
+    PrevWorkspace,
     // Workspace layout (docs/design/workspace-layout.md).
     SplitRight,
     SplitDown,
@@ -367,13 +371,15 @@ impl ShortcutGroup {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 14] = [
+    pub const ALL: [ShortcutId; 16] = [
         ShortcutId::ToggleSidebar,
         ShortcutId::ToggleChanges,
         ShortcutId::ToggleTerminal,
         ShortcutId::NewSession,
         ShortcutId::NextSession,
         ShortcutId::PrevSession,
+        ShortcutId::NextWorkspace,
+        ShortcutId::PrevWorkspace,
         ShortcutId::SplitRight,
         ShortcutId::SplitDown,
         ShortcutId::FocusLeft,
@@ -394,6 +400,8 @@ impl ShortcutId {
             ShortcutId::NewSession => "New session",
             ShortcutId::NextSession => "Next session",
             ShortcutId::PrevSession => "Previous session",
+            ShortcutId::NextWorkspace => "Next workspace",
+            ShortcutId::PrevWorkspace => "Previous workspace",
             ShortcutId::SplitRight => "Split right",
             ShortcutId::SplitDown => "Split down",
             ShortcutId::FocusLeft => "Focus tile to the left",
@@ -412,7 +420,9 @@ impl ShortcutId {
             | ShortcutId::ToggleTerminal
             | ShortcutId::NewSession
             | ShortcutId::NextSession
-            | ShortcutId::PrevSession => ShortcutGroup::General,
+            | ShortcutId::PrevSession
+            | ShortcutId::NextWorkspace
+            | ShortcutId::PrevWorkspace => ShortcutGroup::General,
             ShortcutId::SplitRight
             | ShortcutId::SplitDown
             | ShortcutId::FocusLeft
@@ -452,6 +462,11 @@ impl ShortcutId {
             ShortcutId::NextSession => "mod-tab",
             ShortcutId::PrevSession if mac => "ctrl-shift-tab",
             ShortcutId::PrevSession => "mod-shift-tab",
+            // Bare Shift+arrow on every platform. Text fields keep it for
+            // extending a selection (their bindings sit deeper; see
+            // `WORKSPACE_SWITCH_CONTEXT` in shell.rs).
+            ShortcutId::NextWorkspace => "shift-down",
+            ShortcutId::PrevWorkspace => "shift-up",
             ShortcutId::SplitRight => "mod-\\",
             ShortcutId::SplitDown => "mod-shift-\\",
             ShortcutId::FocusLeft => "mod-alt-left",
@@ -477,6 +492,8 @@ pub struct KeymapConfig {
     pub new_session: String,
     pub next_session: String,
     pub prev_session: String,
+    pub next_workspace: String,
+    pub prev_workspace: String,
     pub split_right: String,
     pub split_down: String,
     pub focus_left: String,
@@ -496,6 +513,8 @@ impl Default for KeymapConfig {
             new_session: String::new(),
             next_session: String::new(),
             prev_session: String::new(),
+            next_workspace: String::new(),
+            prev_workspace: String::new(),
             split_right: String::new(),
             split_down: String::new(),
             focus_left: String::new(),
@@ -521,6 +540,8 @@ impl KeymapConfig {
             ShortcutId::NewSession => &self.new_session,
             ShortcutId::NextSession => &self.next_session,
             ShortcutId::PrevSession => &self.prev_session,
+            ShortcutId::NextWorkspace => &self.next_workspace,
+            ShortcutId::PrevWorkspace => &self.prev_workspace,
             ShortcutId::SplitRight => &self.split_right,
             ShortcutId::SplitDown => &self.split_down,
             ShortcutId::FocusLeft => &self.focus_left,
@@ -540,6 +561,8 @@ impl KeymapConfig {
             ShortcutId::NewSession => &mut self.new_session,
             ShortcutId::NextSession => &mut self.next_session,
             ShortcutId::PrevSession => &mut self.prev_session,
+            ShortcutId::NextWorkspace => &mut self.next_workspace,
+            ShortcutId::PrevWorkspace => &mut self.prev_workspace,
             ShortcutId::SplitRight => &mut self.split_right,
             ShortcutId::SplitDown => &mut self.split_down,
             ShortcutId::FocusLeft => &mut self.focus_left,
@@ -649,6 +672,43 @@ pub fn display_combo(combo: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("+")
+}
+
+/// A combo as a tooltip teaches it: macOS key glyphs ("shift-up" → "⇧↑",
+/// "mod-shift-w" → "⇧⌘W", modifiers in the system's ⌃⌥⇧⌘ order), the
+/// [`display_combo`] spelling elsewhere.
+pub fn glyph_combo(combo: &str) -> String {
+    glyph_combo_on(cfg!(target_os = "macos"), combo)
+}
+
+/// [`glyph_combo`] for an explicit platform.
+pub fn glyph_combo_on(mac: bool, combo: &str) -> String {
+    if !mac {
+        return display_combo(combo);
+    }
+    let mut parts: Vec<&str> = combo.split('-').collect();
+    let key = parts.pop().unwrap_or_default();
+    let mut out = String::new();
+    for (name, glyph) in [("ctrl", "⌃"), ("alt", "⌥"), ("shift", "⇧"), ("mod", "⌘")] {
+        if parts.contains(&name) {
+            out.push_str(glyph);
+        }
+    }
+    let key = match key {
+        "up" => "↑".to_string(),
+        "down" => "↓".to_string(),
+        "left" => "←".to_string(),
+        "right" => "→".to_string(),
+        "enter" => "↵".to_string(),
+        "tab" => "⇥".to_string(),
+        "escape" => "esc".to_string(),
+        "backspace" => "⌫".to_string(),
+        "delete" => "⌦".to_string(),
+        "space" => "Space".to_string(),
+        other => display_combo(other),
+    };
+    out.push_str(&key);
+    out
 }
 
 impl UiSettings {

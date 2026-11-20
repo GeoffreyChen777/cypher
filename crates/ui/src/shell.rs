@@ -101,6 +101,8 @@ actions!(
         NewSession,
         NextSession,
         PrevSession,
+        NextWorkspace,
+        PrevWorkspace,
         SplitRight,
         SplitDown,
         FocusLeft,
@@ -244,6 +246,32 @@ pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool, light_inset: f32)
     }
 }
 
+/// The shell root's key context. Bindings scoped to it sit at the shallowest
+/// depth, so any focused element binding the same keys keeps them.
+pub(crate) const SHELL_KEY_CONTEXT: &str = "Shell";
+
+/// Where the workspace-switch shortcuts apply. Scoped to the shell root
+/// rather than context-free: gpui counts a context-free binding as the
+/// deepest match, which would take Shift+↑/↓ from every text field. Scoped
+/// here, a field's own SelectUp/SelectDown wins, and an empty chat composer
+/// passes it on (`TextInput::select_up`). The terminal keeps its raw keys
+/// (bindings run before its key listener) and palette fields (in-chat find,
+/// pickers) own the keyboard while they are open.
+pub(crate) const WORKSPACE_SWITCH_CONTEXT: &str = "Shell && !Terminal && !PaletteSearch";
+
+/// The key context a customizable shortcut binds in (`None`: context-free).
+fn shortcut_context(
+    id: crate::prefs::ShortcutId,
+) -> Option<std::rc::Rc<gpui::KeyBindingContextPredicate>> {
+    use crate::prefs::ShortcutId;
+    if !matches!(id, ShortcutId::NextWorkspace | ShortcutId::PrevWorkspace) {
+        return None;
+    }
+    gpui::KeyBindingContextPredicate::parse(WORKSPACE_SWITCH_CONTEXT)
+        .ok()
+        .map(std::rc::Rc::new)
+}
+
 /// (Re-)apply the whole app keymap: clears every binding, restores the composer
 /// map, then binds the customizable shortcuts from `keymap`. Invalid persisted
 /// combos fall back to that shortcut's default.
@@ -270,19 +298,21 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         KeyBinding::load(
             &combo,
             action,
-            None,
+            shortcut_context(id),
             false,
             None,
             &gpui::DummyKeyboardMapper,
         )
     };
-    let customizable: [(ShortcutId, Box<dyn gpui::Action>); 14] = [
+    let customizable: [(ShortcutId, Box<dyn gpui::Action>); 16] = [
         (ShortcutId::ToggleSidebar, Box::new(ToggleSidebar)),
         (ShortcutId::ToggleChanges, Box::new(ToggleChanges)),
         (ShortcutId::ToggleTerminal, Box::new(ToggleTerminal)),
         (ShortcutId::NewSession, Box::new(NewSession)),
         (ShortcutId::NextSession, Box::new(NextSession)),
         (ShortcutId::PrevSession, Box::new(PrevSession)),
+        (ShortcutId::NextWorkspace, Box::new(NextWorkspace)),
+        (ShortcutId::PrevWorkspace, Box::new(PrevWorkspace)),
         (ShortcutId::SplitRight, Box::new(SplitRight)),
         (ShortcutId::SplitDown, Box::new(SplitDown)),
         (ShortcutId::FocusLeft, Box::new(FocusLeft)),
@@ -1161,6 +1191,34 @@ struct ShellDialogs {
     bot: Option<bots::BotDialog>,
     /// Bot id awaiting delete confirmation.
     delete_bot: Option<String>,
+}
+
+impl ShellDialogs {
+    /// Whether any dialog or palette is up.
+    fn any_open(&self) -> bool {
+        let Self {
+            rename_chat,
+            delete_chat,
+            quick_chat,
+            delete_worktree,
+            rename_space,
+            delete_space,
+            move_sessions,
+            add_space,
+            bot,
+            delete_bot,
+        } = self;
+        rename_chat.is_some()
+            || delete_chat.is_some()
+            || quick_chat.is_some()
+            || delete_worktree.is_some()
+            || rename_space.is_some()
+            || delete_space.is_some()
+            || move_sessions.is_some()
+            || add_space.is_some()
+            || bot.is_some()
+            || delete_bot.is_some()
+    }
 }
 
 /// In-app update state: the bundle update's progress, the About dialog,

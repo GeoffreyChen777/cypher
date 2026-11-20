@@ -316,6 +316,18 @@ fn keymap_defaults_and_reset() {
         keymap.get(ShortcutId::PrevSession),
         format!("{ctrl}-shift-tab")
     );
+    // Workspace switching is bare Shift+arrow on every platform.
+    assert_eq!(keymap.get(ShortcutId::NextWorkspace), "shift-down");
+    assert_eq!(keymap.get(ShortcutId::PrevWorkspace), "shift-up");
+    for mac in [true, false] {
+        assert_eq!(
+            ShortcutId::NextWorkspace.default_combo_on(mac),
+            "shift-down"
+        );
+        assert_eq!(ShortcutId::PrevWorkspace.default_combo_on(mac), "shift-up");
+    }
+    assert_eq!(ShortcutId::NextWorkspace.group(), ShortcutGroup::General);
+    assert_eq!(ShortcutId::PrevWorkspace.group(), ShortcutGroup::General);
     keymap.set(ShortcutId::ToggleSidebar, "mod-shift-x".into());
     assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-shift-x");
     keymap.reset(ShortcutId::ToggleSidebar);
@@ -430,6 +442,14 @@ fn combo_translation() {
     // session cycling.
     assert_eq!(platform_combo("ctrl-shift-tab"), "ctrl-shift-tab");
     assert_eq!(display_combo("ctrl-shift-tab"), "Ctrl+Shift+Tab");
+    // Tooltip glyphs: macOS symbols in the system's modifier order, the
+    // table spelling elsewhere.
+    assert_eq!(glyph_combo_on(true, "shift-up"), "⇧↑");
+    assert_eq!(glyph_combo_on(true, "shift-down"), "⇧↓");
+    assert_eq!(glyph_combo_on(true, "mod-shift-w"), "⇧⌘W");
+    assert_eq!(glyph_combo_on(true, "ctrl-alt-tab"), "⌃⌥⇥");
+    assert_eq!(glyph_combo_on(true, "f5"), "F5");
+    assert_eq!(glyph_combo_on(false, "shift-up"), "Shift+Up");
 }
 
 #[test]
@@ -456,6 +476,8 @@ fn a_keymap_missing_newer_shortcuts_keeps_its_customizations() {
     // intact.
     assert_eq!(keymap.get(ShortcutId::SplitRight), "mod-\\");
     assert_eq!(keymap.get(ShortcutId::ToggleZoom), "mod-shift-enter");
+    // So did workspace switching.
+    assert_eq!(keymap.get(ShortcutId::PrevWorkspace), "shift-up");
 }
 
 #[test]
