@@ -103,7 +103,12 @@ impl Harness for TestHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<EventStream, HarnessError> {
-        (self.run)(request, controls)
+        // A harness ends its stream when its run is interrupted. A scripted
+        // stream that stayed open made the engine wait out its three-second
+        // grace on every interrupt and shutdown.
+        let interrupted = controls.interrupt.clone().cancelled_owned();
+        let stream = (self.run)(request, controls)?;
+        Ok(stream.take_until(interrupted).boxed())
     }
 }
 
