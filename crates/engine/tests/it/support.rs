@@ -269,14 +269,20 @@ fn log_to_test_output() {
     });
 }
 
-/// What every test engine gets on top of a production assembly: its log in
-/// the test's output, and worktrees beside its own data. A production engine
-/// makes them in `~/.cypher/worktrees`, the user's real ones.
+/// What every test engine gets on top of a production assembly:
+///
+/// - its log in the test's output;
+/// - worktrees beside its own data, where a production engine makes them in
+///   `~/.cypher/worktrees`, the user's real ones;
+/// - no memory pass started by the clock. A test that ran during a store's
+///   consolidation hour otherwise got passes over the chats it had just
+///   made, through its own harness. A pass a test requests still runs.
 pub fn test_engine(assemble: impl FnOnce() -> Result<EngineCore, EngineError>) -> EngineCore {
     log_to_test_output();
     let core = assemble().expect("engine core assembles");
     core.repos
         .set_worktrees_root(core.repos.data_dir().join("worktrees"));
+    core.memory.hold_nightly_passes(true);
     core
 }
 
@@ -356,9 +362,14 @@ pub fn rig(harness: impl Harness + 'static) -> Rig {
     Rig { core, dir }
 }
 
-/// Poll `predicate` until it holds (10s budget).
+/// How long a wait may take before it fails. A wait returns the moment its
+/// condition holds, so the budget only bounds a failure: it is sized for a
+/// loaded CI runner, not for how long the step takes.
+pub const WAIT_BUDGET: Duration = Duration::from_secs(30);
+
+/// Poll `predicate` until it holds, for [`WAIT_BUDGET`] at most.
 pub async fn wait_for(predicate: impl FnMut() -> bool, what: &str) {
-    wait_for_within(predicate, what, Duration::from_secs(10)).await;
+    wait_for_within(predicate, what, WAIT_BUDGET).await;
 }
 
 pub async fn wait_for_within(mut predicate: impl FnMut() -> bool, what: &str, budget: Duration) {
@@ -372,9 +383,9 @@ pub async fn wait_for_within(mut predicate: impl FnMut() -> bool, what: &str, bu
     }
 }
 
-/// Poll `probe` until it yields a value (15s budget).
+/// Poll `probe` until it yields a value, for [`WAIT_BUDGET`] at most.
 pub async fn wait_for_some<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + WAIT_BUDGET;
     loop {
         if let Some(value) = probe() {
             return value;
@@ -383,8 +394,34 @@ pub async fn wait_for_some<T>(what: &str, mut probe: impl FnMut() -> Option<T>) 
             tokio::time::Instant::now() < deadline,
             "timed out waiting for {what}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// One bot tool call from `chat_id`, as the bot tools extension makes it;
+/// the text the tool answers with.
+pub async fn bot_tool(
+    core: &EngineCore,
+    chat_id: &str,
+    name: &str,
+    args: serde_json::Value,
+) -> String {
+    let reply = cypher_rpc::memory_client(core.rpc_service())
+        .call(
+            cypher_rpc::methods::BOT_TOOL,
+            serde_json::json!({ "chatId": chat_id, "tool": name, "args": args }),
+        )
+        .await
+        .expect("BotTool answers");
+    reply["text"].as_str().expect("text").to_string()
+}
+
+/// One `Mutate` op, as an owner's device sends it.
+pub async fn mutate(core: &EngineCore, op: serde_json::Value) {
+    cypher_rpc::memory_client(core.rpc_service())
+        .call(cypher_rpc::methods::MUTATE, op)
+        .await
+        .expect("Mutate");
 }
 
 /// Poll `cond` by blocking the calling thread (400 × 25ms).

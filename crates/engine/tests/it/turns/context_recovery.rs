@@ -224,8 +224,6 @@ async fn assemble_gated(refuse_always: bool, gate: Option<Arc<tokio::sync::Notif
     let core = support::test_engine(|| {
         EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None)
     });
-    // Stop before creating chats: the pass host can wake on another worker.
-    core.memory.shutdown().await;
     core.workspace
         .create_chat(
             CHAT,

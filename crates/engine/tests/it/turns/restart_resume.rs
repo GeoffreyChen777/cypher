@@ -188,8 +188,6 @@ async fn run_one_turn_and_shutdown(dir: &std::path::Path, requests: &RequestLog,
             fail_starts: Default::default(),
         },
     );
-    // A nightly memory pass must not add extra recorded runs or chat rows.
-    core.memory.shutdown().await;
     pre_title(&core);
     queue_run(
         &core,
@@ -228,7 +226,6 @@ async fn restart_roundtrip_restores_chats_transcript_and_resume() {
             fail_starts: Default::default(),
         },
     );
-    core.memory.shutdown().await;
 
     // Sidebar state survived: the chat row is back with its cwd, preview, and
     // the stored harness session (cwd-scoped).
@@ -302,7 +299,6 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
             fail_starts: Default::default(),
         },
     );
-    core.memory.shutdown().await;
     assert_eq!(core.device_id, "dev-crash");
 
     // Boot recovery stamped the abandoned streaming entry `aborted`, keeping
@@ -470,7 +466,6 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
             fail_starts: Default::default(),
         },
     );
-    core.memory.shutdown().await;
 
     // The run is PICKED BACK UP without any user action: recovery
     // re-dispatches the crashed prompt itself.
@@ -533,7 +528,6 @@ async fn resume_is_cwd_scoped() {
             fail_starts: Default::default(),
         },
     );
-    core.memory.shutdown().await;
     // Same chat, different launch directory: claude session stores are keyed
     // by cwd, so the stored id must NOT be injected.
     queue_run(
@@ -575,7 +569,6 @@ async fn startup_crash_retries_once_with_resume_kept() {
             fail_starts: Arc::new(Mutex::new(1)),
         },
     );
-    core.memory.shutdown().await;
     queue_run(&core, "second turn", "/tmp", "msg-user-2");
     wait_for(
         || complete_assistant_count(&core, CHAT) == 2,
@@ -630,7 +623,6 @@ async fn persistent_startup_crash_keeps_stored_session_id() {
             fail_starts: Arc::new(Mutex::new(u32::MAX)),
         },
     );
-    core.memory.shutdown().await;
     queue_run(&core, "second turn", "/tmp", "msg-user-2");
     // Crashed attempt + its single retry — then it must STOP (no spawn loop).
     wait_for(
@@ -674,7 +666,6 @@ async fn steer_after_restart_dispatches_new_turn_with_resume() {
             fail_starts: Default::default(),
         },
     );
-    core.memory.shutdown().await;
     core.doc_host
         .queue_command(
             CHAT,

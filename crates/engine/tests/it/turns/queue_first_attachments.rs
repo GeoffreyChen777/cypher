@@ -20,13 +20,9 @@ use cypher_doc::{MessagePart, SessionCommandEntry, SessionCommandPayload, Sessio
 use cypher_engine::EngineCore;
 use cypher_proto::{HarnessId, PendingAttachment, RunRequest};
 
-use support::{command_statuses, run_request};
+use support::{command_statuses, run_request, wait_for};
 
 const CHAT: &str = "chat-queue-first";
-
-async fn wait_for(predicate: impl FnMut() -> bool, what: &str) {
-    support::wait_for_within(predicate, what, Duration::from_secs(20)).await;
-}
 
 fn run_payload(message_id: &str, pending: Vec<PendingAttachment>) -> SessionCommandPayload {
     SessionCommandPayload::Run {

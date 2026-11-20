@@ -16,7 +16,7 @@ use cypher_proto::{
     ProjectGrant, RunRequest, SessionStatus, UserInputAnswer, UserInputQuestion,
 };
 
-use support::{complete_assistant_count, run_request, wait_for};
+use support::{bot_tool, complete_assistant_count, run_request, wait_for};
 
 /// Two projects with one session each; each transcript mentions "invoice".
 fn seed(core: &EngineCore, root: &std::path::Path) {
@@ -64,18 +64,6 @@ async fn create_bot(core: &EngineCore, scope: BotScope) -> Bot {
     serde_json::from_value(value).expect("a Bot")
 }
 
-async fn tool(core: &EngineCore, chat_id: &str, name: &str, args: serde_json::Value) -> String {
-    let client = cypher_rpc::memory_client(core.rpc_service());
-    let reply = client
-        .call(
-            cypher_rpc::methods::BOT_TOOL,
-            serde_json::json!({ "chatId": chat_id, "tool": name, "args": args }),
-        )
-        .await
-        .expect("BotTool answers");
-    reply["text"].as_str().expect("text").to_string()
-}
-
 fn billing_only() -> BotScope {
     BotScope {
         projects: ProjectGrant::Selected {
@@ -107,11 +95,11 @@ async fn bot_tools_see_only_the_granted_scope() {
     let folder = std::path::PathBuf::from(chat.cwd.clone().unwrap());
     assert!(folder.is_dir() && folder.ends_with(format!("bots/{}", bot.id)));
 
-    let projects = tool(&core, &bot.chat_id, "list_projects", serde_json::json!({})).await;
+    let projects = bot_tool(&core, &bot.chat_id, "list_projects", serde_json::json!({})).await;
     assert!(projects.contains("sp-billing"), "{projects}");
     assert!(!projects.contains("sp-secret"), "{projects}");
 
-    let sessions = tool(&core, &bot.chat_id, "list_sessions", serde_json::json!({})).await;
+    let sessions = bot_tool(&core, &bot.chat_id, "list_sessions", serde_json::json!({})).await;
     assert!(sessions.contains("chat-billing"), "{sessions}");
     assert!(!sessions.contains("chat-secret"), "{sessions}");
     assert!(
@@ -119,7 +107,7 @@ async fn bot_tools_see_only_the_granted_scope() {
         "a bot never sees its own chat"
     );
 
-    let found = tool(
+    let found = bot_tool(
         &core,
         &bot.chat_id,
         "search_sessions",
@@ -129,7 +117,7 @@ async fn bot_tools_see_only_the_granted_scope() {
     assert!(found.contains("Migrate the invoice tables"), "{found}");
     assert!(!found.contains("signing key"), "{found}");
 
-    let read = tool(
+    let read = bot_tool(
         &core,
         &bot.chat_id,
         "read_session",
@@ -139,14 +127,14 @@ async fn bot_tools_see_only_the_granted_scope() {
     assert!(read.contains("Migrate the invoice tables to v2"), "{read}");
 
     // Out of scope reads exactly like missing: the model cannot probe.
-    let hidden = tool(
+    let hidden = bot_tool(
         &core,
         &bot.chat_id,
         "read_session",
         serde_json::json!({ "session_id": "chat-secret" }),
     )
     .await;
-    let missing = tool(
+    let missing = bot_tool(
         &core,
         &bot.chat_id,
         "read_session",
@@ -157,7 +145,7 @@ async fn bot_tools_see_only_the_granted_scope() {
         hidden.replace("chat-secret", "ID"),
         missing.replace("no-such-chat", "ID")
     );
-    let hidden_project = tool(
+    let hidden_project = bot_tool(
         &core,
         &bot.chat_id,
         "list_sessions",
@@ -167,7 +155,7 @@ async fn bot_tools_see_only_the_granted_scope() {
     assert!(hidden_project.starts_with("No project"), "{hidden_project}");
 
     // Only a bot chat may call the tools.
-    let refused = tool(
+    let refused = bot_tool(
         &core,
         "chat-billing",
         "list_sessions",
@@ -240,7 +228,7 @@ async fn scope_edits_apply_to_the_next_call() {
         )
         .await
         .expect("updateBot");
-    let sessions = tool(&core, &bot.chat_id, "list_sessions", serde_json::json!({})).await;
+    let sessions = bot_tool(&core, &bot.chat_id, "list_sessions", serde_json::json!({})).await;
     assert!(sessions.contains("chat-secret"), "{sessions}");
     assert_eq!(
         core.workspace
@@ -265,7 +253,7 @@ async fn scope_edits_apply_to_the_next_call() {
         )
         .await
         .expect("updateBot");
-    let read = tool(
+    let read = bot_tool(
         &core,
         &bot.chat_id,
         "read_session",
@@ -273,7 +261,7 @@ async fn scope_edits_apply_to_the_next_call() {
     )
     .await;
     assert!(read.contains("may not read message text"), "{read}");
-    let found = tool(
+    let found = bot_tool(
         &core,
         &bot.chat_id,
         "search_sessions",
@@ -333,8 +321,6 @@ async fn a_bot_chat_runs_locked_down() {
             support::reply(HarnessId::Pi, &request, "sess-bot", "On it.")
         });
     let core = support::engine_at(&tmp.path().join("data"), harness);
-    // Keep nightly memory runs out of this bot-only recording harness.
-    core.memory.shutdown().await;
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
     // A read-only bot: no capability beyond reading (tests/bot_work.rs
@@ -442,7 +428,6 @@ async fn a_bot_chat_refuses_commands_that_widen_its_tools() {
         support::reply(HarnessId::Pi, &request, "sess", "ok")
     });
     let core = support::engine_at(&tmp.path().join("data"), harness);
-    core.memory.shutdown().await;
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
     let cwd = core
@@ -537,7 +522,6 @@ async fn an_unattended_run_that_asks_stops_failed() {
     let tmp = tempfile::tempdir().unwrap();
     let answers = Arc::new(Mutex::new(Vec::new()));
     let core = support::engine_at(&tmp.path().join("data"), asking_harness(answers.clone()));
-    core.memory.shutdown().await;
     let stops = Arc::new(Mutex::new(Vec::<UnattendedStop>::new()));
     let heard = stops.clone();
     core.sessions.add_unattended_listener(Arc::new(move |stop| {
@@ -620,7 +604,6 @@ async fn an_attended_bot_run_waits_for_its_approval() {
     let tmp = tempfile::tempdir().unwrap();
     let answers = Arc::new(Mutex::new(Vec::new()));
     let core = support::engine_at(&tmp.path().join("data"), asking_harness(answers.clone()));
-    core.memory.shutdown().await;
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
     let cwd = core
@@ -729,7 +712,7 @@ async fn activity_and_git_state_stay_in_scope() {
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
 
-    let activity = tool(
+    let activity = bot_tool(
         &core,
         &bot.chat_id,
         "session_activity",
@@ -752,7 +735,7 @@ async fn activity_and_git_state_stay_in_scope() {
     git(&repo, &["commit", "-q", "-m", "Add invoice totals"]);
     std::fs::write(repo.join("invoice.rs"), "fn total() -> u32 { 0 }\n").unwrap();
     std::fs::write(repo.join("notes.md"), "todo\n").unwrap();
-    let state = tool(
+    let state = bot_tool(
         &core,
         &bot.chat_id,
         "project_git",
@@ -767,14 +750,14 @@ async fn activity_and_git_state_stay_in_scope() {
     assert!(state.contains("added notes.md"), "{state}");
     assert!(state.contains("Add invoice totals — Ada"), "{state}");
 
-    let not_git = tool(
+    let not_git = bot_tool(
         &core,
         &bot.chat_id,
         "project_git",
         serde_json::json!({ "project": "sp-secret" }),
     )
     .await;
-    let unknown = tool(
+    let unknown = bot_tool(
         &core,
         &bot.chat_id,
         "project_git",
@@ -802,7 +785,7 @@ async fn activity_and_git_state_stay_in_scope() {
         )
         .await
         .expect("updateBot");
-    let remote = tool(
+    let remote = bot_tool(
         &core,
         &bot.chat_id,
         "project_git",
@@ -813,7 +796,7 @@ async fn activity_and_git_state_stay_in_scope() {
         remote.ends_with("is offline, so its git state can't be read right now."),
         "{remote}"
     );
-    let secret = tool(
+    let secret = bot_tool(
         &core,
         &bot.chat_id,
         "project_git",
@@ -865,7 +848,7 @@ async fn search_reads_the_index_and_filters_scope_at_query_time() {
         "the sessions indexed",
     )
     .await;
-    let found = tool(
+    let found = bot_tool(
         &core,
         &bot.chat_id,
         "search_sessions",
@@ -894,7 +877,7 @@ async fn search_reads_the_index_and_filters_scope_at_query_time() {
         )
         .await
         .expect("updateBot");
-    let found = tool(
+    let found = bot_tool(
         &core,
         &bot.chat_id,
         "search_sessions",
@@ -937,7 +920,6 @@ async fn owner_turns_learn_where_their_plans_stand() {
             support::reply(HarnessId::Pi, &request, "sess-bot", "On it.")
         });
     let core = support::engine_at(&tmp.path().join("data"), harness);
-    core.memory.shutdown().await;
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
     let now = cypher_proto::now_ms();
@@ -1021,7 +1003,7 @@ async fn shortcuts_are_made_by_the_workspace_chat_and_go_with_it() {
     let core = support::assemble_mock(&tmp.path().join("data"));
     seed(&core, tmp.path());
     let bot = create_bot(&core, billing_only()).await;
-    let added = tool(
+    let added = bot_tool(
         &core,
         &bot.chat_id,
         "save_shortcut",
@@ -1032,7 +1014,7 @@ async fn shortcuts_are_made_by_the_workspace_chat_and_go_with_it() {
         added.starts_with("Added the shortcut \"What's stuck?\""),
         "{added}"
     );
-    let fix = tool(
+    let fix = bot_tool(
         &core,
         &bot.chat_id,
         "save_shortcut",
@@ -1046,7 +1028,7 @@ async fn shortcuts_are_made_by_the_workspace_chat_and_go_with_it() {
     assert_eq!((mine[0].order, mine[1].order), (0, 1));
     assert_eq!(mine[1].icon, None, "an unknown icon is dropped");
     let fix_id = mine[1].id.clone();
-    let renamed = tool(
+    let renamed = bot_tool(
         &core,
         &bot.chat_id,
         "save_shortcut",
@@ -1057,7 +1039,7 @@ async fn shortcuts_are_made_by_the_workspace_chat_and_go_with_it() {
         renamed.starts_with("Updated the shortcut \"Fix billing\""),
         "{renamed}"
     );
-    let listed = tool(&core, &bot.chat_id, "list_shortcuts", serde_json::json!({})).await;
+    let listed = bot_tool(&core, &bot.chat_id, "list_shortcuts", serde_json::json!({})).await;
     assert!(listed.contains("\"Fix billing\""), "{listed}");
 
     // The owner's devices reorder and delete; nothing else writes them.
@@ -1083,7 +1065,7 @@ async fn shortcuts_are_made_by_the_workspace_chat_and_go_with_it() {
         )
         .await;
     assert!(manual.is_err(), "shortcuts are made by asking");
-    let removed = tool(
+    let removed = bot_tool(
         &core,
         &bot.chat_id,
         "delete_shortcut",

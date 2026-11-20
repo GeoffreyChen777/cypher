@@ -687,8 +687,6 @@ async fn child_runs_receive_child_env_via_host_context() {
     let host = Arc::new(Mutex::new(None));
     let dir = tempfile::tempdir().unwrap();
     let core = engine(dir.path(), capturing_harness(host.clone()));
-    // Only the child run should reach this recording harness.
-    core.memory.shutdown().await;
     core.workspace
         .create_chat(PARENT, None, Some(core.device_id.as_str()), None, None)
         .expect("parent chat");
@@ -737,7 +735,6 @@ async fn child_run_messages_under_its_address_but_the_row_keeps_the_agent() {
     let host = Arc::new(Mutex::new(None));
     let dir = tempfile::tempdir().unwrap();
     let core = engine(dir.path(), capturing_harness(host.clone()));
-    core.memory.shutdown().await;
     core.workspace
         .create_chat(PARENT, None, Some(core.device_id.as_str()), None, None)
         .expect("parent chat");
@@ -783,7 +780,6 @@ async fn start_subagent_recovers_an_orphan_existing_child() {
     let host = Arc::new(Mutex::new(None));
     let dir = tempfile::tempdir().unwrap();
     let core = engine(dir.path(), capturing_harness(host.clone()));
-    core.memory.shutdown().await;
     core.workspace
         .create_chat(
             PARENT,
@@ -897,7 +893,6 @@ async fn later_child_turn_has_no_messaging_channel() {
 
     let dir = tempfile::tempdir().unwrap();
     let core = engine(dir.path(), harness);
-    core.memory.shutdown().await;
     core.workspace
         .create_chat(PARENT, None, Some(core.device_id.as_str()), None, None)
         .expect("parent chat");

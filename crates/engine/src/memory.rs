@@ -440,6 +440,17 @@ impl Memory {
         })
     }
 
+    /// Tests: start no pass by the clock. A requested pass still runs. An
+    /// engine assembled during a store's consolidation hour otherwise starts
+    /// passes over whatever chats a test has just made.
+    #[doc(hidden)]
+    pub fn hold_nightly_passes(&self, hold: bool) {
+        self.inner
+            .passes
+            .nightly_held
+            .store(hold, Ordering::Relaxed);
+    }
+
     /// Tests: hold writes after untrusted content as earlier versions did,
     /// so the held writes they left behind can still be accepted.
     #[doc(hidden)]

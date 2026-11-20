@@ -21,7 +21,7 @@ use cypher_proto::{
     UserInputQuestion,
 };
 
-use support::{TestHarness, wait_for_within};
+use support::{TestHarness, bot_tool, mutate, wait_for};
 
 /// What each run reached the harness with.
 type Runs = Arc<Mutex<Vec<(RunRequest, Option<cypher_harness::BotRunEnv>)>>>;
@@ -154,24 +154,6 @@ async fn create_bot(core: &EngineCore, coordinate: bool) -> Bot {
     serde_json::from_value(value).expect("a Bot")
 }
 
-async fn mutate(core: &EngineCore, op: serde_json::Value) {
-    cypher_rpc::memory_client(core.rpc_service())
-        .call(cypher_rpc::methods::MUTATE, op)
-        .await
-        .expect("Mutate");
-}
-
-async fn tool(core: &EngineCore, chat_id: &str, name: &str, args: serde_json::Value) -> String {
-    let reply = cypher_rpc::memory_client(core.rpc_service())
-        .call(
-            cypher_rpc::methods::BOT_TOOL,
-            serde_json::json!({ "chatId": chat_id, "tool": name, "args": args }),
-        )
-        .await
-        .expect("BotTool answers");
-    reply["text"].as_str().expect("text").to_string()
-}
-
 fn routine_def(id: &str, bot: &Bot, prompt: &str, schedule: Schedule) -> BotRoutine {
     BotRoutine {
         id: id.into(),
@@ -207,10 +189,6 @@ fn routine(core: &EngineCore, id: &str) -> BotRoutine {
     core.workspace
         .record(p::KIND_BOT_ROUTINES, id)
         .expect("the routine row")
-}
-
-async fn wait_for(predicate: impl FnMut() -> bool, what: &str) {
-    wait_for_within(predicate, what, Duration::from_secs(20)).await;
 }
 
 fn last_outcome(core: &EngineCore, id: &str) -> Option<RunOutcome> {
@@ -712,7 +690,7 @@ async fn a_project_routine_runs_as_a_plain_session_in_its_own_worktree() {
         core, runs, dir, ..
     } = rig().await;
     let bot = create_bot(&core, true).await;
-    let saved = tool(
+    let saved = bot_tool(
         &core,
         &bot.chat_id,
         "save_routine",
@@ -898,7 +876,7 @@ async fn a_project_routine_runs_as_a_plain_session_in_its_own_worktree() {
         core.workspace.chat(&second).unwrap().is_some(),
         "scheduled runs leave the manual one"
     );
-    let schedule = tool(&core, &bot.chat_id, "list_routines", serde_json::json!({})).await;
+    let schedule = bot_tool(&core, &bot.chat_id, "list_routines", serde_json::json!({})).await;
     assert!(
         schedule.contains("a session in web on") && schedule.contains("its own worktree"),
         "{schedule}"
@@ -1251,7 +1229,7 @@ async fn a_reminder_is_a_routine_that_runs_once() {
     let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
         .format("%Y-%m-%dT09:00")
         .to_string();
-    let saved = tool(
+    let saved = bot_tool(
         &core,
         &bot.chat_id,
         "save_routine",
@@ -1264,7 +1242,7 @@ async fn a_reminder_is_a_routine_that_runs_once() {
     .await;
     assert!(saved.contains("Once, "), "{saved}");
     assert!(saved.contains("next run"), "{saved}");
-    let past = tool(
+    let past = bot_tool(
         &core,
         &bot.chat_id,
         "save_routine",
@@ -1303,7 +1281,7 @@ async fn the_workspace_chat_runs_deletes_and_stops_what_the_owner_could() {
     .await;
 
     // Run now: a fresh run whose post lands in the bot chat.
-    let ran = tool(
+    let ran = bot_tool(
         &core,
         &bot.chat_id,
         "run_routine",
@@ -1323,7 +1301,7 @@ async fn the_workspace_chat_runs_deletes_and_stops_what_the_owner_could() {
     let thread = routine(&core, "r1")
         .manual_chat_id
         .expect("its run's session");
-    let refused = tool(
+    let refused = bot_tool(
         &core,
         &thread,
         "run_routine",
@@ -1331,7 +1309,7 @@ async fn the_workspace_chat_runs_deletes_and_stops_what_the_owner_could() {
     )
     .await;
     assert!(refused.contains("in the workspace chat"), "{refused}");
-    let missing = tool(
+    let missing = bot_tool(
         &core,
         &bot.chat_id,
         "run_routine",
@@ -1341,7 +1319,7 @@ async fn the_workspace_chat_runs_deletes_and_stops_what_the_owner_could() {
     assert!(missing.contains("No routine nope"), "{missing}");
 
     // Activity: what the workspace did, for the owner's threads.
-    let activity = tool(&core, &bot.chat_id, "list_activity", serde_json::json!({})).await;
+    let activity = bot_tool(&core, &bot.chat_id, "list_activity", serde_json::json!({})).await;
     assert!(
         activity.contains("routines · Ran \"Morning brief\""),
         "{activity}"
@@ -1379,7 +1357,7 @@ async fn the_workspace_chat_runs_deletes_and_stops_what_the_owner_could() {
             cypher_engine::RecordFields::All,
         )
         .unwrap();
-    let stopped = tool(
+    let stopped = bot_tool(
         &core,
         &bot.chat_id,
         "stop_work",
@@ -1399,7 +1377,7 @@ async fn the_workspace_chat_runs_deletes_and_stops_what_the_owner_could() {
         .set_approval_wait(std::time::Duration::from_millis(400));
     core.bots
         .taint_thread(&bot.chat_id, "Ada's workspace answered in this chat");
-    let held = tool(
+    let held = bot_tool(
         &core,
         &bot.chat_id,
         "delete_routine",
@@ -1433,7 +1411,7 @@ async fn delete_routine_removes_it_and_its_sessions() {
         &routine_def("r1", &bot, "Tell me what's stuck.", Schedule::Manual),
     )
     .await;
-    tool(
+    bot_tool(
         &core,
         &bot.chat_id,
         "run_routine",
@@ -1446,7 +1424,7 @@ async fn delete_routine_removes_it_and_its_sessions() {
         .expect("its run's session");
     // The run has ended; a routine deleted mid-run is the next test's.
     assert_eq!(run_to_its_end(&core, "r1").await, RunOutcome::Done);
-    let deleted = tool(
+    let deleted = bot_tool(
         &core,
         &bot.chat_id,
         "delete_routine",
@@ -1469,7 +1447,7 @@ async fn held_run(core: &EngineCore, bot: &Bot) -> String {
         &routine_def("r1", bot, "HOLD the summary", Schedule::Manual),
     )
     .await;
-    tool(
+    bot_tool(
         core,
         &bot.chat_id,
         "run_routine",
@@ -1498,7 +1476,7 @@ async fn a_routine_deleted_mid_run_stops_the_run() {
     } = rig().await;
     let bot = create_bot(&core, false).await;
     let session = held_run(&core, &bot).await;
-    let deleted = tool(
+    let deleted = bot_tool(
         &core,
         &bot.chat_id,
         "delete_routine",

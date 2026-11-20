@@ -10,19 +10,14 @@ use crate::support;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use cypher_doc::{SessionCommandPayload, SessionCommandStatus};
 use cypher_engine::{EngineCore, HarnessRegistry};
 use cypher_proto::{HarnessId, RunRequest, WorktreeSpec};
 
-use support::{command_statuses, complete_assistant_count, run_request};
+use support::{command_statuses, complete_assistant_count, run_request, wait_for};
 
 const CHAT: &str = "chat-worktree-run";
-
-async fn wait_for(predicate: impl FnMut() -> bool, what: &str) {
-    support::wait_for_within(predicate, what, Duration::from_secs(20)).await;
-}
 
 fn run_payload(message_id: &str, repo_path: &str, base_ref: &str) -> SessionCommandPayload {
     SessionCommandPayload::Run {

@@ -14,8 +14,6 @@ use cypher_engine::{EngineCore, EngineProfile};
 /// one row-only), exactly as a local-first stretch leaves them on disk.
 async fn seed_local(data_dir: &std::path::Path) -> (String, String, String) {
     let local = support::assemble_profile(EngineProfile::local(data_dir).expect("local profile"));
-    // Preserve the exact fixture rows even during the nightly memory window.
-    local.memory.shutdown().await;
     let device = local.device_id.clone();
 
     local
@@ -445,7 +443,6 @@ async fn later_local_work_imports_as_a_delta() {
 
     // A later signed-out stretch creates one more local chat…
     let local = support::assemble_profile(EngineProfile::local(dir.path()).expect("local profile"));
-    local.memory.shutdown().await;
     local
         .workspace
         .create_chat("chat-later", None, Some(&device), None, Some("/tmp".into()))
