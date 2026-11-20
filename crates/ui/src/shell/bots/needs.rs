@@ -491,6 +491,37 @@ impl Shell {
         })
     }
 
+    /// Decide a record's card on the page (a plan, an action): the
+    /// decision is the record's, and its card leaves once it lands.
+    pub(in crate::shell) fn decide_need(
+        &mut self,
+        params: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.board.needs_decided = true;
+        self.board_mutate(params, cx);
+    }
+
+    /// Slide the panel shut once the owner has decided the Needs you page's
+    /// last item: the page has nothing left to do. Runs on every main-state
+    /// change, so it closes when the decision lands, not when it is sent
+    /// (an item that fails or is replaced keeps the page open). The page
+    /// emptied elsewhere, without a decision here, stays open.
+    pub(in crate::shell) fn close_needs_when_done(&mut self, cx: &mut Context<Self>) {
+        if !self.board.needs_decided || self.board.panel != Some(PanelItem::NeedsYou) {
+            return;
+        }
+        let done = {
+            let state = self.state.read(cx);
+            current_bot(&state.bots, self.settings.botboard_bot.as_deref()).is_none_or(|bot| {
+                need_items(state, bot, bot_needs(state, bot, Utc::now())).is_empty()
+            })
+        };
+        if done {
+            self.close_panel(cx);
+        }
+    }
+
     /// Open the Needs you page on the card `key` (a row, the pill). The
     /// workspace's own question is answered in its chat: its row goes there.
     pub(in crate::shell) fn open_need(&mut self, key: Option<String>, cx: &mut Context<Self>) {
@@ -788,7 +819,7 @@ impl Shell {
                                 .child(
                                     quiet_button(&format!("{key}-reject"), "Reject", theme)
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.board_mutate(
+                                            this.decide_need(
                                                 serde_json::json!({
                                                     "op": "resolveBotPlan",
                                                     "workId": reject,
@@ -801,7 +832,7 @@ impl Shell {
                                 .child(
                                     primary_button(&format!("{key}-approve"), "Approve", theme)
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.board_mutate(
+                                            this.decide_need(
                                                 serde_json::json!({
                                                     "op": "resolveBotPlan",
                                                     "workId": approve,
@@ -826,7 +857,7 @@ impl Shell {
                                 .child(
                                     quiet_button(&format!("{key}-decline"), "Decline", theme)
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.board_mutate(
+                                            this.decide_need(
                                                 serde_json::json!({
                                                     "op": "resolveBotApproval",
                                                     "approvalId": no,
@@ -839,7 +870,7 @@ impl Shell {
                                 .child(
                                     primary_button(&format!("{key}-approve"), "Approve", theme)
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.board_mutate(
+                                            this.decide_need(
                                                 serde_json::json!({
                                                     "op": "resolveBotApproval",
                                                     "approvalId": yes,
@@ -1187,6 +1218,7 @@ impl Shell {
             return;
         };
         self.board.answered.insert(request_id.clone());
+        self.board.needs_decided = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let params = serde_json::json!({ "chatId": chat_id, "command": command });

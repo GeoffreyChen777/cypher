@@ -47,6 +47,8 @@ impl Shell {
         self.prune_tabs(cx);
         // The Botboard stays on a bot that exists.
         self.sync_board(cx);
+        // The Needs you page's last decision landed: the panel shuts.
+        self.close_needs_when_done(cx);
         self.advance_splash(state, cx);
     }
 

@@ -70,6 +70,10 @@ pub(super) struct BoardUi {
     /// The Needs you card the page should scroll to (its key), once.
     needs_focus: Option<String>,
     needs_scroll: gpui::ScrollHandle,
+    /// The owner decided an item on the Needs you page: once nothing is
+    /// left on it, the panel slides shut. Dropped when the panel shows
+    /// something else or is shut.
+    needs_decided: bool,
     /// The Review panel's editable draft, for the exchange it was opened on.
     review: Option<(String, Entity<TextInput>)>,
     /// Questions answered from the Asking panel, until their session says
