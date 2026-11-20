@@ -137,11 +137,9 @@ final class SessionWindowTests: XCTestCase {
         try await until { store.earlierRounds.count == 118 }
     }
 
-    private func until(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
-        for _ in 0..<250 {
-            if condition() { return }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        XCTFail("Timed out", file: file, line: line)
+    private func until(
+        _ condition: @MainActor () -> Bool, file: StaticString = #filePath, line: UInt = #line
+    ) async throws {
+        try await waitUntil("the session window", file: file, line: line, condition)
     }
 }

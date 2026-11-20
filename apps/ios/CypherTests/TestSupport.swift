@@ -21,6 +21,35 @@ enum TestSupport {
     }
 }
 
+/// How long a wait may take before it fails. A wait returns the moment its
+/// condition holds, so this only bounds a failure. It is long because a loaded
+/// CI simulator has taken tens of seconds over a WebKit launch or one
+/// navigation push; budgets sized for a developer's Mac failed there.
+let waitBudget: Duration = .seconds(30)
+
+/// Thrown by `waitUntil` when its time runs out; the failure is recorded.
+struct WaitTimedOut: Error {}
+
+/// Waits until `condition` holds, checking every few milliseconds. On a
+/// timeout it records a failure at the caller and throws, so a test never
+/// carries on from a state it did not reach. The condition runs on the main
+/// actor: most of them read UIKit.
+@MainActor
+func waitUntil(
+    _ what: @autoclosure () -> String, timeout: Duration = waitBudget,
+    file: StaticString = #filePath, line: UInt = #line,
+    _ condition: @MainActor () async throws -> Bool
+) async throws {
+    let deadline = ContinuousClock.now + timeout
+    while true {
+        if try await condition() { return }
+        guard ContinuousClock.now < deadline else { break }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTFail("Timed out waiting for \(what())", file: file, line: line)
+    throw WaitTimedOut()
+}
+
 /// `TranscriptRowBuilder.rows` with fresh parse caches, as a first render
 /// builds them.
 func buildRows(_ entries: [MessageEntry], pending: [PendingSend] = []) -> [TranscriptRow] {

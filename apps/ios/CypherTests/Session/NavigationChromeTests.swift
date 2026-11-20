@@ -34,13 +34,10 @@ private struct NavigationChromeFixture: View {
 
 @MainActor
 final class NavigationChromeTests: XCTestCase {
-    private func settle(_ condition: () -> Bool) async throws {
-        for _ in 0..<75 {
-            if condition() { return }
-            try await Task.sleep(for: .milliseconds(40))
-        }
-        XCTFail("Navigation did not settle")
-        throw NSError(domain: "NavigationChromeTests", code: 1)
+    private func settle(
+        file: StaticString = #filePath, line: UInt = #line, _ condition: @MainActor () -> Bool
+    ) async throws {
+        try await waitUntil("the navigation to settle", file: file, line: line, condition)
     }
 
     func testSessionTitlesStayOutOfBackButtonGroupAcrossAnimatedPushAndPop() async throws {

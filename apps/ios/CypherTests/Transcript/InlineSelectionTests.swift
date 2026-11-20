@@ -108,10 +108,9 @@ final class InlineSelectionTests: XCTestCase {
         defer { hosted.close() }
         let host = hosted.host
         func findText(_ view: UIView) -> TranscriptUITextView? { firstSubview(TranscriptUITextView.self, in: view) }
-        for _ in 0..<20 {
+        try await waitUntil("the transcript text view") {
             host.view.layoutIfNeeded()
-            if findText(host.view) != nil { break }
-            try await Task.sleep(for: .milliseconds(20))
+            return findText(host.view) != nil
         }
         let text = try XCTUnwrap(findText(host.view))
         XCTAssertFalse(text.isEditable)

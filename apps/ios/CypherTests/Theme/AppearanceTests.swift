@@ -110,17 +110,17 @@ final class AppearanceTests: XCTestCase {
         defer { hosted.close() }
         let host = hosted.host
         func findText(_ view: UIView) -> TranscriptUITextView? { firstSubview(TranscriptUITextView.self, in: view) }
-        for _ in 0..<30 {
+        try await waitUntil("the transcript text view") {
             host.view.layoutIfNeeded()
-            if findText(host.view) != nil { break }
-            try await Task.sleep(for: .milliseconds(20))
+            return findText(host.view) != nil
         }
         let view = try XCTUnwrap(findText(host.view))
         view.selectedRange = NSRange(location: 0, length: 6)
         for style: UIUserInterfaceStyle in [.light, .dark, .light] {
             host.overrideUserInterfaceStyle = style
-            try await Task.sleep(for: .milliseconds(50))
-            XCTAssertEqual(view.traitCollection.userInterfaceStyle, style)
+            try await waitUntil("the \(style == .dark ? "dark" : "light") appearance") {
+                view.traitCollection.userInterfaceStyle == style
+            }
             XCTAssertEqual(view.selectedRange, NSRange(location: 0, length: 6))
             XCTAssertEqual(view.text, attributed.string)
         }

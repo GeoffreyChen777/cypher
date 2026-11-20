@@ -201,11 +201,10 @@ final class TranscriptTextMeasureTests: XCTestCase {
         let hosted = try HostedWindow(view.frame(width: 240), frame: CGRect(x: 0, y: 0, width: 300, height: 900))
         defer { hosted.close() }
         var found: TranscriptUITextView?
-        for _ in 0..<20 {
+        try await waitUntil("the transcript text view") {
             hosted.host.view.layoutIfNeeded()
             found = firstSubview(TranscriptUITextView.self, in: hosted.host.view)
-            if found != nil { break }
-            try await Task.sleep(for: .milliseconds(20))
+            return found != nil
         }
         let text = try XCTUnwrap(found)
         XCTAssertEqual(text.frame.width, 240)
