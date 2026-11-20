@@ -24,6 +24,7 @@ fn assemble_with_mock(dir: &Path, script: Vec<AgentEvent>) -> EngineCore {
     std::fs::create_dir_all(dir).expect("data dir");
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(MockHarness { script }));
+    common::log_to_test_output();
     EngineCore::assemble(dir, Arc::new(registry), HarnessId::Mock, None).expect("engine assembles")
 }
 

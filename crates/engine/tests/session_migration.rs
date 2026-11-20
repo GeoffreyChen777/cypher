@@ -119,6 +119,7 @@ fn device(dir: &Path, device_id: &str) -> Device {
     let runs = recorder.runs.clone();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(recorder));
+    common::log_to_test_output();
     let core = EngineCore::assemble_with_profile(
         EngineProfile::development(dir, ORG, USER),
         Arc::new(registry),

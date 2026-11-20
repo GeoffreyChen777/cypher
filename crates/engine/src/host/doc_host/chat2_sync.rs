@@ -79,7 +79,7 @@ impl DocHost {
         let doc = handle.doc.clone();
         let store = self.inner.store.clone();
         let persister = handle.persister.clone();
-        let http = self.inner.http.clone();
+        let http = self.inner.http.get().clone();
         let device = self.inner.config.device_id.clone();
         let weak = Arc::downgrade(handle);
         let host = self.clone();
@@ -324,7 +324,7 @@ impl DocHost {
         };
         let frontier = handle.doc.doc().oplog_vv().encode();
         let seq_covered = stats.cursor;
-        let http = self.inner.http.clone();
+        let http = self.inner.http.get().clone();
         let weak_note = Arc::downgrade(handle);
         self.spawn_worker(async move {
             let Some(bearer) = edge.bearer().await else {

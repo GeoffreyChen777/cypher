@@ -427,6 +427,7 @@ fn settings_engine(dir: &std::path::Path, device: &'static str) -> EngineCore {
     std::fs::write(dir.join("device-id"), device).unwrap();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(DeviceCatalog(device)));
+    common::log_to_test_output();
     let core = EngineCore::assemble(dir, Arc::new(registry), HarnessId::Pi, None).unwrap();
     let current = dir.join("pi-runtime/current");
     for folder in ["bin", "pi/dist/extensions/mcp", "npm"] {

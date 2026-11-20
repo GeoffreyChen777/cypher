@@ -124,6 +124,7 @@ fn registry_with(harness: Arc<dyn Harness>) -> Arc<HarnessRegistry> {
 }
 
 fn assemble(dir: &std::path::Path, harness: Arc<dyn Harness>) -> EngineCore {
+    common::log_to_test_output();
     EngineCore::assemble(dir, registry_with(harness), HarnessId::Mock, None)
         .expect("engine core assembles")
 }

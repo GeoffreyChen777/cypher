@@ -273,7 +273,9 @@ mod tests {
         let doc = LoroDoc::new();
         append(&doc, "seed");
         persister.save(&doc).unwrap();
-        // Incompressible chunks so the budget is reached on size.
+        // Incompressible chunks so the budget is reached on size. They ride
+        // as binary values: Loro tracks a text insert per character, which
+        // made megabytes of text take this test twenty seconds.
         let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut chunk = || {
             (0..64 * 1024)
@@ -281,13 +283,16 @@ mod tests {
                     x ^= x << 13;
                     x ^= x >> 7;
                     x ^= x << 17;
-                    char::from(b'a' + (x % 26) as u8)
+                    x as u8
                 })
-                .collect::<String>()
+                .collect::<Vec<u8>>()
         };
         let mut compacted = false;
-        for _ in 0..40 {
-            append(&doc, &chunk());
+        for n in 0..40 {
+            doc.get_map("chunks")
+                .insert(&n.to_string(), chunk())
+                .unwrap();
+            append(&doc, "x");
             persister.save(&doc).unwrap();
             if deltas(&store, "c") == 0 {
                 compacted = true;

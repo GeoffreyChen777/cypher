@@ -250,12 +250,27 @@ pub fn run_request(prompt: &str) -> RunRequest {
     }
 }
 
+/// Send the engine's log to the test's captured output, so a failing test
+/// prints what the engine warned about on the way. Warnings and errors by
+/// default; `CYPHER_TEST_LOG=debug` (any `tracing` filter) shows more.
+pub fn log_to_test_output() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let filter = std::env::var("CYPHER_TEST_LOG").unwrap_or_else(|_| "warn".into());
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_test_writer()
+            .try_init();
+    });
+}
+
 /// Assemble an engine at `dir` with `harnesses` registered.
 pub fn assemble_with(
     dir: &Path,
     default: HarnessId,
     harnesses: Vec<Arc<dyn Harness>>,
 ) -> EngineCore {
+    log_to_test_output();
     let registry = HarnessRegistry::new();
     for harness in harnesses {
         registry.register(harness);
@@ -266,6 +281,7 @@ pub fn assemble_with(
 /// An engine at `dir` with no harnesses registered (default `Mock`), for
 /// tests that exercise repos, diffs, terminals or sync rather than runs.
 pub fn assemble_mock(dir: &Path) -> EngineCore {
+    log_to_test_output();
     std::fs::create_dir_all(dir).expect("data dir");
     EngineCore::assemble(dir, Arc::new(HarnessRegistry::new()), HarnessId::Mock, None)
         .expect("engine core assembles")
@@ -274,6 +290,7 @@ pub fn assemble_mock(dir: &Path) -> EngineCore {
 /// An engine at `dir` whose device id is pinned to `device_id` — the
 /// two-engine tests tell their devices apart by it.
 pub fn assemble_device(dir: &Path, device_id: &str, registry: Arc<HarnessRegistry>) -> EngineCore {
+    log_to_test_output();
     std::fs::create_dir_all(dir).expect("create data dir");
     std::fs::write(dir.join("device-id"), device_id).expect("write device id");
     EngineCore::assemble(dir, registry, HarnessId::Mock, None).expect("engine core assembles")
@@ -282,6 +299,7 @@ pub fn assemble_device(dir: &Path, device_id: &str, registry: Arc<HarnessRegistr
 /// Assemble one resolved profile with the production harness registry (Pi
 /// sessions under the profile's store).
 pub fn assemble_profile(profile: EngineProfile) -> EngineCore {
+    log_to_test_output();
     let pi_sessions = profile.store_root().join("agent-sessions");
     EngineCore::assemble_with_profile(
         profile,

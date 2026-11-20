@@ -1171,6 +1171,22 @@ async fn a_run_cut_off_by_a_restart_settles_on_the_next_start() {
     core.shutdown().await;
 }
 
+/// Scheduler passes until the routine's run has settled; its outcome.
+async fn run_to_its_end(core: &EngineCore, id: &str) -> RunOutcome {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        core.bots.schedule_now().await;
+        if let Some(outcome) = last_outcome(core, id).filter(|o| *o != RunOutcome::Running) {
+            return outcome;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the routine's run to settle"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn wait_for_settled(core: &EngineCore, id: &str) -> RunOutcome {
     let mut outcome = None;
     wait_for(
@@ -1437,6 +1453,8 @@ async fn delete_routine_removes_it_and_its_sessions() {
     let session = routine(&core, "r1")
         .manual_chat_id
         .expect("its run's session");
+    // The run has ended; a routine deleted mid-run is the next test's.
+    assert_eq!(run_to_its_end(&core, "r1").await, RunOutcome::Done);
     let deleted = tool(
         &core,
         &bot.chat_id,
@@ -1451,4 +1469,81 @@ async fn delete_routine_removes_it_and_its_sessions() {
             .is_none()
     );
     assert!(core.workspace.chat(&session).unwrap().is_none());
+}
+
+/// A routine with a run under way, and that run's session.
+async fn held_run(core: &EngineCore, bot: &Bot) -> String {
+    save_routine(
+        core,
+        &routine_def("r1", bot, "HOLD the summary", Schedule::Manual),
+    )
+    .await;
+    tool(
+        core,
+        &bot.chat_id,
+        "run_routine",
+        serde_json::json!({ "id": "r1" }),
+    )
+    .await;
+    core.bots.schedule_now().await;
+    let session = routine(core, "r1")
+        .manual_chat_id
+        .expect("its run's session");
+    wait_for(
+        || common::status(core, &session) == Some(p::SessionStatus::Working),
+        "the routine run to start",
+    )
+    .await;
+    session
+}
+
+/// A routine its agent deletes mid-run takes the run with it: the run stops
+/// before the tool answers, so nothing it writes later brings its session
+/// back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_routine_deleted_mid_run_stops_the_run() {
+    let Rig {
+        core, dir: _dir, ..
+    } = rig().await;
+    let bot = create_bot(&core, false).await;
+    let session = held_run(&core, &bot).await;
+    let deleted = tool(
+        &core,
+        &bot.chat_id,
+        "delete_routine",
+        serde_json::json!({ "id": "r1" }),
+    )
+    .await;
+    assert_eq!(deleted, "Deleted the routine \"Morning brief\".");
+    assert_ne!(
+        common::status(&core, &session),
+        Some(p::SessionStatus::Working)
+    );
+    assert!(core.workspace.chat(&session).unwrap().is_none());
+}
+
+/// The routine page's Delete does the same: the rows go at once, and the run
+/// is stopped behind them.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_deleting_a_routine_mid_run_stops_the_run() {
+    let Rig {
+        core, dir: _dir, ..
+    } = rig().await;
+    let bot = create_bot(&core, false).await;
+    let session = held_run(&core, &bot).await;
+    mutate(
+        &core,
+        serde_json::json!({ "op": "deleteBotRoutine", "routineId": "r1" }),
+    )
+    .await;
+    // A stopping run writes its row before its status, so once it is no
+    // longer working the row it may have claimed back is the one deleted.
+    wait_for(
+        || {
+            common::status(&core, &session) != Some(p::SessionStatus::Working)
+                && core.workspace.chat(&session).unwrap().is_none()
+        },
+        "the run to stop and its session to go",
+    )
+    .await;
 }

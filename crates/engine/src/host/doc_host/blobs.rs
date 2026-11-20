@@ -44,6 +44,7 @@ impl DocHost {
         let res = self
             .inner
             .http
+            .get()
             .get(&url)
             .bearer_auth(&bearer)
             .send()

@@ -75,6 +75,7 @@ async fn assemble_with(cwds: Arc<Mutex<Vec<String>>>) -> (EngineCore, tempfile::
         let _guard = ENV_LOCK.lock().unwrap();
         let previous = std::env::var_os("CYPHER_WORKTREES_DIR");
         unsafe { std::env::set_var("CYPHER_WORKTREES_DIR", &worktrees_root) };
+        common::log_to_test_output();
         let core = EngineCore::assemble(
             &tmp_path.join("data"),
             Arc::new(registry),

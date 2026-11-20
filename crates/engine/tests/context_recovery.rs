@@ -221,6 +221,7 @@ async fn assemble_gated(refuse_always: bool, gate: Option<Arc<tokio::sync::Notif
         session_root: dir.path().join("agent-sessions"),
         runs: Default::default(),
     }));
+    common::log_to_test_output();
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None)
         .expect("engine core assembles");
     // Stop before creating chats: the pass host can wake on another worker.

@@ -18,6 +18,27 @@ pub(crate) fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// An HTTP client built on its first use. Building one loads the system
+/// trust store (about 150 ms on macOS), which an engine that never makes the
+/// call, offline or assembled for a test, should not pay when it starts.
+pub(crate) struct LazyHttp {
+    build: fn() -> reqwest::Client,
+    client: std::sync::OnceLock<reqwest::Client>,
+}
+
+impl LazyHttp {
+    pub(crate) fn new(build: fn() -> reqwest::Client) -> Self {
+        Self {
+            build,
+            client: std::sync::OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn get(&self) -> &reqwest::Client {
+        self.client.get_or_init(self.build)
+    }
+}
+
 /// Run blocking work (subprocesses, archive extraction, large directory
 /// removals, SQLite) on tokio's blocking pool instead of a runtime worker.
 ///

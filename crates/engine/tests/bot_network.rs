@@ -61,6 +61,7 @@ async fn side(hub: &Arc<FakeHub>, user: &str, owner: &str, bot_name: &str) -> Si
     let runs = Runs::default();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(harness(runs.clone())));
+    common::log_to_test_output();
     let core = EngineCore::assemble(&data, Arc::new(registry), HarnessId::Pi, None).unwrap();
     // A project the bot reads, and one the connection will hide.
     for space in ["sp-billing", "sp-secret"] {

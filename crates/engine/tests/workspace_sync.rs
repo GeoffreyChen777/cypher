@@ -485,6 +485,7 @@ async fn two_engines_converge_through_a_real_workspace_room() {
             base.clone(),
             format!("{user}@{org}"),
         ));
+        common::log_to_test_output();
         EngineCore::assemble_with_identity(dir, registry(), HarnessId::Mock, edge, &org, user)
             .expect("engine core assembles")
     };

@@ -179,6 +179,7 @@ fn assemble() -> Rig {
     let harness = RecordingHarness::new(pi_sessions_root.clone());
     let fork_requests = harness.fork_requests.clone();
     registry.register(Arc::new(harness));
+    common::log_to_test_output();
     let core = EngineCore::assemble_with_profile(profile, Arc::new(registry), HarnessId::Pi, None)
         .expect("engine core assembles");
     Rig {
@@ -616,6 +617,7 @@ async fn live_session_is_unavailable() {
     let registry = cypher_engine::HarnessRegistry::new();
     registry.register(stuck_harness());
     let dir = tempfile::tempdir().unwrap();
+    common::log_to_test_output();
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None).unwrap();
     create_source_chat(&core, SOURCE, core.device_id.as_str(), HarnessId::Pi);
     core.sessions
@@ -996,6 +998,7 @@ async fn lost_reply_retry_returns_existing_even_when_source_live() {
     let fork_requests = harness.fork_requests.clone();
     let stuck = harness.stuck.clone();
     registry.register(Arc::new(harness));
+    common::log_to_test_output();
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None).unwrap();
     core.workspace
         .create_chat(
@@ -1495,6 +1498,7 @@ async fn live_session_rewind_is_unavailable() {
     let dir = tempfile::tempdir().unwrap();
     let registry = cypher_engine::HarnessRegistry::new();
     registry.register(stuck_harness());
+    common::log_to_test_output();
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None).unwrap();
     core.workspace
         .create_chat(
@@ -1568,6 +1572,7 @@ async fn live_session_rewind_is_unavailable() {
 async fn forwardable_marks_rewind_and_fork_session() {
     let registry = cypher_engine::HarnessRegistry::new();
     let dir = tempfile::tempdir().unwrap();
+    common::log_to_test_output();
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None).unwrap();
     for (method, params) in [
         (
