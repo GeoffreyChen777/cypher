@@ -420,6 +420,40 @@ final class TranscriptTextLayoutManager: NSLayoutManager {
     }
 }
 
+/// Lays transcript text out off screen to measure it, set up as the text
+/// views are (no line fragment padding, no insets), so a height matches what
+/// a view of that width lays out. Measuring a view directly resizes its text
+/// container and back, and TextKit throws the view's whole layout away twice
+/// over for it.
+@MainActor
+final class TranscriptTextMeasurer {
+    static let shared = TranscriptTextMeasurer()
+
+    private let storage = NSTextStorage()
+    private let layout = NSLayoutManager()
+    private let container = NSTextContainer(size: .zero)
+    /// How many layouts it has run (tests).
+    private(set) var layouts = 0
+
+    init() {
+        container.lineFragmentPadding = 0
+        layout.addTextContainer(container)
+        storage.addLayoutManager(layout)
+    }
+
+    /// The height `text` lays out to in `width`.
+    func height(of text: NSAttributedString, width: CGFloat) -> CGFloat {
+        layouts += 1
+        container.size = CGSize(width: width, height: .greatestFiniteMagnitude)
+        storage.setAttributedString(text)
+        layout.ensureLayout(for: container)
+        let height = layout.usedRect(for: container).height
+        // Hold no reply's text (or formula images) between measurements.
+        storage.setAttributedString(NSAttributedString())
+        return height
+    }
+}
+
 final class TranscriptUITextView: UITextView {
     var selectionEnded: (() -> Void)?
 
@@ -504,20 +538,7 @@ struct SelectableTranscriptText: UIViewRepresentable {
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: TranscriptUITextView, context: Context) -> CGSize? {
-        // An active selection freezes only this text block, not the session.
-        // Measure what is actually displayed so its handles never drift.
-        let displayed = uiView.attributedText ?? attributed
-        let natural =
-            ceil(
-                displayed.boundingRect(
-                    with: CGSize(width: 1_000_000, height: 1_000_000),
-                    options: [.usesLineFragmentOrigin, .usesFontLeading],
-                    context: nil
-                ).width) + 1
-        let offered = proposal.width.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? natural
-        let width = max(1, wraps ? (hugsContent ? min(offered, natural) : offered) : natural)
-        let measured = uiView.sizeThatFits(CGSize(width: width, height: CGFloat.greatestFiniteMagnitude))
-        return CGSize(width: width, height: ceil(measured.height))
+        context.coordinator.size(of: uiView, proposedWidth: proposal.width, wraps: wraps, hugsContent: hugsContent)
     }
 
     func makeCoordinator() -> TranscriptSelectionCoordinator { TranscriptSelectionCoordinator() }
@@ -539,6 +560,54 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
     private var latest: NSAttributedString?
     private weak var drafts: CommentDrafts?
     private var applying = false
+    /// The text the view shows, as UIKit holds it; nil until measured since
+    /// it changed. An active selection freezes only this block on its old
+    /// text, and the block is measured by what it shows, so the selection
+    /// handles never drift.
+    private var displayed: NSAttributedString?
+    /// `displayed`'s width on one line, once something asked for it.
+    private var naturalWidth: CGFloat?
+    /// `displayed`'s height by layout width. The lazy transcript measures a
+    /// row many times over (scrolling, re-anchoring at the bottom, a scene
+    /// update going to the background), and laying out every long reply
+    /// again each time held the main thread past the system's watchdog.
+    private var heights: [CGFloat: CGFloat] = [:]
+
+    /// The size of the text `view` shows for a proposed width: the offered
+    /// width, or its one-line width where it does not wrap (or hugs content
+    /// narrower than offered). Remembered until the text changes.
+    func size(of view: UITextView, proposedWidth: CGFloat?, wraps: Bool, hugsContent: Bool) -> CGSize {
+        let displayed = displayed ?? NSAttributedString(attributedString: view.textStorage)
+        self.displayed = displayed
+        let offered = proposedWidth.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        let width: CGFloat
+        if wraps, !hugsContent, let offered {
+            width = max(1, offered)
+        } else {
+            let natural = natural(of: displayed)
+            let offered = offered ?? natural
+            width = max(1, wraps ? min(offered, natural) : natural)
+        }
+        if let height = heights[width] { return CGSize(width: width, height: height) }
+        let height = ceil(TranscriptTextMeasurer.shared.height(of: displayed, width: width))
+        // A rotation or split view brings a few widths; never a lot of them.
+        if heights.count >= 8 { heights.removeAll() }
+        heights[width] = height
+        return CGSize(width: width, height: height)
+    }
+
+    private func natural(of displayed: NSAttributedString) -> CGFloat {
+        if let naturalWidth { return naturalWidth }
+        let width =
+            ceil(
+                displayed.boundingRect(
+                    with: CGSize(width: 1_000_000, height: 1_000_000),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                ).width) + 1
+        naturalWidth = width
+        return width
+    }
 
     func update(_ view: UITextView, attributed: NSAttributedString, drafts: CommentDrafts?) {
         latest = attributed
@@ -552,6 +621,9 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
         else { return }
         applying = true
         view.attributedText = latest
+        displayed = nil
+        naturalWidth = nil
+        heights.removeAll()
         view.selectedRange = NSRange(location: 0, length: 0)
         view.invalidateIntrinsicContentSize()
         applying = false
