@@ -4,19 +4,27 @@
 #   bash scripts/check.sh <stage>...
 #
 # Stages:
-#   fmt        cargo fmt --check
-#   lint       crate layering, Python byte-compile, shell syntax and ShellCheck,
-#              node --check, and clippy over the headless crate set
-#   rust       the headless crate tests, the headless build and its CLI tests
-#   edge       apps/edge typecheck, unit and workerd tests
-#   scripts    script, release and installer tests; documentation links
-#   runtime    the Pi runtime suites that need no staged runtime
-#   workflows  actionlint and the workflow policy (downloads actionlint)
-#   macos      macOS only: icon, workspace clippy (gpui included), UI tests, and the
-#              Rust/Swift preview vectors
-#   ios        swift-format lint and the iOS unit tests on a simulator, with the
-#              Xcode pinned in .xcode-version
-#   all        fmt lint rust edge scripts runtime workflows, plus macos on macOS
+#   fmt          cargo fmt --check
+#   lint         crate layering, Python byte-compile, shell syntax and ShellCheck,
+#                node --check, and clippy over the headless crate set
+#   rust         rust-test and rust-build
+#   rust-test    the headless crate tests
+#   rust-build   the development-profile suites, the headless build and its CLI
+#                tests
+#   edge         apps/edge typecheck, unit and workerd tests
+#   scripts      script, release and installer tests; documentation links
+#   runtime      the Pi runtime suites that need no staged runtime
+#   workflows    actionlint and the workflow policy (downloads actionlint)
+#   macos        macOS only: macos-lint and macos-test
+#   macos-lint   workspace clippy (gpui included)
+#   macos-test   icon, UI tests, and the Rust/Swift preview vectors
+#   ios          swift-format lint and the iOS unit tests on a simulator, with the
+#                Xcode pinned in .xcode-version
+#   all          fmt lint rust edge scripts runtime workflows, plus macos on macOS
+#
+# CI runs rust-test, rust-build, macos-lint and macos-test as separate jobs:
+# each builds the workspace with a different feature set, so side by side they
+# finish sooner than one after another.
 #
 # On a Mac, scripts/check-linux.sh runs the Linux-dependent stages in Docker.
 #
@@ -30,7 +38,7 @@ CARGO="${CARGO:-cargo}"
 PYTHON="${PYTHON:-python3}"
 NODE="${NODE:-node}"
 
-# Crates that build without gpui; the Linux CI job checks exactly this set.
+# Crates that build without gpui; the Linux CI jobs lint and test exactly this set.
 HEADLESS=(-p cypher -p cypher-env -p cypher-proto -p cypher-doc -p cypher-sync
   -p cypher-net -p cypher-harness -p cypher-engine -p cypher-rpc -p cypher-update -p cypher-syntax
   -p cypher-secrets -p cypher-trust)
@@ -64,20 +72,28 @@ stage_lint() {
   run "$CARGO" clippy --locked --no-default-features "${HEADLESS[@]}" --all-targets -- -D warnings
 }
 
-stage_rust() {
-  run "$CARGO" test --locked --no-default-features -p cypher -p cypher-env -p cypher-proto \
-    -p cypher-doc -p cypher-syntax -p cypher-net -p cypher-harness -p cypher-engine -p cypher-update \
-    -p cypher-rpc
-  # The registry transport suites need the in-process server, so they run
-  # nowhere else: without the feature their targets don't even build.
-  run "$CARGO" test --locked -p cypher-sync --features mock-server \
-    --lib --test registry_client --test registry_transport
-  run "$CARGO" test --locked --no-default-features -p cypher --features development \
-    --test development_profile
-  run "$CARGO" test --locked -p cypher-engine --features development --lib development_auth_tests
+# Every headless crate in one invocation, so each is compiled once.
+# cypher-sync's registry transport suites need its in-process server.
+stage_rust_test() {
+  run "$CARGO" test --locked --no-default-features "${HEADLESS[@]}" \
+    --features cypher-sync/mock-server
+}
+
+stage_rust_build() {
+  # Both development suites select the same packages and features, so the
+  # second reuses the first's build.
+  local development=(--locked --no-default-features -p cypher -p cypher-engine
+    --features cypher/development)
+  run "$CARGO" test "${development[@]}" --test development_profile
+  run "$CARGO" test "${development[@]}" --lib development_auth_tests
   run "$CARGO" build --locked --no-default-features -p cypher
   run "$PYTHON" scripts/ci/check-production-profile.py "$ROOT/target/debug/cypher"
   run "$PYTHON" scripts/tests/test-linux-cli.py --binary target/debug/cypher
+}
+
+stage_rust() {
+  stage_rust_test
+  stage_rust_build
 }
 
 stage_edge() {
@@ -105,13 +121,22 @@ stage_workflows() {
   run bash scripts/ci/actionlint.sh
 }
 
-stage_macos() {
-  [[ "$(uname -s)" == Darwin ]] || { echo "the macos stage needs a macOS host" >&2; return 1; }
-  run bash scripts/tests/test-macos-icon.sh
+require_macos() {
+  [[ "$(uname -s)" == Darwin ]] || { echo "the $1 stage needs a macOS host" >&2; return 1; }
+}
+
+stage_macos_lint() {
+  require_macos macos-lint
   run "$CARGO" clippy --workspace --all-targets --locked -- -D warnings
   run "$CARGO" clippy --locked -p cypher-ui -p cypher --features cypher/dev-capture -- -D warnings
-  run "$CARGO" test --locked -p cypher-ui --lib
-  run "$CARGO" test --locked -p cypher-sync --lib preview
+}
+
+stage_macos_test() {
+  require_macos macos-test
+  run bash scripts/tests/test-macos-icon.sh
+  # cypher-sync's library holds the Rust side of the preview vectors; testing
+  # it with cypher-ui compiles their shared crates once.
+  run "$CARGO" test --locked -p cypher-ui -p cypher-sync --lib
   local out
   out="$(mktemp -d)"
   run xcrun swiftc apps/ios/Cypher/Sync/ChatFrames.swift apps/ios/Cypher/Sync/StreamPreview.swift \
@@ -126,6 +151,11 @@ stage_macos() {
     scripts/tests/command-signing-vectors.swift -o "$out/command-vectors"
   run "$out/command-vectors" protocol/vectors/command-signing-v1.json
   rm -rf "$out"
+}
+
+stage_macos() {
+  stage_macos_lint
+  stage_macos_test
 }
 
 stage_ios() {
@@ -153,7 +183,10 @@ stage_all() {
 [[ $# -gt 0 ]] || { awk 'NR > 1 && !/^#/ {exit} NR > 1' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 for stage in "$@"; do
   case "$stage" in
-    fmt | lint | rust | edge | scripts | runtime | workflows | macos | ios | all) "stage_$stage" ;;
+    fmt | lint | rust | rust-test | rust-build | edge | scripts | runtime | workflows | macos | \
+      macos-lint | macos-test | ios | all)
+      "stage_${stage//-/_}"
+      ;;
     *) echo "unknown stage: $stage (run without arguments for the list)" >&2; exit 2 ;;
   esac
 done

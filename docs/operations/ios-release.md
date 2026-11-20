@@ -10,7 +10,7 @@ distribution through a device-development signing setup.
 
 ## How a build ships
 
-Releases run in GitHub Actions (`.github/workflows/ios.yml`). There is no local
+Releases run in GitHub Actions (`.github/workflows/release-ios.yml`). There is no local
 archive/upload path any more: a developer Mac is not expected to hold the
 distribution private key, and one did not.
 
@@ -38,7 +38,7 @@ its provisioning profile.
 A `workflow_dispatch` run builds and verifies but never uploads.
 
 To diagnose a failing CI archive, run the same `xcodebuild archive` and
-`-exportArchive` steps as `.github/workflows/ios.yml`. A local export is not a
+`-exportArchive` steps as `.github/workflows/release-ios.yml`. A local export is not a
 release and must not be uploaded by hand; inspect it with
 `scripts/ci/ios-verify.py`, never by the mere existence of an archive or IPA.
 

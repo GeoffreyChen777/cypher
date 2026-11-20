@@ -1,11 +1,13 @@
-name: macos
-
+# Builds and publishes the macOS release.
+#
 # Pushing a `cypher-macos-v<version>-b<build>` tag publishes the MACOS channel
 # alone: `macos/manifest.json` and `macos/latest.txt`. Linux, iOS and the
 # Runtime are untouched, and their channels are read-only here. The version
 # must match `[workspace.package].version`; the build is the per-platform
 # counter, so macOS can be re-cut without disturbing Linux. Like every other
 # release workflow, workflow_dispatch is ALWAYS build/validate-only.
+name: Release (macOS)
+
 on:
   push:
     tags: ["cypher-macos-v*"]
@@ -16,6 +18,7 @@ permissions:
 
 jobs:
   preflight:
+    name: Preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -23,16 +26,19 @@ jobs:
       build: ${{ steps.context.outputs.build }}
       publish: ${{ steps.context.outputs.publish }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - name: validate tag/version and fail early on missing publication credential
+
+      - name: Validate the tag and require the publication credential
         id: context
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: python3 scripts/ci/release.py platform-context --platform macos
 
-  macos:
+  build:
+    name: Build
     needs: preflight
     # The macOS developers build on, so the release links against the same SDK
     # major (macOS 26) as local builds. On macos-15 it linked against SDK 15 and
@@ -47,13 +53,20 @@ jobs:
       AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
       AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - run: test "$(uname -m)" = arm64
-      - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - name: import optional Developer ID certificate
+
+      - name: Require an Apple silicon runner
+        run: test "$(uname -m)" = arm64
+
+      # The cache is saved from main only, so a tag restores what a manual run
+      # of this workflow on main left there.
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Import the Developer ID certificate, if configured
         if: env.MACOS_CERT_P12 != ''
         run: |
           keychain="$RUNNER_TEMP/release.keychain-db"
@@ -70,7 +83,8 @@ jobs:
             | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
           test -n "$identity"
           echo "CODESIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
-      - name: optional notary credentials
+
+      - name: Configure the notary credentials, if configured
         if: env.AC_API_KEY_P8 != ''
         run: |
           printf '%s' "$AC_API_KEY_P8" >"$RUNNER_TEMP/ac_api_key.p8"
@@ -79,11 +93,13 @@ jobs:
             echo "NOTARY_KEY_ID=$AC_API_KEY_ID"
             echo "NOTARY_ISSUER_ID=$AC_API_ISSUER_ID"
           } >>"$GITHUB_ENV"
-      - name: package macOS application
+
+      - name: Package the macOS application
         env:
           CYPHER_RELEASE_BUILD: ${{ needs.preflight.outputs.build }}
         run: scripts/package-macos.sh
-      - name: verify macOS package and executable
+
+      - name: Verify the package and its executable
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
           BUILD: ${{ needs.preflight.outputs.build }}
@@ -94,7 +110,9 @@ jobs:
           codesign --verify --strict target/package/Cypher.app
           test "$(target/package/Cypher.app/Contents/MacOS/cypher --version)" = "cypher $VERSION"
           hdiutil verify "target/package/cypher-$stem-macos-arm64.dmg"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+
+      - name: Upload the package
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: macos-${{ runner.arch }}
           path: |
@@ -103,34 +121,42 @@ jobs:
           if-no-files-found: error
 
   validate-artifacts:
-    needs: [preflight, macos]
+    name: Validate artifacts
+    needs: [preflight, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+
+      - name: Download the packages
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: target/release-dist
           merge-multiple: true
-      - name: validate every artifact before any production write
+
+      - name: Validate every artifact before any production write
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
           BUILD: ${{ needs.preflight.outputs.build }}
         run: |
           python3 scripts/ci/release.py validate-platform --platform macos \
             --dist target/release-dist --version "$VERSION" --build "$BUILD"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+
+      - name: Upload the checksums and manifests
         if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: checksums-and-manifests
           path: target/release-plan/*
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cypher-macos-v')
+    name: Publish
     needs: [preflight, validate-artifacts]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cypher-macos-v')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -140,14 +166,18 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+
+      - name: Download the packages
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: target/release-dist
           merge-multiple: true
-      - name: validate, reject conflicts/rollback, upload immutable objects, promote last
+
+      - name: Validate, reject conflicts and rollbacks, upload immutable objects, promote last
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
           BUILD: ${{ needs.preflight.outputs.build }}

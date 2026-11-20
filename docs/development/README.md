@@ -9,6 +9,7 @@ product works; this guide is about working on it.
 | Path | What it is |
 | --- | --- |
 | `Cargo.toml`, `rust-toolchain.toml`, `rustfmt.toml` | Rust workspace, pinned toolchain (with rustfmt and clippy), formatter settings |
+| `.node-version`, `.xcode-version` | the Node and Xcode that CI and the scripts use |
 | `crates/env` | `cypher-env`: every `CYPHER_*` environment variable, data directories, IPC socket paths |
 | `crates/proto` | `cypher-proto`: wire types and the pure view derivations both frontends share |
 | `crates/syntax` | `cypher-syntax`: tree-sitter syntax highlighting |
@@ -33,6 +34,7 @@ product works; this guide is about working on it.
 | `scripts/ops/` | Cloudflare usage and billing probes ([Cloudflare billing](../operations/cloudflare-billing.md)) |
 | `docs/` | documentation, indexed in [docs/README.md](../README.md) |
 | `.github/workflows/` | CI, deploy and release workflows ([CI/CD operations](../operations/ci-cd.md)) |
+| `.github/actions/` | composite actions the workflows share (`setup-rust`) |
 | `.agents/skills/` | runbooks for coding agents (the dev app procedure) |
 
 ## Crate layering
@@ -63,13 +65,16 @@ stages, so a stage that passes locally passes in CI.
 bash scripts/check.sh fmt        # cargo fmt --check
 bash scripts/check.sh lint       # crate layers, Python byte-compile, bash -n, ShellCheck,
                                  # node --check, clippy -D warnings (headless crates)
-bash scripts/check.sh rust       # headless crate tests, headless build, CLI tests
+bash scripts/check.sh rust       # rust-test, then rust-build
+bash scripts/check.sh rust-test  # headless crate tests
+bash scripts/check.sh rust-build # development-profile suites, headless build, CLI tests
 bash scripts/check.sh edge       # apps/edge typecheck, unit and workerd tests
 bash scripts/check.sh scripts    # script/release/installer tests, doc links
 bash scripts/check.sh runtime    # Pi runtime suites that need no staged runtime
 bash scripts/check.sh workflows  # actionlint + workflow policy (downloads actionlint)
-bash scripts/check.sh macos      # macOS: icon, workspace clippy, cypher-ui tests,
-                                 # Rust/Swift preview vectors
+bash scripts/check.sh macos      # macOS: macos-lint, then macos-test
+bash scripts/check.sh macos-lint # workspace clippy -D warnings (gpui included)
+bash scripts/check.sh macos-test # icon, cypher-ui tests, Rust/Swift preview vectors
 bash scripts/check.sh ios        # swift-format lint + iOS unit tests (pinned Xcode)
 bash scripts/check.sh all        # everything except ios; macos only on a Mac
 bash scripts/check-linux.sh      # CI's Linux checks in Docker, from a Mac (below)
@@ -96,8 +101,8 @@ Tests per platform:
   [pi-runtime/README.md](../../pi-runtime/README.md#tests)).
 - **iOS**: `bash scripts/check.sh ios`, or Xcode; see
   [apps/ios/README.md](../../apps/ios/README.md).
-- **Same tools as CI**: Rust (`rust-toolchain.toml`), Node 24.19.0 and the iOS
-  Xcode (`.xcode-version`, matched by build number) are pinned for both. CI
+- **Same tools as CI**: Rust (`rust-toolchain.toml`), Node (`.node-version`) and
+  the iOS Xcode (`.xcode-version`, matched by build number) are pinned for both. CI
   fails when the runner lacks the pinned Xcode, so moving to a new Xcode is a
   deliberate one-line change. Desktop macOS builds run on `macos-26`, the macOS
   developers use, so releases link against the same SDK major.

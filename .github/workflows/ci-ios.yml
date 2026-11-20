@@ -1,0 +1,53 @@
+# Lints and tests the iOS app on a simulator.
+#
+# The job holds a macOS runner for several minutes, so it runs only when
+# something it builds or reads changes: the app and its tests, the shared
+# cross-language vectors under protocol/, and the scripts below.
+name: CI (iOS)
+
+on:
+  pull_request:
+    paths:
+      - "apps/ios/**"
+      - "protocol/**"
+      - "scripts/check.sh"
+      - "scripts/ci/ios-unit-tests.sh"
+      - "scripts/ci/select-xcode.sh"
+      - ".xcode-version"
+      - ".github/workflows/ci-ios.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/ios/**"
+      - "protocol/**"
+      - "scripts/check.sh"
+      - "scripts/ci/ios-unit-tests.sh"
+      - "scripts/ci/select-xcode.sh"
+      - ".xcode-version"
+      - ".github/workflows/ci-ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push supersedes a pull request's run. Runs on main always finish,
+# so every commit there has a verdict.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test (iOS)
+    # The runner of the archive job in release-ios.yml; the ios stage selects
+    # the Xcode pinned in .xcode-version.
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Lint and test the iOS app
+        run: bash scripts/check.sh ios

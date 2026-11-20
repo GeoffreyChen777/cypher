@@ -1,4 +1,11 @@
-name: ci
+# Checks every change on pull requests, pushes to main and manual runs.
+#
+# Each step runs one stage of scripts/check.sh, the entry point used locally
+# (docs/development/README.md#checks). The Rust checks are split into jobs
+# that build different feature sets, so they run side by side instead of
+# rebuilding the workspace one after another. No deployment credentials are
+# available to these jobs.
+name: CI
 
 on:
   pull_request:
@@ -9,79 +16,165 @@ on:
 permissions:
   contents: read
 
+# A newer push supersedes a pull request's run. Runs on main always finish,
+# so every commit there has a verdict.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # No debug info for workspace crates: it costs about a tenth of the build,
+  # and a failing test still reports its file and line.
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
-  # Each step runs one stage of scripts/check.sh, the same entry point used
-  # locally; see docs/development/README.md.
-  workflow-and-release-tests:
+  scripts:
+    name: Scripts and workflows
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: 24.19.0
-      - run: bash scripts/check.sh workflows
-      - run: bash scripts/check.sh scripts
-      - name: installer regressions on release container Python 3.8
+          node-version-file: .node-version
+
+      - name: Lint the workflows
+        run: bash scripts/check.sh workflows
+
+      - name: Test the scripts and release tooling
+        run: bash scripts/check.sh scripts
+
+      - name: Test the installer on Python 3.8
         run: bash scripts/ci/installer-py38.sh
-      - run: bash scripts/check.sh runtime
+
+      - name: Test the Pi runtime
+        run: bash scripts/check.sh runtime
 
   edge:
+    name: Edge
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: 24.19.0
+          node-version-file: .node-version
           cache: npm
           cache-dependency-path: apps/edge/package-lock.json
-      - run: npm ci --prefix apps/edge
-      - run: bash scripts/check.sh edge
 
-  linux-backend:
+      - name: Install dependencies
+        run: npm ci --prefix apps/edge
+
+      - name: Typecheck and test
+        run: bash scripts/check.sh edge
+
+  lint-linux:
+    name: Lint (Linux)
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
-        with:
-          node-version: 24.19.0
-      # GitHub's image has these; apt (Ubuntu's servers) only for one it lacks.
-      - name: build tools
-        run: |
-          missing=()
-          command -v cmake >/dev/null || missing+=(cmake)
-          command -v pkg-config >/dev/null || missing+=(pkg-config)
-          command -v systemd-analyze >/dev/null || missing+=(systemd)
-          if [ "${#missing[@]}" -gt 0 ]; then
-            sudo apt-get -o Acquire::Retries=3 update -qq
-            sudo apt-get -o Acquire::Retries=3 install -y "${missing[@]}"
-          fi
-      - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - run: bash scripts/check.sh fmt
-      - run: bash scripts/check.sh lint
-      - run: bash scripts/check.sh rust
 
-  macos-workspace:
-    # Same macOS and SDK major as the release build in macos.yml.
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version-file: .node-version
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Check formatting
+        run: bash scripts/check.sh fmt
+
+      - name: Lint the scripts and the headless crates
+        run: bash scripts/check.sh lint
+
+  test-linux:
+    name: Test (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version-file: .node-version
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Test the headless crates
+        run: bash scripts/check.sh rust-test
+
+  build-linux:
+    name: Build (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version-file: .node-version
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Build the headless binary and test the development profile
+        run: bash scripts/check.sh rust-build
+
+  # Both macOS jobs run on the macOS and SDK major of the release build in
+  # release-macos.yml.
+  lint-macos:
+    name: Lint (macOS)
     runs-on: macos-26
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - run: bash scripts/check.sh macos
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Lint the workspace
+        run: bash scripts/check.sh macos-lint
+
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Test the desktop app
+        run: bash scripts/check.sh macos-test

@@ -817,7 +817,7 @@ class Retention(unittest.TestCase):
 
 class Policies(unittest.TestCase):
     def test_release_smoke_does_not_reintroduce_removed_tcp_ipc(self):
-        workflow = (release.ROOT / ".github/workflows/linux.yml").read_text()
+        workflow = (release.ROOT / ".github/workflows/release-linux.yml").read_text()
         self.assertNotIn("CYPHER_IPC_PORT=", workflow)
         self.assertIn('CYPHER_DATA_DIR="$stage/data" timeout 8', workflow)
 
@@ -868,7 +868,7 @@ class Policies(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
 
     def test_ios_workflow_stops_at_upload_and_touches_no_release_channel(self):
-        text = (release.ROOT / ".github/workflows/ios.yml").read_text()
+        text = (release.ROOT / ".github/workflows/release-ios.yml").read_text()
         self.assertIn("altool --upload-app", text)
         self.assertIn("ios-verify.py", text)
         # Prose may discuss what the workflow does not do; the configuration is
@@ -885,7 +885,7 @@ class Policies(unittest.TestCase):
         workflows = release.ROOT / ".github/workflows"
         self.assertFalse((workflows / "release.yml").exists(),
                          "the coupled release workflow must not come back")
-        for name, platform in (("linux.yml", "linux"), ("macos.yml", "macos")):
+        for name, platform in (("release-linux.yml", "linux"), ("release-macos.yml", "macos")):
             text = (workflows / name).read_text()
             self.assertIn("publish-platform --platform " + platform, text)
             self.assertIn('tags: ["cypher-{}-v*"]'.format(platform), text)
@@ -896,14 +896,14 @@ class Policies(unittest.TestCase):
     def test_only_the_runtime_workflow_builds_the_runtime(self):
         # The Runtime now ships from exactly one place, so there is no second
         # copy of the build to drift out of step with it.
-        for name in ("linux.yml", "macos.yml", "ios.yml"):
+        for name in ("release-linux.yml", "release-macos.yml", "release-ios.yml"):
             text = (release.ROOT / ".github/workflows" / name).read_text()
             self.assertNotIn("package-pi-runtime.sh", text)
-        runtime = (release.ROOT / ".github/workflows/pi-runtime.yml").read_text()
+        runtime = (release.ROOT / ".github/workflows/release-pi-runtime.yml").read_text()
         self.assertIn("package-pi-runtime.sh", runtime)
 
     def test_runtime_release_cannot_write_the_application_channel(self):
-        workflow = (release.ROOT / ".github/workflows/pi-runtime.yml").read_text()
+        workflow = (release.ROOT / ".github/workflows/release-pi-runtime.yml").read_text()
         self.assertIn("release.py publish-runtime", workflow)
         self.assertNotIn("contents: write", workflow)
         self.assertNotIn("GITHUB_TOKEN", workflow)
@@ -944,6 +944,30 @@ class Policies(unittest.TestCase):
         self.assertNotIn("grep -q", code)
         self.assertIn("ref: main", code)
         self.assertIn("needs.prepare.outputs.commit", code)
+
+    def test_workflow_conventions(self):
+        step = "      - name: Check out\n        uses: actions/checkout@{} # v5\n".format("a" * 40)
+        workflow_policy.check_conventions("ci.yml", step)
+        workflow_policy.check_conventions("action.yml", "    - name: Local\n      uses: ./.github/actions/setup-rust\n")
+        for invalid in ["      - uses: actions/checkout@{} # v5\n".format("a" * 40),
+                        "      - run: make\n",
+                        "      - name: Tag\n        uses: actions/checkout@v5\n",
+                        "      - name: Bare\n        uses: actions/checkout@{}\n".format("a" * 40)]:
+            with self.assertRaises(ValueError, msg=invalid):
+                workflow_policy.check_conventions("ci.yml", invalid)
+        for name in ("ci.yml", "ci-ios.yml", "deploy.yml", "release-pi-runtime.yml"):
+            self.assertTrue(workflow_policy.FILE_NAME.fullmatch(name), name)
+        for name in ("linux.yml", "release.yml", "CI.yml", "ci.yaml"):
+            self.assertFalse(workflow_policy.FILE_NAME.fullmatch(name), name)
+
+    def test_ci_node_is_the_node_the_runtime_bundles(self):
+        # scripts/package-pi-runtime.sh refuses any other Node, and the
+        # workflows install the one named in .node-version.
+        pinned = (release.ROOT / ".node-version").read_text().strip()
+        bundled = json.loads((release.ROOT / "pi-runtime/release.json").read_text())["nodeVersion"]
+        self.assertEqual(pinned, bundled)
+        for path in sorted((release.ROOT / ".github/workflows").glob("*.yml")):
+            self.assertNotIn("node-version:", path.read_text(), path.name)
 
     def test_runtime_archives_ignore_mtime_and_owner(self):
         source = Path(__file__).with_name("deterministic-tar.py")

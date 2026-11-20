@@ -7,7 +7,7 @@
 # keys, so a mirror can be slow or stale, never trusted with altered
 # packages. Plain http: ca-certificates is often among what is installed.
 #
-# .github/workflows/linux.yml inlines the same steps (its container has no
+# .github/workflows/release-linux.yml inlines the same steps (its container has no
 # git, so no checkout, before this runs); change both together.
 #
 #   bash scripts/ci/apt-install.sh <package>...

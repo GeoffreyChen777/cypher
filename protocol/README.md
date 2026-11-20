@@ -161,4 +161,4 @@ fields the signature leaves out; the third is a `launch` record.
 | --- | --- | --- |
 | Rust | `include_str!` from the test module | `cargo test` (the `rust` and `macos` stages of `scripts/check.sh`) |
 | TypeScript | JSON import in the vitest unit tests | `npm --prefix apps/edge test` (the `edge` stage) |
-| Swift | `TestSupport.repoRoot()` + the path | `CypherTests` (the `ios` stage; `ios-tests.yml` runs on changes under `protocol/`) |
+| Swift | `TestSupport.repoRoot()` + the path | `CypherTests` (the `ios` stage; `ci-ios.yml` runs on changes under `protocol/`) |
