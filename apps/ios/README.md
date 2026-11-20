@@ -446,6 +446,11 @@ Source folders are features or layers; tests in `CypherTests/` mirror them.
 The project uses synchronized groups, so adding or moving a file needs no
 `project.pbxproj` edit.
 
+A test that waits for the UI uses `waitUntil` (`CypherTests/TestSupport.swift`):
+it returns the moment its condition holds and fails after one shared, long
+budget. Don't pace a step with `Task.sleep` or a loop with its own budget; a
+CI simulator is many times slower than a developer's Mac.
+
 ```
 Cypher/
   App/            entry point (CypherApp), AppModel and its data/session/

@@ -190,9 +190,12 @@ to verify them) is in
    again, and cargo runs those binaries one after another.
 3. Integration tests are hermetic and share their process. A test engine comes
    from `support::test_engine` (or a fixture built on it), which keeps its
-   worktrees and its log with the test, and no test changes the process
-   environment or working directory. Wait for a condition (`support::wait_for`)
-   rather than sleeping for a fixed time.
+   worktrees and its log with the test and starts nothing by the wall clock,
+   and no test changes the process environment or working directory. Wait
+   for a condition (`support::wait_for`, `waitUntil` in the iOS tests) rather
+   than sleeping for a fixed time: a wait's budget only bounds a failure, so
+   it is one long shared value, not a guess per call. A scripted harness
+   ends its stream when its run is interrupted, as a real one does.
 4. Imports: leaf/pure modules import explicitly; `use super::*` only in
    continuation files that extend the parent's type (`impl Shell` split files etc.).
 5. Naming: child module rendering code is `render.rs` (not `rendering.rs`);
