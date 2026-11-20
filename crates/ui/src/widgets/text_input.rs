@@ -956,7 +956,7 @@ impl Render for TextInput {
                 // Internal scrolling once content exceeds the 260px textarea
                 // box minus its `pt-4 pb-1` padding.
                 max_content_height: match self.key_context {
-                    "ProviderField" => INPUT_LINE_HEIGHT,
+                    "ProviderField" => line_height,
                     "PromptField" => PROMPT_FIELD_MAX,
                     _ => TEXTAREA_MAX - TEXTAREA_PAD_V,
                 },

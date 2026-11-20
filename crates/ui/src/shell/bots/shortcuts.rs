@@ -1,7 +1,9 @@
 //! **Shortcuts**: buttons pinned at the foot of a workspace's sidebar, each
 //! a request the owner makes often. A click sends it to the workspace's
 //! agent in its chat, as if the owner had typed it; a request holding
-//! `{input}` asks for one line of text first, in a field under the chips.
+//! `{input}` asks for one line of text first, in a field under the chips
+//! (optional: Enter on an empty field, or a double-click on the chip, sends
+//! it with the blank left empty).
 //!
 //! Nobody makes shortcuts here: the owner asks the agent in the workspace
 //! chat ("make this a button") and it saves, changes or removes them with
@@ -39,6 +41,9 @@ const SENT_MS: u64 = 1600;
 const DELETE_ARM_MS: u64 = 4000;
 /// The most of a request a chip's tooltip shows.
 const TIP_CHARS: usize = 160;
+/// The input field's text metrics: the chips' size, not a settings field's.
+const INPUT_SIZE: f32 = 12.0;
+const INPUT_LINE: f32 = 18.0;
 
 /// A shortcut's icon: the one it names, else a chat bubble (it talks to
 /// the agent).
@@ -66,6 +71,12 @@ fn clip(text: &str, max: usize) -> String {
     let mut cut: String = line.chars().take(max - 1).collect();
     cut.push('…');
     cut
+}
+
+/// Whether `shortcut` still says something with its blanks left empty (a
+/// request that is only `{input}` doesn't).
+fn sends_without_input(shortcut: &BotShortcut) -> bool {
+    !shortcut.request_with("").trim().is_empty()
 }
 
 /// What a chip says when its request didn't go out: "Couldn't send Fix
@@ -312,7 +323,9 @@ impl Shell {
                     .into()
             })
             .on_click(
-                cx.listener(move |this, _, window, cx| this.click_shortcut(&click_id, window, cx)),
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    this.click_shortcut(&click_id, event.click_count(), window, cx)
+                }),
             )
             .on_mouse_down(
                 MouseButton::Right,
@@ -342,20 +355,21 @@ impl Shell {
             )
     }
 
-    /// The field a chip asks for its input in: Enter sends, Esc cancels.
+    /// The field a chip asks for its input in, sized like the chips above
+    /// it: Enter sends (empty too, leaving the blank out), Esc cancels.
     fn render_shortcut_input(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let asking = self.board.shortcuts.asking.as_ref()?;
         Some(
             div()
                 .mx(px(ROW_MARGIN))
                 .mt(px(6.0))
-                .px(px(10.0))
-                .py(px(5.0))
+                .px(px(ROW_MARK_INSET))
+                .py(px(4.0))
                 .rounded(px(8.0))
                 .border_1()
                 .border_color(crate::kit::theme::hairline(0.08))
-                .bg(crate::kit::theme::ink(0.04))
-                .text_size(px(12.5))
+                .bg(crate::kit::theme::ink(0.03))
+                .text_size(px(INPUT_SIZE))
                 .text_color(theme.text)
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                     let keys = &event.keystroke;
@@ -373,12 +387,34 @@ impl Shell {
     // ── sending ─────────────────────────────────────────────────────────────
 
     /// A chip's click: ask for its input first when its request has a
-    /// blank, else send it.
-    fn click_shortcut(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// blank, else send it. A double-click sends it at once, the blank left
+    /// empty (the first click's field closes); it never sends twice.
+    fn click_shortcut(
+        &mut self,
+        id: &str,
+        clicks: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(shortcut) = self.shortcut_row(id, cx) else {
             return;
         };
         if !shortcut.wants_input() {
+            if clicks <= 1 {
+                self.send_shortcut(&shortcut, "", cx);
+            }
+            return;
+        }
+        if clicks == 2 && sends_without_input(&shortcut) {
+            if self
+                .board
+                .shortcuts
+                .asking
+                .as_ref()
+                .is_some_and(|asking| asking.id == id)
+            {
+                self.board.shortcuts.asking = None;
+            }
             return self.send_shortcut(&shortcut, "", cx);
         }
         if let Some(asking) = self.board.shortcuts.asking.as_ref()
@@ -388,14 +424,9 @@ impl Shell {
             return;
         }
         let input = cx.new(|cx| {
-            TextInput::settings_field(
-                format!(
-                    "Text for {}, then Enter",
-                    transcript::single_line(&shortcut.label)
-                ),
-                false,
-                cx,
-            )
+            let mut input = TextInput::settings_field("Optional text, then Enter", false, cx);
+            input.set_metrics(INPUT_SIZE, INPUT_LINE);
+            input
         });
         let shortcut_id = shortcut.id.clone();
         let submit = cx.subscribe(
@@ -405,13 +436,17 @@ impl Shell {
                     return;
                 }
                 let text = input.read(cx).text().trim().to_string();
-                if text.is_empty() {
+                let Some(shortcut) = this.shortcut_row(&shortcut_id, cx) else {
+                    this.board.shortcuts.asking = None;
+                    return cx.notify();
+                };
+                // A request that is nothing but its blank has nothing to
+                // send without text.
+                if text.is_empty() && !sends_without_input(&shortcut) {
                     return;
                 }
                 this.board.shortcuts.asking = None;
-                if let Some(shortcut) = this.shortcut_row(&shortcut_id, cx) {
-                    this.send_shortcut(&shortcut, &text, cx);
-                }
+                this.send_shortcut(&shortcut, &text, cx);
                 cx.notify();
             },
         );
@@ -639,6 +674,8 @@ mod tests {
         let s = shortcut("Fix {input}, then test {input}", None);
         assert!(s.wants_input());
         assert_eq!(s.request_with(" #42 "), "Fix #42, then test #42");
+        assert!(sends_without_input(&s));
+        assert!(!sends_without_input(&shortcut(" {input} ", None)));
         let plain = shortcut("What's stuck?", None);
         assert!(!plain.wants_input());
         assert_eq!(plain.request_with(""), "What's stuck?");
