@@ -1338,6 +1338,30 @@ fn dismissals_sit_beside_the_ledger_and_sync() {
 }
 
 #[test]
+fn failed_uploads_are_recorded_once_and_sync() {
+    let doc = SessionDoc::init("chat-1").unwrap();
+    assert!(!doc.upload_failed("up-1"));
+    doc.fail_uploads(&["up-1".to_string()], 1_000).unwrap();
+    // Idempotent, and an empty list writes nothing.
+    doc.fail_uploads(&["up-1".to_string()], 2_000).unwrap();
+    doc.fail_uploads(&[], 3_000).unwrap();
+    assert!(doc.upload_failed("up-1") && !doc.upload_failed("up-2"));
+    assert_eq!(
+        doc.doc()
+            .get_map("failedUploads")
+            .get_value()
+            .to_json_value(),
+        serde_json::json!({ "up-1": 1_000 })
+    );
+    // The host reads it from the synced doc.
+    let replica = LoroDoc::new();
+    replica
+        .import(&doc.doc().export(ExportMode::Snapshot).unwrap())
+        .unwrap();
+    assert!(SessionDoc::from_doc(replica).upload_failed("up-1"));
+}
+
+#[test]
 fn launch_records_round_trip_with_their_signing_bytes() {
     let doc = SessionDoc::init("chat-1").unwrap();
     let config = cypher_proto::ChatConfig {

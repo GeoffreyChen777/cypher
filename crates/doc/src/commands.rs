@@ -22,7 +22,13 @@ use crate::constants::COMMAND_DEFAULT_TTL_MS;
 /// sealed before the host expires it (aligned with the engine's staging-dir
 /// TTL, so a wedged upload can't leave the command Pending forever). Bounded
 /// wait is a product requirement: the durable queue must eventually resolve.
-pub(crate) const ATTACHMENT_SEAL_GRACE_MS: i64 = 10 * 60 * 1000;
+pub const ATTACHMENT_SEAL_GRACE_MS: i64 = 10 * 60 * 1000;
+
+/// The resolution a Run gets when the sending device reported that one of
+/// its attachments could not be uploaded (see
+/// [`CommandDisposition::AttachmentsFailed`]).
+pub const ATTACHMENT_UPLOAD_FAILED: &str =
+    "The attachment didn't finish uploading, so the message wasn't sent. Send it again.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -178,6 +184,10 @@ pub enum CommandDisposition {
     /// marking processed; the next seal commit re-triggers the drain. Never
     /// permanent — past the seal grace window it degrades to [`Expired`].
     WaitForAttachments,
+    /// A Run whose sending device reported that one of its uploads failed
+    /// (the doc's `failedUploads` map): reject it at once rather than hold
+    /// every later command behind it for the whole grace window.
+    AttachmentsFailed,
     /// Mark processed BEFORE executing, then execute.
     Execute,
 }
@@ -198,6 +208,17 @@ pub struct EvaluationContext<'a> {
     /// `sealedAttachments` map), or `None` when not sealed yet. `None` for
     /// any pending id is what gates [`CommandDisposition::WaitForAttachments`].
     pub sealed_attachment_path: &'a dyn Fn(&str) -> Option<String>,
+    /// Whether the sending device reported `upload_id` as failed (the doc's
+    /// `failedUploads` map). Wins over a seal: the sender has already told
+    /// the user the message wasn't sent.
+    pub failed_upload: &'a dyn Fn(&str) -> bool,
+}
+
+/// When a Run waiting for its attachments stops waiting: the instant its
+/// grace window ends and it resolves Expired. `None` for any other command.
+/// The host wakes its drain then, since no doc change may come to do it.
+pub fn attachment_wait_deadline(entry: &SessionCommandEntry) -> Option<i64> {
+    run_pending_attachments(entry).map(|_| entry.issued_at + ATTACHMENT_SEAL_GRACE_MS)
 }
 
 /// The pending-attachment descriptors of a Run command, if it carries any.
@@ -228,6 +249,9 @@ pub fn evaluate_command(
     // instead of sitting Pending forever. Pending ids never execute: the
     // request only dispatches with sealed final paths.
     if let Some(pending) = run_pending_attachments(entry) {
+        if pending.iter().any(|p| (cx.failed_upload)(&p.upload_id)) {
+            return CommandDisposition::AttachmentsFailed;
+        }
         let all_sealed = pending
             .iter()
             .all(|p| (cx.sealed_attachment_path)(&p.upload_id).is_some());
@@ -313,6 +337,7 @@ mod tests {
             current_turn_id,
             turn_is_past,
             sealed_attachment_path: &|_| None,
+            failed_upload: &NEVER,
         }
     }
 
@@ -454,6 +479,7 @@ mod tests {
             current_turn_id: None,
             turn_is_past: &NEVER,
             sealed_attachment_path: &|id| (id == "up-1").then(|| "/up/1.png".to_string()),
+            failed_upload: &NEVER,
         };
         assert_eq!(evaluate_command(&e, &cx), CommandDisposition::Execute);
         // Partial seal (one of two pending) still waits.
@@ -473,6 +499,7 @@ mod tests {
             current_turn_id: None,
             turn_is_past: &NEVER,
             sealed_attachment_path: &|id| (id == "up-1").then(|| "/up/1.png".to_string()),
+            failed_upload: &NEVER,
         };
         assert_eq!(
             evaluate_command(&both, &cx),
@@ -511,6 +538,51 @@ mod tests {
             None,
         );
         assert_eq!(evaluate_command(&r, &cx), CommandDisposition::Execute);
+    }
+
+    #[test]
+    fn run_whose_upload_failed_is_rejected_at_once() {
+        let e = pending_run("up-1", 1_000);
+        let entries = vec![e.clone()];
+        let failed = |id: &str| id == "up-1";
+        let cx = EvaluationContext {
+            failed_upload: &failed,
+            ..eval_cx(&entries, &NEVER, &NEVER, 2_000, None)
+        };
+        assert_eq!(
+            evaluate_command(&e, &cx),
+            CommandDisposition::AttachmentsFailed
+        );
+        // The sender's report wins over a seal that landed after all.
+        let cx = EvaluationContext {
+            failed_upload: &failed,
+            sealed_attachment_path: &|_| Some("/up/1.png".to_string()),
+            ..eval_cx(&entries, &NEVER, &NEVER, 2_000, None)
+        };
+        assert_eq!(
+            evaluate_command(&e, &cx),
+            CommandDisposition::AttachmentsFailed
+        );
+    }
+
+    #[test]
+    fn attachment_wait_deadline_is_the_end_of_the_grace_window() {
+        let e = pending_run("up-1", 1_000);
+        assert_eq!(
+            attachment_wait_deadline(&e),
+            Some(1_000 + ATTACHMENT_SEAL_GRACE_MS)
+        );
+        let r = entry(
+            "r-plain",
+            SessionCommandPayload::Run {
+                request: run_request(),
+                message_id: "m1".into(),
+                agent_prompt: None,
+            },
+            1_000,
+        );
+        assert_eq!(attachment_wait_deadline(&r), None);
+        assert_eq!(attachment_wait_deadline(&steer("s", 1_000)), None);
     }
 
     #[test]

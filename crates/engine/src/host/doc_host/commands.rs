@@ -702,6 +702,26 @@ impl DocHost {
                 "only message commands can be retried".into(),
             ));
         }
+        // A queue-first Run's files exist only on the device that sent it:
+        // when they never reached this chat, a retry would only wait out
+        // another grace window with every later command stuck behind it.
+        if let SessionCommandPayload::Run { request, .. } = &old.payload {
+            let missing = request.pending_attachments.iter().any(|p| {
+                handle.doc.upload_failed(&p.upload_id)
+                    || handle
+                        .doc
+                        .sealed_attachment(&p.upload_id)
+                        .ok()
+                        .flatten()
+                        .is_none()
+            });
+            if missing {
+                return Err(EngineError::Other(
+                    "its attachment never finished uploading — attach it and send the message again"
+                        .into(),
+                ));
+            }
+        }
         let has_live_attempt = |candidate: &SessionCommandEntry| {
             commands.iter().any(|other| {
                 other.id != candidate.id
@@ -876,6 +896,87 @@ impl DocHost {
 }
 
 impl DocHost {
+    /// Wake this chat's drain when `entry`'s attachment grace window ends, so
+    /// a Run whose uploads never sealed resolves Expired on time and the
+    /// commands queued behind it run. Without it the Run waited for the
+    /// chat's next doc change, which a quiet chat (or one whose owner has
+    /// stopped sending because it looks stuck) may never get. One timer per
+    /// command; the doc is reopened if it was evicted meanwhile.
+    fn wake_at_attachment_deadline(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        entry: &SessionCommandEntry,
+    ) {
+        let Some(deadline) = cypher_doc::attachment_wait_deadline(entry) else {
+            return;
+        };
+        if !lock(&self.inner.attachment_wakes).insert(entry.id.clone()) {
+            return;
+        }
+        // A beat past the deadline: evaluation expires at `now >= deadline`.
+        let wait_ms = (deadline - now_ms()).max(0) as u64 + 50;
+        let host = self.clone();
+        let weak = Arc::downgrade(handle);
+        let chat_id = handle.chat_id.clone();
+        let command_id = entry.id.clone();
+        self.spawn_worker(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            lock(&host.inner.attachment_wakes).remove(&command_id);
+            match weak.upgrade() {
+                Some(handle) => host.drain_commands(&handle).await,
+                // Evicted: opening it again runs the chat task's first drain.
+                None => {
+                    if let Err(err) = host.open(&chat_id) {
+                        tracing::warn!(chat = %chat_id, error = %err, "attachment wake: open failed");
+                    }
+                }
+            }
+        });
+    }
+
+    /// The sender's side of a failed upload: record in the chat doc that
+    /// `upload_ids` will never arrive, so the host rejects the Run waiting
+    /// on them at once instead of holding the chat's queue for the whole
+    /// grace window. With `dismiss_message`, the message's attempts are
+    /// dismissed too: the composer that sent it has taken the draft back,
+    /// so no "Send failed" row should repeat it. Written from whichever
+    /// device sent the message; the host picks it up from the synced doc.
+    pub fn fail_uploads(
+        &self,
+        chat_id: &str,
+        upload_ids: &[String],
+        dismiss_message: Option<&str>,
+    ) -> Result<(), EngineError> {
+        self.check_may_command(chat_id)?;
+        let handle = self.open(chat_id)?;
+        if let Some(message_id) = dismiss_message {
+            let ids: Vec<String> = handle
+                .doc
+                .read_commands()?
+                .into_iter()
+                .filter(|command| match &command.payload {
+                    SessionCommandPayload::Run {
+                        message_id: id,
+                        request,
+                        ..
+                    } => {
+                        id == message_id
+                            && request
+                                .pending_attachments
+                                .iter()
+                                .any(|p| upload_ids.contains(&p.upload_id))
+                    }
+                    _ => false,
+                })
+                .map(|command| command.id)
+                .collect();
+            handle.doc.dismiss_commands(&ids, now_ms())?;
+        }
+        handle.doc.fail_uploads(upload_ids, now_ms())?;
+        self.nudge_remote_host(chat_id);
+        Ok(())
+    }
+
     /// Drain pending commands (host-only): evaluate → mark processed BEFORE execute →
     /// execute → write the outcome as the sole outcome writer.
     pub async fn drain_commands(&self, handle: &Arc<ChatDocHandle>) {
@@ -996,6 +1097,7 @@ impl DocHost {
                     current_turn_id: current_turn_id.as_deref(),
                     turn_is_past: &turn_is_past,
                     sealed_attachment_path: &sealed_path,
+                    failed_upload: &|upload_id| handle.doc.upload_failed(upload_id),
                 },
             );
             // Attachments still uploading: hold WITHOUT marking processed so
@@ -1009,6 +1111,11 @@ impl DocHost {
                     command = %entry.id,
                     "run waiting for attachment seal"
                 );
+                // Nothing else may touch the doc before the grace window
+                // ends, and the Run (with every command behind it) would
+                // then wait for whatever change comes next — possibly
+                // never. Wake the drain when it ends.
+                self.wake_at_attachment_deadline(handle, &entry);
                 return;
             }
             // In-flight claim: a concurrent drain must not classify this
@@ -1041,6 +1148,19 @@ impl DocHost {
                 }
                 CommandDisposition::Superseded => {
                     self.resolve_command(handle, &entry.id, SessionCommandStatus::Superseded, None);
+                }
+                CommandDisposition::AttachmentsFailed => {
+                    tracing::info!(
+                        chat = %handle.chat_id,
+                        command = %entry.id,
+                        "run rejected: its sender reported an attachment upload failed"
+                    );
+                    self.resolve_command(
+                        handle,
+                        &entry.id,
+                        SessionCommandStatus::Rejected,
+                        Some(cypher_doc::ATTACHMENT_UPLOAD_FAILED),
+                    );
                 }
                 // Returned above (before the processed-ledger mark) — the
                 // seal commit re-triggers this drain.

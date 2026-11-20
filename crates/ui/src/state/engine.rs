@@ -180,6 +180,38 @@ impl EngineBackend for RemoteEngine {
     }
 }
 
+/// A test engine answering from `service` over the in-memory transport.
+#[cfg(test)]
+struct ServiceEngine(RpcClient);
+
+#[cfg(test)]
+#[async_trait]
+impl EngineBackend for ServiceEngine {
+    fn client(&self) -> &RpcClient {
+        &self.0
+    }
+    fn mode(&self) -> EngineMode {
+        EngineMode::InProcess
+    }
+    async fn shutdown(&self) {}
+}
+
+#[cfg(test)]
+impl EngineHandle {
+    /// An engine handle whose calls `service` answers. Call inside a tokio
+    /// runtime: the transport spawns its server task there.
+    pub(crate) fn for_service(service: Arc<dyn RpcService>) -> Self {
+        Self {
+            inner: Arc::new(ServiceEngine(memory_client(service))),
+            engine_info: EngineInfo {
+                device_id: "dev".into(),
+                workspace_scope: cypher_proto::WorkspaceScope::Local,
+            },
+            deferred_state: None,
+        }
+    }
+}
+
 /// Cheaply clonable handle to whichever backend won the probe.
 #[derive(Clone)]
 pub struct EngineHandle {

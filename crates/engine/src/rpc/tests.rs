@@ -29,6 +29,8 @@ fn engine_identity_is_not_forwardable() {
     assert!(forwardable(methods::RETRY_COMMAND));
     assert!(forwardable(methods::DISMISS_COMMAND));
     assert!(!is_stream_method(methods::DISMISS_COMMAND));
+    assert!(forwardable(methods::FAIL_UPLOADS));
+    assert!(!is_stream_method(methods::FAIL_UPLOADS));
     assert!(forwardable(methods::WATCH_DOC_COMMANDS));
     assert!(is_stream_method(methods::WATCH_DOC_COMMANDS));
     assert!(forwardable(methods::SEARCH_FILES));
