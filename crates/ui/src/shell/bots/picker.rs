@@ -205,6 +205,48 @@ fn picks<'a>(lines: &'a [BotLine], query: &str) -> Vec<Pick<'a>> {
         .collect()
 }
 
+/// A view the switcher lists: the projects view, or a workspace by id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SwitchView {
+    Sessions,
+    Workspace(String),
+}
+
+/// The view one step from `current` (a workspace id; `None` is the
+/// projects view) in the unfiltered list's order — Sessions, then `bots` —
+/// wrapping at both ends. A `current` no longer listed (deleted elsewhere)
+/// steps from Sessions, the view the window falls back to. `None` when
+/// there is no workspace to step to.
+fn step_view(bots: &[String], current: Option<&str>, forward: bool) -> Option<SwitchView> {
+    if bots.is_empty() {
+        return None;
+    }
+    let len = bots.len() + 1;
+    let at = current
+        .and_then(|id| bots.iter().position(|bot| bot == id))
+        .map_or(0, |ix| ix + 1);
+    let next = if forward {
+        (at + 1) % len
+    } else {
+        (at + len - 1) % len
+    };
+    Some(match next {
+        0 => SwitchView::Sessions,
+        ix => SwitchView::Workspace(bots[ix - 1].clone()),
+    })
+}
+
+/// The logo's tooltip: what a click does, and the keys that step without
+/// one (as bound now; "⇧↑ ⇧↓" by default).
+fn switch_tip(keymap: &crate::prefs::KeymapConfig) -> String {
+    use crate::prefs::{ShortcutId, glyph_combo};
+    format!(
+        "Switch workspace ({} {})",
+        glyph_combo(keymap.get(ShortcutId::PrevWorkspace)),
+        glyph_combo(keymap.get(ShortcutId::NextWorkspace)),
+    )
+}
+
 /// Whether a workspace has a plan running in the background.
 fn bot_is_working(records: &cypher_proto::BotRecords, bot_id: &str) -> bool {
     records
@@ -381,6 +423,37 @@ impl Shell {
         self.set_window_mode(crate::prefs::WindowMode::Projects, cx);
     }
 
+    /// Next/Previous workspace: one step through the switcher's views
+    /// ([`step_view`]), as a pick in the list would. The main window only
+    /// (a project window has no Botboard), on the chat route, with no
+    /// dialog up.
+    pub(in crate::shell) fn step_workspace(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.is_project_window()
+            || !matches!(self.route, Route::Chat)
+            || self.showing_setup()
+            || self.dialogs.any_open()
+        {
+            return;
+        }
+        let (bots, current) = {
+            let state = self.state.read(cx);
+            let bots: Vec<String> = state.bots.iter().map(|bot| bot.id.clone()).collect();
+            // The bot the board shows (a stale saved id falls back the way
+            // `sync_board` does).
+            let current = self
+                .botboard()
+                .then(|| current_bot(&state.bots, self.settings.botboard_bot.as_deref()))
+                .flatten()
+                .map(|bot| bot.id.clone());
+            (bots, current)
+        };
+        match step_view(&bots, current.as_deref(), forward) {
+            Some(SwitchView::Sessions) => self.show_sessions(cx),
+            Some(SwitchView::Workspace(id)) => self.switch_to(&id, cx),
+            None => {}
+        }
+    }
+
     /// The list's keys that reach it as keys: arrows and Enter while the
     /// field is not focused (a short list has none), and Esc.
     fn switcher_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -538,6 +611,13 @@ impl Shell {
                 )
             })
             .on_hover(motion::hover_listener(key))
+            .when(!open, |el| {
+                let tip: SharedString = switch_tip(&self.settings.keymap).into();
+                el.tooltip(move |_, cx| {
+                    cx.new(|_| super::super::session::FindTooltip(tip.clone()))
+                        .into()
+                })
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.menus.bot_switcher.note_trigger_press()),
@@ -803,6 +883,74 @@ mod tests {
             unread: false,
             online: true,
         }
+    }
+
+    #[test]
+    fn workspace_steps_follow_the_list_and_wrap() {
+        let bots: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        let ws = |id: &str| Some(SwitchView::Workspace(id.into()));
+        // Forward: Sessions → a → b → c → back to Sessions.
+        assert_eq!(step_view(&bots, None, true), ws("a"));
+        assert_eq!(step_view(&bots, Some("a"), true), ws("b"));
+        assert_eq!(step_view(&bots, Some("b"), true), ws("c"));
+        assert_eq!(
+            step_view(&bots, Some("c"), true),
+            Some(SwitchView::Sessions)
+        );
+        // Back: Sessions wraps to the last workspace.
+        assert_eq!(step_view(&bots, None, false), ws("c"));
+        assert_eq!(step_view(&bots, Some("c"), false), ws("b"));
+        assert_eq!(
+            step_view(&bots, Some("a"), false),
+            Some(SwitchView::Sessions)
+        );
+    }
+
+    #[test]
+    fn a_workspace_gone_from_the_list_steps_from_sessions() {
+        let bots: Vec<String> = ["a", "b"].map(String::from).to_vec();
+        assert_eq!(
+            step_view(&bots, Some("deleted"), true),
+            Some(SwitchView::Workspace("a".into()))
+        );
+        assert_eq!(
+            step_view(&bots, Some("deleted"), false),
+            Some(SwitchView::Workspace("b".into()))
+        );
+    }
+
+    #[test]
+    fn with_no_workspace_there_is_no_step() {
+        assert_eq!(step_view(&[], None, true), None);
+        assert_eq!(step_view(&[], None, false), None);
+        assert_eq!(step_view(&[], Some("stale"), true), None);
+        // One workspace toggles with Sessions.
+        let one = vec!["a".to_string()];
+        assert_eq!(step_view(&one, Some("a"), true), Some(SwitchView::Sessions));
+        assert_eq!(
+            step_view(&one, Some("a"), false),
+            Some(SwitchView::Sessions)
+        );
+        assert_eq!(
+            step_view(&one, None, false),
+            Some(SwitchView::Workspace("a".into()))
+        );
+    }
+
+    #[test]
+    fn the_logo_tip_names_the_bound_keys() {
+        let mut keymap = crate::prefs::KeymapConfig::default();
+        let tip = switch_tip(&keymap);
+        if cfg!(target_os = "macos") {
+            assert_eq!(tip, "Switch workspace (⇧↑ ⇧↓)");
+        } else {
+            assert_eq!(tip, "Switch workspace (Shift+Up Shift+Down)");
+        }
+        keymap.set(crate::prefs::ShortcutId::PrevWorkspace, "mod-alt-up".into());
+        assert!(
+            switch_tip(&keymap).contains(&crate::prefs::glyph_combo("mod-alt-up")),
+            "a rebind shows in the tip"
+        );
     }
 
     fn unread(name: &str) -> BotLine {

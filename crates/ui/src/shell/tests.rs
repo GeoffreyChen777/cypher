@@ -91,6 +91,152 @@ fn the_files_editor_saves_on_mod_s_despite_the_sidebar_shortcut(cx: &mut gpui::T
     });
 }
 
+#[gpui::test]
+fn shift_arrows_switch_workspaces_unless_the_focus_owns_them(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        apply_keymap(cx, &crate::prefs::KeymapConfig::default());
+        let resolve = |keys: &str, contexts: &[&str]| -> Vec<&'static str> {
+            let keystroke = Keystroke::parse(keys).unwrap();
+            let contexts: Vec<gpui::KeyContext> = contexts
+                .iter()
+                .map(|c| gpui::KeyContext::parse(c).unwrap())
+                .collect();
+            cx.key_bindings()
+                .borrow()
+                .bindings_for_input(std::slice::from_ref(&keystroke), &contexts)
+                .0
+                .iter()
+                .map(|binding| binding.action().name())
+                .collect()
+        };
+        let prev = gpui::Action::name(&PrevWorkspace);
+        let next = gpui::Action::name(&NextWorkspace);
+        let select_up = gpui::Action::name(&crate::widgets::text_input::SelectUp);
+        let select_down = gpui::Action::name(&crate::widgets::text_input::SelectDown);
+        // Focus on the root, the sidebar's or the board's chrome.
+        assert_eq!(resolve("shift-up", &[SHELL_KEY_CONTEXT]), [prev]);
+        assert_eq!(resolve("shift-down", &[SHELL_KEY_CONTEXT]), [next]);
+        // A composer selects first; only if it passes (empty) does the
+        // switch run.
+        assert_eq!(
+            resolve("shift-up", &[SHELL_KEY_CONTEXT, "Composer"]),
+            [select_up, prev]
+        );
+        assert_eq!(
+            resolve("shift-down", &[SHELL_KEY_CONTEXT, "Composer"]),
+            [select_down, next]
+        );
+        // The Files editor's own selection binding comes first too.
+        let editor = resolve(
+            "shift-up",
+            &[SHELL_KEY_CONTEXT, crate::files::editor::KEY_CONTEXT],
+        );
+        assert_eq!(
+            editor.first().copied(),
+            Some(gpui::Action::name(&crate::files::editor::SelectUp))
+        );
+        // The terminal and palette fields keep the keys.
+        assert!(resolve("shift-up", &[SHELL_KEY_CONTEXT, "Terminal"]).is_empty());
+        assert!(resolve("shift-down", &[SHELL_KEY_CONTEXT, "PaletteSearch"]).is_empty());
+    });
+}
+
+/// A window whose root stands in for the shell's (its key context and the
+/// two workspace actions) around one chat composer input.
+struct ComposerHost {
+    input: Entity<crate::widgets::text_input::TextInput>,
+    switched: Vec<bool>,
+}
+
+impl Render for ComposerHost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .key_context(SHELL_KEY_CONTEXT)
+            .w(px(400.0))
+            .on_action(cx.listener(|this, _: &NextWorkspace, _, _| this.switched.push(true)))
+            .on_action(cx.listener(|this, _: &PrevWorkspace, _, _| this.switched.push(false)))
+            .child(self.input.clone())
+    }
+}
+
+#[gpui::test]
+fn an_empty_composer_passes_shift_arrows_to_the_workspace_switch(cx: &mut gpui::TestAppContext) {
+    use crate::widgets::text_input::TextInput;
+    cx.update(|cx| {
+        cx.set_global(Theme::dark());
+        apply_keymap(cx, &crate::prefs::KeymapConfig::default());
+    });
+    let window = cx.open_window(gpui::size(px(500.0), px(200.0)), |_, cx| ComposerHost {
+        input: cx.new(|cx| {
+            let mut input = TextInput::new("", cx);
+            input.use_chat_style = true;
+            input
+        }),
+        switched: Vec::new(),
+    });
+    let input = window.update(cx, |host, _, _| host.input.clone()).unwrap();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+        let focus = input.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+    });
+    let switched = |visual: &mut gpui::VisualTestContext| {
+        window
+            .update(visual, |host, _, _| host.switched.clone())
+            .unwrap()
+    };
+
+    visual.simulate_keystrokes("shift-down");
+    visual.simulate_keystrokes("shift-up");
+    assert_eq!(switched(&mut visual), [true, false], "empty: both switch");
+
+    // With a draft the keys select it, and nothing switches.
+    input.update(&mut visual, |input, cx| input.set_text("first\nsecond", cx));
+    visual.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let caret = input.read_with(&visual, |input, _| input.selected_range.clone());
+    assert!(caret.is_empty(), "the caret, nothing selected yet");
+    visual.simulate_keystrokes("shift-up");
+    let selected = input.read_with(&visual, |input, _| input.selected_range.clone());
+    assert!(!selected.is_empty(), "Shift+↑ selected the draft");
+    visual.simulate_keystrokes("shift-down");
+    assert_eq!(
+        switched(&mut visual),
+        [true, false],
+        "a draft keeps the keys"
+    );
+}
+
+#[gpui::test]
+fn a_settings_field_keeps_shift_arrows_even_when_empty(cx: &mut gpui::TestAppContext) {
+    use crate::widgets::text_input::TextInput;
+    cx.update(|cx| {
+        cx.set_global(Theme::dark());
+        apply_keymap(cx, &crate::prefs::KeymapConfig::default());
+    });
+    let window = cx.open_window(gpui::size(px(500.0), px(200.0)), |_, cx| ComposerHost {
+        input: cx.new(|cx| TextInput::new("", cx)),
+        switched: Vec::new(),
+    });
+    let input = window.update(cx, |host, _, _| host.input.clone()).unwrap();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+        let focus = input.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+    });
+    visual.simulate_keystrokes("shift-up shift-down");
+    let switched = window
+        .update(&mut visual, |host, _, _| host.switched.clone())
+        .unwrap();
+    assert!(switched.is_empty(), "not the chat composer");
+}
+
 fn test_chat(id: &str, archived: bool) -> cypher_proto::Chat {
     cypher_proto::Chat {
         id: id.into(),

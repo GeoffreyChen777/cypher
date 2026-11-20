@@ -286,15 +286,30 @@ impl TextInput {
     }
 
     pub(super) fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        if self.passes_on_vertical_select() {
+            cx.propagate();
+            return;
+        }
         if let Some(ix) = self.vertical_target(-1.0) {
             self.select_to(ix, cx);
         }
     }
 
     pub(super) fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        if self.passes_on_vertical_select() {
+            cx.propagate();
+            return;
+        }
         if let Some(ix) = self.vertical_target(1.0) {
             self.select_to(ix, cx);
         }
+    }
+
+    /// An empty chat composer has nothing to select, so Shift+↑/↓ goes on
+    /// to the next binding: the window's workspace switch (shell.rs
+    /// `WORKSPACE_SWITCH_CONTEXT`). Other fields keep the keys.
+    fn passes_on_vertical_select(&self) -> bool {
+        self.use_chat_style && self.content.is_empty() && self.marked_range.is_none()
     }
 
     /// Offset one wrapped line above/below the cursor, keeping its x column.

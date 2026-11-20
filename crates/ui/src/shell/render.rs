@@ -1416,6 +1416,7 @@ impl Render for Shell {
 
         let root = div()
             .id("shell-root")
+            .key_context(super::SHELL_KEY_CONTEXT)
             .relative()
             .flex()
             .flex_row()
@@ -1717,6 +1718,10 @@ impl Shell {
             // and says why.
             .on_action(cx.listener(|this, _: &NextSession, _, cx| this.cycle_session(true, cx)))
             .on_action(cx.listener(|this, _: &PrevSession, _, cx| this.cycle_session(false, cx)))
+            // The logo switcher's views, in its order; `step_workspace`
+            // holds the guards.
+            .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.step_workspace(true, cx)))
+            .on_action(cx.listener(|this, _: &PrevWorkspace, _, cx| this.step_workspace(false, cx)))
             .on_action(cx.listener(|this, _: &ToggleChanges, _, cx| {
                 if matches!(this.route, Route::Chat)
                     && let Some(sid) = this.focused_slot()
