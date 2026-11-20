@@ -19,7 +19,10 @@
  *    message names or plainly implies (a release tag on the default branch
  *    holding the version, for "release a new version"; the pull request
  *    this chat opened, for "open a PR and merge it").
- * 3. Nothing the owner wrote since takes it back or moves on to other work.
+ * 3. Nothing the owner wrote since takes it back or moves on to other work,
+ *    and the message itself doesn't say not to ("open a PR, don't merge it").
+ *    A later "don't" about something else ("don't forget the changelog")
+ *    takes nothing back.
  *
  * A target known only when the line runs (`git push origin $BRANCH`) can't
  * be checked, so it asks; a body or title known only when it runs
@@ -104,6 +107,81 @@ const VAGUE = new Set(
 /** A later message that takes a request back or changes it ("先别 push", "don't merge", "wait"). */
 const RETRACTION =
   /\b(wait|hold (on|off)|don'?t|do not|stop|cancel|abort|never ?mind|not yet|no longer|revert|undo|instead|scratch that|forget (it|that))\b|先别|别(?:再|急|动|推|合|发|做|弄|改|管|push|merge)|不要|不用|先停|停下|停一下|等等|等一下|等下|取消|算了|暂停|先不|撤销|回滚|改成|改为|换成/i;
+
+/** Words that say not to do what follows them ("don't merge", "先别合并"). */
+const NEGATION = /\b(?:don'?t|do not|never|not yet|no need to|without|instead of|hold off on|skip)\b|先别|别|不要|不用|先不|不必|无需|不需要/gi;
+
+/** Words a bare "wait" or "don't" may come with and still mean the request at hand ("don't do that yet", "先别了"). */
+const FILLER =
+  /\b(?:it|that|this|them|those|these|yet|now|for now|please|pls|just|ok(?:ay)?|so|and|but|oh|hey|actually|no|nope|sorry|oops|well|hmm+|a (?:sec|second|moment|minute|bit)|do|doing|anything|any of (?:it|that)|one|more|on|up|the|all)\b|这个|那个|这些|那些|它|一下|吧|了|先|请|再|啊|哦|呢|做|弄|搞/gi;
+
+/** A "don't" that asks for the thing ("don't forget to merge", "别忘了合并"). */
+const REMINDER = /\b(?:don'?t|do not|never)\s+(?:forget|hesitate|worry|be afraid)\b|(?:别|不要|不用)(?:忘了?|忘记|担心|犹豫)/gi;
+
+/** The most a clause may say besides its "wait" and still be a bare one. */
+const BARE_WEIGHT = 4;
+
+/** A message's sentences: a "don't" belongs to the sentence it stands in. */
+function sentences(text: string): string[] {
+  return text
+    .split(/[.!?](?=\s|$)|[;。！？；\n]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/** The words that ask for what a target's command does, for telling what a "don't" is about. */
+function verbOf(target: Target): RegExp {
+  if (target.kind === "pr") return target.action === "create" ? /open|create|make|file|raise|submit|send|开|提|建|发/i : (SAYS[target.action as keyof typeof SAYS] ?? SAYS.pr);
+  if (target.kind === "branch") return target.action === "delete" ? SAYS.delete : SAYS.push;
+  if (target.kind === "tag") return /release|publish|ship|tag|push|发布|发版|上线|标签|推/i;
+  if (target.kind === "package") return target.action === "install" ? SAYS.install : SAYS.publish;
+  return /deploy|ssh|connect|log ?in|run|登录|连接|部署|执行/i;
+}
+
+/** Whether a sentence is about what a target's command does: it names the target, or its action. */
+function concerns(text: string, target: Target): boolean {
+  if (mentions(text, target.value) || verbOf(target).test(text)) return true;
+  switch (target.kind) {
+    case "pr":
+      return SAYS.pr.test(text) || SAYS.merge.test(text);
+    case "branch":
+      return /branch|分支/i.test(text);
+    case "tag":
+      return SAYS.release.test(text);
+    case "package":
+      return SAYS.publish.test(text) || SAYS.install.test(text);
+    case "host":
+      return /server|host|machine|cluster|服务器|主机|集群/i.test(text);
+  }
+}
+
+/**
+ * Whether a later message takes a request back: a sentence with a "wait",
+ * "don't" or "instead" that is about what the command does, or that says
+ * nothing else ("wait", "先别", "don't do that yet"). A "don't" about
+ * something else ("don't rename any branch", for a merge) takes nothing back.
+ */
+function retracts(text: string, targets: readonly Target[]): boolean {
+  return sentences(text.normalize("NFKC").replace(REMINDER, " ")).some((sentence) => {
+    if (!RETRACTION.test(sentence)) return false;
+    if (targets.some((target) => concerns(sentence, target))) return true;
+    const rest = sentence.replace(new RegExp(RETRACTION.source, "gi"), " ").replace(FILLER, " ");
+    return weight(normalize(rest)) <= BARE_WEIGHT;
+  });
+}
+
+/** Whether a message says not to do what a target's command does: a "don't" right before its verb ("open a PR, don't merge it"). */
+function forbids(text: string, target: Target): boolean {
+  const verb = verbOf(target);
+  const haystack = text.normalize("NFKC").replace(REMINDER, " ");
+  for (const match of haystack.matchAll(NEGATION)) {
+    const after = haystack.slice(match.index + match[0].length, match.index + match[0].length + 32).split(/[,.;!?，。；！？、\n]/)[0];
+    // The verb must come right after: within a couple of words.
+    const near = /[\p{Script=Han}]/u.test(after) ? after.slice(0, 8) : after.trim().split(/\s+/).slice(0, 3).join(" ");
+    if (verb.test(near)) return true;
+  }
+  return false;
+}
 
 /** A later message that only carries on ("好了 继续发布", "try again", "looks good"). */
 const CONTINUATION =
@@ -610,8 +688,11 @@ function uncovered(target: Target, message: string, opened: readonly { number: s
       return `your message names neither ${target.name} nor version ${target.version}`;
     }
     case "host": {
+      // By its name, its first label (`web` for `web.example.com`), or what its alias starts with (`gamma` for `gamma-cluster`).
       const first = target.value.split(".")[0];
-      return mentions(message, target.value) || (first.length >= 3 && mentions(message, first)) ? undefined : `it reaches ${target.value}, a host your message doesn't name`;
+      const lead = first.split(/[-_]/)[0];
+      const named = mentions(message, target.value) || (first.length >= 3 && mentions(message, first)) || (lead !== first && lead.length >= 4 && mentions(message, lead));
+      return named ? undefined : `it reaches ${target.value}, a host your message doesn't name`;
     }
   }
 }
@@ -699,12 +780,14 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
   for (const target of targets) {
     const why = uncovered(target, message.text, opened, facts);
     if (why) return result(["quote"], why, source);
+    // "open a PR, don't merge it" asks for no merge, though it says the word.
+    if (forbids(message.text, target)) return result(["quote"], `your message says not to (${describeTarget(target)})`, source);
   }
   // Nothing since takes it back or moves on.
   for (const later of owner.messages.slice(at + 1)) {
     const text = later.text.trim();
     const short = text.length > 140 ? `${text.slice(0, 140)}…` : text;
-    if (RETRACTION.test(text)) return result(["quote", "target"], `you wrote later: "${short}"`, source);
+    if (retracts(text, targets)) return result(["quote", "target"], `you wrote later: "${short}"`, source);
     const carriesOn = (text.length <= 120 && (CONTINUATION.test(text.normalize("NFKC").trim()) || CONTINUES.test(text))) || targets.some((target) => mentions(text, target.value));
     if (!carriesOn) return result(["quote", "target"], `you've written since ("${short}"), so that request may be about earlier work`, source);
   }

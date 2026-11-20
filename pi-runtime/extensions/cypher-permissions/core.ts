@@ -13,7 +13,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { AuditLog } from "./audit.ts";
 import type { AuditRecord } from "./audit.ts";
-import { appendCommandRule, appendRule, approvalMode as approvalModeFor, CONFIG_FILE, editUserConfig, loadConfig, readUserConfig, resolveLevel } from "./config.ts";
+import { appendCommandRule, appendRule, approvalMode as approvalModeFor, CONFIG_FILE, editUserConfig, loadConfig, ownFolders, readUserConfig, resolveLevel } from "./config.ts";
 import { CREATED_ENTRY, CreatedStore, creationsOf } from "./created.ts";
 import type { CreationFacts } from "./created.ts";
 import type { Capability, LevelName, PermissionsConfig } from "./config.ts";
@@ -27,7 +27,7 @@ import {
   ripgrepGlobs,
   splitPatterns,
 } from "./discover.ts";
-import { globBase } from "./glob.ts";
+import { globBase, hasGlob } from "./glob.ts";
 import { GRANT_ENTRY, GrantStore, newGrant, REVOKE_ENTRY, ROOT_ENTRY } from "./grants.ts";
 import type { Grant, GrantScope } from "./grants.ts";
 import { checkExplicit, describeTarget, lineTargets, repoName } from "./explicit.ts";
@@ -459,6 +459,13 @@ export class Permissions {
    * on without a dialog. Undefined when the engine passed none.
    */
   ownerWords: OwnerWords | undefined;
+  /**
+   * Set by the extension: the owner's words as the engine knows them now.
+   * A Pi process outlives the turn it was started for, so what it started
+   * with lacks every message the owner sent since. Undefined result: none
+   * newer could be had, and the words at hand stand.
+   */
+  ownerWordsNow?: () => Promise<OwnerWords | undefined>;
   private cwd: string;
   private extraRoots: string[] = [];
   private baseRoots: string[] = [];
@@ -546,6 +553,8 @@ export class Permissions {
       writableSupport: this.config.writableSupport,
       permissionSystem: this.config.permissionSystem,
       scratch: this.scratchDirs,
+      // A workspace bot's folder lies in Cypher's data: for its own chats it is the project.
+      ownFolders: ownFolders(roots, this.agentDir),
       home: this.home,
     });
     this.sensitiveCache = undefined;
@@ -598,7 +607,24 @@ export class Permissions {
   }
 
   private ruleCovers(capability: Capability, path: string): boolean {
+    // No rule lets the permission system's own files be written (the always-ask floor).
+    if (this.systemWrite(capability, path)) return false;
     return this.config.rules.some((rule) => (capability === "read" || rule.capability === "write") && isUnder(path, rule.path) && this.ruleApplies(rule));
+  }
+
+  /** A write to one of the permission system's own files (config.ts): only the user approves one, file by file. */
+  private systemWrite(capability: Capability, path: string): boolean {
+    return capability === "write" && this.paths.isPermissionSystem(path) !== undefined;
+  }
+
+  /**
+   * A grant that lets a file tool touch this path. One of the permission
+   * system's own files is covered only by a grant the user gave for that
+   * very file: approving a folder never hands over the policy inside it.
+   */
+  private fileGrant(capability: Capability, path: string): Grant | undefined {
+    if (!this.systemWrite(capability, path)) return this.grants.findForFile(capability, path);
+    return this.grants.all().find((grant) => grant.pattern === undefined && grant.capability === "write" && grant.approvedBy === "user" && grant.paths.includes(path));
   }
 
   /**
@@ -613,7 +639,7 @@ export class Permissions {
     if (verdict.kind === "allow") return canonical;
     if (approved?.covers(capability, canonical)) return canonical;
     for (const flight of this.inflight.values()) if (flight.covers(capability, canonical)) return canonical;
-    const grant = this.grants.findForFile(capability, canonical);
+    const grant = this.fileGrant(capability, canonical);
     if (grant) return canonical;
     if (this.ruleCovers(capability, canonical) && classification.zone !== "sensitive") return canonical;
     const reason = verdict.kind === "deny" ? verdict.reason : `${describe(classification)} needs approval to ${capability}`;
@@ -662,7 +688,7 @@ export class Permissions {
         this.audit.write({ tool: call.tool, capability: request.capability, zone: classification.zone, guard: classification.guard, paths: [canonical], decision: "deny", decidedBy: "policy", reason: verdict.reason });
         return { ok: false, reason: `Permission denied: ${verdict.reason}.` };
       }
-      const grant = this.grants.findForFile(request.capability, canonical);
+      const grant = this.fileGrant(request.capability, canonical);
       if (grant) {
         this.audit.write({ tool: call.tool, capability: request.capability, zone: classification.zone, guard: classification.guard, paths: [canonical], decision: "allow", decidedBy: "grant", grantId: grant.id, scope: grant.scope });
         this.grants.used(grant);
@@ -678,7 +704,7 @@ export class Permissions {
       }
       const outcome = await this.serialized(async () => {
         // An earlier dialog in the queue may have allowed it meanwhile.
-        if (this.grants.findForFile(request.capability, canonical) || (classification.zone !== "sensitive" && this.ruleCovers(request.capability, canonical))) {
+        if (this.fileGrant(request.capability, canonical) || (classification.zone !== "sensitive" && this.ruleCovers(request.capability, canonical))) {
           return { allowed: true as const, scope: "rule" as const, by: "rule" as const };
         }
         return this.elevate(
@@ -1175,12 +1201,14 @@ export class Permissions {
     return !this.shellPrefix && !Object.hasOwn(process.env, name) && !SHELL_VARIABLES.test(name) && !/proxy/i.test(name);
   }
 
-  private parse(command: string): ParsedLine {
+  private parse(command: string, cwd?: string): ParsedLine {
     return parseShell(command, this.home, {
       assignable: (name) => this.assignable(name),
       prefixAllowed: benignEnv,
       // An exported value is followed for later words; `export` itself never runs outside by a rule (`ruleCannotVouch`).
       exportable: (name) => !SHELL_VARIABLES.test(name) && !/proxy/i.test(name),
+      // `$PWD` is where the line starts, unless a command prefix from the settings could move it first.
+      ...(cwd !== undefined && !this.shellPrefix ? { cwd } : {}),
     });
   }
 
@@ -1214,6 +1242,8 @@ export class Permissions {
       out.push({
         ...command,
         words,
+        // The wrappers' words are gone from the front: so are their hints.
+        ...(command.hints ? { hints: command.hints.slice(command.words.length - words.length) } : {}),
         env: [...command.env, ...(wrapped?.env ?? [])],
         // The values in front of it and its wrappers' words: they can name the installed app too (`CYPHER_DATA_DIR=~/.cypher cmd`).
         carried: [...(command.envValues ?? []), ...(wrapped ? command.words.slice(0, command.words.length - words.length) : [])],
@@ -1277,7 +1307,7 @@ export class Permissions {
     if (!this.enforcing) return;
     let commands: LineCommand[];
     try {
-      const parsed = this.parse(command);
+      const parsed = this.parse(command, cwd);
       if (parsed.kind === "opaque") return;
       commands = this.commandsOf(parsed.commands, cwd);
     } catch {
@@ -1295,6 +1325,7 @@ export class Permissions {
     for (const [capability, paths] of [["read", item.reads], ["write", item.writes]] as const) {
       const verb = capability === "read" ? "reads" : "writes";
       for (const path of paths) {
+        if (path === UNKNOWN) return `it ${verb} a file known only when it runs`;
         if (item.cwd === undefined && !isAbsolute(path)) return `it ${verb} ${path} in a directory known only when it runs`;
         const classification = this.classify(path, item.cwd);
         if (this.verdict(capability, classification).kind !== "allow") return `it ${verb} ${displayPath(classification.path, this.home)}, which commands in the sandbox can't`;
@@ -1326,7 +1357,7 @@ export class Permissions {
 
   /** The risk tier of a whole line: its most dangerous command (risk.ts). */
   assess(command: string, cwd: string): LineAssessment {
-    const parsed = this.parse(command);
+    const parsed = this.parse(command, cwd);
     if (parsed.kind === "opaque") return { ...assessOpaque(command, this.riskFacts()), commands: [], parsed };
     const commands = this.commandsOf(parsed.commands, cwd);
     const facts = this.riskFacts();
@@ -1339,7 +1370,7 @@ export class Permissions {
     for (const assessment of assessments) if (TIER_RANK[assessment.tier] > TIER_RANK[worst.tier]) worst = assessment;
     if (downloadsAndRuns(commands)) worst = { tier: "danger", kind: "downloads code and runs it", key: "download-run" };
     // A secret leaving the machine: the always-ask floor, for the line as a whole.
-    const exfiltration = exfiltrates(commands, facts, command);
+    const exfiltration = exfiltrates(commands, facts, parsed.expands);
     if (exfiltration) worst = { tier: "danger", kind: exfiltration, key: "secret-off-machine", floor: true };
     return { ...worst, commands, assessments, parsed };
   }
@@ -1535,6 +1566,8 @@ export class Permissions {
       else if (unknownTarget) audit.explicit = { ok: false, reason: `${unknownTarget}, so Cypher can't check it against your words`, targets: [], passed: [] };
       let review: string | undefined;
       if (mode === "assisted" && floor === undefined && reviewable) {
+        // A danger runs on the owner's own words: the ones they have written by now.
+        if (dangerous) await this.refreshOwnerWords();
         const purpose = [proposal.label && `Purpose: ${proposal.label}`, proposal.reason && `Reason: ${proposal.reason}`].filter(Boolean).join("\n");
         // An approval is remembered for the commands' own categories, never for patterns the agent proposed; a danger's, never.
         const memo = dangerous ? [] : patterns.filter((pattern) => !pattern.proposed);
@@ -1636,6 +1669,17 @@ export class Permissions {
         }
       }
     });
+  }
+
+  /** Ask the engine for the owner's words as of now; a failure keeps the ones at hand. */
+  private async refreshOwnerWords(): Promise<void> {
+    if (!this.ownerWordsNow) return;
+    try {
+      const words = await this.ownerWordsNow();
+      if (words) this.ownerWords = words;
+    } catch {
+      // The words the run started with stand.
+    }
   }
 
   /**
@@ -2052,7 +2096,7 @@ export class Permissions {
 
   /** Concrete sensitive, protected and self paths for a launch. */
   async concretePaths(signal?: AbortSignal): Promise<ConcretePaths> {
-    const key = JSON.stringify([this.roots, this.config.sensitive, this.config.protected, this.config.self]);
+    const key = JSON.stringify([this.roots, this.paths.ownFolders, this.config.sensitive, this.config.protected, this.config.self]);
     if (this.sensitiveCache && this.sensitiveCache.key === key && Date.now() - this.sensitiveCache.at < 1500) {
       return this.sensitiveCache.paths;
     }
@@ -2089,8 +2133,14 @@ export class Permissions {
     // is denied child by child, around the exception.
     const inside = sensitive.exceptions.filter((exception) => exception.startsWith("/"));
     const carve = (list: string[]) => list.flatMap((path) => splitSelf(path, inside));
-    const allSensitive = dropExceptions(carve([...sensitiveRead, ...anywhere, ...deferredHits.flat()]), sensitive.exceptions, roots, this.home);
-    const allSensitiveWrite = dropExceptions(carve([...sensitiveWrite, ...anywhere, ...deferredHits.flat()]), sensitive.exceptions, roots, this.home);
+    // The chat's own folder in Cypher's data (paths.ts `ownFolders`) is carved
+    // out of the directories denied for where they are (`~/.cypher/orgs`), and
+    // only of those: a secret found inside it by name stays denied.
+    const own = this.paths.ownFolders.filter((root) => !hasGlob(root)).map((root) => `${root}/**`);
+    const carveOwn = (list: string[]) => list.flatMap((path) => splitSelf(path, [...inside, ...own]));
+    const found = [...anywhere, ...deferredHits.flat()];
+    const allSensitive = dropExceptions([...carveOwn(sensitiveRead), ...carve(found)], sensitive.exceptions, roots, this.home);
+    const allSensitiveWrite = dropExceptions([...carveOwn(sensitiveWrite), ...carve(found)], sensitive.exceptions, roots, this.home);
 
     const guarded = splitPatterns(this.config.protected, roots, this.home);
     const protectedPaths: string[] = [];
@@ -2117,7 +2167,7 @@ export class Permissions {
       sensitiveWrite: [...new Set(allSensitiveWrite)],
       protectedPaths: dropExceptions([...new Set(protectedPaths)], guarded.exceptions, roots, this.home),
       selfRoots: [...new Set(selfRoots)],
-      selfExceptions: self.exceptions,
+      selfExceptions: [...self.exceptions, ...own],
     };
     this.sensitiveCache = { at: Date.now(), key, paths };
     return paths;

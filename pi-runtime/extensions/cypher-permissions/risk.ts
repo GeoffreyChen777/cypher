@@ -103,10 +103,13 @@ export function fileEffect(command: RiskCommand, view: CommandView, path: string
   const program = view.program;
   // `mkdir` is named-only for reading a secret's directory, but it does make it.
   if (program !== "mkdir" && (NAME_ONLY.has(program) || READERS.has(program))) return "read";
-  // `find` and friends only list what they name, unless told to act on it
-  // (which `destroyDanger` reads).
+  // `find` and friends only list what they name, unless told to delete it,
+  // write a file, or run a program on it that is more than a reader.
   if (/^(find|fd|tree|du|rg|ag|ack)$/.test(program)) {
-    return view.args.some((word) => /^-(delete|exec|execdir|ok|okdir|fprint.*|fls|X)$/.test(word)) ? "write" : "read";
+    if (view.args.some((word) => /^-(delete|fprint.*|fls)$/.test(word))) return "write";
+    const runs = findRuns(view);
+    if (runs === undefined) return "write";
+    return runs.every((run) => readsOnly(basename(run[0] ?? ""))) ? "read" : "write";
   }
   if (EITHER.test(program)) {
     if (program === "sed" || program === "perl") return view.args.some((word) => /^-[A-Za-z]*i/.test(word) || word.startsWith("--in-place")) ? "write" : "read";
@@ -116,6 +119,67 @@ export function fileEffect(command: RiskCommand, view: CommandView, path: string
     return view.words.some((word) => word !== UNKNOWN && WRITE_HINT.test(word)) ? "write" : "read";
   }
   return "write";
+}
+
+/** A program that only reads the files it names, or only their names. */
+function readsOnly(program: string): boolean {
+  return program !== "mkdir" && (NAME_ONLY.has(program) || READERS.has(program));
+}
+
+/** The words that end what `find -exec` runs. */
+const FIND_RUNS = /^-(exec|execdir|ok|okdir)$/;
+
+/**
+ * The commands `find` (or `fd -x`) runs on what it finds, each with its
+ * words as written (`{}` stands for a found file). Empty when it runs none;
+ * undefined when one cannot be read (a word known only when it runs, no
+ * program after `-exec`).
+ */
+function findRuns(view: CommandView): string[][] | undefined {
+  const args = view.args;
+  const runs: string[][] = [];
+  if (view.program === "fd") {
+    const at = args.findIndex((word) => /^(-x|-X|--exec|--exec-batch)$/.test(word));
+    if (at < 0) return args.includes(UNKNOWN) ? undefined : [];
+    const run = args.slice(at + 1);
+    return run.length === 0 || run[0] === UNKNOWN ? undefined : [run];
+  }
+  if (view.program !== "find") return [];
+  if (args.includes(UNKNOWN)) return undefined;
+  for (let i = 0; i < args.length; i++) {
+    if (!FIND_RUNS.test(args[i])) continue;
+    const run: string[] = [];
+    for (i++; i < args.length && args[i] !== ";" && args[i] !== "+"; i++) run.push(args[i]);
+    if (run.length === 0) return undefined;
+    runs.push(run);
+  }
+  return runs;
+}
+
+/** Where `find` starts: its operands before its tests (`find -L dir -name x`), `.` when it names none. */
+function findStarts(view: CommandView): string[] {
+  const starts: string[] = [];
+  let i = 0;
+  // Options before the paths (`find -L dir`), BSD's `-f path` among them.
+  for (; i < view.args.length; i++) {
+    const word = view.args[i];
+    if (/^-[HLPEXdsx]+$/.test(word) || /^-O\d$/.test(word) || word === "-D") {
+      if (word === "-D") i++;
+      continue;
+    }
+    if (word === "-f") {
+      const path = view.args[++i];
+      if (path !== undefined) starts.push(path);
+      continue;
+    }
+    break;
+  }
+  for (; i < view.args.length; i++) {
+    const word = view.args[i];
+    if (word !== UNKNOWN && (word.startsWith("-") || word === "!" || word === "(")) break;
+    starts.push(word);
+  }
+  return starts.length ? starts : ["."];
 }
 
 /** The danger a kind names, without the specifics that differ from command to command (which tag). */
@@ -135,6 +199,8 @@ export interface RiskCommand {
   writes: readonly string[];
   /** Words it carries besides its own: values assigned in front of it, its wrappers' words. */
   carried?: readonly string[];
+  /** What each word known only when it runs surely starts with (shell.ts `hints`), one per word. */
+  hints?: readonly (string | undefined)[];
 }
 
 /** What `kill`, `pkill` and `killall` would stop. */
@@ -266,6 +332,11 @@ function pathWords(words: readonly string[]): string[] {
 export function redirectRisk(command: Pick<RiskCommand, "reads" | "writes" | "cwd">, facts: RiskFacts): Assessment | undefined {
   let soft: Assessment | undefined;
   for (const path of command.reads) {
+    // `< "$file"`: which file, nobody can say before it runs. No inspection, and no rule's to vouch for (core.ts).
+    if (path === UNKNOWN) {
+      soft ??= { tier: "local", kind: "reads a file known only when it runs" };
+      continue;
+    }
     const classification = facts.classify(path, command.cwd) ?? named(path, facts);
     if (!classification) continue;
     // Reading a secret sends it to the model provider: the model may approve
@@ -273,6 +344,10 @@ export function redirectRisk(command: Pick<RiskCommand, "reads" | "writes" | "cw
     if (classification.zone === "sensitive") soft ??= { tier: "local", kind: `reads a secret (${path})`, once: true };
   }
   for (const path of command.writes) {
+    if (path === UNKNOWN) {
+      soft ??= { tier: "local", kind: "writes a file known only when it runs" };
+      continue;
+    }
     const classification = facts.classify(path, command.cwd) ?? named(path, facts);
     // A name in a directory known only when it runs that could be no secret
     // and no startup file is ordinary work.
@@ -320,6 +395,8 @@ function pathRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): As
     if (!pathWords([word]).length) continue;
     // ssh's identity file: the key is used, not read out.
     if (/^(ssh|scp|sftp|rsync|git|mosh)$/.test(view.program) && (words[i - 1] === "-i" || /IdentityFile/i.test(words[i - 1] ?? ""))) continue;
+    // `host:path` and a URL are the other machine's files, whatever their names.
+    if (!localOperand(view, word, words[i - 1])) continue;
     const classification = facts.classify(word, command.cwd);
     if (!classification) continue;
     const effect = pathEffect(command, view, word);
@@ -328,7 +405,8 @@ function pathRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): As
     }
     if (classification.zone === "sensitive" && !NAME_ONLY.has(view.program)) {
       if (effect === "write") return { tier: "danger", kind: `writes a secret (${word})`, key: "writes a secret" };
-      soft ??= { tier: "local", kind: `reads a secret (${word})`, once: true };
+      // A bare name that is not there holds nothing to read.
+      if (isAbsolute(word) || word.startsWith("~") || present(classification.path)) soft ??= { tier: "local", kind: `reads a secret (${word})`, once: true };
       continue;
     }
     if (WRITERS.has(view.program) && view.program !== "git" && effect === "write") {
@@ -405,28 +483,10 @@ function destroyDanger(command: RiskCommand, view: CommandView, facts: RiskFacts
     // --delete empties the destination of what the source lacks; --remove-source-files the sources.
     operands = [...(deletes ? [copy.dest] : []), ...(view.args.includes("--remove-source-files") ? copy.sources : [])].filter((word) => !remoteOperand(word));
   }
-  else if (view.program === "find" && view.args.some((word) => word === UNKNOWN || word === "-delete" || word === "-exec" || word === "-execdir" || word === "-ok" || word === "-okdir")) {
-    // Options before the paths (`find -L dir`), BSD's `-f path` among them.
-    let i = 0;
-    for (; i < view.args.length; i++) {
-      const word = view.args[i];
-      if (/^-[HLPEXdsx]+$/.test(word) || /^-O\d$/.test(word) || word === "-D") {
-        if (word === "-D") i++;
-        continue;
-      }
-      if (word === "-f") {
-        const path = view.args[++i];
-        if (path !== undefined) operands.push(path);
-        continue;
-      }
-      break;
-    }
-    for (; i < view.args.length; i++) {
-      const word = view.args[i];
-      if (word !== UNKNOWN && (word.startsWith("-") || word === "!" || word === "(")) break;
-      operands.push(word);
-    }
-    if (operands.length === 0) operands = ["."];
+  else if (view.program === "find" && view.args.some((word) => word === UNKNOWN || word === "-delete")) {
+    // `-delete`, or a word known only when it runs that could be it. What
+    // `-exec` runs is assessed as its own command (`assessCommand`).
+    operands = findStarts(view);
   } else if (/^(chmod|chown|chgrp)$/.test(view.program) && view.args.some((word) => /^-[A-Za-z]*R/.test(word))) {
     // A recursive mode change outside the project folders; one path at a
     // time, or a path known only when it runs, is ordinary work (`mkdir -p
@@ -636,7 +696,7 @@ const HARMLESS_GIT_KEYS =
  * names: the global ones before the subcommand, and `clone -c`/`--config`.
  * (`git commit -c <commit>` reuses a message: not configuration.)
  */
-function gitOptionDanger(view: CommandView): string | undefined {
+function gitOptionDanger(view: CommandView, hints?: readonly (string | undefined)[]): string | undefined {
   const args = view.args;
   let sub: string | undefined;
   for (let i = 0; i < args.length; i++) {
@@ -658,6 +718,8 @@ function gitOptionDanger(view: CommandView): string | undefined {
     else if (!global && word.startsWith("--config=")) setting = word.slice("--config=".length);
     else if (global && /^-c.+=/.test(word)) setting = word.slice(2);
     if (setting === undefined) continue;
+    // `-c user.name="$(…)"`: the key is as written, only its value is known when it runs.
+    if (setting === UNKNOWN && args[i] === UNKNOWN) setting = /^[\w.-]+=/.exec(hints?.[i + 1] ?? "")?.[0] ?? UNKNOWN;
     if (setting === UNKNOWN) return "sets git configuration known only when it runs";
     const key = setting.split("=")[0];
     if (!HARMLESS_GIT_KEYS.test(key)) return `sets ${key}, which can make git run a program`;
@@ -821,10 +883,11 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
   if (words[0] === UNKNOWN) return { tier: "local", kind: "runs a program known only when it runs" };
   const inner = innerLine(view);
   if (inner) {
-    const assessment = inner.line.includes(UNKNOWN) ? { tier: "danger" as const, kind: "runs a command known only when it runs" } : assessOpaque(inner.line, facts);
+    // What ssh runs is the other machine's: its variables and files are not this one's secrets.
+    const assessment: Assessment = inner.line.includes(UNKNOWN) ? { tier: "danger", kind: "runs a command known only when it runs" } : assessOpaque(inner.line, facts, inner.where !== undefined);
     if (assessment.tier === "danger") {
       const kind = inner.where ? `on ${inner.where}: ${assessment.kind}` : assessment.kind!;
-      return { tier: "danger", kind, key: kind };
+      return assessment.floor ? { ...assessment, kind } : { tier: "danger", kind, key: kind };
     }
   }
   // Options that run a program on this computer (`ssh -o ProxyCommand=…`, `-F file`, `rsync -e`).
@@ -833,11 +896,22 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
   if (vouch) return { tier: "danger", kind: `gives ${view.program} an option that can run a program or write a file on this computer`, key: "ssh-options" };
   const next = runsNext(view);
   if (next) {
-    const assessment = assessCommand({ ...command, words: next, reads: [], writes: [] }, facts);
+    const assessment = assessCommand({ ...command, words: next, reads: [], writes: [], hints: undefined }, facts);
     if (assessment.tier === "danger") return assessment;
     const redirected = redirectRisk(command, facts);
     if (redirected?.tier === "danger") return redirected;
     return { tier: "local", kind: assessment.kind ?? redirected?.kind ?? `runs ${basename(next[0] ?? "a program")} through ${view.program}`, ...(assessment.once || redirected?.once ? { once: true as const } : {}) };
+  }
+  // What `find -exec` runs is a command of its own, on the files `find`
+  // starts from (`find build -exec rm {} +` deletes in `build`).
+  let ran: Assessment | undefined;
+  for (const run of findRuns(view) ?? []) {
+    const starts = run.some((word) => word.includes("{}")) ? findStarts(view) : [""];
+    for (const start of starts) {
+      const assessment = assessCommand({ ...command, words: run.map((word) => word.split("{}").join(start)), reads: [], writes: [], hints: undefined }, facts);
+      if (assessment.tier === "danger") return assessment;
+      if (assessment.once) ran ??= assessment;
+    }
   }
   const kill = killAssessment(view, facts);
   if (kill?.tier === "danger") return kill;
@@ -846,7 +920,7 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
   // else is dangerous.
   const system = permissionSystemRisk(command, view, facts);
   if (system) return system;
-  let soft: Assessment | undefined;
+  let soft: Assessment | undefined = ran;
   for (const check of [pathRisk(command, view, facts), installedAppRisk(command, view, facts)]) {
     if (check?.tier === "danger") return check;
     soft ??= check;
@@ -856,7 +930,7 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
     copyDanger(command, view, facts) ??
     protectedTarget(view, facts) ??
     (view.program === "git"
-      ? (gitOptionDanger(view) ?? gitConfigDanger(view) ?? gitPushDanger(command, view, facts) ?? gitDiscardDanger(command, view, facts) ?? gitHistoryDanger(view))
+      ? (gitOptionDanger(view, command.hints) ?? gitConfigDanger(view) ?? gitPushDanger(command, view, facts) ?? gitDiscardDanger(command, view, facts) ?? gitHistoryDanger(view))
       : undefined) ??
     DANGER.map((entry) => dangerMatches(entry, view, facts)).find((kind) => kind !== undefined);
   if (danger) {
@@ -923,21 +997,146 @@ const SECRET_WRITE_VERB =
 const SENDERS =
   /^(curl|wget|http|https|xh|nc|ncat|netcat|socat|telnet|ftp|ssh|scp|sftp|rsync|mosh|mail|mailx|sendmail|mutt|neomutt|msmtp|slack|slackcat|telegram-send|signal-cli|discord-send|ntfy|apprise|pushover|twilio|gh|glab|aws|gcloud|az|op|vault)$/;
 
-/** Variable names whose value is a secret. */
-const SECRET_VARIABLE = /\$\{?[A-Za-z_]*(TOKEN|SECRET|PASSW|PASSWD|APIKEY|API_KEY|CREDENTIAL|PRIVATE_KEY|COOKIE|SESSION_TOKEN)[A-Za-z_]*\}?/i;
+/** What a variable's name holds anywhere in it when its value is a secret (`DB_PASSWORD`, `clientSecret`, `SESSION_COOKIE`). */
+const SECRET_NAME = /secret|passw|apikey|api_key|credential|private_key|cookie/;
+
+/** Words beside `token` that make it a count, not a credential (`TOKEN_LIMIT`; `MAX_TOKENS` is no token at all). */
+const COUNT_WORDS: ReadonlySet<string> = new Set([
+  "max", "min", "num", "n", "count", "counts", "limit", "limits", "budget", "len", "length", "size", "total", "per", "rate", "used", "usage", "window", "cost", "price", "avg", "mean",
+]);
+
+/**
+ * Whether a variable's name says it holds a secret. `token` counts as a
+ * word of its own, read word by word: `HF_TOKEN`, `authToken` and `MYTOKEN`
+ * hold one; `MAX_TOKENS`, `num_tokens`, `TOKEN_LIMIT` and
+ * `TOKENIZERS_PARALLELISM` hold none. So do `OPENAI_API_KEY` and
+ * `privateKey`.
+ */
+export function secretName(name: string): boolean {
+  if (SECRET_NAME.test(name.toLowerCase())) return true;
+  const words = name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().split(/_+/).filter(Boolean);
+  return words.some((word, index) => {
+    if (word === "key") return /^(api|private)$/.test(words[index - 1] ?? "");
+    return word.endsWith("token") && !words.some((other) => COUNT_WORDS.has(other));
+  });
+}
+
+/** A secret variable written in a word the line's shell does not expand (`bash -c 'curl -H "$TOKEN"'`). */
+function namesSecret(word: string): boolean {
+  for (const match of word.matchAll(/\$\{?[#!]?([A-Za-z_][A-Za-z0-9_]*)/g)) if (secretName(match[1])) return true;
+  return false;
+}
+
+/**
+ * Programs that touch a file without reading what it holds: listing a key's
+ * directory, testing for it, changing its mode, deleting it, or handing it
+ * to the ssh agent sends nothing anywhere.
+ */
+const TOUCHES_ONLY: ReadonlySet<string> = new Set([...NAME_ONLY, "chmod", "chown", "chgrp", "chflags", "xattr", "touch", "rm", "rmdir", "unlink", "ssh-add", "ssh-keygen"]);
+
+/** Options whose value is a key or certificate a connection is made with: used, not read out. */
+const USES_KEY = /^(-i|-E|--identity|--key|--cert|--cacert|--capath|--client-cert|--pubkey|--proxy-cert|--proxy-key|--proxy-cacert)$/;
+
+/** Options of the downloaders whose value is a file they write. */
+const WRITES_OUTPUT = /^(-o|-O|--output|--output-document|--output-file|--output-dir|-D|--dump-header|-c|--cookie-jar|--trace|--trace-ascii|--stderr|-P|--directory-prefix|-a|--append-output)$/;
+
+/** `security` subcommands that print a secret from the keychain. */
+const KEYCHAIN_READS = /^(find-generic-password|find-internet-password|dump-keychain|export|find-key|unlock-keychain)$/;
+
+function present(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Options of curl and wget whose value is a file on this computer (alone, or last in a bundle: `-fsSLo out`). */
+const TAKES_FILE =
+  /^(-[A-Za-z]*[oOTKEbcDPai]|--output|--output-document|--output-file|--output-dir|--upload-file|--config|--cert|--key|--cacert|--capath|--cookie|--cookie-jar|--dump-header|--netrc-file|--trace|--trace-ascii|--stderr|--input-file|--post-file|--body-file|--load-cookies|--save-cookies|--ca-certificate|--certificate|--private-key|--directory-prefix|--append-output)$/;
+
+/**
+ * Whether a word could name a file on this computer: no URL, for a copy no
+ * `host:path`, for curl and wget only an option's file or `@file` (a bare
+ * word is a URL: `curl example.com/ca.pem`), and not the endpoint of `gh
+ * api`.
+ */
+function localOperand(view: CommandView, word: string, before = ""): boolean {
+  if (/^[a-z][\w+.-]*:\/\//i.test(word)) return false;
+  if (/^(scp|rsync|sftp)$/.test(view.program) && remoteOperand(word) !== undefined) return false;
+  if (/^(curl|wget|http|https|xh|aria2c)$/.test(view.program) && !TAKES_FILE.test(before) && !/^[^=@\s]*=?@/.test(word)) return false;
+  if (/^(gh|glab)$/.test(view.program) && view.positionals[0] === "api" && word === view.positionals[1]) return false;
+  return true;
+}
+
+/**
+ * The words of a command that name files it could read and pass on, as
+ * written; an unknown word gives what it surely starts with. ssh names none
+ * (its options are used here, its host and command are the other
+ * machine's); a copy names its local sources when it uploads; a download's
+ * output file is written, not read.
+ */
+function fileWords(command: RiskCommand, view: CommandView): string[] {
+  if (TOUCHES_ONLY.has(view.program) || /^(ssh|mosh)$/.test(view.program)) return [];
+  if (view.program === "scp" || view.program === "rsync") {
+    const copy = copyOperands(view.words);
+    if (copy) return remoteOperand(copy.dest) ? copy.sources.filter((word) => !remoteOperand(word)) : [];
+  }
+  const out: string[] = [];
+  // `aws s3 cp s3://bucket/key file`: copied from a URL, the last word is a file it writes.
+  const url = (word: string) => /^[a-z][\w+.-]*:\/\//i.test(word);
+  const last = view.positionals.at(-1);
+  const written = last !== undefined && last !== UNKNOWN && !url(last) && view.positionals.slice(0, -1).some((word) => word !== UNKNOWN && url(word)) ? view.args.lastIndexOf(last) : -1;
+  for (const [at, word] of view.args.entries()) {
+    const before = view.args[at - 1] ?? "";
+    if (USES_KEY.test(before) || /IdentityFile/i.test(before)) continue;
+    if (DOWNLOADERS.has(view.program) && WRITES_OUTPUT.test(before)) continue;
+    if (at === written && !before.startsWith("-")) continue;
+    if (word === UNKNOWN) {
+      // `~/.ssh/id_*`: the directory it surely points into, and the name it starts.
+      const hint = command.hints?.[at + 1];
+      if (!hint || hint.startsWith("-") || !localOperand(view, hint, before)) continue;
+      out.push(hint.includes("/") ? hint.slice(0, hint.lastIndexOf("/") + 1) : "./");
+      if (!hint.endsWith("/")) out.push(hint);
+      continue;
+    }
+    if (word.startsWith("-") || !localOperand(view, word, before)) continue;
+    out.push(word);
+  }
+  return out;
+}
 
 /**
  * The always-ask floor for a whole line: a secret or credential leaving this
- * machine. A line that both reaches a secret (a sensitive file, the
- * keychain, the environment) and runs a program that can send what it is
- * given always asks the user, whatever the owner wrote and whatever the
- * model says. A command that only prints a secret here does not: the model
- * may approve that once (`pathRisk`).
+ * machine. A line that both reaches a secret (a sensitive file that is
+ * there, the keychain, the environment, a variable named like a credential)
+ * and runs a program that can send what it is given always asks the user,
+ * whatever the owner wrote and whatever the model says. A command that only
+ * prints a secret here does not: the model may approve that once
+ * (`pathRisk`).
+ *
+ * Only what the line can really read counts. A URL, a `host:path`, an ssh
+ * host or the command it runs there, an option's value such as
+ * `BatchMode=yes` and a file a download writes are no files this machine
+ * reads; a bare name that is not there (and that no other command of the
+ * line makes) holds nothing to send.
  */
-export function exfiltrates(commands: readonly RiskCommand[], facts: RiskFacts, text?: string): string | undefined {
+export function exfiltrates(commands: readonly RiskCommand[], facts: RiskFacts, expands: readonly string[] = []): string | undefined {
   let sender: string | undefined;
   let secret: string | undefined;
+  /** A name some other command of the line also uses: it may make the file this one sends. */
+  const elsewhere = (word: string, self: RiskCommand) => commands.some((other) => other !== self && (other.words.includes(word) || other.writes.includes(word)));
+  const holdsSecret = (word: string, command: RiskCommand): boolean => {
+    const classification = facts.classify(word, command.cwd);
+    if (classification?.zone !== "sensitive") return false;
+    // Named in full (`~/.aws/credentials`), it is the secret whether or not it
+    // can be seen from here; a bare name must be a file that is there.
+    return isAbsolute(word) || word.startsWith("~") || present(classification.path) || elsewhere(word, command);
+  };
   for (const command of commands) {
+    // What a redirection feeds a command is a file it reads, whatever the command.
+    for (const path of command.reads) if (path !== UNKNOWN && holdsSecret(path, command)) secret ??= path;
     const words = command.words;
     if (words.length === 0) continue;
     const view = viewOf(words);
@@ -946,20 +1145,18 @@ export function exfiltrates(commands: readonly RiskCommand[], facts: RiskFacts, 
       const sends = !/^(gh|glab)$/.test(view.program) || view.positionals.some((word) => /^(api|gist|secret|variable|release|pr|issue|repo)$/.test(word));
       if (sends) sender ??= view.program;
     }
-    for (const [at, path] of [...view.args, ...command.reads].entries()) {
-      if (path === UNKNOWN || (path.startsWith("-") && !command.reads.includes(path))) continue;
-      // A key a connection is made with is used, not read out (as in `pathRisk`).
-      const before = view.args[at - 1] ?? "";
-      if (before === "-i" || /^(--identity|--key|--cert|--cacert|--client-cert|--pubkey)$/.test(before) || /IdentityFile/i.test(before)) continue;
-      const classification = facts.classify(path, command.cwd);
-      if (classification?.zone === "sensitive") secret ??= path;
-    }
+    for (const word of fileWords(command, view)) if (holdsSecret(word, command)) secret ??= word;
     // The keychain and the environment hold secrets whatever file they name.
-    if (/^(security|printenv)$/.test(view.program)) secret ??= view.program === "security" ? "the keychain" : "the environment";
+    if (view.program === "security" && view.positionals.some((word) => word === UNKNOWN || KEYCHAIN_READS.test(word))) secret ??= "the keychain";
+    if (view.program === "printenv" && (view.positionals.length === 0 || view.positionals.some((word) => word === UNKNOWN || secretName(word)))) secret ??= "the environment";
     if (view.program === "env" && view.positionals.length === 0) secret ??= "the environment";
-    if (words.some((word) => word !== UNKNOWN && SECRET_VARIABLE.test(word))) secret ??= "a value in this line";
+    // `$TOKEN` in a word this shell leaves as written, for a program that expands it here
+    // (`bash -c '…'`). What ssh runs on the other machine reads that machine's variables.
+    const remote = /^(ssh|mosh)$/.test(view.program) ? sshHostIndex(words) : undefined;
+    if (words.some((word, at) => word !== UNKNOWN && (remote === undefined || at <= remote) && namesSecret(word))) secret ??= "a value in this line";
   }
-  if (text !== undefined && secret === undefined && SECRET_VARIABLE.test(text)) secret = "a value in this line";
+  // A variable named like a credential that the line's own shell expands for its commands.
+  if (expands.some(secretName)) secret ??= "a value in this line";
   if (sender === undefined || secret === undefined) return undefined;
   return `sends a secret off this machine (${secret}) through ${sender}`;
 }
@@ -1019,8 +1216,13 @@ export function downloadsAndRuns(commands: readonly { words: readonly string[]; 
  * when a command in it could be one: each `;`, `&`, `|`, `(`, backtick or
  * newline starts a command, and so does a quoted string (what `bash -c` or
  * `ssh host` would run). Words with `$` are known only when it runs.
+ *
+ * A secret leaving the machine is the floor here too: a credential's
+ * variable or a secret file anywhere in a line that runs a program that
+ * sends. Not for `remote`, the line ssh runs on another machine: its
+ * variables and files are that machine's.
  */
-export function assessOpaque(line: string, facts: RiskFacts): Assessment {
+export function assessOpaque(line: string, facts: RiskFacts, remote = false): Assessment {
   // Its words with `$` are unknown: look for the installed app in its text
   // instead. Only a line that writes where it names it is dangerous; one
   // that reads it is local work like any other read.
@@ -1037,6 +1239,18 @@ export function assessOpaque(line: string, facts: RiskFacts): Assessment {
     for (const quoted of piece.matchAll(/'([^']*)'|"([^"]*)"/g)) segments.push(tokens(quoted[1] ?? quoted[2] ?? ""));
   }
   const all = segments.flat();
+  // A secret leaving the machine is the always-ask floor here too: a
+  // credential's variable anywhere in a line that runs a program that sends.
+  const sender = remote ? undefined : all.find((word) => SENDERS.test(basename(word)));
+  if (sender) {
+    const file = all.find((word, at) => {
+      if (word === UNKNOWN || word.startsWith("-") || USES_KEY.test(all[at - 1] ?? "") || /IdentityFile/i.test(all[at - 1] ?? "")) return false;
+      const classification = facts.classify(word, undefined);
+      return classification?.zone === "sensitive" && present(classification.path);
+    });
+    const secret = file ?? (namesSecret(line) ? "a value in this line" : undefined);
+    if (secret) return { tier: "danger", kind: `may send a secret off this machine (${secret}) through ${basename(sender)}`, key: "secret-off-machine", floor: true };
+  }
   if (all.some((word) => DOWNLOADERS.has(basename(word))) && all.some((word) => INTERPRETERS.test(basename(word)))) {
     return { tier: "danger", kind: "may download code and run it", key: "download-run" };
   }

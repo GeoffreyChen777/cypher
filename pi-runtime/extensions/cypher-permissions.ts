@@ -21,6 +21,7 @@
 import { constants, existsSync, statSync } from "node:fs";
 import * as nodeFs from "node:fs/promises";
 import { relative } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   createBashToolDefinition,
   createEditToolDefinition,
@@ -75,9 +76,34 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
         ownerWords: parseOwnerWords(process.env[OWNER_WORDS_ENV]),
       });
       permissions.appendEntry = (type, data) => pi.appendEntry(type, data);
+      permissions.ownerWordsNow = ownerWordsNow;
       permissions.reload(ctx.cwd, ctx.sessionManager?.getBranch() ?? []);
     }
     return permissions;
+  };
+
+  /**
+   * The owner's words as the engine knows them now (its `OwnerWords` call
+   * on the agent socket). This process outlives the turn it was started
+   * for: a message the owner sent since is routed into it, and is not in
+   * the environment it started with. Undefined when the engine can't be
+   * asked (no Cypher, an older one): the words it started with stand.
+   */
+  const ownerWordsNow = async () => {
+    const chatId = process.env.CYPHER_CHAT_ID;
+    const module = process.env.CYPHER_ENGINE_CLIENT_MODULE;
+    if (!chatId || !module) return undefined;
+    let client: { call(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<{ words?: unknown } | undefined>; close(): void } | undefined;
+    try {
+      const { connectEngine } = await import(pathToFileURL(module).href);
+      client = await connectEngine({ timeoutMs: 2000 });
+      const reply = await client!.call("OwnerWords", { chatId }, { timeoutMs: 3000 });
+      return reply?.words ? parseOwnerWords(JSON.stringify(reply.words)) : undefined;
+    } catch {
+      return undefined;
+    } finally {
+      client?.close();
+    }
   };
 
   const requestContext = (ctx: ExtensionContext, signal: AbortSignal | undefined, toolCallId?: string): RequestContext => {
@@ -367,7 +393,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
       "bash runs in a sandbox: the project folders, temp directories, toolchain caches and (in a git worktree) the repository's objects and refs are writable; the rest of the machine is readable except sensitive files (.env, keys, ~/.ssh keys, credentials); the network is open. Commands that need more (credentials for ssh, git push, gh or cloud CLIs; other processes; the keychain; launchctl; simulators; Docker's socket) fail in it.",
       "Commands that only inspect what the sandbox cannot reach (lsof, gh run/pr view and list, git fetch, docker ps and logs, kubectl get, cloud describe and list, launchctl list) run outside it on their own, without escalate. So does stopping a process this chat started, by its pid; stopping one that runs in the project folders (a dev instance or test server it started) goes to the reviewing model.",
       "Try a command in the sandbox first unless it obviously needs credentials, other processes or system services. When it needs more, run it again with `escalate` (label and reason). The reviewing model approves what plainly serves the user's request (checking the work counts: builds, tests, the chat's dev instance, screenshots) and remembers it for the chat, or approves it once; otherwise the user decides, and can keep it for the project. Dangerous commands (publishing, deploying, pushing to the default branch or tags, deleting outside the project folders, stopping processes this chat did not start, installing system-wide, reading secrets, touching the installed Cypher app or its data in ~/.cypher) always ask the user; test with the chat's own dev instance instead. Make the label and reason say plainly how it serves what the user asked. Do not work around the sandbox in other ways.",
-      "Commands that may leave the sandbox read best plainly: name programs directly, not through `bash -c`, `eval` or an interpreter, which no rule can allow. `NAME=value cmd`, `nohup`, `timeout`, `nice`, a trailing `&`, `( … & )`, `$HOME` and variables set to a literal earlier in the line (`E=~/x; chmod 700 $E`) are fine. Write paths and pids literally (not `$(pwd)` or `$(pgrep …)`): a word known only when the line runs counts as the worst it could be.",
+      "Commands that may leave the sandbox read best plainly: name programs directly, not through `bash -c`, `eval` or an interpreter, which no rule can allow. `NAME=value cmd`, `nohup`, `timeout`, `nice`, a trailing `&`, `( … & )`, `if`, `for`, `case`, `{ …; }`, `$HOME`, `$PWD`, variables set to a literal earlier in the line (`E=~/x; chmod 700 $E`) and a message written as `\"$(cat <<'EOF' … EOF)\"` are fine; a shell function is not. Write paths and pids literally (not `$(pwd)` or `$(pgrep …)`): a word known only when the line runs counts as the worst it could be.",
       "Escalate only the part that needs it: write its output to a file in the project folder or temp, or pipe it to plain filters (grep, sort, uniq, wc, cut, tr, head, tail, awk and sed programs that only print), and do other work in later commands in the sandbox. A line that also runs a script, an interpreter or other commands outside can only be approved once, so the user is asked again every time.",
     ],
     async execute(id, params, signal, onUpdate, ctx) {

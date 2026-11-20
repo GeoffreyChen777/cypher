@@ -1207,6 +1207,12 @@ impl SessionsEngine {
     pub fn is_ephemeral(&self, chat_id: &str) -> bool {
         self.inner.is_ephemeral(chat_id)
     }
+
+    /// The owner's own words in a chat as of now, as `CYPHER_OWNER_WORDS`
+    /// carries them (the `OwnerWords` call of a run's permission extension).
+    pub fn owner_words(&self, chat_id: &str) -> Option<String> {
+        self.inner.owner_words(chat_id)
+    }
 }
 
 /// How a chat began, for the owner's words (`CYPHER_OWNER_WORDS`): an agent
@@ -1767,13 +1773,10 @@ impl Inner {
     fn host_context(&self, chat_id: &str) -> RunHostContext {
         let mut profile = RunProfile::Root;
         let memory = self.memory.get();
-        let mut origin = ChatOrigin::default();
         if let Some(ws) = self.workspace()
             && let Ok(Some(chat)) = ws.chat(chat_id)
         {
-            origin = chat_origin(&ws, &chat);
             if let Some(pass) = memory.and_then(|m| m.run_env(chat_id)) {
-                origin.agent_started = true;
                 profile = RunProfile::Memory(pass);
             } else if let Some(bot) = crate::bots::profile::bot_env(&ws, &chat) {
                 profile = RunProfile::Bot(bot);
@@ -1781,20 +1784,40 @@ impl Inner {
                 profile = RunProfile::Child(self.child_env(chat_id, child));
             }
         }
-        // The owner's own words, for the permission check: what a person
-        // sent in this chat and the plan's instruction, never an agent's.
-        let owner_words = if self.is_ephemeral(chat_id) {
-            None
-        } else {
-            self.doc_host()
-                .and_then(|host| host.owner_words_env(chat_id, &origin))
-        };
         RunHostContext {
             chat_id: Some(chat_id.to_string()),
             profile,
             memory_prompt: memory.and_then(|m| m.prompt_for(chat_id)),
-            owner_words,
+            owner_words: self.owner_words(chat_id),
         }
+    }
+
+    /// The owner's own words in a chat as of now, for the permission check
+    /// (`CYPHER_OWNER_WORDS`): what a person sent in it and the plan's
+    /// instruction, never an agent's. A run's process gets them when it
+    /// starts and asks again before each check (`OwnerWords`): the process
+    /// outlives the turn it was started for, and a later message routed
+    /// into it is as much the owner's as the first.
+    fn owner_words(&self, chat_id: &str) -> Option<String> {
+        if self.is_ephemeral(chat_id) {
+            return None;
+        }
+        let mut origin = ChatOrigin::default();
+        if let Some(ws) = self.workspace()
+            && let Ok(Some(chat)) = ws.chat(chat_id)
+        {
+            origin = chat_origin(&ws, &chat);
+            // A memory pass is the engine's own run.
+            if self
+                .memory
+                .get()
+                .is_some_and(|memory| memory.run_env(chat_id).is_some())
+            {
+                origin.agent_started = true;
+            }
+        }
+        self.doc_host()
+            .and_then(|host| host.owner_words_env(chat_id, &origin))
     }
 
     /// A child chat's run env, consuming its local messaging channel.

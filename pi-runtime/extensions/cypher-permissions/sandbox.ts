@@ -213,14 +213,15 @@ function prefixMatches(path: string, pattern: string): boolean {
 /**
  * Deny roots for Cypher's own data inside a writable root, without covering
  * the excepted subtrees (`worktrees/`): a self root with an exception beneath
- * it is split into its children, down to three levels.
+ * it is split into its children, down to six levels (a workspace bot's
+ * folder lies five below the data directory: `orgs/<org>/<user>/bots/<id>`).
  */
 export function splitSelf(selfRoot: string, exceptions: readonly string[], depth = 0): string[] {
   if (exceptions.some((exception) => globToRegExp(exception).test(selfRoot))) return [];
   const holdsException = exceptions.some(
     (exception) => prefixMatches(selfRoot, exception) && exception.split("/").filter(Boolean).length > selfRoot.split("/").filter(Boolean).length,
   );
-  if (!holdsException || depth >= 3) return [selfRoot];
+  if (!holdsException || depth >= 6) return [selfRoot];
   let names: string[];
   try {
     names = readdirSync(selfRoot);
