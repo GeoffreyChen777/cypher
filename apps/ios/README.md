@@ -545,3 +545,5 @@ the desktop sources cited in each file header.
   `TestSupport*.swift`; repository fixtures are found with
   `TestSupport.repoRoot()`, never by counting parent folders.
 - Formatting is `swift-format` with `apps/ios/.swift-format`.
+
+<!-- throwaway change to check that an iOS-only pull request skips the Rust jobs -->
