@@ -336,6 +336,9 @@ fn cache(edge_url: &str) -> Arc<LinkCache> {
     config.cooldown_base = Duration::from_millis(100);
     config.cooldown_max = Duration::from_millis(400);
     config.probe_timeout = Duration::from_millis(1_500);
+    // A dial that fails is retried twice; the default spacing makes each
+    // expected failure take four and a half seconds.
+    config.dial_retry_spacing = Duration::from_millis(20);
     LinkCache::new(config)
 }
 
@@ -596,6 +599,9 @@ async fn presence_reset_clears_cooldown_immediately() {
     config.cooldown_base = Duration::from_secs(120);
     config.cooldown_max = Duration::from_secs(120);
     config.probe_timeout = Duration::from_millis(1_500);
+    // A dial that fails is retried twice; the default spacing makes each
+    // expected failure take four and a half seconds.
+    config.dial_retry_spacing = Duration::from_millis(20);
     let links = LinkCache::new(config);
 
     // No host: the dial fails and the two-minute cooldown engages.
@@ -882,6 +888,9 @@ fn trusted_cache(relay: &FakeRelay, trust: Arc<TestTrust>) -> Arc<LinkCache> {
     config.cooldown_base = Duration::from_millis(50);
     config.cooldown_max = Duration::from_millis(100);
     config.probe_timeout = Duration::from_millis(1_500);
+    // A dial that fails is retried twice; the default spacing makes each
+    // expected failure take four and a half seconds.
+    config.dial_retry_spacing = Duration::from_millis(20);
     LinkCache::new(config)
 }
 
@@ -1122,6 +1131,9 @@ async fn a_plaintext_link_is_replaced_once_the_host_is_paired() {
         LinkCacheConfig::new(relay.edge_url(), Arc::new(StaticToken("test-user".into())))
             .with_trust(trust.clone());
     config.probe_timeout = Duration::from_millis(1_500);
+    // A dial that fails is retried twice; the default spacing makes each
+    // expected failure take four and a half seconds.
+    config.dial_retry_spacing = Duration::from_millis(20);
     let links = LinkCache::new(config);
     links.client("dev-a").await.unwrap();
     relay.state.lock().unwrap().seen.clear();

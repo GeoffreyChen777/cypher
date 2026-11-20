@@ -75,6 +75,12 @@ pub async fn stage_headless(
 }
 
 pub(super) fn headless_binary_ready(dir: &Path) -> bool {
+    headless_binary_ready_within(dir, std::time::Duration::from_secs(5))
+}
+
+/// Whether `dir/cypher --help` exits cleanly within `budget`; a binary still
+/// running then is killed and reaped.
+pub(super) fn headless_binary_ready_within(dir: &Path, budget: std::time::Duration) -> bool {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
     let binary = dir.join("cypher");
@@ -90,7 +96,7 @@ pub(super) fn headless_binary_ready(dir: &Path) -> bool {
     else {
         return false;
     };
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + budget;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
