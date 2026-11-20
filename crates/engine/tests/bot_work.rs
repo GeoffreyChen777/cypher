@@ -1624,6 +1624,41 @@ async fn a_plans_runs_carry_the_owners_words_never_the_agents() {
         words_of_opt(&rig, &session, "pr 给main 没问题合并")
     })
     .await;
+    // A run's process outlives the turn it was started for, so its
+    // permission extension asks for the words as of now (`OwnerWords`, on
+    // the agent socket): the same ones, read from the ledger.
+    {
+        use cypher_rpc::RpcService;
+        let agent = rig.core.agent_rpc_service();
+        let reply = agent
+            .handle(
+                cypher_rpc::methods::OWNER_WORDS,
+                serde_json::json!({ "chatId": session }),
+            )
+            .await
+            .expect("a chat on this device is answered");
+        let cypher_rpc::RpcReply::Value(reply) = reply else {
+            panic!("a unary reply");
+        };
+        assert_eq!(
+            texts(&reply["words"]),
+            [
+                instruction.clone(),
+                ("typed".to_string(), "pr 给main 没问题合并".to_string())
+            ]
+        );
+        assert_eq!(reply["words"]["agentWritten"], true);
+        assert!(
+            agent
+                .handle(
+                    cypher_rpc::methods::OWNER_WORDS,
+                    serde_json::json!({ "chatId": "no-such-chat" }),
+                )
+                .await
+                .is_err(),
+            "only a chat on this device"
+        );
+    }
     assert_eq!(
         texts(&words),
         [

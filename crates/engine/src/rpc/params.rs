@@ -608,6 +608,12 @@ pub(super) struct RespondSideChatInputParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct OwnerWordsParams {
+    pub(super) chat_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct WatchAgentEventsParams {
     pub(super) chat_id: String,
     #[serde(default)]

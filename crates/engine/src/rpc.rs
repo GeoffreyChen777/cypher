@@ -944,6 +944,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&reply)
             }
             methods::WATCH_AGENT_EVENTS => chats::watch_agent_events(self, params),
+            methods::OWNER_WORDS => chats::owner_words(self, params),
             methods::CREATE_BOT => bots::create_bot(self, params),
             methods::WATCH_BOTS => Ok(RpcReply::Stream(watch_stream(self.workspace.watch_bots()))),
             methods::WATCH_BOT_RECORDS => Ok(RpcReply::Stream(watch_stream(

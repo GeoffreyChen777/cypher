@@ -3,7 +3,8 @@
 //! Agents are spawned with the engine's keyless `agent.sock` (see
 //! `cypher_rpc`'s `local` module) rather than the keyed `engine.sock`. Here
 //! they reach only the calls the bundled extensions make — subagents,
-//! language detection and a workspace run's bot tools — and only on this
+//! language detection, a workspace run's bot tools, memory and the owner's
+//! own words for the permission check — and only on this
 //! device: an agent that follows
 //! injected instructions cannot open terminals, change settings, or queue
 //! work in chats that run elsewhere.
@@ -43,8 +44,10 @@ impl AgentRpc {
         }
     }
 
-    /// `MemoryTool` speaks for a chat whose run is on this device (its
-    /// handler resolves which stores the chat sees, peers none).
+    /// `MemoryTool` and `OwnerWords` speak for a chat whose run is on this
+    /// device (the memory handler resolves which stores the chat sees, peers
+    /// none; the owner's words are read from the chat's ledger, never taken
+    /// from the caller).
     fn require_local_chat(&self, params: &Value) -> Result<(), RpcError> {
         let chat_id = params
             .get("chatId")
@@ -53,7 +56,7 @@ impl AgentRpc {
         match self.inner.workspace.chat(chat_id).map_err(failed)? {
             Some(chat) if chat.device_id == self.inner.doc_host.device_id() => Ok(()),
             _ => Err(RpcError::Failed(
-                "Memory answers only runs on this device.".into(),
+                "This answers only runs on this device.".into(),
             )),
         }
     }
@@ -93,7 +96,7 @@ impl RpcService for AgentRpc {
                 self.require_local_child(&params)?
             }
             methods::BOT_TOOL => self.require_local_bot_chat(&params)?,
-            methods::MEMORY_TOOL => self.require_local_chat(&params)?,
+            methods::MEMORY_TOOL | methods::OWNER_WORDS => self.require_local_chat(&params)?,
             other => return Err(RpcError::UnknownMethod(other.to_string())),
         }
         self.inner.handle(method, params).await

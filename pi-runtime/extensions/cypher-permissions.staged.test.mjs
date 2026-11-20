@@ -478,6 +478,42 @@ function startSshd() {
   };
 }
 
+test("a workspace's own folder in Cypher's data: its chats work in it like in a project; the data around it stays closed", { skip }, async () => {
+  // Where the engine runs a workspace's chats: <data>/orgs/<org>/<user>/bots/<id>.
+  const account = join(home, ".cypher", "orgs", "org_1", "user_1");
+  const folder = join(account, "bots", "bot_1");
+  write(join(folder, "notes.md"), "workspace notes\n");
+  write(join(folder, ".env"), "API_TOKEN=hunter2\n");
+  write(join(account, "bots", "bot_2", "notes.md"), "ANOTHER WORKSPACE\n");
+  write(join(account, "agent-sessions", "other.jsonl"), "ANOTHER CHAT\n");
+  write(join(account, "uploads", "a1-notes.txt"), "attached by the user\n");
+  const { results, dialogs } = await turn(
+    [
+      { tool: "bash", args: { command: "pwd && cat notes.md && echo scratch > out.txt && cat out.txt; cat ../../uploads/a1-notes.txt; cat .env; cat ../bot_2/notes.md; cat ../../agent-sessions/other.jsonl" } },
+      { tool: "read", args: { path: "notes.md" } },
+      { tool: "write", args: { path: "report.md", content: "done\n" } },
+      { tool: "read", args: { path: join(account, "uploads", "a1-notes.txt") } },
+      // A remote command from that folder is no secret leaving the machine: the model decides it like anywhere else.
+      { tool: "bash", args: { command: "ssh -o BatchMode=yes -o ConnectTimeout=1 nosuchhost.invalid 'ls /mnt/data'", escalate: { label: "List the data on the cluster", reason: "ssh needs the key" } } },
+    ],
+    { cwd: folder, judge: JSON.stringify({ decision: "approve-once", reason: "it lists the data the user asked about" }) },
+  );
+  const [bash, read, written, upload, ssh] = results;
+  assert.match(bash.text, new RegExp(`^${realpathSync(folder)}$`, "m"), "the shell stands in its folder");
+  assert.match(bash.text, /^workspace notes$/m);
+  assert.match(bash.text, /^scratch$/m);
+  assert.match(bash.text, /^attached by the user$/m);
+  assert.doesNotMatch(bash.text, /hunter2|ANOTHER WORKSPACE|ANOTHER CHAT/, "a secret in it, another workspace and the transcripts stay closed");
+  assert.equal(read.isError, false, read.text);
+  assert.match(read.text, /workspace notes/);
+  assert.equal(written.isError, false, written.text);
+  assert.equal(readFileSync(join(folder, "report.md"), "utf8"), "done\n");
+  assert.equal(upload.isError, false, upload.text);
+  assert.match(upload.text, /attached by the user/);
+  assert.match(ssh.text, /Ran outside the sandbox \(approved once by the reviewing model/);
+  assert.deepEqual(dialogs, [], "nobody was asked");
+});
+
 test("ssh: fails in the sandbox; approving the key files doesn't change that; escalated it signs in", { skip }, async (t) => {
   const sshd = startSshd();
   if (!sshd) return t.skip("no sshd to sign in to");

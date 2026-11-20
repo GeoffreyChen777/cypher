@@ -71,6 +71,21 @@ pub(super) async fn dispose_side_chat(
     RpcReply::ok()
 }
 
+/// The owner's own words in a chat as of now (`OwnerWords`): what its run's
+/// permission extension checks a dangerous command against. `words` is the
+/// JSON `CYPHER_OWNER_WORDS` carries, or null for a chat that keeps none.
+pub(super) fn owner_words(rpc: &EngineRpc, params: Value) -> Result<RpcReply, RpcError> {
+    let p: OwnerWordsParams = parse_params(params)?;
+    if p.chat_id.chars().count() > 256 {
+        return Err(RpcError::BadParams("chatId too long".into()));
+    }
+    let words = rpc
+        .sessions
+        .owner_words(&p.chat_id)
+        .and_then(|json| serde_json::from_str::<Value>(&json).ok());
+    RpcReply::value(&serde_json::json!({ "words": words }))
+}
+
 pub(super) fn watch_agent_events(rpc: &EngineRpc, params: Value) -> Result<RpcReply, RpcError> {
     let p: WatchAgentEventsParams = parse_params(params)?;
     if p.chat_id.chars().count() > 256 {

@@ -155,7 +155,8 @@ export function createMachine({ judgeTimeoutMs, cases = fixture.cases } = {}) {
     if (dialogs.length) outcome = "ask";
     else if (!result.ok) outcome = "denied";
     else if (audit.decidedBy === "judge") outcome = remembered ? "approve-remember" : "approve-once";
-    else outcome = `auto-${audit.decidedBy}`;
+    // Nothing was decided at all: the defaults allow it (a read of an attachment).
+    else outcome = audit.decidedBy ? `auto-${audit.decidedBy}` : "allowed";
     return {
       outcome,
       tier: audit.tier,

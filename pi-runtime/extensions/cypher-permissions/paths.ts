@@ -11,6 +11,12 @@
  * On top of the zone, a path may be write-guarded: `protected` (a write runs
  * code outside the sandbox later; the judge may approve it) or `self`
  * (Cypher's and Pi's own data; only a human may approve a write).
+ *
+ * A chat whose project folder Cypher itself made inside its data (a
+ * workspace bot's folder, `ownFolders`) works there like in any project: the
+ * patterns that cover that whole folder because of where it lives (other
+ * chats' data, Cypher's own data) do not apply inside it. A secret in it
+ * (`.env`, a key) is still one.
  */
 
 import { realpathSync } from "node:fs";
@@ -96,10 +102,11 @@ export function compilePatterns(patterns: readonly string[], roots: readonly str
   );
 }
 
-/** The first non-exception pattern that matches, unless an exception matches too. */
-export function matchPatterns(path: string, compiled: readonly CompiledPattern[]): string | undefined {
+/** The first non-exception pattern that matches, unless an exception matches too. `skip` leaves patterns out. */
+export function matchPatterns(path: string, compiled: readonly CompiledPattern[], skip?: (pattern: CompiledPattern) => boolean): string | undefined {
   let hit: string | undefined;
   for (const pattern of compiled) {
+    if (skip?.(pattern)) continue;
     if (!pattern.regex.test(path)) continue;
     if (pattern.exception) return undefined;
     hit ??= pattern.source;
@@ -117,6 +124,8 @@ export interface PathContextInput {
   permissionSystem?: readonly string[];
   /** Temp directories: scratch space, writable like the workspace. */
   scratch?: readonly string[];
+  /** Project folders Cypher made for this chat inside its own data (config.ts `ownFolders`), canonical. */
+  ownFolders?: readonly string[];
   home?: string;
 }
 
@@ -129,9 +138,11 @@ export class PathContext {
   readonly writableSupport: CompiledPattern[];
   readonly permissionSystem: CompiledPattern[];
   readonly scratch: readonly string[];
+  readonly ownFolders: readonly string[];
 
   constructor(input: PathContextInput) {
     this.scratch = input.scratch ?? [];
+    this.ownFolders = input.ownFolders ?? [];
     this.home = input.home ?? homedir();
     this.roots = input.roots;
     this.sensitive = compilePatterns(input.sensitive, input.roots, this.home);
@@ -163,11 +174,14 @@ export class PathContext {
   }
 
   classify(path: string): Classification {
-    const sensitive = matchPatterns(path, this.sensitive);
+    // In the chat's own folder inside Cypher's data, a pattern that covers the whole folder says nothing.
+    const own = this.ownFolders.find((root) => isUnder(path, root));
+    const skip = own === undefined ? undefined : (pattern: CompiledPattern) => !pattern.exception && pattern.regex.test(own);
+    const sensitive = matchPatterns(path, this.sensitive, skip);
     if (sensitive) return { path, zone: "sensitive", match: sensitive };
     const scratch = !this.inWorkspace(path) && this.inScratch(path);
     const zone: Zone = scratch || this.inWorkspace(path) ? "workspace" : "external";
-    const self = matchPatterns(path, this.self);
+    const self = matchPatterns(path, this.self, skip);
     if (self) return { path, zone, guard: "self", match: self };
     const guarded = matchPatterns(path, this.protectedPatterns);
     if (guarded) return { path, zone, guard: "protected", match: guarded };

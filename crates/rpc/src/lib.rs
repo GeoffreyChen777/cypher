@@ -65,6 +65,12 @@ pub mod methods {
     pub const GET_PI_TRANSLATION_SETTINGS: &str = "GetPiTranslationSettings";
     pub const SET_PI_TRANSLATION_SETTINGS: &str = "SetPiTranslationSettings";
     pub const DETECT_PI_LANGUAGE: &str = "DetectPiLanguage";
+    /// The owner's own words in a chat as of now, for the permission
+    /// extension of a run on this device (unary, host-local): `{chatId}` →
+    /// `{words}`, the JSON `CYPHER_OWNER_WORDS` carries or null. A run's
+    /// process outlives the turn it was started for, so its environment
+    /// lacks what the owner wrote since.
+    pub const OWNER_WORDS: &str = "OwnerWords";
     /// The permission extension's settings on the target device
     /// (`permissions.json`) and whether the device can sandbox.
     pub const GET_PI_PERMISSION_SETTINGS: &str = "GetPiPermissionSettings";
@@ -615,6 +621,7 @@ pub mod methods {
         MethodSpec::unary(CREATE_BOT_INVITE).forwardable(),
         MethodSpec::unary(REDEEM_BOT_INVITE).forwardable(),
         MethodSpec::unary(BOT_TOOL),
+        MethodSpec::unary(OWNER_WORDS),
         MethodSpec::unary(MEMORY_TOOL),
         MethodSpec::stream(WATCH_MEMORY),
         MethodSpec::unary(EDIT_MEMORY),

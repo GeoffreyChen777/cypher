@@ -190,10 +190,17 @@ As built (P2), `bots/work.rs`:
   unless the answer is `allow`; it fails closed. The engine refuses when the bot no longer
   has *Work directly*, when permission control is off on this device (it is off by
   default) or Landstrip can't enforce there, and applies the taint rule (§4.3).
-- **Limits of the approach.** The bot's folder is inside the profile store, which
-  permission control protects as Cypher's own data, so a shell started there prints a
-  harmless `getcwd` warning (the prompt says so), and a checkout under `~/.cypher*` can't
-  be worked in directly.
+- **The bot's folder.** It lies inside the profile store, which permission control
+  protects as other chats' data and as Cypher's own. For the bot's own threads it is
+  their project folder all the same (permission-control.md §3.1, 2026-11-20): a scratch
+  file or a relative path there is ordinary work, and the sandbox can read and write it.
+  Before that it was protected like the rest of the store, so a shell started there
+  printed a `getcwd` warning (the prompt still calls it harmless, for a Runtime that
+  predates the change), a file written beside it counted as a secret, and every `ssh` or
+  `curl` run from it asked the owner as "a secret leaving the machine". A secret in the
+  folder is still one, and so is the rest of the store: another workspace's folder, the
+  transcripts. A checkout under `~/.cypher*` outside `worktrees/` still can't be worked
+  in directly.
 
 ## 5. Scope
 

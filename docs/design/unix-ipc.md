@@ -62,8 +62,11 @@ old connection and resubscribe on the new one.
 Agents never get `engine.sock`. `agent.sock` serves `rpc::AgentRpc`:
 `StartSubagent` (whose parent must be hosted on this device), `QueueCommand` and
 `WatchAgentEvents` for subagent chats hosted on this device,
-`DetectPiLanguage`, and `BotTool` for a workspace's own chat hosted on this device
-(the bot tools of [agent bots](agent-bots.md)). Any other method, and any call carrying `targetDeviceId`,
+`DetectPiLanguage`, `BotTool` for a workspace's own chat hosted on this device
+(the bot tools of [agent bots](agent-bots.md)), and `MemoryTool` and `OwnerWords` for a
+chat hosted on this device (`OwnerWords` returns the owner's own words in the chat as of
+now, read from its command ledger, for the permission extension's check of a dangerous
+command: [permission control](permission-control.md) §7.3.2). Any other method, and any call carrying `targetDeviceId`,
 is refused, so an agent following injected instructions cannot open terminals,
 change settings, or reach other devices through IPC.
 

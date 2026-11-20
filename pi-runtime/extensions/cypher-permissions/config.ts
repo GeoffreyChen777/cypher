@@ -6,7 +6,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { isCommandRule, patternError } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
 
@@ -127,7 +127,8 @@ export const DEFAULT_SENSITIVE: readonly string[] = [
   "**/*.pfx",
   "**/*.keystore",
   "**/*.jks",
-  // Cypher's and Pi's own credentials and other chats' transcripts.
+  // Cypher's and Pi's own credentials and other chats' transcripts. Not the
+  // files the user attached to a chat (`uploads/`): they are there to be read.
   "~/.cypher*/session.json",
   "~/.cypher*/*/session.json",
   "~/.cypher*/github-account.json",
@@ -136,6 +137,10 @@ export const DEFAULT_SENSITIVE: readonly string[] = [
   "~/.cypher*/*/profiles/**",
   "~/.cypher*/orgs/**",
   "~/.cypher*/*/orgs/**",
+  "!~/.cypher*/orgs/*/*/uploads/**",
+  "!~/.cypher*/*/orgs/*/*/uploads/**",
+  "!~/.cypher*/profiles/*/uploads/**",
+  "!~/.cypher*/*/profiles/*/uploads/**",
   "~/.cypher*/pi-runtime/agent/auth.json",
   "~/.cypher*/*/pi-runtime/agent/auth.json",
   "~/.cypher*/pi-runtime/agent/mcp-auth.json",
@@ -163,6 +168,8 @@ export const DEFAULT_PROTECTED: readonly string[] = [
   "~/.cypher*/*/pi-runtime/agent/extensions/**",
   "~/.cypher*/pi-runtime/versions/**",
   "~/.cypher*/*/pi-runtime/versions/**",
+  // A project's own rules can only tighten (deny or ask): removing one loosens them.
+  "<root>/.pi/permissions.json",
   "<root>/.gitmodules",
   "<root>/.envrc",
   "<root>/.vscode/tasks.json",
@@ -274,6 +281,24 @@ export function instanceRoot(agentDir: string): string {
   } catch {
     return root;
   }
+}
+
+/**
+ * The chat's project folders that Cypher itself made inside its data: a
+ * workspace bot's folder, `<data>/orgs/<org>/<user>/bots/<id>` (or
+ * `<data>/profiles/<name>/bots/<id>` without an account), where the engine
+ * runs that workspace's chats. For the chat working in one it is its project
+ * like any other, not other chats' data and not Cypher's own (paths.ts).
+ * Only a folder of that shape in the running instance's data counts: a chat
+ * opened on `~/.ssh` or on the data directory itself earns nothing.
+ */
+export function ownFolders(roots: readonly string[], agentDir: string): string[] {
+  const data = instanceRoot(agentDir);
+  return roots.filter((root) => {
+    const parts = relative(data, root).split(sep);
+    if (parts.some((part) => part === "" || part === "..")) return false;
+    return (parts.length === 5 && parts[0] === "orgs" && parts[3] === "bots") || (parts.length === 4 && parts[0] === "profiles" && parts[2] === "bots");
+  });
 }
 
 /** The self list for the instance whose agent directory this is. */
