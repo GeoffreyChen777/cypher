@@ -373,6 +373,50 @@ fn display_tree_styles_hanging_bold_immediately() {
     assert!(flat(&p.tree().blocks[0].block).contains("**"));
 }
 
+/// Bold runs of the first paragraph, plus whether any literal `**` leaked.
+fn bold_runs(tree: &BlockTree) -> (Vec<String>, bool) {
+    let Block::Paragraph { runs } = &tree.blocks[0].block else {
+        panic!("expected paragraph");
+    };
+    let bold = runs
+        .iter()
+        .filter(|r| r.style.bold)
+        .map(|r| r.text.to_string())
+        .collect();
+    (bold, flat(&tree.blocks[0].block).contains("**"))
+}
+
+/// Strict CommonMark won't close `**` after full-width punctuation when a
+/// CJK character follows (`。**旧版`) — the typical shape of translated or
+/// natively Chinese/Japanese text. CJK-friendly emphasis closes it.
+#[test]
+fn emphasis_closes_next_to_cjk_punctuation() {
+    for (source, want) in [
+        (
+            "**1. 它会猜测模型的用途。**旧版模型包没有声明信息",
+            "1. 它会猜测模型的用途。",
+        ),
+        (
+            "**10. 预训练权重仅限非商业用途。**README 中明确写了",
+            "10. 预训练权重仅限非商业用途。",
+        ),
+        ("**注意：**请先备份", "注意："),
+        ("これは**「重要」**です", "「重要」"),
+        ("**テスト。**テスト", "テスト。"),
+    ] {
+        let (bold, leaked) = bold_runs(&parse_full(source));
+        assert_eq!(bold, [want], "{source}");
+        assert!(!leaked, "{source}");
+        // Streaming lands on the same tree once the closer arrives.
+        let mut p = IncrementalParser::default();
+        p.set_text(source);
+        assert_eq!(p.display_tree(), *p.tree(), "{source}");
+    }
+    // Plain ASCII keeps strict CommonMark: still literal.
+    let (bold, leaked) = bold_runs(&parse_full("**result:**3 items"));
+    assert!(bold.is_empty() && leaked);
+}
+
 #[test]
 fn display_tree_converges_to_canonical_when_balanced() {
     let corpus = "a **b** *c* `d` [e](https://x.dev) ~~f~~";

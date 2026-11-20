@@ -133,7 +133,11 @@ raw-window-handle = "0.6"
 notify = "7"
 portable-pty = "0.8"
 alacritty_terminal = "0.26"
-pulldown-cmark = "0.12"
+# Pinned to upstream main for `Options::ENABLE_CJK_FRIENDLY_EMPHASIS`
+# (pulldown-cmark#1059): strict CommonMark leaves `**结论。**正文` unclosed,
+# which is everywhere in Chinese/Japanese text. Not in any crates.io release
+# yet (0.13.x ships from branch_0.13) — switch back once 0.14 is published.
+pulldown-cmark = { git = "https://github.com/pulldown-cmark/pulldown-cmark", rev = "584c92bc4d1d400fca52d9bf6eb27ebd685bcff5" }
 # LaTeX math in chat markdown: RaTeX is a pure-Rust KaTeX port (parse → layout
 # → tiny-skia raster). `embed-fonts` bundles the KaTeX TTFs (~1MB), so formulas
 # render identically without a TeX install or a JS engine.

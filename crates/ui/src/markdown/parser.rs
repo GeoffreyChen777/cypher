@@ -245,6 +245,8 @@ pub fn options() -> Options {
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_MATH
+        // `**结论。**正文`: let emphasis close next to CJK text/punctuation.
+        | Options::ENABLE_CJK_FRIENDLY_EMPHASIS
 }
 
 /// Parse a whole source into a [`BlockTree`].
