@@ -91,7 +91,9 @@ a wrapper that serializes heavy builds.
 Tests per platform:
 
 - **Rust**: inline `#[cfg(test)] mod tests`, `foo/tests.rs` for larger suites,
-  integration tests in `<crate>/tests/` sharing `tests/common/`. Some suites
+  integration tests in `<crate>/tests/`. The engine's are one binary,
+  `crates/engine/tests/it/`: a folder per area, fixtures in `support.rs`
+  (`cargo test -p cypher-engine --test it bots::` runs one area). Some suites
   need a feature: `cypher-sync --features mock-server` (registry transport),
   `cypher-engine --features development` and `cypher --features development`.
   `cargo test --workspace` runs every default-feature suite on a Mac.
@@ -178,29 +180,38 @@ to verify them) is in
 ### Rust
 
 1. Module files: `foo.rs` + `foo/` for children; no `mod.rs` under `src/`
-   (`tests/common/mod.rs` in integration tests is exempt — cargo layout).
+   (`tests/common/mod.rs` beside a crate's separate test binaries is exempt —
+   cargo layout).
 2. Tests: inline `#[cfg(test)] mod tests {}` up to ~150 lines; larger go to
    `foo/tests.rs` declared with `#[cfg(test)] mod tests;`. Integration tests in
-   `<crate>/tests/` sharing `tests/common/`.
-3. Imports: leaf/pure modules import explicitly; `use super::*` only in
+   `<crate>/tests/`. A crate with more than a few of them keeps them in one
+   binary, `tests/it/main.rs`, with a module per file and the shared fixtures
+   in `tests/it/support.rs`: each separate file under `tests/` links the crate
+   again, and cargo runs those binaries one after another.
+3. Integration tests are hermetic and share their process. A test engine comes
+   from `support::test_engine` (or a fixture built on it), which keeps its
+   worktrees and its log with the test, and no test changes the process
+   environment or working directory. Wait for a condition (`support::wait_for`)
+   rather than sleeping for a fixed time.
+4. Imports: leaf/pure modules import explicitly; `use super::*` only in
    continuation files that extend the parent's type (`impl Shell` split files etc.).
-4. Naming: child module rendering code is `render.rs` (not `rendering.rs`);
+5. Naming: child module rendering code is `render.rs` (not `rendering.rs`);
    settings pages are `<Topic>Page`; the epoch-milliseconds helper is `now_ms()`.
-5. Visibility: inside private modules use bare `pub` for crate-visible items and
+6. Visibility: inside private modules use bare `pub` for crate-visible items and
    `pub(super)` for parent-only; in library crates' public modules, `pub` is API —
    keep internals `pub(crate)` or private.
-6. Errors: one thiserror enum per library crate; `anyhow` only in `apps/cypher`
+7. Errors: one thiserror enum per library crate; `anyhow` only in `apps/cypher`
    (`cypher-update` is a documented exception); no new `Result<_, String>` APIs in
    the engine.
-7. Logging: `tracing` with structured fields (`error = %err`); no print macros in
+8. Logging: `tracing` with structured fields (`error = %err`); no print macros in
    library crates; no explicit `target:`.
-8. Env: every `CYPHER_*` read goes through `cypher_env` (`var` for a value, `var_raw`/`is_set`
+9. Env: every `CYPHER_*` read goes through `cypher_env` (`var` for a value, `var_raw`/`is_set`
    where an empty value must stay distinct from an unset one).
-9. Locks: `std::sync::Mutex` for short critical sections, never held across
+10. Locks: `std::sync::Mutex` for short critical sections, never held across
    `.await`; poisoning ignored through one `lock()` helper per crate.
-10. Comments explain current behaviour and why; no dates, incident stories,
+11. Comments explain current behaviour and why; no dates, incident stories,
     review-round labels, or citations of files that don't exist.
-11. RPC methods: a new method is one constant in `cypher_rpc::methods` plus one entry in
+12. RPC methods: a new method is one constant in `cypher_rpc::methods` plus one entry in
     `methods::SPECS` (forwardable, streaming, auth-handled, …); the engine derives its routing
     from that table and a test fails if a constant has no spec.
 

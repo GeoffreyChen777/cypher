@@ -78,7 +78,7 @@ fn default_worktrees_root() -> PathBuf {
 struct ReposInner {
     data_dir: PathBuf,
     device_id: String,
-    worktrees_root: PathBuf,
+    worktrees_root: std::sync::Mutex<PathBuf>,
     file_searches: std::sync::Mutex<HashMap<PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     /// Per-checkout (canonical root) file-mention index, evicted on staleness.
     file_index: FileIndexCache,
@@ -102,11 +102,27 @@ impl Repos {
             inner: std::sync::Arc::new(ReposInner {
                 data_dir: data_dir.to_path_buf(),
                 device_id: device_id.to_string(),
-                worktrees_root,
+                worktrees_root: std::sync::Mutex::new(worktrees_root),
                 file_searches: std::sync::Mutex::new(HashMap::new()),
                 file_index: std::sync::Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// Where this engine keeps `repos.json` and the repos it clones.
+    pub fn data_dir(&self) -> &Path {
+        &self.inner.data_dir
+    }
+
+    /// Where this engine makes worktrees.
+    pub fn worktrees_root(&self) -> PathBuf {
+        crate::util::lock(&self.inner.worktrees_root).clone()
+    }
+
+    /// Move the worktree root of an assembled engine: a test engine keeps
+    /// its worktrees with its own data instead of among the user's.
+    pub fn set_worktrees_root(&self, root: PathBuf) {
+        *crate::util::lock(&self.inner.worktrees_root) = root;
     }
 
     // ── registry (repos.json) ───────────────────────────────────────────────

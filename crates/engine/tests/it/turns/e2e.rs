@@ -1,0 +1,2122 @@
+//! End-to-end tests: doc-queued commands → host executor → harness stream →
+//! journal + broadcast + folded doc entries, plus interrupt/recovery/idempotence
+//! and the RPC surface over the in-memory transport.
+
+use crate::support;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use cypher_doc::{
+    MessagePart, MessageRole, MessageStatus, SessionCommandEntry, SessionCommandPayload,
+    SessionCommandStatus, SessionDoc, SessionMessageEntry,
+};
+use cypher_engine::{EngineCore, HarnessRegistry, RunJournal};
+use futures::StreamExt;
+
+use cypher_harness::mock::MockHarness;
+use cypher_harness::{Harness, HarnessError};
+use cypher_proto::{
+    AgentEvent, AnsweredModel, DoneStatus, HarnessId, RunRequest, SessionStatus, ToolCall,
+};
+use cypher_sync::DocsStore;
+
+use support::{run_request, wait_for};
+
+const CHAT: &str = "chat-e2e";
+const VIEWER: &str = "viewer-device";
+
+/// Asks a question through RunControls and echoes the answer.
+fn asking_harness() -> support::TestHarness {
+    support::TestHarness::new(HarnessId::Mock, "Asking", move |_, controls| {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+        tokio::spawn(async move {
+            let answers = (controls.request_input)(vec![cypher_proto::UserInputQuestion {
+                id: "q1".into(),
+                header: "Pick".into(),
+                question: "Which one?".into(),
+                options: vec!["a".into(), "b".into()],
+                multi_select: false,
+                permission: None,
+                asked_by: None,
+            }])
+            .await
+            .unwrap_or_default();
+            let picked = answers
+                .first()
+                .and_then(|a| a.labels.first().cloned())
+                .unwrap_or_else(|| "none".into());
+            let _ = tx
+                .send(Ok(AgentEvent::TextDelta {
+                    text: format!("picked {picked}"),
+                }))
+                .await;
+            let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    })
+    .reasoning(&[])
+}
+
+fn done(status: DoneStatus) -> AgentEvent {
+    support::done_with(status, Some("hs-1"))
+}
+
+fn mock_script() -> Vec<AgentEvent> {
+    vec![
+        support::session_started(HarnessId::Mock, "mock-1", "/tmp", "hs-1", "a-1"),
+        AgentEvent::TextDelta { text: "Hel".into() },
+        AgentEvent::TextDelta { text: "lo".into() },
+        AgentEvent::ToolCall {
+            id: "tool-1".into(),
+            call: ToolCall::WriteFile {
+                path: "/tmp/x".into(),
+                content: Some("SECRET".into()),
+            },
+        },
+        AgentEvent::ToolResult {
+            id: "tool-1".into(),
+            is_error: false,
+            output: None,
+            diff: None,
+            permission: None,
+        },
+        done(DoneStatus::Completed),
+    ]
+}
+
+/// Scripted harness with a per-event delay; optionally hangs after the script until its
+/// interrupt token cancels, then ends with `Done{interrupted}`.
+fn scripted_harness(script: Vec<AgentEvent>, delay: Duration, hang: bool) -> Arc<dyn Harness> {
+    Arc::new(
+        support::TestHarness::new(HarnessId::Mock, "Scripted", move |_, controls| {
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+            let script = script.clone();
+            let token = controls.interrupt.clone();
+            tokio::spawn(async move {
+                for event in script {
+                    if tx.send(Ok(event)).await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(delay).await;
+                }
+                if hang {
+                    token.cancelled().await;
+                    let _ = tx.send(Ok(done(DoneStatus::Interrupted))).await;
+                }
+            });
+            Ok(futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            })
+            .boxed())
+        })
+        .steering(),
+    )
+}
+
+fn registry_with(harness: Arc<dyn Harness>) -> Arc<HarnessRegistry> {
+    let registry = HarnessRegistry::new();
+    registry.register(harness);
+    Arc::new(registry)
+}
+
+fn assemble(dir: &std::path::Path, harness: Arc<dyn Harness>) -> EngineCore {
+    support::test_engine(|| {
+        EngineCore::assemble(dir, registry_with(harness), HarnessId::Mock, None)
+    })
+}
+
+/// Queue a command into the chat doc the way a REMOTE viewer device would: an immutable
+/// pending entry appended under the viewer's device id (ledger rule 1).
+fn queue_as_viewer(doc: &SessionDoc, id: &str, payload: SessionCommandPayload) {
+    let now = chrono::Utc::now().timestamp_millis();
+    let based_on =
+        doc.read_entries()
+            .expect("read entries")
+            .last()
+            .map(|m| cypher_doc::CommandBasedOn {
+                turn_id: Some(m.id.clone()),
+                frontier: None,
+            });
+    doc.queue_command(&SessionCommandEntry {
+        id: id.into(),
+        payload,
+        issued_by: VIEWER.into(),
+        issued_at: now,
+        based_on,
+        expires_at: None,
+        status: SessionCommandStatus::Pending,
+        resolution: None,
+        sent_at: None,
+        dismissed: false,
+        author: None,
+    })
+    .expect("queue command");
+}
+
+fn entries(core: &EngineCore) -> Vec<SessionMessageEntry> {
+    core.doc_host
+        .open(CHAT)
+        .expect("open chat")
+        .doc()
+        .read_entries()
+        .expect("read entries")
+}
+
+fn command_status(core: &EngineCore, id: &str) -> Option<(SessionCommandStatus, Option<String>)> {
+    core.doc_host
+        .open(CHAT)
+        .expect("open chat")
+        .doc()
+        .read_commands()
+        .expect("read commands")
+        .into_iter()
+        .find(|c| c.id == id)
+        .map(|c| (c.status, c.resolution))
+}
+
+#[tokio::test]
+async fn queued_run_command_executes_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+
+    // Live event subscription (journal replay + broadcast) before anything runs.
+    let (replayed, mut live) = core.sessions.subscribe(CHAT, 0).unwrap();
+    assert!(replayed.is_empty());
+
+    // A viewer device queues the run command into the doc.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-1",
+        SessionCommandPayload::Run {
+            request: run_request("do the thing"),
+            message_id: "msg-user-1".into(),
+
+            agent_prompt: None,
+        },
+    );
+
+    // The host executor picks it up, runs the harness, and the doc settles.
+    wait_for(
+        || {
+            entries(&core).iter().any(|e| {
+                e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete)
+            })
+        },
+        "assistant entry to complete",
+    )
+    .await;
+
+    let all = entries(&core);
+    assert_eq!(all.len(), 2, "user + assistant entries, got {all:#?}");
+    // User entry carries the command's client-minted message id.
+    assert_eq!(all[0].id, "msg-user-1");
+    assert_eq!(all[0].role, MessageRole::User);
+    assert_eq!(
+        all[0].parts,
+        vec![MessagePart::Text {
+            id: "t0".into(),
+            text: "do the thing".into(),
+            agent_text: None,
+        }]
+    );
+    // Assistant entry: folded parts — merged text, then the resolved tool call with the
+    // render-parts privacy policy applied (WriteFile content stripped).
+    let assistant = &all[1];
+    assert_eq!(assistant.status, Some(MessageStatus::Complete));
+    assert_eq!(assistant.parts.len(), 2);
+    match &assistant.parts[0] {
+        MessagePart::Text { text, .. } => assert_eq!(text, "Hello"),
+        other => panic!("unexpected first part {other:?}"),
+    }
+    match &assistant.parts[1] {
+        MessagePart::Tool {
+            call,
+            resolved,
+            is_error,
+            ..
+        } => {
+            assert!(*resolved);
+            assert!(!*is_error);
+            assert_eq!(
+                call,
+                &ToolCall::WriteFile {
+                    path: "/tmp/x".into(),
+                    content: None
+                }
+            );
+        }
+        other => panic!("unexpected second part {other:?}"),
+    }
+
+    // Command outcome written by the host (sole outcome writer).
+    assert_eq!(
+        command_status(&core, "cmd-run-1"),
+        Some((SessionCommandStatus::Applied, None))
+    );
+
+    // Journal replay: the full script in order, terminal Done last.
+    let replay = core.sessions.subscribe(CHAT, 0).unwrap().0;
+    assert_eq!(replay.len(), mock_script().len());
+    assert!(matches!(
+        replay.last().map(|j| &j.event),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+    let seqs: Vec<u64> = replay.iter().map(|j| j.seq).collect();
+    assert_eq!(seqs, (1..=mock_script().len() as u64).collect::<Vec<_>>());
+
+    // The live broadcast delivered the same events.
+    let mut broadcast_count = 0usize;
+    while let Ok(event) = live.try_recv() {
+        assert!(event.seq >= 1);
+        broadcast_count += 1;
+    }
+    assert_eq!(broadcast_count, mock_script().len());
+
+    // Final session status: Idle.
+    assert_eq!(
+        core.sessions.session_status(CHAT).map(|s| s.status),
+        Some(SessionStatus::Idle)
+    );
+}
+
+#[tokio::test]
+async fn a_runs_thinking_is_kept_in_the_doc_before_its_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut script = mock_script();
+    // After SessionStarted: a heartbeat, the thought, then the answer.
+    script.splice(
+        1..5,
+        [
+            AgentEvent::ReasoningDelta {
+                text: String::new(),
+            },
+            AgentEvent::ReasoningDelta {
+                text: "Plan".into(),
+            },
+            AgentEvent::ReasoningDelta { text: " it".into() },
+            AgentEvent::TextDelta {
+                text: "Answer".into(),
+            },
+        ],
+    );
+    let core = assemble(dir.path(), Arc::new(MockHarness { script }));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-1",
+        SessionCommandPayload::Run {
+            request: run_request("think first"),
+            message_id: "msg-user-1".into(),
+            agent_prompt: None,
+        },
+    );
+    wait_for(
+        || {
+            entries(&core).iter().any(|e| {
+                e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete)
+            })
+        },
+        "assistant entry to complete",
+    )
+    .await;
+    let all = entries(&core);
+    assert_eq!(
+        all[1].parts,
+        vec![
+            MessagePart::Reasoning {
+                id: "r0".into(),
+                text: "Plan it".into(),
+            },
+            MessagePart::Text {
+                id: "t1".into(),
+                text: "Answer".into(),
+                agent_text: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn session_status_transitions_idle_working_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        scripted_harness(mock_script(), Duration::from_millis(40), false),
+    );
+    let mut watch = core.sessions.watch_sessions();
+    assert!(watch.borrow().is_empty(), "no sessions before dispatch");
+
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-status",
+        SessionCommandPayload::Run {
+            request: run_request("go"),
+            message_id: "m-1".into(),
+
+            agent_prompt: None,
+        },
+    );
+
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = tokio::time::timeout_at(deadline, watch.changed())
+            .await
+            .expect("status change before timeout")
+            .map(|_| watch.borrow().first().map(|s| s.status))
+            .expect("watch alive");
+        if let Some(status) = status {
+            if seen.last() != Some(&status) {
+                seen.push(status);
+            }
+            if status == SessionStatus::Idle {
+                break;
+            }
+        }
+    }
+    assert_eq!(seen, vec![SessionStatus::Working, SessionStatus::Idle]);
+}
+
+#[tokio::test]
+async fn interrupt_stamps_streaming_entry_aborted() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        scripted_harness(
+            vec![AgentEvent::TextDelta {
+                text: "partial output".into(),
+            }],
+            Duration::from_millis(5),
+            true,
+        ),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-hang",
+        SessionCommandPayload::Run {
+            request: run_request("hang"),
+            message_id: "m-1".into(),
+
+            agent_prompt: None,
+        },
+    );
+
+    // Wait until the streaming entry is visibly in the doc, then interrupt via a
+    // viewer-queued durable command (based_on = the streaming entry = current turn).
+    wait_for(
+        || {
+            entries(&core)
+                .iter()
+                .any(|e| e.status == Some(MessageStatus::Streaming))
+        },
+        "streaming entry",
+    )
+    .await;
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-int-1",
+        SessionCommandPayload::Interrupt {},
+    );
+
+    wait_for(
+        || {
+            entries(&core)
+                .iter()
+                .any(|e| e.status == Some(MessageStatus::Aborted))
+        },
+        "aborted stamp",
+    )
+    .await;
+
+    let all = entries(&core);
+    let assistant = all
+        .iter()
+        .find(|e| e.role == MessageRole::Assistant)
+        .unwrap();
+    assert_eq!(assistant.status, Some(MessageStatus::Aborted));
+    match &assistant.parts[0] {
+        MessagePart::Text { text, .. } => assert_eq!(text, "partial output"),
+        other => panic!("unexpected part {other:?}"),
+    }
+    // The interrupt command's Applied status lands in its own doc commit —
+    // wait for it (the aborted-stamp wait above can race it under parallel
+    // load) before the final journal/status checks.
+    wait_for(
+        || command_status(&core, "cmd-int-1") == Some((SessionCommandStatus::Applied, None)),
+        "interrupt command applied",
+    )
+    .await;
+    // Journal closed with a Done — nothing left to recover.
+    let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
+    assert!(journal.stale_sessions().unwrap().is_empty());
+    assert_eq!(
+        core.sessions.session_status(CHAT).map(|s| s.status),
+        Some(SessionStatus::Idle)
+    );
+}
+#[tokio::test]
+async fn steer_with_no_live_run_falls_back_to_new_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-1",
+        SessionCommandPayload::Run {
+            request: run_request("first"),
+            message_id: "m-1".into(),
+
+            agent_prompt: None,
+        },
+    );
+    wait_for(
+        || {
+            matches!(
+                command_status(&core, "cmd-run-1"),
+                Some((SessionCommandStatus::Applied, _))
+            )
+        },
+        "first run applied",
+    )
+    .await;
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "first run settled",
+    )
+    .await;
+
+    // No live run anymore (mock finishes instantly): a steer command must fall back to
+    // dispatch-as-next-turn.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-steer-1",
+        SessionCommandPayload::Steer {
+            prompt: "also do this".into(),
+            message_id: Some("m-2".into()),
+
+            agent_prompt: None,
+        },
+    );
+    wait_for(
+        || {
+            matches!(
+                command_status(&core, "cmd-steer-1"),
+                Some((SessionCommandStatus::Applied, Some(_)))
+            )
+        },
+        "steer fallback applied",
+    )
+    .await;
+    let (status, resolution) = command_status(&core, "cmd-steer-1").unwrap();
+    assert_eq!(status, SessionCommandStatus::Applied);
+    assert_eq!(resolution.as_deref(), Some("queued as new turn"));
+
+    wait_for(
+        || {
+            entries(&core)
+                .iter()
+                .filter(|e| {
+                    e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete)
+                })
+                .count()
+                == 2
+        },
+        "second assistant entry",
+    )
+    .await;
+    // The steer prompt became a user entry with its client-minted id.
+    assert!(
+        entries(&core)
+            .iter()
+            .any(|e| e.id == "m-2" && e.role == MessageRole::User)
+    );
+}
+
+#[tokio::test]
+async fn dead_processed_commands_are_terminalized_on_redelivery() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Simulate a crash AFTER mark-processed but BEFORE execute/outcome: the ledger has
+    // the id, the doc still says pending.
+    {
+        let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
+        assert!(store.mark_processed("cmd-crashed").unwrap());
+    }
+
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-crashed",
+        SessionCommandPayload::Run {
+            request: run_request("never again"),
+            message_id: "m-x".into(),
+
+            agent_prompt: None,
+        },
+    );
+
+    // The dead command must be terminalized — no user entry or run can be
+    // recovered from the original consumed attempt.
+    wait_for(
+        || {
+            command_status(&core, "cmd-crashed")
+                .is_some_and(|(status, _)| status != SessionCommandStatus::Pending)
+        },
+        "the dead command to resolve",
+    )
+    .await;
+    assert!(entries(&core).is_empty(), "dead command must not execute");
+    assert_eq!(
+        command_status(&core, "cmd-crashed"),
+        Some((
+            SessionCommandStatus::Rejected,
+            Some("interrupted before completion — retry to send again".into())
+        )),
+        "dead command must have a durable terminal outcome"
+    );
+    assert!(core.sessions.session_status(CHAT).is_none());
+
+    // A retry mints a fresh command identity but keeps the logical user
+    // message id, allowing the executor to dedupe the transcript entry.
+    let retry_id = core
+        .doc_host
+        .retry_command(CHAT, "cmd-crashed")
+        .expect("dead command can be retried");
+    assert_ne!(retry_id, "cmd-crashed");
+    wait_for(
+        || {
+            command_status(&core, &retry_id)
+                .is_some_and(|(status, _)| status == SessionCommandStatus::Applied)
+        },
+        "retried command applied",
+    )
+    .await;
+    assert!(
+        entries(&core).iter().any(|entry| entry.id == "m-x"),
+        "retry preserves the logical user message id"
+    );
+
+    // Direct ledger-evaluation check: re-evaluating a processed command = Skip.
+    let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
+    let commands = handle.doc().read_commands().unwrap();
+    let entry = commands.iter().find(|c| c.id == "cmd-crashed").unwrap();
+    let is_processed = |id: &str| store.is_processed(id).unwrap_or(false);
+    let never_past = |_: &str| false;
+    let verdict = cypher_doc::evaluate_command(
+        entry,
+        &cypher_doc::EvaluationContext {
+            is_processed: &is_processed,
+            now_ms: chrono::Utc::now().timestamp_millis(),
+            entries: &commands,
+            current_turn_id: None,
+            turn_is_past: &never_past,
+            sealed_attachment_path: &|_| None,
+            failed_upload: &never_past,
+        },
+    );
+    assert_eq!(verdict, cypher_doc::CommandDisposition::Skip);
+}
+
+#[tokio::test]
+async fn rpc_surface_over_in_memory_transport() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let client = cypher_rpc::memory_client(core.rpc_service());
+
+    // ListHarnesses + ListModels.
+    let harnesses = client
+        .call(cypher_rpc::methods::LIST_HARNESSES, serde_json::Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(harnesses[0]["id"], "mock");
+    let models = client
+        .call(
+            cypher_rpc::methods::LIST_MODELS,
+            serde_json::json!({"harness": "mock"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(models[0]["id"], "mock-1");
+
+    // WatchSessions + WatchDocMessages streams.
+    let mut sessions_stream = client
+        .subscribe(cypher_rpc::methods::WATCH_SESSIONS, serde_json::Value::Null)
+        .await
+        .unwrap();
+    let first_sessions = tokio::time::timeout(Duration::from_secs(5), sessions_stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_sessions, serde_json::json!([]));
+
+    let mut messages_stream = client
+        .subscribe(
+            cypher_rpc::methods::WATCH_DOC_MESSAGES,
+            serde_json::json!({"chatId": CHAT}),
+        )
+        .await
+        .unwrap();
+    let initial = tokio::time::timeout(Duration::from_secs(5), messages_stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // Delta protocol: the stream opens with a full reset frame.
+    assert_eq!(initial, serde_json::json!({ "reset": [] }));
+
+    // QueueCommand (as this device's composer would over IPC).
+    let command = serde_json::to_value(SessionCommandPayload::Run {
+        request: run_request("via rpc"),
+        message_id: "m-rpc-1".into(),
+
+        agent_prompt: None,
+    })
+    .unwrap();
+    let queued = client
+        .call(
+            cypher_rpc::methods::QUEUE_COMMAND,
+            serde_json::json!({"chatId": CHAT, "command": command}),
+        )
+        .await
+        .unwrap();
+    assert!(queued["commandId"].is_string());
+
+    // The doc-messages stream emits delta frames until the transcript settles:
+    // user entry + completed assistant entry with the folded parts. Applying
+    // each frame client-side mirrors what both viewports do.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut materialized: Vec<SessionMessageEntry> = vec![];
+    let settled = loop {
+        let item = tokio::time::timeout_at(deadline, messages_stream.recv())
+            .await
+            .expect("doc messages before timeout")
+            .expect("stream alive");
+        let frame: cypher_doc::TranscriptFrame = serde_json::from_value(item).unwrap();
+        cypher_doc::apply_transcript_frame(&mut materialized, frame).unwrap();
+        if materialized.len() == 2 && materialized[1].status == Some(MessageStatus::Complete) {
+            break materialized;
+        }
+    };
+    assert_eq!(settled[0].id, "m-rpc-1");
+    assert_eq!(settled[0].role, MessageRole::User);
+    match &settled[1].parts[0] {
+        MessagePart::Text { text, .. } => assert_eq!(text, "Hello"),
+        other => panic!("unexpected part {other:?}"),
+    }
+
+    // WatchSessions eventually reports the settled Idle session.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let item = tokio::time::timeout_at(deadline, sessions_stream.recv())
+            .await
+            .expect("session update before timeout")
+            .expect("stream alive");
+        let list: Vec<serde_json::Value> = serde_json::from_value(item).unwrap();
+        if list.first().and_then(|s| s["status"].as_str()) == Some("idle") {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn watch_doc_commands_streams_initial_and_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let client = cypher_rpc::memory_client(core.rpc_service());
+
+    let mut stream = client
+        .subscribe(
+            cypher_rpc::methods::WATCH_DOC_COMMANDS,
+            serde_json::json!({ "chatId": CHAT }),
+        )
+        .await
+        .unwrap();
+
+    // The stream opens with the CURRENT ledger — empty for a fresh chat.
+    let initial = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let initial: Vec<serde_json::Value> = serde_json::from_value(initial).unwrap();
+    assert!(initial.is_empty(), "fresh chat has no commands");
+
+    // Queue a message command (the composer's path); the ledger re-sends on
+    // every doc change. The executor may already have Applied it by the time
+    // the frame lands — the durable fields are what we assert.
+    let command = serde_json::to_value(SessionCommandPayload::Run {
+        request: run_request("watch me"),
+        message_id: "m-watch-1".into(),
+
+        agent_prompt: None,
+    })
+    .unwrap();
+    client
+        .call(
+            cypher_rpc::methods::QUEUE_COMMAND,
+            serde_json::json!({ "chatId": CHAT, "command": command }),
+        )
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let updated = loop {
+        let item = tokio::time::timeout_at(deadline, stream.recv())
+            .await
+            .expect("command update before timeout")
+            .expect("stream alive");
+        let ledger: Vec<serde_json::Value> = serde_json::from_value(item).unwrap();
+        if !ledger.is_empty() {
+            break ledger;
+        }
+    };
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0]["payload"]["messageId"], "m-watch-1");
+    // The host may already have Applied the command by the time the frame
+    // lands — what matters is the durable field shape, not the transient
+    // status.
+    let status = updated[0]["status"].as_str().unwrap();
+    assert!(
+        matches!(status, "pending" | "applied"),
+        "unexpected status {status}"
+    );
+    // The first attempt IS the send: sentAt equals issuedAt.
+    assert_eq!(updated[0]["sentAt"], updated[0]["issuedAt"]);
+}
+
+#[tokio::test]
+async fn retry_preserves_sent_at_and_message_identity() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Crash AFTER mark-processed but BEFORE execute: the ledger has the id,
+    // the doc still says pending — the drain terminalizes it Rejected.
+    {
+        let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
+        assert!(store.mark_processed("cmd-retry-1").unwrap());
+    }
+
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-retry-1",
+        SessionCommandPayload::Run {
+            request: run_request("retry me"),
+            message_id: "m-retry-1".into(),
+
+            agent_prompt: None,
+        },
+    );
+
+    // Terminalized as a durable Rejected (no transcript entry is ever
+    // written for a dead command).
+    wait_for(
+        || {
+            command_status(&core, "cmd-retry-1")
+                .is_some_and(|(status, _)| status == SessionCommandStatus::Rejected)
+        },
+        "dead command rejected",
+    )
+    .await;
+    let commands = handle.doc().read_commands().unwrap();
+    let old = commands.iter().find(|c| c.id == "cmd-retry-1").unwrap();
+    assert_eq!(
+        old.sent_at, None,
+        "viewer-queued legacy entry has no sentAt"
+    );
+    // Copy out the original clock before re-reading below (the borrow of
+    // `old` must not span the next read).
+    let old_issued_at = old.issued_at;
+    let old_sent_at = old.sent_at;
+
+    // Watch the ledger while retrying: the stream must carry the fresh
+    // attempt with the ORIGINAL send clock and message identity. The client
+    // must stay alive for the stream to live.
+    let client = cypher_rpc::memory_client(core.rpc_service());
+    let mut stream = client
+        .subscribe(
+            cypher_rpc::methods::WATCH_DOC_COMMANDS,
+            serde_json::json!({ "chatId": CHAT }),
+        )
+        .await
+        .unwrap();
+    // Drain the opening reset (current ledger: the rejected entry).
+    let _ = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let retry_id = core
+        .doc_host
+        .retry_command(CHAT, "cmd-retry-1")
+        .expect("dead command can be retried");
+    assert_ne!(retry_id, "cmd-retry-1", "retry mints a fresh command id");
+
+    // The retried attempt executes (host is local); whatever its terminal
+    // status, its sentAt and message id must match the original.
+    wait_for(
+        || {
+            command_status(&core, &retry_id)
+                .is_some_and(|(status, _)| status == SessionCommandStatus::Applied)
+        },
+        "retried command applied",
+    )
+    .await;
+    let commands = handle.doc().read_commands().unwrap();
+    let retry = commands.iter().find(|c| c.id == retry_id).unwrap();
+    match &retry.payload {
+        SessionCommandPayload::Run { message_id, .. } => {
+            assert_eq!(
+                message_id, "m-retry-1",
+                "retry preserves the logical message id"
+            )
+        }
+        other => panic!("expected run payload, got {other:?}"),
+    }
+    // sentAt survives the retry: the legacy entry had none, so the fallback
+    // is the original issued_at — never the retry's own clock.
+    assert_eq!(
+        retry.sent_at,
+        Some(old_issued_at),
+        "retry preserves the original send time"
+    );
+    assert_eq!(retry.sent_at, old_sent_at.or(Some(old_issued_at)));
+    assert!(
+        entries(&core).iter().any(|entry| entry.id == "m-retry-1"),
+        "retry writes the user entry under the preserved message id"
+    );
+
+    // And the stream eventually carries the retried entry with those fields.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let item = tokio::time::timeout_at(deadline, stream.recv())
+            .await
+            .expect("ledger update before timeout")
+            .expect("stream alive");
+        let ledger: Vec<serde_json::Value> = serde_json::from_value(item).unwrap();
+        if let Some(entry) = ledger.iter().find(|e| e["id"] == retry_id) {
+            assert_eq!(entry["payload"]["messageId"], "m-retry-1");
+            assert_eq!(entry["sentAt"], old_issued_at);
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn respond_input_resolves_pending_question() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(asking_harness()));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-ask",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+
+            agent_prompt: None,
+        },
+    );
+
+    // The input request surfaces: status AwaitingInput + an unresolved input part.
+    wait_for(
+        || {
+            core.sessions.session_status(CHAT).map(|s| s.status)
+                == Some(SessionStatus::AwaitingInput)
+        },
+        "awaiting input",
+    )
+    .await;
+    wait_for(
+        || {
+            entries(&core).iter().any(|e| {
+                e.parts.iter().any(|p| {
+                    matches!(
+                        p,
+                        MessagePart::Input {
+                            resolved: false,
+                            ..
+                        }
+                    )
+                })
+            })
+        },
+        "input part in doc",
+    )
+    .await;
+
+    // A viewer answers through the durable command queue.
+    let request_id = entries(&core)
+        .iter()
+        .find_map(|e| {
+            e.parts.iter().find_map(|p| match p {
+                MessagePart::Input { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+        })
+        .unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-answer-1",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: vec![cypher_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["b".into()],
+            }],
+        },
+    );
+
+    wait_for(
+        || {
+            support::entries(&core, CHAT).iter().any(|e| {
+                e.status == Some(MessageStatus::Complete)
+                    && e.parts
+                        .iter()
+                        .any(|p| matches!(p, MessagePart::Text { text, .. } if text == "picked b"))
+            })
+        },
+        "answered turn to complete",
+    )
+    .await;
+    assert_eq!(
+        command_status(&core, "cmd-answer-1"),
+        Some((SessionCommandStatus::Applied, None))
+    );
+    // The input part is marked resolved in the doc.
+    assert!(entries(&core).iter().any(|e| {
+        e.parts
+            .iter()
+            .any(|p| matches!(p, MessagePart::Input { resolved: true, .. }))
+    }));
+    // The run task writes the Complete entry BEFORE settling the status row —
+    // wait for the transition instead of asserting the instant in between.
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "session to settle idle",
+    )
+    .await;
+}
+
+/// A harness that stops waiting (Pi resolved its timed-out dialog on its own)
+/// withdraws the question: the part resolves while the turn keeps going, and a
+/// late answer is rejected instead of "applied" into a dialog that is gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn abandoned_question_is_withdrawn_mid_turn() {
+    let harness = support::TestHarness::new(HarnessId::Mock, "Abandoning", move |_, controls| {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+        tokio::spawn(async move {
+            let answer = (controls.request_input)(vec![cypher_proto::UserInputQuestion {
+                id: "q1".into(),
+                header: "Pick".into(),
+                question: "Which one?".into(),
+                options: vec!["a".into(), "b".into()],
+                multi_select: false,
+                permission: None,
+                asked_by: None,
+            }]);
+            let _ = tokio::time::timeout(Duration::from_millis(300), answer).await;
+            let _ = tx
+                .send(Ok(AgentEvent::TextDelta {
+                    text: "no answer, moving on".into(),
+                }))
+                .await;
+            controls.interrupt.cancelled().await;
+            let _ = tx.send(Ok(done(DoneStatus::Interrupted))).await;
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    })
+    .reasoning(&[]);
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(harness));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-abandon",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+            agent_prompt: None,
+        },
+    );
+    let request_id = {
+        let mut found = None;
+        wait_for(
+            || {
+                found = entries(&core).iter().find_map(|e| {
+                    e.parts.iter().find_map(|p| match p {
+                        MessagePart::Input { request_id, .. } => Some(request_id.clone()),
+                        _ => None,
+                    })
+                });
+                found.is_some()
+            },
+            "input part in doc",
+        )
+        .await;
+        found.unwrap()
+    };
+
+    // Withdrawn while the turn is still live.
+    wait_for(
+        || {
+            core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Working)
+                && entries(&core).iter().any(|e| {
+                    e.status == Some(MessageStatus::Streaming)
+                        && e.parts
+                            .iter()
+                            .any(|p| matches!(p, MessagePart::Input { resolved: true, .. }))
+                })
+        },
+        "abandoned question withdrawn",
+    )
+    .await;
+
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-answer-late",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: vec![cypher_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["a".into()],
+            }],
+        },
+    );
+    wait_for(
+        || {
+            command_status(&core, "cmd-answer-late")
+                .is_some_and(|(s, _)| s != SessionCommandStatus::Pending)
+        },
+        "late answer processed",
+    )
+    .await;
+    assert_eq!(
+        command_status(&core, "cmd-answer-late"),
+        Some((
+            SessionCommandStatus::Rejected,
+            Some("no pending input request".into())
+        ))
+    );
+    core.sessions.interrupt(CHAT).await.unwrap();
+}
+
+/// Resilience: a RespondInput whose id matches no pending request is REJECTED
+/// with a resolution (never silently dropped), the question stays live (the
+/// panel persists), and a subsequent correct answer still resumes the run —
+/// a wrong answer can never brick the session.
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(asking_harness()));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-wrong",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+
+            agent_prompt: None,
+        },
+    );
+    wait_for(
+        || {
+            core.sessions.session_status(CHAT).map(|s| s.status)
+                == Some(SessionStatus::AwaitingInput)
+        },
+        "awaiting input",
+    )
+    .await;
+    wait_for(
+        || {
+            support::entries(&core, CHAT).iter().any(|e| {
+                e.parts.iter().any(|p| {
+                    matches!(
+                        p,
+                        MessagePart::Input {
+                            resolved: false,
+                            ..
+                        }
+                    )
+                })
+            })
+        },
+        "input part in doc",
+    )
+    .await;
+
+    // A wrong-id answer: rejected with a resolution, question still live.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-answer-bogus",
+        SessionCommandPayload::RespondInput {
+            request_id: "bogus-id".into(),
+            answers: vec![cypher_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["a".into()],
+            }],
+        },
+    );
+    wait_for(
+        || {
+            command_status(&core, "cmd-answer-bogus")
+                .is_some_and(|(s, _)| s != SessionCommandStatus::Pending)
+        },
+        "bogus answer processed",
+    )
+    .await;
+    assert_eq!(
+        command_status(&core, "cmd-answer-bogus"),
+        Some((
+            SessionCommandStatus::Rejected,
+            Some("no pending input request".into())
+        ))
+    );
+    // The run is still waiting and the part is still unresolved — the
+    // QuestionPanel keeps presenting the real request.
+    assert_eq!(
+        core.sessions.session_status(CHAT).map(|s| s.status),
+        Some(SessionStatus::AwaitingInput)
+    );
+    let request_id = entries(&core)
+        .iter()
+        .find_map(|e| {
+            e.parts.iter().find_map(|p| match p {
+                MessagePart::Input {
+                    request_id,
+                    resolved: false,
+                    ..
+                } => Some(request_id.clone()),
+                _ => None,
+            })
+        })
+        .expect("question still live after rejected answer");
+
+    // The correct answer still resumes and completes the run.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-answer-right",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: vec![cypher_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["b".into()],
+            }],
+        },
+    );
+    wait_for(
+        || {
+            support::entries(&core, CHAT).iter().any(|e| {
+                e.status == Some(MessageStatus::Complete)
+                    && e.parts
+                        .iter()
+                        .any(|p| matches!(p, MessagePart::Text { text, .. } if text == "picked b"))
+            })
+        },
+        "answered turn to complete",
+    )
+    .await;
+    assert_eq!(
+        core.sessions.session_status(CHAT).map(|s| s.status),
+        Some(SessionStatus::Idle)
+    );
+}
+
+/// Resilience: interrupting a run that is BLOCKED on a question unparks the
+/// harness immediately (the pending resolver is failed with empty answers),
+/// the entry settles `aborted`, the chip flips terminal (never dangles
+/// unresolved), and the next run works — a blocked question can never brick
+/// the session.
+#[tokio::test(flavor = "multi_thread")]
+async fn interrupt_unblocks_a_run_awaiting_input() {
+    let harness =
+        support::TestHarness::new(HarnessId::Mock, "Blocking", move |request, controls| {
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+            if request.prompt == "second run" {
+                // The post-interrupt turn: completes immediately.
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(Ok(AgentEvent::TextDelta {
+                            text: "second done".into(),
+                        }))
+                        .await;
+                    let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+                });
+            } else {
+                let interrupt = controls.interrupt.clone();
+                tokio::spawn(async move {
+                    // Blocks on the question; an interrupt fails the resolver
+                    // (empty answers) and cancels the token — like a real CLI
+                    // being torn down, the stream then ends WITHOUT a Done.
+                    // (Asked a beat after the prompt, so the question's own
+                    // lastMessageAt bump is distinguishable from the send's.)
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    let _ = (controls.request_input)(vec![cypher_proto::UserInputQuestion {
+                        id: "q1".into(),
+                        header: "Pick".into(),
+                        question: "Which one?".into(),
+                        options: vec!["a".into(), "b".into()],
+                        multi_select: false,
+                        permission: None,
+                        asked_by: None,
+                    }])
+                    .await;
+                    interrupt.cancelled().await;
+                    drop(tx);
+                });
+            }
+            Ok(futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            })
+            .boxed())
+        })
+        .reasoning(&[]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(harness));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-block",
+        SessionCommandPayload::Run {
+            request: run_request("ask and block"),
+            message_id: "m-1".into(),
+
+            agent_prompt: None,
+        },
+    );
+    wait_for(
+        || {
+            core.sessions.session_status(CHAT).map(|s| s.status)
+                == Some(SessionStatus::AwaitingInput)
+        },
+        "awaiting input",
+    )
+    .await;
+    // The question is new activity: `lastMessageAt` moves past the moment it
+    // was asked, so the chat reads unseen (Dock/phone badges) until someone
+    // opens it on any device.
+    // (Rows store epoch ms.)
+    let asked_at = core
+        .sessions
+        .session_status(CHAT)
+        .unwrap()
+        .updated_at
+        .timestamp_millis();
+    wait_for(
+        || {
+            core.workspace
+                .chat(CHAT)
+                .ok()
+                .flatten()
+                .and_then(|c| c.last_message_at)
+                .is_some_and(|at| at.timestamp_millis() >= asked_at)
+        },
+        "question bumps lastMessageAt",
+    )
+    .await;
+    wait_for(
+        || {
+            support::entries(&core, CHAT).iter().any(|e| {
+                e.parts.iter().any(|p| {
+                    matches!(
+                        p,
+                        MessagePart::Input {
+                            resolved: false,
+                            ..
+                        }
+                    )
+                })
+            })
+        },
+        "input part in doc",
+    )
+    .await;
+
+    // Interrupt while blocked: settles promptly (well under the 3s grace —
+    // the unparked resolver lets the harness wind down on its own).
+    let start = std::time::Instant::now();
+    core.sessions.interrupt(CHAT).await.unwrap();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(3),
+        "interrupt settled via the unparked resolver, not the grace timeout"
+    );
+    wait_for(
+        || {
+            support::entries(&core, CHAT)
+                .iter()
+                .any(|e| e.status == Some(MessageStatus::Aborted))
+        },
+        "entry stamped aborted",
+    )
+    .await;
+    // The chip is terminal — no dangling unresolved question survives the run.
+    assert!(entries(&core).iter().all(|e| {
+        e.parts.iter().all(|p| {
+            !matches!(
+                p,
+                MessagePart::Input {
+                    resolved: false,
+                    ..
+                }
+            )
+        })
+    }));
+
+    // And the session is usable: the next run completes.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-second",
+        SessionCommandPayload::Run {
+            request: run_request("second run"),
+            message_id: "m-2".into(),
+
+            agent_prompt: None,
+        },
+    );
+    wait_for(
+        || {
+            support::entries(&core, CHAT).iter().any(|e| {
+                e.status == Some(MessageStatus::Complete)
+                    && e.parts.iter().any(
+                        |p| matches!(p, MessagePart::Text { text, .. } if text == "second done"),
+                    )
+            })
+        },
+        "second run to complete",
+    )
+    .await;
+}
+
+/// Regression (the "nothing happened after I answered" bug): a harness that
+/// emits its OWN `InputRequested` (keyed by its internal id — Claude's
+/// control-request id) *and* asks through `RunControls::request_input` used to
+/// fold TWO input parts into the doc. The UI answers the LAST unresolved part;
+/// the harness-emitted twin's id was unknown to `respond_input`'s pending map,
+/// so the RespondInput doc command was rejected and the run never resumed.
+/// The engine now drops harness-emitted `InputRequested` events (the input
+/// bridge is the sole authority), so exactly one — answerable — part folds.
+#[tokio::test(flavor = "multi_thread")]
+async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
+    let harness = support::TestHarness::new(HarnessId::Mock, "DoubleEmit", move |_, controls| {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+        tokio::spawn(async move {
+            let question = cypher_proto::UserInputQuestion {
+                id: "q1".into(),
+                header: "Pick".into(),
+                question: "Which one?".into(),
+                options: vec!["a".into(), "b".into()],
+                multi_select: false,
+                permission: None,
+                asked_by: None,
+            };
+            // The pre-fix Claude/Codex shape: surface the question under
+            // the harness's own id BEFORE asking through the bridge.
+            let _ = tx
+                .send(Ok(AgentEvent::InputRequested {
+                    request_id: "claude-ctrl-1".into(),
+                    questions: vec![question.clone()],
+                }))
+                .await;
+            let answers = (controls.request_input)(vec![question])
+                .await
+                .unwrap_or_default();
+            let picked = answers
+                .first()
+                .and_then(|a| a.labels.first().cloned())
+                .unwrap_or_else(|| "none".into());
+            let _ = tx
+                .send(Ok(AgentEvent::TextDelta {
+                    text: format!("picked {picked}"),
+                }))
+                .await;
+            let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    })
+    .reasoning(&[]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(harness));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-twin",
+        SessionCommandPayload::Run {
+            request: run_request("ask me twice"),
+            message_id: "m-1".into(),
+
+            agent_prompt: None,
+        },
+    );
+
+    wait_for(
+        || {
+            core.sessions.session_status(CHAT).map(|s| s.status)
+                == Some(SessionStatus::AwaitingInput)
+        },
+        "awaiting input",
+    )
+    .await;
+    wait_for(
+        || {
+            support::entries(&core, CHAT).iter().any(|e| {
+                e.parts.iter().any(|p| {
+                    matches!(
+                        p,
+                        MessagePart::Input {
+                            resolved: false,
+                            ..
+                        }
+                    )
+                })
+            })
+        },
+        "input part in doc",
+    )
+    .await;
+
+    // Exactly ONE input part folded, and not under the harness's own id.
+    let input_ids: Vec<String> = entries(&core)
+        .iter()
+        .flat_map(|e| {
+            e.parts.iter().filter_map(|p| match p {
+                MessagePart::Input { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+        })
+        .collect();
+    assert_eq!(input_ids.len(), 1, "one chip, not a twin: {input_ids:?}");
+    assert_ne!(input_ids[0], "claude-ctrl-1");
+
+    // Answer the LAST unresolved part — exactly what the QuestionPanel does.
+    let request_id = entries(&core)
+        .iter()
+        .rev()
+        .find_map(|e| {
+            e.parts.iter().rev().find_map(|p| match p {
+                MessagePart::Input {
+                    request_id,
+                    resolved: false,
+                    ..
+                } => Some(request_id.clone()),
+                _ => None,
+            })
+        })
+        .unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-answer-twin",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: vec![cypher_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["a".into()],
+            }],
+        },
+    );
+
+    // The run resumes and completes; the chip flips to resolved.
+    wait_for(
+        || {
+            support::entries(&core, CHAT).iter().any(|e| {
+                e.status == Some(MessageStatus::Complete)
+                    && e.parts
+                        .iter()
+                        .any(|p| matches!(p, MessagePart::Text { text, .. } if text == "picked a"))
+            })
+        },
+        "answered turn to complete",
+    )
+    .await;
+    assert_eq!(
+        command_status(&core, "cmd-answer-twin"),
+        Some((SessionCommandStatus::Applied, None))
+    );
+    assert!(entries(&core).iter().any(|e| {
+        e.parts
+            .iter()
+            .any(|p| matches!(p, MessagePart::Input { resolved: true, .. }))
+    }));
+    // The run task writes the Complete entry BEFORE settling the status row —
+    // wait for the transition instead of asserting the instant in between.
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "session to settle idle",
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// Attachments: chunked upload → durable path → Run carrying both
+// the prompt-embedded refs (the persisted transport) and the staged paths.
+// ---------------------------------------------------------------------------
+
+/// Replays a scripted mock but records every RunRequest the engine hands
+/// over (the chat run AND the auto-title run share the harness) — proves
+/// `attachments` survives doc-queue → executor → harness.
+fn capturing_harness(
+    script: Vec<AgentEvent>,
+    seen: Arc<std::sync::Mutex<Vec<RunRequest>>>,
+) -> Arc<dyn Harness> {
+    Arc::new(
+        support::TestHarness::new(HarnessId::Mock, "Capturing", move |request, _| {
+            seen.lock().unwrap().push(request);
+            support::script(script.clone())
+        })
+        .steering(),
+    )
+}
+
+#[tokio::test]
+async fn attachment_upload_then_run_threads_refs_and_paths() {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let dir = tempfile::tempdir().unwrap();
+    let seen: Arc<std::sync::Mutex<Vec<RunRequest>>> = Default::default();
+    let core = assemble(dir.path(), capturing_harness(mock_script(), seen.clone()));
+    let client = cypher_rpc::memory_client(core.rpc_service());
+
+    // Chunked upload exactly as the composer sends it: base64 split across
+    // positional UploadChunk slots, then UploadCommit → the durable path.
+    let payload: Vec<u8> = (0..=255u8).cycle().take(9_001).collect();
+    let encoded = b64.encode(&payload);
+    let (first, second) = encoded.split_at(encoded.len() / 2);
+    for (seq, data) in [(0, first), (1, second)] {
+        client
+            .call(
+                cypher_rpc::methods::UPLOAD_CHUNK,
+                serde_json::json!({ "uploadId": "e2e-att", "seq": seq, "data": data }),
+            )
+            .await
+            .expect("UploadChunk");
+    }
+    let committed = client
+        .call(
+            cypher_rpc::methods::UPLOAD_COMMIT,
+            serde_json::json!({ "uploadId": "e2e-att", "fileName": "red.png" }),
+        )
+        .await
+        .expect("UploadCommit");
+    let path = committed["path"].as_str().expect("path").to_string();
+    assert_eq!(
+        std::fs::read(&path).expect("durable upload file"),
+        payload,
+        "committed file holds the exact reassembled bytes"
+    );
+
+    // Run with the `withAttachments` transport: refs embedded in the
+    // prompt text (this is what persists), paths on the additive field.
+    let prompt = format!(
+        "what color is this?\n\nAttached images (local files — open them to view):\n- {path}"
+    );
+    let mut request = run_request(&prompt);
+    request.attachments = vec![path.clone()];
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-att-1",
+        SessionCommandPayload::Run {
+            request,
+            message_id: "msg-att-1".into(),
+
+            agent_prompt: None,
+        },
+    );
+    wait_for(
+        || {
+            support::entries(&core, CHAT).iter().any(|e| {
+                e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete)
+            })
+        },
+        "assistant entry to complete",
+    )
+    .await;
+
+    // Doc user entry: the message text carries the refs verbatim (render-back
+    // parses them into thumbnails).
+    let all = entries(&core);
+    assert_eq!(all[0].id, "msg-att-1");
+    assert_eq!(all[0].role, MessageRole::User);
+    match &all[0].parts[0] {
+        MessagePart::Text { text, .. } => {
+            assert!(text.contains("Attached images (local files"));
+            assert!(text.contains(&path));
+        }
+        other => panic!("unexpected user part {other:?}"),
+    }
+
+    // The harness saw the staged paths on the request itself (the chat run —
+    // NOT the auto-title run, which fires at dispatch now, embeds the user
+    // prompt in its wrapper, and legitimately carries no attachments).
+    let requests = seen.lock().unwrap().clone();
+    let chat_run = requests
+        .iter()
+        .find(|r| r.prompt.contains("what color is this?") && !r.prompt.contains("word title"))
+        .expect("chat run reached the harness");
+    assert_eq!(chat_run.attachments, vec![path.clone()]);
+    assert!(chat_run.prompt.contains(&path));
+
+    // Read-back over the same RPC surface the transcript uses.
+    let chunk = client
+        .call(
+            cypher_rpc::methods::READ_ATTACHMENT_CHUNK,
+            serde_json::json!({ "path": path, "offset": 0 }),
+        )
+        .await
+        .expect("ReadAttachmentChunk");
+    assert_eq!(chunk["mimeType"], "image/png");
+    assert_eq!(chunk["name"], "e2e-att-red.png");
+}
+
+// ---------------------------------------------------------------------------
+// Liveness heartbeats: empty reasoning deltas keep the session fresh but
+// never reach the journal (redacted thinking + tool-input-generation noise).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn empty_reasoning_deltas_are_heartbeats_not_journal_noise() {
+    let mut script = vec![AgentEvent::SessionStarted {
+        harness: HarnessId::Mock,
+        model: "mock-1".into(),
+        tools: vec![],
+        cwd: "/tmp".into(),
+        session_id: "hs-hb".into(),
+        assistant_message_id: "a-hb".into(),
+    }];
+    // A long "silent" stretch: redacted thinking / input_json_delta windows
+    // stream as empty reasoning deltas.
+    for _ in 0..40 {
+        script.push(AgentEvent::ReasoningDelta {
+            text: String::new(),
+        });
+    }
+    script.push(AgentEvent::ReasoningDelta {
+        text: "planning".into(),
+    });
+    script.push(AgentEvent::TextDelta {
+        text: "done".into(),
+    });
+    script.push(AgentEvent::Done {
+        status: DoneStatus::Completed,
+        result: Some("done".into()),
+        error: None,
+        session_id: None,
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(MockHarness { script }));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-hb-1",
+        SessionCommandPayload::Run {
+            request: run_request("hb"),
+            message_id: "msg-hb-1".into(),
+
+            agent_prompt: None,
+        },
+    );
+    wait_for(
+        || {
+            entries(&core)
+                .iter()
+                .any(|e| e.status == Some(MessageStatus::Complete))
+        },
+        "run completes",
+    )
+    .await;
+    // Journal replay: the 40 empties were filtered; real content survived.
+    let replay = core.sessions.subscribe(CHAT, 0).unwrap().0;
+    let empties = replay
+        .iter()
+        .filter(|j| matches!(&j.event, AgentEvent::ReasoningDelta { text } if text.is_empty()))
+        .count();
+    let nonempty = replay
+        .iter()
+        .filter(|j| matches!(&j.event, AgentEvent::ReasoningDelta { text } if !text.is_empty()))
+        .count();
+    assert_eq!(empties, 0, "empty reasoning deltas never reach the journal");
+    assert_eq!(nonempty, 1, "real reasoning text is preserved");
+    assert!(
+        replay
+            .iter()
+            .any(|j| matches!(&j.event, AgentEvent::TextDelta { text } if text == "done")),
+        "text deltas unaffected"
+    );
+}
+
+#[tokio::test]
+async fn parked_session_ignores_trailing_frames_and_stays_idle() {
+    // A harness child can keep streaming frames after a turn's Done (late
+    // tool updates, flushed text). A parked session must treat
+    // them as inert: no Working re-arm (the eternally-running-session bug),
+    // no phantom assistant entry.
+    let mut script = mock_script();
+    script.push(AgentEvent::ToolCall {
+        id: "tool-1".into(),
+        call: ToolCall::Exec {
+            command: "echo late-echo".into(),
+        },
+    });
+    script.push(AgentEvent::TextDelta {
+        text: "trailing flush".into(),
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(MockHarness { script }));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-parked",
+        SessionCommandPayload::Run {
+            request: run_request("go"),
+            message_id: "m-parked".into(),
+
+            agent_prompt: None,
+        },
+    );
+
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "session to complete",
+    )
+    .await;
+    // The trailing frames land right after the park; hold the assertion open
+    // past the 120ms flush window to catch a phantom segment or a Working
+    // re-arm (both are what the old code did).
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(600);
+    while tokio::time::Instant::now() < deadline {
+        assert_eq!(
+            core.sessions.session_status(CHAT).map(|s| s.status),
+            Some(SessionStatus::Idle),
+            "trailing frames must not re-arm Working"
+        );
+        let all = support::entries(&core, CHAT);
+        assert!(
+            all.len() <= 2,
+            "trailing frames must not open a phantom entry: {all:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let all = entries(&core);
+    assert_eq!(all.len(), 2, "user + one assistant entry");
+    assert_eq!(all[1].status, Some(MessageStatus::Complete));
+}
+
+#[tokio::test]
+async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
+    // Adapters re-emit shape-bearing tool_call_updates as full ToolCall
+    // events. Once a steer boundary reset the fold, such an echo for a
+    // PRIOR segment's tool must not mint a chip mid-text in the new segment
+    // (the mid-word transcript splits).
+    let script = vec![
+        AgentEvent::SessionStarted {
+            harness: HarnessId::Mock,
+            model: "mock-1".into(),
+            tools: vec![],
+            cwd: "/tmp".into(),
+            session_id: "hs-steer".into(),
+            assistant_message_id: "a-1".into(),
+        },
+        AgentEvent::TextDelta {
+            text: "part one".into(),
+        },
+        AgentEvent::ToolCall {
+            id: "tool-long".into(),
+            call: ToolCall::Exec {
+                command: "sleep 60".into(),
+            },
+        },
+        AgentEvent::Steered {
+            assistant_message_id: Some("a-1".into()),
+            next_assistant_message_id: Some("a-2".into()),
+        },
+        AgentEvent::TextDelta {
+            text: "part ".into(),
+        },
+        // The long-running exec from segment one completes mid-stream of the
+        // next segment: a shape-bearing echo plus its result.
+        AgentEvent::ToolCall {
+            id: "tool-long".into(),
+            call: ToolCall::Exec {
+                command: "sleep 60".into(),
+            },
+        },
+        AgentEvent::ToolResult {
+            id: "tool-long".into(),
+            is_error: false,
+            output: None,
+            diff: None,
+            permission: None,
+        },
+        AgentEvent::TextDelta { text: "two".into() },
+        done(DoneStatus::Completed),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(MockHarness { script }));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-echo",
+        SessionCommandPayload::Run {
+            request: run_request("go"),
+            message_id: "m-echo".into(),
+
+            agent_prompt: None,
+        },
+    );
+
+    wait_for(
+        || {
+            support::entries(&core, CHAT).len() == 3
+                && core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle)
+        },
+        "both segments to land",
+    )
+    .await;
+    let all = entries(&core);
+    // Segment one: text + the (unresolved-at-boundary) tool chip.
+    assert_eq!(all[1].parts.len(), 2, "{:#?}", all[1].parts);
+    // Segment two: ONE contiguous text part, no spliced chip.
+    assert_eq!(
+        all[2].parts,
+        vec![MessagePart::Text {
+            id: "t0".into(),
+            text: "part two".into(),
+            agent_text: None,
+        }],
+        "stale echo must not split the streaming text"
+    );
+}
+
+#[tokio::test]
+async fn each_segment_records_the_models_that_answered_it() {
+    // Each completed assistant message names its model; the segment it
+    // wrote keeps them (once each, in order), and a steer boundary starts
+    // the next segment's list afresh.
+    let completed =
+        |id: &str, model: &str, requested: Option<&str>| AgentEvent::AssistantMessageCompleted {
+            assistant_message_id: id.into(),
+            model: Some(AnsweredModel {
+                model: model.into(),
+                requested: requested.map(str::to_owned),
+            }),
+        };
+    let script = vec![
+        AgentEvent::SessionStarted {
+            harness: HarnessId::Mock,
+            model: "mock-1".into(),
+            tools: vec![],
+            cwd: "/tmp".into(),
+            session_id: "hs-models".into(),
+            assistant_message_id: "a-1".into(),
+        },
+        AgentEvent::TextDelta {
+            text: "looking".into(),
+        },
+        completed("a-1", "gpt-5.4-mini", Some("gpt-6-astra")),
+        AgentEvent::TextDelta {
+            text: " done".into(),
+        },
+        completed("a-2", "gpt-6-astra", None),
+        completed("a-3", "gpt-6-astra", None),
+        AgentEvent::Steered {
+            assistant_message_id: Some("a-3".into()),
+            next_assistant_message_id: Some("a-4".into()),
+        },
+        AgentEvent::TextDelta {
+            text: "steered".into(),
+        },
+        completed("a-4", "gpt-6-astra", None),
+        done(DoneStatus::Completed),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(MockHarness { script }));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-models",
+        SessionCommandPayload::Run {
+            request: run_request("go"),
+            message_id: "m-models".into(),
+
+            agent_prompt: None,
+        },
+    );
+
+    wait_for(
+        || {
+            support::entries(&core, CHAT).len() == 3
+                && core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle)
+        },
+        "both segments to land",
+    )
+    .await;
+    let all = entries(&core);
+    assert!(all[0].models.is_empty(), "user entries carry none");
+    assert_eq!(
+        all[1].models,
+        vec![
+            AnsweredModel {
+                model: "gpt-5.4-mini".into(),
+                requested: Some("gpt-6-astra".into()),
+            },
+            AnsweredModel {
+                model: "gpt-6-astra".into(),
+                requested: None,
+            },
+        ]
+    );
+    assert_eq!(
+        all[2].models,
+        vec![AnsweredModel {
+            model: "gpt-6-astra".into(),
+            requested: None,
+        }]
+    );
+}
+
+/// The elapsed timer's base (`started_at`) is per user message: a settled
+/// session drops it (no reader can resurrect the previous turn's elapsed —
+/// the "timer opens at 30:00 on send" bug), and a steer into a PARKED
+/// persistent session restamps it fresh for the new turn.
+#[tokio::test]
+async fn parked_steer_restamps_started_at_and_idle_clears_it() {
+    // Steerable harness whose stream stays open after the turn's Done — the
+    // engine parks the session — and whose steering mailbox drives turn two.
+    let harness = support::TestHarness::new(HarnessId::Mock, "Parking", move |_, mut controls| {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(AgentEvent::TextDelta {
+                    text: "turn one".into(),
+                }))
+                .await;
+            let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+            // Parked. The next steer is turn two.
+            if let Some(_msg) = controls.steering.recv().await {
+                let _ = tx
+                    .send(Ok(AgentEvent::Steered {
+                        assistant_message_id: None,
+                        next_assistant_message_id: None,
+                    }))
+                    .await;
+                let _ = tx
+                    .send(Ok(AgentEvent::TextDelta {
+                        text: "turn two".into(),
+                    }))
+                    .await;
+                // Hold the turn open so the test's poll observes Working
+                // (the transition is otherwise sub-millisecond).
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+            }
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    })
+    .steering()
+    .reasoning(&[]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(harness));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-park-timer",
+        SessionCommandPayload::Run {
+            request: run_request("first"),
+            message_id: "m-1".into(),
+
+            agent_prompt: None,
+        },
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "turn one to park",
+    )
+    .await;
+    let parked = core.sessions.session_status(CHAT).unwrap();
+    assert_eq!(
+        parked.started_at, None,
+        "a settled session must drop its timer base"
+    );
+
+    let before_steer = chrono::Utc::now();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-steer-park-timer",
+        SessionCommandPayload::Steer {
+            prompt: "next".into(),
+            message_id: Some("m-2".into()),
+
+            agent_prompt: None,
+        },
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Working),
+        "turn two working",
+    )
+    .await;
+    let working = core.sessions.session_status(CHAT).unwrap();
+    let started = working.started_at.expect("Working carries a timer base");
+    assert!(
+        started >= before_steer,
+        "steer into a parked session must restamp started_at (got {started}, steered at {before_steer})"
+    );
+
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "turn two to settle",
+    )
+    .await;
+    assert_eq!(core.sessions.session_status(CHAT).unwrap().started_at, None);
+}

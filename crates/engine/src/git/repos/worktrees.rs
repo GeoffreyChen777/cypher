@@ -25,7 +25,7 @@ impl Repos {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "repo".to_string());
-        let base = self.inner.worktrees_root.join(&repo_name);
+        let base = self.worktrees_root().join(&repo_name);
         std::fs::create_dir_all(&base)?;
         // Auto-generate a name colliding with neither an existing dir nor branch.
         let existing: HashSet<String> = self
@@ -240,7 +240,7 @@ impl Repos {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "repo".to_string());
         let name = chat_worktree_name(chat_key, name_hint);
-        let base = self.inner.worktrees_root.join(&repo_name);
+        let base = self.worktrees_root().join(&repo_name);
         let path = base.join(&name);
         let branch_name = format!("cypher/{name}");
 
