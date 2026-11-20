@@ -80,6 +80,10 @@ bash scripts/check.sh all        # everything except ios; macos only on a Mac
 bash scripts/check-linux.sh      # CI's Linux checks in Docker, from a Mac (below)
 ```
 
+CI skips the heavy Rust jobs or the iOS job when a change cannot affect them;
+`python3 scripts/ci/changed_areas.py --base origin/main` prints what it will run
+([CI/CD operations](../operations/ci-cd.md#which-jobs-a-change-runs)).
+
 `lint` and `workflows` download pinned ShellCheck and actionlint binaries on
 first use. `CARGO=…`, `PYTHON=…` and `NODE=…` substitute the tools, for example
 a wrapper that serializes heavy builds.

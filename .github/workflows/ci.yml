@@ -3,8 +3,10 @@
 # Each step runs one stage of scripts/check.sh, the entry point used locally
 # (docs/development/README.md#checks). The Rust checks are split into jobs
 # that build different feature sets, so they run side by side instead of
-# rebuilding the workspace one after another. No deployment credentials are
-# available to these jobs.
+# rebuilding the workspace one after another. The heavy Rust jobs and the iOS
+# job run only when the change touches something they build or read
+# (scripts/ci/changed_areas.py). No deployment credentials are available to
+# these jobs.
 name: CI
 
 on:
@@ -29,6 +31,28 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
+  changes:
+    name: Changed areas
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.areas.outputs.rust }}
+      ios: ${{ steps.areas.outputs.ios }}
+    steps:
+      # Two commits deep: a pull request's merge commit with its base, or a
+      # pushed commit with the one before it.
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Decide which jobs the change needs
+        id: areas
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: python3 scripts/ci/changed_areas.py
+
   scripts:
     name: Scripts and workflows
     runs-on: ubuntu-24.04
@@ -79,6 +103,8 @@ jobs:
       - name: Typecheck and test
         run: bash scripts/check.sh edge
 
+  # Always runs: besides clippy, the lint stage checks every script in the
+  # repository, whatever part of it changed.
   lint-linux:
     name: Lint (Linux)
     runs-on: ubuntu-24.04
@@ -105,6 +131,8 @@ jobs:
 
   test-linux:
     name: Test (Linux)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -126,6 +154,8 @@ jobs:
 
   build-linux:
     name: Build (Linux)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -149,6 +179,8 @@ jobs:
   # release-macos.yml.
   lint-macos:
     name: Lint (macOS)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: macos-26
     timeout-minutes: 60
     steps:
@@ -165,6 +197,8 @@ jobs:
 
   test-macos:
     name: Test (macOS)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: macos-26
     timeout-minutes: 60
     steps:
@@ -178,3 +212,20 @@ jobs:
 
       - name: Test the desktop app
         run: bash scripts/check.sh macos-test
+
+  test-ios:
+    name: Test (iOS)
+    needs: changes
+    if: needs.changes.outputs.ios == 'true'
+    # The runner of the archive job in release-ios.yml; the ios stage selects
+    # the Xcode pinned in .xcode-version.
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Lint and test the iOS app
+        run: bash scripts/check.sh ios

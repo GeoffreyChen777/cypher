@@ -5,7 +5,6 @@
 | File | Name | Runs on | What it does |
 | --- | --- | --- | --- |
 | `ci.yml` | CI | pull requests, pushes to `main`, manual | every check below; no deployment credentials |
-| `ci-ios.yml` | CI (iOS) | the same, when `apps/ios/**`, `protocol/**` or its scripts change | swift-format lint and the iOS unit tests (`CypherTests`) on a simulator, with the Xcode the archive job uses |
 | `deploy.yml` | Deploy | pushes to `main`, main-only manual | tests one fresh `main` snapshot and deploys the three Workers from it |
 | `release-linux.yml` | Release (Linux) | `cypher-linux-v<version>-b<build>` tags, manual | builds and publishes the Linux channel **alone** |
 | `release-macos.yml` | Release (macOS) | `cypher-macos-v<version>-b<build>` tags, manual | builds and publishes the macOS channel **alone** |
@@ -27,19 +26,50 @@ Each step of `ci.yml` runs one stage of `scripts/check.sh` (see
 [Development](../development/README.md#checks)), so a stage that passes locally
 passes in CI.
 
-| Job | Runner | Stages |
-| --- | --- | --- |
-| Scripts and workflows | `ubuntu-24.04` | `workflows`, `scripts`, the Python 3.8 installer regressions, `runtime` |
-| Edge | `ubuntu-24.04` | `edge` |
-| Lint (Linux) | `ubuntu-24.04` | `fmt`, `lint` (clippy `-D warnings` over the headless crates) |
-| Test (Linux) | `ubuntu-24.04` | `rust-test` (every headless crate's tests) |
-| Build (Linux) | `ubuntu-24.04` | `rust-build` (development-profile suites, the headless build and its CLI tests) |
-| Lint (macOS) | `macos-26` | `macos-lint` (clippy `-D warnings` over the whole workspace) |
-| Test (macOS) | `macos-26` | `macos-test` (icon, `cypher-ui` suite, Rust/Swift preview vectors) |
+| Job | Runner | Runs | Stages |
+| --- | --- | --- | --- |
+| Changed areas | `ubuntu-24.04` | always | decides the two optional areas below |
+| Scripts and workflows | `ubuntu-24.04` | always | `workflows`, `scripts`, the Python 3.8 installer regressions, `runtime` |
+| Edge | `ubuntu-24.04` | always | `edge` |
+| Lint (Linux) | `ubuntu-24.04` | always | `fmt`, `lint` (every script in the repository; clippy `-D warnings` over the headless crates) |
+| Test (Linux) | `ubuntu-24.04` | Rust | `rust-test` (every headless crate's tests) |
+| Build (Linux) | `ubuntu-24.04` | Rust | `rust-build` (development-profile suites, the headless build and its CLI tests) |
+| Lint (macOS) | `macos-26` | Rust | `macos-lint` (clippy `-D warnings` over the whole workspace) |
+| Test (macOS) | `macos-26` | Rust | `macos-test` (icon, `cypher-ui` suite, Rust/Swift preview vectors) |
+| Test (iOS) | `xcode-27` | iOS | `ios` (swift-format lint and `CypherTests` on a simulator, with the Xcode the archive job uses) |
 
 The five Rust jobs each build the workspace with a different feature set or
 mode (lint, test, development, production), which Cargo cannot share between
 them; as separate jobs they build side by side rather than one after another.
+
+### Which jobs a change runs
+
+`scripts/ci/changed_areas.py` reads the changed files and switches two areas
+on or off; a skipped job shows as skipped, not as passed.
+
+- **Rust** (the four heavy Rust jobs) is skipped only when **every** changed
+  file is known not to reach a Rust build or test: `docs/`, the top-level
+  Markdown files, `apps/ios/`, `apps/edge/`, `apps/landing/`,
+  `apps/www-redirect/` and `.agents/`. The exceptions are the files Rust does
+  read from there: the installer the binary embeds and the Swift sources
+  `macos-test` compiles. A path the script does not list runs the Rust jobs.
+- **iOS** runs when the change touches what the app and its tests are built
+  from: `apps/ios/`, `protocol/`, `.xcode-version` and the iOS scripts.
+- A change to `ci.yml`, `.github/actions/` or the script itself runs both.
+
+The changed files are a pull request's whole diff against its base (not its
+latest push), or what a push to `main` added. Manual runs, and runs where the
+files cannot be determined, run everything. To see the verdict for a branch
+before pushing:
+
+```sh
+python3 scripts/ci/changed_areas.py --base origin/main
+```
+
+A new place where Rust reads a file from outside `crates/` and `apps/cypher/`
+needs no change unless it lies under one of the skipped directories; then add
+it to `RUST_READS`. `test_changed_areas.py` fails when an `include_str!` or the
+`macos-test` stage reaches into a skipped directory without being listed.
 
 A newer push cancels a pull request's run in progress. Runs on `main` are never
 cancelled, so every commit there gets a verdict.
@@ -70,7 +100,7 @@ on every run.
 
 ### Conventions
 
-- Files are named for what they do: `ci*.yml`, `deploy.yml`, `release-<target>.yml`.
+- Files are named for what they do: `ci.yml`, `deploy.yml`, `release-<target>.yml`.
   Workflow and job names are title case, with the platform in parentheses.
 - Every step has a `name` that says what it does, in the imperative.
 - Keys come in one order: `name`, `on`, `permissions`, `concurrency`, `env`,
