@@ -374,3 +374,165 @@ async fn non_image_files_upload_seal_and_reach_the_agent() {
     }
     core.shutdown().await;
 }
+
+fn plain_run(message_id: &str, prompt: &str) -> SessionCommandPayload {
+    SessionCommandPayload::Run {
+        request: run_request(prompt),
+        message_id: message_id.into(),
+        agent_prompt: None,
+    }
+}
+
+fn ran(requests: &RequestLog, prompt: &str) -> bool {
+    requests
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|request| request.prompt.starts_with(prompt))
+}
+
+/// A Run whose upload never arrives holds the commands behind it, but only
+/// until its grace window ends — even when nothing else touches the doc
+/// then. Before, it waited for the chat's next change: a quiet chat stayed
+/// stuck with every later message Pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grace_end_alone_expires_the_waiting_run_and_releases_the_queue() {
+    let (core, requests, _tmp) = assemble().await;
+    let handle = core.doc_host.open(CHAT).unwrap();
+    // Queued long enough ago that its window ends in two seconds.
+    let issued_at =
+        chrono::Utc::now().timestamp_millis() - cypher_doc::ATTACHMENT_SEAL_GRACE_MS + 2_000;
+    handle
+        .doc()
+        .queue_command(&SessionCommandEntry {
+            id: "c-waiting".into(),
+            payload: run_payload(
+                "msg-waiting",
+                vec![PendingAttachment {
+                    upload_id: "up-never".into(),
+                    file_name: "x.png".into(),
+                }],
+            ),
+            issued_by: core.device_id.clone(),
+            issued_at,
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+            sent_at: None,
+            dismissed: false,
+            author: None,
+        })
+        .expect("queue waiting run");
+    core.doc_host
+        .queue_command(CHAT, plain_run("msg-behind", "behind the image"))
+        .expect("queue run behind it");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !ran(&requests, "behind the image"),
+        "a later Run waits behind the one waiting for its upload"
+    );
+
+    wait_for(
+        || ran(&requests, "behind the image"),
+        "the queue moves on once the grace window ends",
+    )
+    .await;
+    let statuses = command_statuses(&core, CHAT);
+    assert_eq!(
+        statuses
+            .iter()
+            .find(|(id, _, _)| id == "c-waiting")
+            .map(|(_, s, _)| *s),
+        Some(SessionCommandStatus::Expired),
+        "statuses: {statuses:?}"
+    );
+    assert!(!ran(&requests, "look at the photo"), "never dispatched");
+    core.shutdown().await;
+}
+
+/// The sender reports its upload failed (`FailUploads`): the host rejects
+/// the waiting Run at once, the commands behind it run, the message's
+/// attempts are dismissed for the composer that took the draft back, and
+/// Retry is refused (the files never reached this chat).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reported_upload_failure_rejects_the_run_and_releases_the_queue() {
+    let (core, requests, _tmp) = assemble().await;
+    let client = cypher_rpc::memory_client(core.rpc_service());
+    let command = run_payload(
+        "msg-failed",
+        vec![PendingAttachment {
+            upload_id: "up-failed".into(),
+            file_name: "photo.png".into(),
+        }],
+    );
+    let queued = client
+        .call(
+            cypher_rpc::methods::QUEUE_COMMAND,
+            serde_json::json!({ "chatId": CHAT, "command": serde_json::to_value(&command).unwrap() }),
+        )
+        .await
+        .expect("QueueCommand");
+    let command_id = queued["commandId"].as_str().unwrap().to_string();
+    client
+        .call(
+            cypher_rpc::methods::QUEUE_COMMAND,
+            serde_json::json!({
+                "chatId": CHAT,
+                "command": serde_json::to_value(plain_run("msg-next", "the next message")).unwrap(),
+            }),
+        )
+        .await
+        .expect("QueueCommand behind");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !ran(&requests, "the next message"),
+        "held behind the upload"
+    );
+
+    client
+        .call(
+            cypher_rpc::methods::FAIL_UPLOADS,
+            serde_json::json!({
+                "chatId": CHAT,
+                "uploadIds": ["up-failed"],
+                "dismissMessageId": "msg-failed",
+            }),
+        )
+        .await
+        .expect("FailUploads");
+
+    wait_for(
+        || ran(&requests, "the next message"),
+        "the next message runs once the failure is reported",
+    )
+    .await;
+    let commands = core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .read_commands()
+        .unwrap();
+    let failed = commands.iter().find(|c| c.id == command_id).unwrap();
+    assert_eq!(failed.status, SessionCommandStatus::Rejected);
+    assert_eq!(
+        failed.resolution.as_deref(),
+        Some(cypher_doc::ATTACHMENT_UPLOAD_FAILED)
+    );
+    assert!(failed.dismissed, "the composer took the draft back");
+    assert!(!ran(&requests, "look at the photo"), "never dispatched");
+
+    let retry = client
+        .call(
+            cypher_rpc::methods::RETRY_COMMAND,
+            serde_json::json!({ "chatId": CHAT, "commandId": command_id }),
+        )
+        .await;
+    assert!(
+        retry.is_err(),
+        "a Run whose files never arrived can't be retried"
+    );
+    core.shutdown().await;
+}

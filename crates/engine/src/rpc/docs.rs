@@ -31,6 +31,14 @@ pub(super) fn dismiss_command(rpc: &EngineRpc, params: Value) -> Result<RpcReply
     RpcReply::value(&serde_json::json!({ "commandIds": dismissed }))
 }
 
+pub(super) fn fail_uploads(rpc: &EngineRpc, params: Value) -> Result<RpcReply, RpcError> {
+    let p: FailUploadsParams = parse_params(params)?;
+    rpc.doc_host
+        .fail_uploads(&p.chat_id, &p.upload_ids, p.dismiss_message_id.as_deref())
+        .map_err(failed)?;
+    RpcReply::ok()
+}
+
 pub(super) fn watch_doc_messages(rpc: &EngineRpc, params: Value) -> Result<RpcReply, RpcError> {
     let p: ChatParams = parse_params(params)?;
     let handle = rpc.doc_host.open(&p.chat_id).map_err(failed)?;

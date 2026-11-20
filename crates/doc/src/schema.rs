@@ -32,6 +32,8 @@ pub use segment_writer::*;
 
 /// Root map of dismissed command ids → epoch millis of the dismissal.
 const DISMISSED_COMMANDS: &str = "dismissedCommands";
+/// Upload ids whose sender gave up on them (see `SessionDoc::fail_uploads`).
+const FAILED_UPLOADS: &str = "failedUploads";
 
 /// The entry as the ledger projects it: `dismissed` comes from the
 /// `dismissedCommands` map alone, never from a field in the entry's own map.
@@ -957,6 +959,32 @@ impl SessionDoc {
             _ => String::new(),
         };
         Ok(Some((path, file_name)))
+    }
+
+    /// Record that the sending device gave up on `upload_ids` (epoch millis
+    /// `at_ms`), in one commit: their bytes will never reach the host, so a
+    /// Run waiting on any of them is rejected instead of holding the chat's
+    /// queue for the whole grace window. Written by the SENDER (any device
+    /// that may command the chat), never the host — like `dismissedCommands`
+    /// it is not an outcome write. Additive container: peers that predate it
+    /// ignore it and fall back to the grace window. Idempotent.
+    pub fn fail_uploads(&self, upload_ids: &[String], at_ms: i64) -> Result<(), DocError> {
+        if upload_ids.is_empty() {
+            return Ok(());
+        }
+        let map = self.doc.get_map(FAILED_UPLOADS);
+        for id in upload_ids {
+            if map.get(id).is_none() {
+                map.insert(id, at_ms)?;
+            }
+        }
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// Whether the sending device reported `upload_id` as failed.
+    pub fn upload_failed(&self, upload_id: &str) -> bool {
+        self.doc.get_map(FAILED_UPLOADS).get(upload_id).is_some()
     }
 
     /// Export a snapshot (persistence) — `ExportMode::Snapshot`.

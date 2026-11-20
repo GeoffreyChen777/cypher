@@ -198,6 +198,9 @@ struct DocHostInner {
     /// outcome write. A pending command in the ledger but not in this set
     /// after a restart is a dead attempt from the mark/execute crash window.
     executing: Mutex<HashSet<String>>,
+    /// Runs waiting for their attachments that already have a drain wake
+    /// set for the end of their grace window (one timer per command).
+    attachment_wakes: Mutex<HashSet<String>>,
     /// Chats a session migration is moving off this device: their drains
     /// stand still until the move commits (the destination hosts them from
     /// then on) or fails (they drain here again).
@@ -526,6 +529,7 @@ impl DocHost {
                 tasks: TaskTracker::new(),
                 handles: Mutex::new(HashMap::new()),
                 executing: Mutex::new(HashSet::new()),
+                attachment_wakes: Mutex::new(HashSet::new()),
                 held: Mutex::new(HashSet::new()),
                 moved_cwds: Mutex::new(HashMap::new()),
                 http: reqwest::Client::builder()

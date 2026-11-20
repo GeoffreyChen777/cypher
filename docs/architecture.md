@@ -120,6 +120,10 @@ execute; steer with no live run dispatches as the next turn). Offline sends queu
 A failed send's composer row offers Retry (`RetryCommand`, a fresh attempt) and × (`DismissCommand`):
 a dismissal is recorded in the doc's `dismissedCommands` map beside the ledger, so it syncs to every
 device without touching the host's outcome or the entry's signature.
+A Run with attachments is queued first and waits (holding the commands behind it) until its uploads
+are sealed in the doc's `sealedAttachments` map, for at most a ten-minute grace window; the host
+wakes its drain when that window ends. A sender whose upload fails records the ids in
+`failedUploads` (`FailUploads`), and the host rejects the Run at once.
 
 ## 3. Repository and crates
 

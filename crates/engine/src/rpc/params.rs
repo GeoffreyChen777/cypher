@@ -61,6 +61,16 @@ pub(super) struct RetryCommandParams {
     pub(super) command_id: String,
 }
 
+/// `FailUploads`: the uploads a queue-first Run will never get.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct FailUploadsParams {
+    pub(super) chat_id: String,
+    pub(super) upload_ids: Vec<String>,
+    #[serde(default)]
+    pub(super) dismiss_message_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct RepoPathParams {

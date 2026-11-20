@@ -1242,6 +1242,115 @@ fn refresh_echo(job: &SendJob, content: String, this: &WeakEntity<Composer>, cx:
     .ok();
 }
 
+/// How a queue-first send's uploads ended.
+enum UploadOutcome {
+    /// Every upload sealed: their durable paths, in staged order.
+    Sealed(Vec<String>),
+    /// An upload failed. `released`: the host was told and the message's
+    /// attempts dismissed, so the composer takes the draft back.
+    Failed { released: bool },
+}
+
+/// A queued Run's uploads: its staged files under their pending ids, each
+/// commit sealing against the chat.
+struct QueuedUpload {
+    engine: EngineHandle,
+    host_device_id: Option<String>,
+    staged: Vec<StagedAttachment>,
+    pending: Vec<cypher_proto::PendingAttachment>,
+    chat_id: String,
+    message_id: String,
+    progress: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl QueuedUpload {
+    /// Run the uploads as a task of their own (detached) and report how they
+    /// ended. Until they seal, the host holds the Run and every command
+    /// queued behind it, so they must not die with the send task (its
+    /// composer closed with the tile or the workspace switch, or replaced by
+    /// the composer's next action): an upload cancelled halfway left the
+    /// chat's queue stuck with nothing said. Drop the receiver and the
+    /// uploads still finish; a failure is then left for the failed row.
+    fn spawn(self, cx: &AsyncApp) -> futures::channel::oneshot::Receiver<UploadOutcome> {
+        let (done_tx, done_rx) = futures::channel::oneshot::channel();
+        cx.spawn(async move |cx| {
+            let outcome = match self.upload(cx).await {
+                Ok(paths) => UploadOutcome::Sealed(paths),
+                Err(_) => {
+                    // A composer still waiting takes the draft back, so the
+                    // message's attempts are dismissed with the report.
+                    let take_back = !done_tx.is_canceled();
+                    let released = self.report_failure(take_back).await;
+                    UploadOutcome::Failed {
+                        released: released && take_back,
+                    }
+                }
+            };
+            let _ = done_tx.send(outcome);
+        })
+        .detach();
+        done_rx
+    }
+
+    async fn upload(&self, cx: &mut AsyncApp) -> Result<Vec<String>, String> {
+        let mut paths = Vec::with_capacity(self.staged.len());
+        for (att, pending) in self.staged.iter().zip(&self.pending) {
+            match attachments::upload_attachment(
+                &self.engine,
+                cx.background_executor(),
+                self.host_device_id.as_deref(),
+                att,
+                &pending.upload_id,
+                Some(&self.chat_id),
+                Some(self.progress.clone()),
+            )
+            .await
+            {
+                Ok(path) => paths.push(path),
+                Err(err) => {
+                    tracing::warn!(
+                        name = %att.name,
+                        error = %err,
+                        "post-queue attachment upload failed"
+                    );
+                    return Err(err);
+                }
+            }
+        }
+        Ok(paths)
+    }
+
+    /// Tell the host the bytes won't come (`FailUploads`), so it rejects the
+    /// Run now instead of after the grace window; `dismiss` also dismisses
+    /// the message's attempts. Whether the report went through.
+    async fn report_failure(&self, dismiss: bool) -> bool {
+        let upload_ids: Vec<&str> = self.pending.iter().map(|p| p.upload_id.as_str()).collect();
+        let mut params = serde_json::json!({
+            "chatId": self.chat_id,
+            "uploadIds": upload_ids,
+        });
+        if dismiss {
+            params["dismissMessageId"] = serde_json::Value::String(self.message_id.clone());
+        }
+        match self
+            .engine
+            .client()
+            .call(methods::FAIL_UPLOADS, params)
+            .await
+        {
+            Ok(_) => true,
+            Err(err) => {
+                tracing::warn!(
+                    chat = %self.chat_id,
+                    error = %err,
+                    "couldn't report the failed upload; the host will expire the message"
+                );
+                false
+            }
+        }
+    }
+}
+
 /// Queue-first Run: the durable command carries the Run intent + PENDING
 /// attachment descriptors (never the bytes, never pending refs in the
 /// transcript — the prompt is the bare text). The host holds the command at
@@ -1266,7 +1375,6 @@ async fn queue_first_run(
     let chat_id = &target.chat_id;
     let device_id = &target.device_id;
     let host_device_id = &target.host_device_id;
-    let mut attachment_paths: Vec<String> = Vec::new();
     let pending_attachments: Vec<cypher_proto::PendingAttachment> = staged
         .iter()
         .map(|att| cypher_proto::PendingAttachment {
@@ -1302,46 +1410,45 @@ async fn queue_first_run(
         });
     })
     .ok();
-    // The command is durable — now stream the bytes.
-    // Each UploadCommit seals against this chat so the
-    // host's drain releases the Run. An upload failure
-    // does NOT delete the durable command: the host's
-    // attachment grace window eventually expires it
-    // and the user can Retry. (The optimistic echo
-    // stays, seeded from local bytes; once the host
-    // rejects, the ledger's failed row takes over.)
-    for (att, pending) in staged.iter().zip(&pending_attachments) {
-        match attachments::upload_attachment(
-            engine,
-            cx.background_executor(),
-            host_device_id.as_deref(),
-            att,
-            &pending.upload_id,
-            Some(chat_id),
-            Some(progress.clone()),
-        )
-        .await
-        {
-            Ok(path) => attachment_paths.push(path),
-            Err(err) => {
-                tracing::warn!(
-                    name = %att.name,
-                    error = %err,
-                    "post-queue attachment upload failed"
-                );
-                this.update(cx, |composer, cx| {
-                    composer.sending = false;
-                    composer.failure = Some(
-                        "Attachments couldn't finish uploading — the message stays queued but the host will fail it unless the upload completes. Retry once the device is reachable."
-                            .into(),
-                    );
-                    cx.notify();
-                })
-                .ok();
-                return Ok(());
-            }
-        }
+    // The command is durable — now stream the bytes, in a task
+    // that outlives this one (see `QueuedUpload::spawn`).
+    let done_rx = QueuedUpload {
+        engine: engine.clone(),
+        host_device_id: host_device_id.clone(),
+        staged: staged.clone(),
+        pending: pending_attachments.clone(),
+        chat_id: chat_id.clone(),
+        message_id: job.taken.message_id.clone(),
+        progress,
     }
+    .spawn(cx);
+    let attachment_paths = match done_rx.await {
+        Ok(UploadOutcome::Sealed(paths)) => paths,
+        // The host has dropped the message: the draft and its files go
+        // back in the composer (the caller's failure path).
+        Ok(UploadOutcome::Failed { released: true }) => {
+            return Err(
+                "The attachment didn't finish uploading, so the message wasn't sent. Send it again."
+                    .into(),
+            );
+        }
+        // The host couldn't be told: the message stays queued until its
+        // grace window ends, then shows as failed.
+        Ok(UploadOutcome::Failed { released: false }) => {
+            this.update(cx, |composer, cx| {
+                composer.sending = false;
+                composer.failure = Some(
+                    "Attachments couldn't finish uploading. The message stays queued for up to 10 minutes, then shows as failed; attach the files and send it again."
+                        .into(),
+                );
+                cx.notify();
+            })
+            .ok();
+            return Ok(());
+        }
+        // The upload task went without a word (the app is quitting).
+        Err(_) => return Ok(()),
+    };
     // Seed the transcript cache from local bytes and
     // refresh the echo with the REAL refs (the queued
     // command's bare prompt is replaced in the doc by
@@ -1711,4 +1818,187 @@ async fn queue_command(
         .await
         .map_err(|e| format!("Send failed: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use cypher_rpc::{RpcError, RpcReply, RpcService};
+
+    /// A host that records every call; chunks wait until `open`, then fail
+    /// when `fail` is set.
+    #[derive(Default)]
+    struct UploadHost {
+        calls: Mutex<Vec<(String, serde_json::Value)>>,
+        open: tokio::sync::Notify,
+        opened: AtomicBool,
+        fail: AtomicBool,
+    }
+
+    impl UploadHost {
+        fn release(&self) {
+            self.opened.store(true, Ordering::SeqCst);
+            self.open.notify_waiters();
+        }
+        fn called(&self, method: &str) -> Vec<serde_json::Value> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(m, _)| m == method)
+                .map(|(_, params)| params.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RpcService for UploadHost {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<RpcReply, RpcError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((method.to_string(), params.clone()));
+            match method {
+                methods::UPLOAD_CHUNK => {
+                    while !self.opened.load(Ordering::SeqCst) {
+                        let opened = self.open.notified();
+                        if self.opened.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        opened.await;
+                    }
+                    if self.fail.load(Ordering::SeqCst) {
+                        return Err(RpcError::Failed("link dropped".into()));
+                    }
+                    RpcReply::ok()
+                }
+                methods::UPLOAD_COMMIT => {
+                    RpcReply::value(&serde_json::json!({ "path": "/uploads/up-1-a.png" }))
+                }
+                methods::FAIL_UPLOADS => RpcReply::ok(),
+                other => Err(RpcError::UnknownMethod(other.into())),
+            }
+        }
+    }
+
+    fn fixture(rt: &tokio::runtime::Runtime) -> (Arc<UploadHost>, QueuedUpload) {
+        let host = Arc::new(UploadHost::default());
+        let engine = {
+            let _guard = rt.enter();
+            EngineHandle::for_service(host.clone())
+        };
+        let upload = QueuedUpload {
+            engine,
+            host_device_id: None,
+            staged: vec![StagedAttachment {
+                id: "s1".into(),
+                name: "a.png".into(),
+                content: attachments::StagedContent::File(Arc::new(vec![1, 2, 3])),
+            }],
+            pending: vec![cypher_proto::PendingAttachment {
+                upload_id: "up-1".into(),
+                file_name: "a.png".into(),
+            }],
+            chat_id: "chat-1".into(),
+            message_id: "msg-1".into(),
+            progress: Arc::default(),
+        };
+        (host, upload)
+    }
+
+    fn pump_until(cx: &gpui::TestAppContext, what: &str, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !done() {
+            cx.run_until_parked();
+            assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The send task dies mid-upload (its composer went with a closed tile
+    /// or a workspace switch): the upload still commits, so the host can
+    /// release the queued Run. It used to be cancelled with nothing said,
+    /// leaving the chat's queue stuck.
+    #[gpui::test]
+    fn the_upload_outlives_the_send_task(cx: &mut gpui::TestAppContext) {
+        cx.background_executor.allow_parking();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (host, upload) = fixture(&rt);
+        let async_cx = cx.to_async();
+        let send_task = cx
+            .foreground_executor()
+            .spawn(async move { upload.spawn(&async_cx).await });
+        pump_until(cx, "the first chunk is in flight", || {
+            !host.called(methods::UPLOAD_CHUNK).is_empty()
+        });
+        drop(send_task);
+        host.release();
+        pump_until(cx, "the upload commits", || {
+            !host.called(methods::UPLOAD_COMMIT).is_empty()
+        });
+        let commit = &host.called(methods::UPLOAD_COMMIT)[0];
+        assert_eq!(commit["uploadId"], "up-1");
+        assert_eq!(commit["chatId"], "chat-1");
+        assert!(host.called(methods::FAIL_UPLOADS).is_empty());
+    }
+
+    /// A failed upload is reported, so the host rejects the Run at once;
+    /// the composer still waiting takes the draft back, so the message's
+    /// attempts are dismissed with it.
+    #[gpui::test]
+    fn a_failed_upload_is_reported_and_the_draft_comes_back(cx: &mut gpui::TestAppContext) {
+        cx.background_executor.allow_parking();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (host, upload) = fixture(&rt);
+        host.fail.store(true, Ordering::SeqCst);
+        host.release();
+        let outcome: Arc<Mutex<Option<UploadOutcome>>> = Arc::default();
+        let async_cx = cx.to_async();
+        let seen = outcome.clone();
+        cx.foreground_executor()
+            .spawn(async move {
+                let result = upload.spawn(&async_cx).await.ok();
+                *seen.lock().unwrap() = result;
+            })
+            .detach();
+        pump_until(cx, "the outcome arrives", || {
+            outcome.lock().unwrap().is_some()
+        });
+        assert!(matches!(
+            outcome.lock().unwrap().take(),
+            Some(UploadOutcome::Failed { released: true })
+        ));
+        assert!(host.called(methods::UPLOAD_COMMIT).is_empty());
+        let report = &host.called(methods::FAIL_UPLOADS)[0];
+        assert_eq!(report["chatId"], "chat-1");
+        assert_eq!(report["uploadIds"], serde_json::json!(["up-1"]));
+        assert_eq!(report["dismissMessageId"], "msg-1");
+    }
+
+    /// With no composer left to take the draft back, the failure is still
+    /// reported, but the message is not dismissed: its failed row is what
+    /// tells the user it wasn't sent.
+    #[gpui::test]
+    fn a_failure_after_the_composer_went_keeps_the_failed_row(cx: &mut gpui::TestAppContext) {
+        cx.background_executor.allow_parking();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (host, upload) = fixture(&rt);
+        host.fail.store(true, Ordering::SeqCst);
+        drop(upload.spawn(&cx.to_async()));
+        host.release();
+        pump_until(cx, "the failure is reported", || {
+            !host.called(methods::FAIL_UPLOADS).is_empty()
+        });
+        let report = &host.called(methods::FAIL_UPLOADS)[0];
+        assert_eq!(report["uploadIds"], serde_json::json!(["up-1"]));
+        assert!(report.get("dismissMessageId").is_none());
+    }
 }

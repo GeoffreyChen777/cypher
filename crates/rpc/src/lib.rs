@@ -128,6 +128,13 @@ pub mod methods {
     /// doc records it in its `dismissedCommands` map, beside the ledger, so
     /// it syncs to every device without touching the host's outcome.
     pub const DISMISS_COMMAND: &str = "DismissCommand";
+    /// The sender gave up on a queue-first Run's uploads. Params
+    /// `{chatId, uploadIds, dismissMessageId?}`; replies `{}`. The doc
+    /// records the ids in its `failedUploads` map, so the host rejects the
+    /// Run waiting on them at once instead of holding the chat's queue for
+    /// the whole grace window; `dismissMessageId` also dismisses that
+    /// message's attempts (the composer took the draft back).
+    pub const FAIL_UPLOADS: &str = "FailUploads";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Durable command ledger of one chat (forwardable stream, params
     /// `{chatId}`): the current command list first, then every doc change.
@@ -508,6 +515,7 @@ pub mod methods {
         MethodSpec::unary(QUEUE_COMMAND).forwardable(),
         MethodSpec::unary(RETRY_COMMAND).forwardable(),
         MethodSpec::unary(DISMISS_COMMAND).forwardable(),
+        MethodSpec::unary(FAIL_UPLOADS).forwardable(),
         MethodSpec::stream(WATCH_DOC_MESSAGES).forwardable(),
         MethodSpec::stream(WATCH_DOC_COMMANDS).forwardable(),
         MethodSpec::unary(PROBE_SYNC),

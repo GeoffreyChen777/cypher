@@ -787,6 +787,7 @@ impl RpcService for EngineRpc {
             methods::QUEUE_COMMAND => docs::queue_command(self, params),
             methods::RETRY_COMMAND => docs::retry_command(self, params),
             methods::DISMISS_COMMAND => docs::dismiss_command(self, params),
+            methods::FAIL_UPLOADS => docs::fail_uploads(self, params),
             methods::WATCH_DOC_MESSAGES => docs::watch_doc_messages(self, params),
             methods::WATCH_DOC_COMMANDS => docs::watch_doc_commands(self, params),
             methods::PROBE_SYNC => {

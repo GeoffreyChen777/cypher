@@ -637,6 +637,7 @@ async fn dead_processed_commands_are_terminalized_on_redelivery() {
             current_turn_id: None,
             turn_is_past: &never_past,
             sealed_attachment_path: &|_| None,
+            failed_upload: &never_past,
         },
     );
     assert_eq!(verdict, cypher_doc::CommandDisposition::Skip);
