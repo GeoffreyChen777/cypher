@@ -2147,6 +2147,74 @@ fn the_detail_panel_opens_replaces_and_closes(cx: &mut gpui::TestAppContext) {
     });
 }
 
+#[gpui::test]
+fn the_needs_you_panel_shuts_once_its_last_item_is_decided(cx: &mut gpui::TestAppContext) {
+    use bots::PanelItem;
+    use cypher_proto::{ApprovalState, BotApproval};
+    let (shell, state) = test_shell(cx);
+    set_bots(&state, &["bob"], cx);
+    set_chats(&state, vec![test_bot_chat("bob")], cx);
+    let approval = |id: &str| BotApproval {
+        id: id.into(),
+        bot_id: "bob".into(),
+        thread_chat_id: "t".into(),
+        work_id: None,
+        action: "Start a session".into(),
+        reason: "It read a peer's answer".into(),
+        created_at: 0,
+        state: ApprovalState::Pending,
+        decision: None,
+    };
+    let set_approvals = |ids: &[&str], cx: &mut gpui::TestAppContext| {
+        let approvals = ids.iter().map(|id| approval(id)).collect();
+        state.update(cx, |s, cx| {
+            s.apply_bot_records(cypher_proto::BotRecords {
+                approvals,
+                ..Default::default()
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+    };
+    let panel = |cx: &mut gpui::TestAppContext| shell.read_with(cx, |s, _| s.board.panel.clone());
+    let decide = |id: &str, cx: &mut gpui::TestAppContext| {
+        let params = serde_json::json!({
+            "op": "resolveBotApproval",
+            "approvalId": id,
+            "approve": true,
+        });
+        shell.update(cx, |shell, cx| shell.decide_need(params, cx));
+    };
+    set_approvals(&["a", "b"], cx);
+    shell.update(cx, |shell, cx| {
+        shell.open_bot("bob", cx);
+        shell.open_panel(PanelItem::NeedsYou, cx);
+    });
+    // A decision with more left keeps the page open…
+    decide("a", cx);
+    set_approvals(&["b"], cx);
+    assert_eq!(panel(cx), Some(PanelItem::NeedsYou));
+    // …and the last one shuts it once it lands, not when it is sent.
+    decide("b", cx);
+    assert_eq!(panel(cx), Some(PanelItem::NeedsYou));
+    set_approvals(&[], cx);
+    assert_eq!(panel(cx), None);
+    // Emptied without a decision here (another device), it stays open.
+    set_approvals(&["c"], cx);
+    shell.update(cx, |shell, cx| shell.open_panel(PanelItem::NeedsYou, cx));
+    set_approvals(&[], cx);
+    assert_eq!(panel(cx), Some(PanelItem::NeedsYou));
+    // A decision made before the owner moved to another item is forgotten.
+    set_approvals(&["d"], cx);
+    decide("d", cx);
+    shell.update(cx, |shell, cx| {
+        shell.open_panel(PanelItem::Activity, cx);
+        shell.open_panel(PanelItem::NeedsYou, cx);
+    });
+    set_approvals(&[], cx);
+    assert_eq!(panel(cx), Some(PanelItem::NeedsYou));
+}
+
 #[test]
 fn header_buttons_follow_the_mode() {
     use crate::prefs::WindowMode;

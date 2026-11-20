@@ -102,6 +102,7 @@ impl Shell {
         }
         if self.board.panel != Some(PanelItem::NeedsYou) {
             self.board.needs_focus = None;
+            self.board.needs_decided = false;
         }
     }
 
@@ -143,6 +144,7 @@ impl Shell {
         };
         let from = self.eval_tween(self.board.panel_tween, self.panel_span());
         self.board.panel_tween = Some(WidthTween::new(from, 0.0));
+        self.board.needs_decided = false;
         // A form shut is a form dropped: the button does not bring it back.
         self.board.panel_recent =
             (!matches!(item, PanelItem::NewRoutine | PanelItem::Invite)).then(|| item.clone());

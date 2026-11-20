@@ -1160,8 +1160,10 @@ asked, and holds the buttons that decide it:
 
 An answer is the same owner field or queued command the item's own page writes, so the
 card leaves the page once its record says so, and every count follows: the sidebar card,
-the strip, the switcher's list and the logo's amber count. After the last card the page
-says the owner is caught up. Two things say something waits: the sidebar's **Needs you**
+the strip, the switcher's list and the logo's amber count. When the owner decides the
+last card on the page, the panel slides shut as that decision lands (a page emptied by
+decisions made elsewhere stays open); opened with nothing left, the page says the owner
+is caught up. Two things say something waits: the sidebar's **Needs you**
 card, always first, and an **"N need you"** pill floating over the bot chat's composer.
 Both only open the page. The pill is the twin of the transcript's "Scroll to bottom"
 pill (the same raised capsule, its bell in amber) and shares its centred row, so the two
