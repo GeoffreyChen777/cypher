@@ -38,7 +38,7 @@ from Linux), assembles `Cypher.app` (`packaging/macos/Info.plist` + icns), signs
 (ad-hoc unless `CODESIGN_IDENTITY` names a Developer ID), notarizes and staples
 when `NOTARY_KEY_PATH`/`NOTARY_KEY_ID`/`NOTARY_ISSUER_ID` are set, and wraps it
 in a dmg. The auto-update tarball contains `Cypher.app`. CI runs this on
-`cypher-macos-v<version>-b<build>` tags (`.github/workflows/macos.yml`).
+`cypher-macos-v<version>-b<build>` tags (`.github/workflows/release-macos.yml`).
 
 ### Icon
 

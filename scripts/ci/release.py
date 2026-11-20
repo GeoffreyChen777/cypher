@@ -2,10 +2,11 @@
 """Release validation, deployment compatibility gate and guarded publication.
 
 Only the `publish-*` actions write remotely. Each requires a tag-push Actions
-context and the shared `cypher-production` concurrency lock held by linux.yml,
-macos.yml, pi-runtime.yml and deploy.yml. Every platform publishes on its own
-channel and may move only its own pointers. No local credentials are read.
-Object GET/PUT uses the same R2 API as the lockfile-pinned Wrangler.
+context and the shared `cypher-production` concurrency lock held by
+release-linux.yml, release-macos.yml, release-pi-runtime.yml and deploy.yml.
+Every platform publishes on its own channel and may move only its own pointers.
+No local credentials are read. Object GET/PUT uses the same R2 API as the
+lockfile-pinned Wrangler.
 """
 import argparse
 import hashlib

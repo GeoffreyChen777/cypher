@@ -1,5 +1,5 @@
-name: linux
-
+# Builds and publishes the Linux release.
+#
 # Pushing a `cypher-linux-v<version>-b<build>` tag publishes the LINUX channel
 # alone: `linux/manifest.json` and `linux/latest.txt`. macOS, iOS and the
 # Runtime are untouched, and their channels are read-only here. The version
@@ -7,6 +7,8 @@ name: linux
 # counter, so the same version can be re-cut for Linux without disturbing
 # macOS. Like every other release workflow, workflow_dispatch is ALWAYS
 # build/validate-only.
+name: Release (Linux)
+
 on:
   push:
     tags: ["cypher-linux-v*"]
@@ -17,6 +19,7 @@ permissions:
 
 jobs:
   preflight:
+    name: Preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -24,23 +27,26 @@ jobs:
       build: ${{ steps.context.outputs.build }}
       publish: ${{ steps.context.outputs.publish }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - name: validate tag/version and fail early on missing publication credential
+
+      - name: Validate the tag and require the publication credential
         id: context
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: python3 scripts/ci/release.py platform-context --platform linux
 
-  linux:
+  build:
+    name: Build (${{ matrix.runner }})
     needs: preflight
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.runner }}
     # Do not build on the host's newer libc. No host Rust cache is imported.
     # Docker Hub's sign-in for GitHub's runners failed for hours on
     # 2026-10-09, so the mirror at public.ecr.aws/docker/library/ubuntu:20.04
@@ -55,7 +61,7 @@ jobs:
       # Ubuntu's servers with retries, then signature-checked fallback
       # mirrors (GitHub's runners could not resolve archive.ubuntu.com for
       # hours on 2026-11-11). Change both together.
-      - name: bootstrap glibc 2.31 build environment
+      - name: Install the glibc 2.31 build environment
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
@@ -76,25 +82,37 @@ jobs:
             install && exit 0
           done
           exit 1
-      - name: bootstrap rustup (toolchain version comes from rust-toolchain.toml)
+
+      - name: Install rustup
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --profile minimal --default-toolchain none
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - run: rustup show active-toolchain
-      - run: bash scripts/tests/test-check-linux-abi.sh
-      - name: package headless application
+
+      - name: Install the Rust toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - name: Test the ABI check
+        run: bash scripts/tests/test-check-linux-abi.sh
+
+      - name: Package the headless application
         env:
           CYPHER_RELEASE_BUILD: ${{ needs.preflight.outputs.build }}
         run: scripts/package-linux.sh
-      - name: isolated CLI and installer regressions
+
+      - name: Test the CLI and the installer in isolation
         run: |
           cargo test --locked --no-default-features -p cypher -p cypher-update --bins --lib
           python3 scripts/tests/test-linux-cli.py --binary target/release/cypher
-      - name: smoke extracted artifact and recheck ABI
+
+      - name: Smoke-test the extracted artifact and recheck its ABI
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
           BUILD: ${{ needs.preflight.outputs.build }}
@@ -112,41 +130,51 @@ jobs:
           rc=$?
           set -e
           test "$rc" = 124 || { echo "headless smoke exited with $rc"; exit 1; }
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+
+      - name: Upload the package
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: linux-${{ runner.arch }}
           path: target/package/*.tar.gz
           if-no-files-found: error
 
   validate-artifacts:
-    needs: [preflight, linux]
+    name: Validate artifacts
+    needs: [preflight, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+
+      - name: Download the packages
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: target/release-dist
           merge-multiple: true
-      - name: validate every artifact before any production write
+
+      - name: Validate every artifact before any production write
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
           BUILD: ${{ needs.preflight.outputs.build }}
         run: |
           python3 scripts/ci/release.py validate-platform --platform linux \
             --dist target/release-dist --version "$VERSION" --build "$BUILD"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+
+      - name: Upload the checksums and manifests
         if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: checksums-and-manifests
           path: target/release-plan/*
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cypher-linux-v')
+    name: Publish
     needs: [preflight, validate-artifacts]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cypher-linux-v')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -156,14 +184,18 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Check out the repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+
+      - name: Download the packages
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: target/release-dist
           merge-multiple: true
-      - name: validate, reject conflicts/rollback, upload immutable objects, promote last
+
+      - name: Validate, reject conflicts and rollbacks, upload immutable objects, promote last
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
           BUILD: ${{ needs.preflight.outputs.build }}

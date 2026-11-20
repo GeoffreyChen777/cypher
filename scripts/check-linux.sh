@@ -6,7 +6,8 @@
 # Stages:
 #   scripts runtime rust   scripts/check.sh stages, in an ubuntu:24.04 container
 #                          like ci.yml's ubuntu-24.04 jobs: the same Node
-#                          (24.19.0), Python 3.12 and Rust (rust-toolchain.toml).
+#                          (.node-version), Python 3.12 and Rust
+#                          (rust-toolchain.toml).
 #                          These are the stages whose verdict depends on the OS;
 #                          fmt, lint, edge and workflows answer the same anywhere.
 #   installer              ci.yml's Python 3.8 installer regressions in
@@ -18,13 +19,13 @@
 # is never written. Node, Rust and the Cargo target directory persist in Docker
 # volumes named cypher-linux-*; `docker volume rm` them to start clean. The
 # container matches the host's CPU: arm64 on Apple silicon, like the
-# ubuntu-24.04-arm runner (ci's linux-backend job runs x86_64). Cargo runs one
+# ubuntu-24.04-arm runner (ci.yml's Linux jobs run x86_64). Cargo runs one
 # job per ~3 GiB of the container's memory; CHECK_LINUX_JOBS overrides it.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-NODE_VERSION=24.19.0
+NODE_VERSION="$(tr -d '[:space:]' <.node-version)"
 IMAGE=cypher-check-linux:ubuntu-24.04
 
 stages=("$@")
@@ -45,9 +46,10 @@ docker info >/dev/null 2>&1 \
   || { echo "no Docker engine is running (start one, for example \`colima start\`)" >&2; exit 1; }
 
 if ((${#inner[@]})); then
-  # The packages ci.yml installs on the ubuntu-24.04 runner, plus the parts of
-  # the runner image the checks rely on: lsof and ssh are named by the
-  # permission tests, which resolve programs on PATH as the extension does.
+  # The packages the setup-rust action installs on the ubuntu-24.04 runner,
+  # plus the parts of the runner image the checks rely on: lsof and ssh are
+  # named by the permission tests, which resolve programs on PATH as the
+  # extension does.
   docker build -q -t "$IMAGE" - >/dev/null <<'DOCKERFILE'
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive

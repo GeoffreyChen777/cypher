@@ -2,33 +2,115 @@
 
 ## Workflows
 
-- **`ci.yml`**: pull requests, pushes to `main`, and manual runs. Each step runs
-  one stage of `scripts/check.sh` (see
-  [Development](../development/README.md#checks)): workflow lint and policy,
-  release/installer and script tests, documentation links, Pi runtime suites,
-  Edge typechecking and unit/workerd tests, formatting, the crate-layer check,
-  ShellCheck, clippy with `-D warnings` (the headless crates on Linux, the
-  whole workspace on macOS), every crate's tests, the headless build and CLI
-  tests, the full `cypher-ui` suite and the Rust/Swift preview vectors. No
-  deployment credentials are available to these jobs.
-- **`ios-tests.yml`**: the iOS unit tests (`CypherTests`) on a simulator, on the
-  same Xcode selection the archive job uses. It runs only when `apps/ios/**`, the
-  shared preview fixtures or its own scripts change.
-- **`deploy.yml`**: pushes to `main` and main-only manual runs. Captures a fresh
-  `main` SHA once, tests it, checks installer compatibility, then deploys all
-  three workers from that same SHA. It deliberately does not use per-push path
-  deltas: skipped/pending pushes and `grep -q`/SIGPIPE must not omit changes.
-- **`linux.yml`** / **`macos.yml`**: pushes of `cypher-<platform>-v<version>-b<build>`
-  build and publish **that platform alone**. Manual runs are **always
-  build/validate-only**, even when a tag is selected. The version must match
-  `[workspace.package].version` in `Cargo.toml`.
-- **`ios.yml`**: pushes of `cypher-ios-v<version>-b<build>` build, verify and
-  upload to TestFlight. The tag must match `MARKETING_VERSION` and
-  `CURRENT_PROJECT_VERSION` in the Xcode project. Manual runs are
-  build/validate-only.
-- **`pi-runtime.yml`**: pushes of `pi-runtime-v<version>` publish the Runtime
-  channel **alone** (see below). Manual runs are build/validate-only on the same
-  terms. The tag must match `pi-runtime/release.json`.
+| File | Name | Runs on | What it does |
+| --- | --- | --- | --- |
+| `ci.yml` | CI | pull requests, pushes to `main`, manual | every check below; no deployment credentials |
+| `deploy.yml` | Deploy | pushes to `main`, main-only manual | tests one fresh `main` snapshot and deploys the three Workers from it |
+| `release-linux.yml` | Release (Linux) | `cypher-linux-v<version>-b<build>` tags, manual | builds and publishes the Linux channel **alone** |
+| `release-macos.yml` | Release (macOS) | `cypher-macos-v<version>-b<build>` tags, manual | builds and publishes the macOS channel **alone** |
+| `release-ios.yml` | Release (iOS) | `cypher-ios-v<version>-b<build>` tags, manual | builds, verifies and uploads to TestFlight |
+| `release-pi-runtime.yml` | Release (Pi Runtime) | `pi-runtime-v<version>` tags, manual | publishes the Runtime channel **alone** (see below) |
+
+A manual run of a release workflow is **always build/validate-only**, even when
+a tag is selected. A desktop tag's version must match
+`[workspace.package].version` in `Cargo.toml`; an iOS tag must match
+`MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` in the Xcode project; a
+Runtime tag must match `pi-runtime/release.json`.
+
+`deploy.yml` deliberately does not use per-push path deltas: skipped/pending
+pushes and `grep -q`/SIGPIPE must not omit changes.
+
+### CI jobs
+
+Each step of `ci.yml` runs one stage of `scripts/check.sh` (see
+[Development](../development/README.md#checks)), so a stage that passes locally
+passes in CI.
+
+| Job | Runner | Runs | Stages |
+| --- | --- | --- | --- |
+| Changed areas | `ubuntu-24.04` | always | decides the two optional areas below |
+| Scripts and workflows | `ubuntu-24.04` | always | `workflows`, `scripts`, the Python 3.8 installer regressions, `runtime` |
+| Edge | `ubuntu-24.04` | always | `edge` |
+| Lint (Linux) | `ubuntu-24.04` | always | `fmt`, `lint` (every script in the repository; clippy `-D warnings` over the headless crates) |
+| Test (Linux) | `ubuntu-24.04` | Rust | `rust-test` (every headless crate's tests) |
+| Build (Linux) | `ubuntu-24.04` | Rust | `rust-build` (development-profile suites, the headless build and its CLI tests) |
+| Lint (macOS) | `macos-26` | Rust | `macos-lint` (clippy `-D warnings` over the whole workspace) |
+| Test (macOS) | `macos-26` | Rust | `macos-test` (icon, `cypher-ui` suite, Rust/Swift preview vectors) |
+| Test (iOS) | `xcode-27` | iOS | `ios` (swift-format lint and `CypherTests` on a simulator, with the Xcode the archive job uses) |
+
+The five Rust jobs each build the workspace with a different feature set or
+mode (lint, test, development, production), which Cargo cannot share between
+them; as separate jobs they build side by side rather than one after another.
+
+### Which jobs a change runs
+
+`scripts/ci/changed_areas.py` reads the changed files and switches two areas
+on or off; a skipped job shows as skipped, not as passed.
+
+- **Rust** (the four heavy Rust jobs) is skipped only when **every** changed
+  file is known not to reach a Rust build or test: `docs/`, the top-level
+  Markdown files, `apps/ios/`, `apps/edge/`, `apps/landing/`,
+  `apps/www-redirect/` and `.agents/`. The exceptions are the files Rust does
+  read from there: the installer the binary embeds and the Swift sources
+  `macos-test` compiles. A path the script does not list runs the Rust jobs.
+- **iOS** runs when the change touches what the app and its tests are built
+  from: `apps/ios/`, `protocol/`, `.xcode-version` and the iOS scripts.
+- A change to `ci.yml`, `.github/actions/` or the script itself runs both.
+
+The changed files are a pull request's whole diff against its base (not its
+latest push), or what a push to `main` added. Manual runs, and runs where the
+files cannot be determined, run everything. To see the verdict for a branch
+before pushing:
+
+```sh
+python3 scripts/ci/changed_areas.py --base origin/main
+```
+
+A new place where Rust reads a file from outside `crates/` and `apps/cypher/`
+needs no change unless it lies under one of the skipped directories; then add
+it to `RUST_READS`. `test_changed_areas.py` fails when an `include_str!` or the
+`macos-test` stage reaches into a skipped directory without being listed.
+
+A newer push cancels a pull request's run in progress. Runs on `main` are never
+cancelled, so every commit there gets a verdict.
+
+### Build cache
+
+The Rust jobs start with `.github/actions/setup-rust`, which installs the
+toolchain pinned in `rust-toolchain.toml` and restores the job's dependency
+cache (`Swatinem/rust-cache`). Workspace crates are not cached and are rebuilt
+on every run.
+
+- **Only `main` saves a cache.** A cache saved from a pull request or a tag is
+  visible to that ref alone and counts against the repository's 10 GB, where it
+  pushes out the caches every ref can use. A pull request that changes
+  `Cargo.lock` therefore rebuilds the changed dependencies on each push until it
+  merges.
+- **The pinned toolchain is the only one installed.** rust-cache hashes every
+  installed toolchain into its key, and the runner image carries its own stable
+  Rust that GitHub updates on its own schedule. Left installed, each image
+  update starts every job from a cold cache (a 25-minute macOS build) although
+  nothing the build uses has changed.
+- **Release (macOS)** restores what a manual run of that workflow on `main` left
+  behind; a tag never saves. Run it manually on `main` after a large dependency
+  change to keep the release build warm.
+- CI builds workspace crates without debug info (`CARGO_PROFILE_DEV_DEBUG=0`),
+  about a tenth off the build. A failing test still reports its file and line;
+  set `RUST_BACKTRACE=1` locally for a full backtrace.
+
+### Conventions
+
+- Files are named for what they do: `ci.yml`, `deploy.yml`, `release-<target>.yml`.
+  Workflow and job names are title case, with the platform in parentheses.
+- Every step has a `name` that says what it does, in the imperative.
+- Keys come in one order: `name`, `on`, `permissions`, `concurrency`, `env`,
+  `jobs`; in a job `name`, `needs`, `if`, `runs-on`, `timeout-minutes`, then the
+  rest.
+- Setup that several jobs share lives in a composite action under
+  `.github/actions/`.
+- Tool versions have one home each: `rust-toolchain.toml`, `.node-version`,
+  `.xcode-version`. Workflows read them rather than repeating a number.
+- Actions are pinned by commit, with the release in a trailing comment.
 
 ## Independent platform releases
 
@@ -94,20 +176,22 @@ platform still sitting behind it.
 version so it can be compared numerically, and the artifact stem is published
 separately rather than parsed out of JSON in POSIX `sh`.
 
-The Rust toolchain is pinned in `rust-toolchain.toml`. Node is pinned to 24.19.0.
+The Rust toolchain is pinned in `rust-toolchain.toml` and Node in `.node-version`
+(the Node `pi-runtime/release.json` bundles; a test keeps the two equal).
 Worker deployments use Wrangler from `apps/edge/package-lock.json`, not a floating
 `npx wrangler@4`. Actions are pinned by commit.
 
 **Ubuntu packages.** The `ubuntu:20.04` containers (the Linux release build and the
 installer test) install packages with `scripts/ci/apt-install.sh`, inlined in
-`linux.yml` because nothing is checked out yet: Ubuntu's servers with retries first, then
+`release-linux.yml` because nothing is checked out yet: Ubuntu's servers with retries first, then
 fallback mirrors for the container's architecture. apt verifies every package against
-Ubuntu's archive keys, so a mirror is trusted only to be reachable. `linux-backend` installs
+Ubuntu's archive keys, so a mirror is trusted only to be reachable. The `setup-rust` action installs
 only the build tools GitHub's runner image lacks, normally none. On 2026-11-11 the runners
 could not resolve `archive.ubuntu.com` for hours, which failed every Linux job that ran
 `apt-get`.
 
-`deploy`, `release.publish` and `pi-runtime.publish` share the
+`deploy.yml` and the Publish jobs of `release-linux.yml`, `release-macos.yml` and
+`release-pi-runtime.yml` share the
 **`cypher-production`** concurrency group with `queue: max` and no cancellation
 of running jobs. GitHub.com supports
 up to 100 pending entries; dispatch order is not a version-order guarantee.
@@ -141,7 +225,7 @@ secrets. Without these, the macOS package is ad-hoc signed, not notarized.
 
 ### iOS / TestFlight secrets
 
-`ios.yml` needs an iOS **distribution** identity, which is a different
+`release-ios.yml` needs an iOS **distribution** identity, which is a different
 certificate from the macOS Developer ID one. Configure in **Settings → Secrets
 and variables → Actions**:
 
@@ -174,7 +258,7 @@ bundle id, version/build against the tag, arm64, production APNs,
 device list, the privacy manifest, and a strict deep signature. The existence of
 an IPA is never taken as proof of correctness.
 
-Upload is where `ios.yml` stops. Tester groups, public links and App Store
+Upload is where `release-ios.yml` stops. Tester groups, public links and App Store
 review submission remain separate, explicit actions. Export compliance is
 declared in `Info.plist` (`ITSAppUsesNonExemptEncryption = NO`), so App Store
 Connect no longer asks per build.
