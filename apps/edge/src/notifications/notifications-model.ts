@@ -86,6 +86,37 @@ export function active(activity: Activity, now: number): boolean {
   return activity.foreground && now - activity.receivedAt <= ACTIVITY_LEASE_MS &&
     now - activity.interactionAt <= INTERACTION_MS;
 }
+/** Which of a chat's events reach the owner's phones — the desktop's rule for
+ * its chimes and Dock badge (`Chat::is_user_facing`, `AppState::attention_count`):
+ * - `all`: a conversation the owner follows (a root session, a workspace's own chat);
+ * - `input`: a session a workspace started — what it finished is its
+ *   workspace's to report, only its questions are the owner's;
+ * - `none`: hidden threads (work, routine, peer, routine-session and unknown
+ *   kinds) and memory passes — nothing on any device would show or clear them.
+ * Archived, deleted and project-less chats are the callers' own checks. */
+export type ChatAttention = "all" | "input" | "none";
+export function chatAttention(fields: Record<string, unknown>): ChatAttention {
+  const present = (value: unknown) => value !== undefined && value !== null;
+  if (present(fields.startedBy)) return "input";
+  if (present(fields.memory)) return "none";
+  const bot = fields.bot;
+  if (!present(bot)) return "all";
+  if (typeof bot !== "object" || Array.isArray(bot)) return "none";
+  // `BotChat`: a missing origin is the owner, a missing thread is `main`.
+  const { origin, thread } = bot as Record<string, unknown>;
+  const owner = !present(origin) || origin === "owner";
+  const main = !present(thread) ||
+    (typeof thread === "object" && !Array.isArray(thread) && (thread as Record<string, unknown>).kind === "main");
+  return owner && main ? "all" : "none";
+}
+/** The stricter of a chat's and its parent's attention: a subagent of a
+ * hidden thread is hidden too. */
+export function narrower(a: ChatAttention, b: ChatAttention): ChatAttention {
+  return a === "none" || b === "none" ? "none" : a === "input" || b === "input" ? "input" : "all";
+}
+export function attends(attention: ChatAttention, kind: NoticeKind): boolean {
+  return attention === "all" || (attention === "input" && kind === "input");
+}
 export function iosViewingChat(chatId: string, activities: Activity[], now: number): boolean {
   return activities.some(a => a.platform === "ios" && a.chatId === chatId && active(a, now));
 }

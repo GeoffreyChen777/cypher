@@ -35,7 +35,7 @@ function fixture(state: DurableObjectState) {
     return response.json() as Promise<BadgeSnapshot & { readEventIds?: string[] }>;
   };
   return {
-    rows, calls, config,
+    rows, calls, config, request,
     restart: () => { service = make(); },
     flush: () => service.flush(),
     snapshot: () => request("settings", "GET"),
@@ -214,6 +214,61 @@ describe("durable unread-conversation badges", () => {
         clock.mockReturnValue(start + 3_000);
         await f.enqueue("two");
         expect((await f.snapshot()).badgeCount).toBe(0);
+      } finally { clock.mockRestore(); }
+    });
+  });
+
+  it("counts what the desktop's Dock badge counts: no hidden workspace threads, workspace sessions only while they ask", async () => {
+    const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("badges-workspace"));
+    await runInDurableObject(stub, async (_, state) => {
+      const f = fixture(state), start = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(start);
+      const chat = (id: string, fields: Row["fields"]) =>
+        f.rows.set(`chats/${id}`, row("chats", id, { spaceId: "project", deviceId: "host", ...fields }));
+      try {
+        chat("routine", { bot: { botId: "ws", origin: "routine", thread: { kind: "routineSession", routineId: "r" } } });
+        chat("memory", { memory: { kind: "consolidate" } });
+        chat("plan", { startedBy: { botId: "ws", workId: "w" } });
+        chat("kid", { child: { parentChatId: "routine", parentRunId: "run", agent: "planner" } });
+        for (const id of ["routine", "memory", "plan", "kid"]) state.storage.sql.exec(
+          "INSERT INTO notify_kv(key,value) VALUES(?,?)", `target:${id}`,
+          JSON.stringify({ clientId: "phone", platform: "ios", at: Date.now() }));
+        for (const id of ["routine", "memory"]) {
+          for (const status of ["idle", "errored", "awaitingInput"]) {
+            const now = Date.now();
+            const reply = await f.request("event", "POST",
+              { chatId: id, deviceId: "host", status, updatedAt: now, startedAt: now - 60_000 });
+            expect(reply).toEqual({ ok: true, ignored: true, reason: "hidden" });
+            clock.mockReturnValue(Date.now() + 1_000);
+          }
+        }
+        await f.enqueue("kid", "awaitingInput");
+        await f.enqueue("plan");
+        clock.mockReturnValue(Date.now() + 1_000);
+        await f.enqueue("plan", "errored");
+        expect((await f.snapshot()).badgeCount).toBe(0);
+        // Its question is the owner's.
+        clock.mockReturnValue(Date.now() + 1_000);
+        await f.enqueue("plan", "awaitingInput");
+        await f.enqueue("one");
+        expect((await f.snapshot()).badgeCount).toBe(2);
+        clock.mockReturnValue(Date.now() + 12_000);
+        await f.flush();
+        expect(f.calls.filter(m => m.kind !== "badge").map(m => "chatId" in m ? m.chatId : undefined).sort())
+          .toEqual(["one", "plan"]);
+        // Answered in the workspace (the session itself never opened): it
+        // stops counting as soon as it works again, as on the desktop.
+        clock.mockReturnValue(Date.now() + 1_000);
+        await f.request("event", "POST", { chatId: "plan", deviceId: "host", status: "working",
+          updatedAt: Date.now(), startedAt: Date.now() - 60_000 });
+        expect((await f.snapshot()).badgeCount).toBe(1);
+        // A row counted before its workspace stamped it leaves on the next look.
+        chat("late", {});
+        clock.mockReturnValue(Date.now() + 1_000);
+        await f.enqueue("late");
+        expect((await f.snapshot()).badgeCount).toBe(2);
+        f.rows.get("chats/late")!.fields.startedBy = { botId: "ws" };
+        expect((await f.snapshot()).badgeCount).toBe(1);
       } finally { clock.mockRestore(); }
     });
   });
