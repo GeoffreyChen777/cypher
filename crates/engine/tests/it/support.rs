@@ -103,13 +103,41 @@ impl Harness for TestHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<EventStream, HarnessError> {
-        // A harness ends its stream when its run is interrupted. A scripted
-        // stream that stayed open made the engine wait out its three-second
-        // grace on every interrupt and shutdown.
-        let interrupted = controls.interrupt.clone().cancelled_owned();
+        let interrupt = controls.interrupt.clone();
         let stream = (self.run)(request, controls)?;
-        Ok(stream.take_until(interrupted).boxed())
+        Ok(until_interrupted(stream, interrupt))
     }
+}
+
+/// `stream`, ended once its run is interrupted and it has nothing more ready.
+/// A harness ends its stream when its run is interrupted, after what it had
+/// already produced: a scripted stream that stayed open made the engine wait
+/// out its three-second grace on every interrupt and shutdown, and one cut
+/// off at once would drop events a test had already scripted.
+fn until_interrupted(
+    mut stream: EventStream,
+    interrupt: tokio_util::sync::CancellationToken,
+) -> EventStream {
+    use std::future::Future;
+    use std::task::Poll;
+    let mut interrupted = Box::pin(interrupt.cancelled_owned());
+    let mut ended = false;
+    futures::stream::poll_fn(move |cx| {
+        if ended {
+            return Poll::Ready(None);
+        }
+        let next = match stream.poll_next_unpin(cx) {
+            // Nothing ready: the interrupt, if it has come, ends the stream.
+            Poll::Pending => match interrupted.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            },
+            ready => ready,
+        };
+        ended = matches!(next, Poll::Ready(None));
+        next
+    })
+    .boxed()
 }
 
 /// Feed-by-hand harness (id `Mock`, steerable): the test's own dispatch

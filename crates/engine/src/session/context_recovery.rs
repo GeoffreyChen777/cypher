@@ -736,16 +736,25 @@ impl ContextRecoveryService {
         let deadline = tokio::time::Instant::now() + HOLD_CAP;
         let mut unrecorded_since: Option<tokio::time::Instant> = None;
         loop {
+            // Whether a later round exists is read BEFORE this round's
+            // verdict. A round's verdict is recorded as it settles, ahead of
+            // anything a later round publishes, so a later round seen first
+            // and still no verdict means this one will never get one. Read
+            // the other way round, a restart that finished between the two
+            // reads (a few milliseconds is enough) looked the same: no
+            // verdict, then the retry's `Done`, and the failed result was
+            // released to the parent.
+            let later = inner
+                .sessions
+                .last_done_seq(chat_id)
+                .is_some_and(|last| last > seq)
+                || inner.later_verdict(chat_id, seq);
             match inner.verdict(chat_id, seq) {
                 Some(Verdict::Restarted) => return true,
                 Some(Verdict::Stands) => return false,
                 Some(Verdict::Deciding) => unrecorded_since = None,
                 None => {
-                    let later_done = inner
-                        .sessions
-                        .last_done_seq(chat_id)
-                        .is_some_and(|last| last > seq);
-                    if later_done || inner.later_verdict(chat_id, seq) {
+                    if later {
                         return false;
                     }
                     // A round still running gets its verdict when it ends;
