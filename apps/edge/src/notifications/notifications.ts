@@ -5,6 +5,7 @@ import type { BadgeSnapshot } from "./apns";
 import {
   defaultNotificationSettings, identifier, object, parseActivity, parseSettings,
   readNotificationJSON, notificationJSON as json, notificationDecision, iosViewingChat,
+  chatAttention, narrower, attends, type ChatAttention,
   NOTICE_DELAY_MS, SHORT_RUN_MS, ACTIVITY_LEASE_MS, SEEN_SLACK_MS, type Activity, type Notice, type NoticeKind, type NotificationSettings
 } from "./notifications-model";
 
@@ -43,6 +44,29 @@ export class Notifications {
   }
   private set(key: string, value: unknown): void {
     this.ctx.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, JSON.stringify(value));
+  }
+  /** Whose events this chat's are ([`chatAttention`]): a subagent chat is
+   * no more visible than the session it belongs to. */
+  private attention(chat: Row): ChatAttention {
+    const own = chatAttention(chat.fields);
+    const child = chat.fields.child;
+    const parentId = child && typeof child === "object" && !Array.isArray(child) ? child.parentChatId : undefined;
+    const parent = typeof parentId === "string" ? this.row("chats", parentId) : undefined;
+    return parent && !parent.deleted ? narrower(own, chatAttention(parent.fields)) : own;
+  }
+  /** A workspace's session counts only while it asks, as on the desktop: once
+   * it moves on, its question was answered wherever the owner answered it
+   * (usually the workspace, which never opens the session itself). */
+  private settle(chatId: string): void {
+    for (const { notice } of this.events()) if (notice.chatId === chatId) this.remove(notice.id);
+    this.clearUnread(chatId);
+  }
+  /** False once every status source for the chat has moved past its
+   * question; unknown counts as still asking. */
+  private mayBeAsking(chatId: string): boolean {
+    const statuses = [this.get<{ status: string }>(`eventState:${chatId}`)?.status,
+      this.row("sessions", chatId)?.fields.status].filter(status => typeof status === "string");
+    return !statuses.length || statuses.includes("awaitingInput");
   }
   private recipients(): Recipient[] { return this.get<Recipient[]>("recipients") ?? []; }
   private settings(): NotificationSettings { return this.get<NotificationSettings>("settings") ?? defaultNotificationSettings(); }
@@ -199,6 +223,8 @@ export class Notifications {
     for (const notice of this.unread()) {
       const chat = this.row("chats", notice.chatId), project = this.row("spaces", notice.projectId);
       if (!chat || chat.deleted || chat.fields.archived || !project || project.deleted ||
+          !attends(this.attention(chat), notice.kind) ||
+          (this.attention(chat) === "input" && !this.mayBeAsking(notice.chatId)) ||
           !prefs[notice.kind] || prefs.mutedProjects.includes(notice.projectId) ||
           (notice.child && notice.kind !== "input" && !prefs.subagents)) {
         this.clearUnread(notice.chatId);
@@ -251,6 +277,11 @@ export class Notifications {
             : "space";
           return json({ ok: true, ignored: true, reason });
         }
+        // Hidden threads and memory passes never reach the owner. Their
+        // markers are written at birth and never change, so the host may
+        // back off as for any other ignored chat.
+        const attention = this.attention(chat);
+        if (attention === "none") return json({ ok: true, ignored: true, reason: "hidden" });
         const subagents = (Array.isArray(body.subagents) ? body.subagents : []).slice(0, 32).map(value => {
           const run = object(value);
           if (!["async", "sync", "message"].includes(String(run.mode)) ||
@@ -273,6 +304,7 @@ export class Notifications {
         if (status === "working") {
           this.resumed(chatId, body.updatedAt);
           this.set(`run:${chatId}`, typeof body.startedAt === "number" ? String(body.startedAt) : crypto.randomUUID());
+          if (attention === "input") { this.settle(chatId); this.schedule(); }
           return json({ ok: true });
         }
         let kind: NoticeKind | undefined;
@@ -283,6 +315,7 @@ export class Notifications {
           kind = children.failed ? "failed" : "completed";
         }
         if (!kind) return json({ ok: true });
+        if (!attends(attention, kind)) { this.settle(chatId); this.schedule(); return json({ ok: true, hidden: true }); }
         const run = this.get<string>(`run:${chatId}`) ?? crypto.randomUUID();
         const startedAt = typeof body.startedAt === "number" ? body.startedAt : Number(run);
         if (kind === "completed" && Number.isFinite(startedAt) && Date.now() - startedAt < SHORT_RUN_MS) {
@@ -389,7 +422,12 @@ export class Notifications {
       const eventAt = childrenSettled ? children.latest : after.fields.updatedAt;
       if (!before || before.deleted || (previousStatus === status && !childrenSettled) ||
           typeof eventAt !== "number" || Math.abs(now - eventAt) > 300_000) continue;
-      if (status === "working") { this.resumed(chatId, eventAt); continue; }
+      if (status === "working") {
+        this.resumed(chatId, eventAt);
+        const chat = this.row("chats", chatId);
+        if (chat && this.attention(chat) === "input") this.settle(chatId);
+        continue;
+      }
       let kind: NoticeKind;
       if (status === "awaitingInput") kind = "input";
       else if (status === "errored") kind = "failed";
@@ -405,6 +443,7 @@ export class Notifications {
       const chat = this.row("chats", chatId);
       if (!chat || chat.deleted || chat.fields.archived || typeof chat.fields.spaceId !== "string" ||
           chat.fields.deviceId !== after.fields.deviceId) continue;
+      if (!attends(this.attention(chat), kind)) { this.settle(chatId); continue; }
       const project = this.row("spaces", chat.fields.spaceId);
       if (!project || project.deleted) continue;
       if (!run) { run = crypto.randomUUID(); this.set(key, run); }
@@ -475,6 +514,7 @@ export class Notifications {
         : this.row("sessions", notice.chatId);
       const expected = notice.sessionStatus ?? { completed: "idle", failed: "errored", input: "awaitingInput" }[notice.kind];
       if (!chat || chat.deleted || chat.fields.archived || !project || project.deleted ||
+          !attends(this.attention(chat), notice.kind) ||
           !session || session.deleted || session.fields.status !== expected ||
           this.get<string>(`run:${notice.chatId}`) !== notice.run) {
         this.remove(notice.id); this.clearUnread(notice.chatId, notice.id); continue;

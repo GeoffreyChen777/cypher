@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  active, defaultNotificationSettings, notificationDecision, parseActivity, parseSettings,
+  active, attends, chatAttention, defaultNotificationSettings, narrower, notificationDecision, parseActivity, parseSettings,
   type Activity, type Notice
 } from "./notifications-model";
 const now = 1_000_000;
@@ -64,4 +64,35 @@ describe("single session notification target policy", () => {
       sequence: 1, interactionAgeMs: 0, chatId: null }, again, now + 20_000)).toEqual(again);
   });
 
+});
+
+describe("which chats reach the owner (the desktop's Dock badge rule)", () => {
+  it("follows the conversations the owner sees, workspace sessions only while they ask", () => {
+    expect(chatAttention({ spaceId: "p", bot: null, memory: null, child: null })).toBe("all");
+    // The workspace's own chat with its owner.
+    expect(chatAttention({ bot: { botId: "b" } })).toBe("all");
+    expect(chatAttention({ bot: { botId: "b", origin: "owner", thread: { kind: "main" } } })).toBe("all");
+    // A session a workspace started: only its questions.
+    expect(chatAttention({ spaceId: "p", startedBy: { botId: "b", workId: "w" } })).toBe("input");
+    expect(attends("input", "input")).toBe(true);
+    expect(attends("input", "completed")).toBe(false);
+    expect(attends("input", "failed")).toBe(false);
+  });
+  it.each([
+    ["work thread", { bot: { botId: "b", thread: { kind: "work", workId: "w" } } }],
+    ["routine thread", { bot: { botId: "b", origin: "routine", thread: { kind: "routine", routineId: "r" } } }],
+    ["routine session", { spaceId: "p", bot: { botId: "b", origin: "routine", thread: { kind: "routineSession", routineId: "r" } } }],
+    ["peer thread", { bot: { botId: "b", origin: "peer", thread: { kind: "peer", connectionId: "c" } } }],
+    ["routine-origin main", { bot: { botId: "b", origin: "routine" } }],
+    ["thread from a newer engine", { bot: { botId: "b", thread: { kind: "later" } } }],
+    ["malformed marker", { bot: "b" }],
+    ["memory pass", { spaceId: "p", memory: { kind: "consolidate" } }]
+  ])("never counts a %s", (_, fields) => {
+    expect(chatAttention(fields)).toBe("none");
+  });
+  it("a subagent is no more visible than its session", () => {
+    expect(narrower("all", "all")).toBe("all");
+    expect(narrower("all", "input")).toBe("input");
+    expect(narrower("input", "none")).toBe("none");
+  });
 });

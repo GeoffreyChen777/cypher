@@ -24,6 +24,14 @@ last-used device target; important events are sent only to that target. There
 is no Smart/Always/Off policy.
 
 - Eligible events: completion, failure and waiting for input.
+- Eligible sessions follow the desktop's chime and Dock badge rule
+  (`Chat::is_user_facing`, `attention_count`): sessions the owner follows
+  notify on all three. A session a workspace started notifies only when it
+  asks, and stops counting once it works again (the owner usually answers in
+  the workspace, which never opens the session). A workspace's hidden threads
+  (work, routine, peer, routine-session, unknown kinds) and memory passes
+  never notify or count; the Worker answers their host reports with
+  `ignored: "hidden"`. A subagent chat is no more visible than its parent.
 - No output-token, tool-call or progress notifications. Completions under 30
   seconds are skipped when run duration is known.
 - Independent child results default off. A child asking for input can still
@@ -110,9 +118,11 @@ is no Smart/Always/Off policy.
   Notifications → Dock badge, on by default): the number of sidebar sessions
   waiting on input, errored, or finished with activity newer than the synced
   seen marker — so opening a session on the phone drops it from the Dock too.
-  The count is derived locally (the sidebar's rule), so it can differ from the
-  phones' count where the phone policy filters events out (short runs, muted
-  projects, disabled categories).
+  The count is derived locally (the sidebar's rule). The Worker applies the
+  same session rule, so the counts differ only where the phone policy filters
+  events out (short runs, muted projects, disabled categories, child results)
+  or the desktop counts what phones are never told about (project-less chats
+  and a workspace's own chat).
 
 Activity reports carry only the selected session and a monotonic client
 sequence. No keys, coordinates or content are collected. Online headless

@@ -43,7 +43,8 @@ enum Reply {
     /// Recorded, or a duplicate of what is recorded: a delivery receipt.
     Delivered,
     /// The Worker declined to act on this chat (`ignored`): no registry row
-    /// yet, archived, hosted on another device, or its space is gone.
+    /// yet, archived, hosted on another device, its space is gone, or a
+    /// hidden workspace thread / memory pass that never notifies.
     Ignored,
     /// Anything else: transport failure, rejection, an obsolete or malformed
     /// reply. Not evidence about the chat either way.
