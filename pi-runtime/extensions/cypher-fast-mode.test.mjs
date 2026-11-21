@@ -7,7 +7,10 @@ import { test } from "node:test";
 import extension, {
   gptVersion,
   isOpenAiModel,
+  REQUESTED_ENTRY_TYPE,
+  requestedState,
   sessionState,
+  startState,
   shouldApplyFastMode,
   STATE_ENTRY_TYPE,
   supportsFastMode,
@@ -151,4 +154,44 @@ test("a session restores its own toggle, else the settings default", () => {
   const off = load({});
   off.handlers.get("session_start")({}, fresh);
   assert.equal(off.handlers.get("before_provider_request")(request, fresh), undefined);
+});
+
+test("a run's request applies once and then leaves the owner's toggle alone", () => {
+  const request = { payload: { model: "gpt-6-sol" } };
+  const model = { provider: "openai", id: "gpt-6-sol" };
+  const previous = process.env.CYPHER_FAST_MODE;
+  try {
+    process.env.CYPHER_FAST_MODE = "on";
+    const run = load({});
+    const branch = [];
+    run.handlers.get("session_start")({}, context(model, branch));
+    assert.ok(run.handlers.get("before_provider_request")(request, context(model)), "the first run asks for it");
+    assert.deepEqual(run.entries.map((e) => [e.customType, e.data.enabled]), [
+      [REQUESTED_ENTRY_TYPE, true],
+      [STATE_ENTRY_TYPE, true],
+    ]);
+
+    // The owner turns it off with /fast; the next run asks the same: off stays.
+    branch.push(...run.entries, { type: "custom", customType: STATE_ENTRY_TYPE, data: { version: 1, enabled: false } });
+    const again = load({});
+    again.handlers.get("session_start")({}, context(model, branch));
+    assert.equal(again.handlers.get("before_provider_request")(request, context(model)), undefined);
+    assert.deepEqual(again.entries, [], "nothing new to record");
+
+    // The routine now asks for off, then on again: each new request applies.
+    process.env.CYPHER_FAST_MODE = "off";
+    const changed = startState(branch, requestedState(), () => false);
+    assert.equal(changed.enabled, false);
+    assert.deepEqual(changed.append, [[REQUESTED_ENTRY_TYPE, { enabled: false }]], "already off: only the request is noted");
+  } finally {
+    if (previous === undefined) delete process.env.CYPHER_FAST_MODE;
+    else process.env.CYPHER_FAST_MODE = previous;
+  }
+});
+
+test("only on and off are requests", () => {
+  assert.equal(requestedState({}), undefined);
+  assert.equal(requestedState({ CYPHER_FAST_MODE: "ON " }), true);
+  assert.equal(requestedState({ CYPHER_FAST_MODE: "off" }), false);
+  assert.equal(requestedState({ CYPHER_FAST_MODE: "1" }), undefined);
 });

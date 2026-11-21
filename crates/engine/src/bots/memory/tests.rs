@@ -32,6 +32,8 @@ fn bot(coordinate: bool) -> Bot {
         },
         paused: false,
         created_at: Utc::now(),
+        plans: Default::default(),
+        session_choice: Default::default(),
     }
 }
 
@@ -141,6 +143,9 @@ fn the_schedule_lists_routines_and_where_they_run() {
             manual: false,
         }),
         next_run_at: Some(nine.timestamp_millis()),
+        thinking: None,
+        fast: None,
+        run_note: None,
     });
     let mut nightly = records.routines[0].clone();
     nightly.id = "r2".into();

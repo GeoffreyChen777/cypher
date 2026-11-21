@@ -422,9 +422,7 @@ impl Harness for PiHarness {
                 Some(&request.cwd),
                 &controls.host,
                 temp_prompt.as_ref(),
-                request.model.as_deref(),
-                request.reasoning.map(thinking_level),
-                Some(request.sandbox),
+                spawn::Launch::of(&request),
             )
             .await;
         let (mut child, stderr_tail) = match spawn {

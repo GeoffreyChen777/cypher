@@ -384,14 +384,9 @@ pub(super) struct JobForm {
     space_id: Option<String>,
     /// A project routine's own worktree rather than the project checkout.
     worktree: bool,
-    /// The model its runs use; `None` follows the workspace chat.
-    model: Option<String>,
-    /// The model list: open, its filter, and the device's catalogue.
-    model_open: bool,
-    model_search: Entity<TextInput>,
-    models: ModelList,
-    /// The device the catalogue was asked of.
-    models_device: Option<String>,
+    /// Its runs' model, thinking and Fast mode; what it leaves out
+    /// follows the workspace's defaults.
+    pub(super) choice: super::choice::ChoicePicker,
     error: Option<SharedString>,
     busy: bool,
     _events: Vec<Subscription>,
@@ -684,12 +679,17 @@ impl Shell {
         let now = Local::now();
         let job = Job::routine(&routine, &now);
         let asking = self.job_asking(&job, cx);
-        let model = routine.chosen_model().map(|model| {
+        let model = {
             let host = space
                 .as_ref()
                 .map_or(bot.host_device_id.clone(), |s| s.device_id.clone());
-            self.model_label(Some(host), model, cx)
-        });
+            let label = routine
+                .chosen_model()
+                .map(|model| self.model_label(Some(host), model, cx));
+            super::choice::choice_words(&routine.session_choice(), |id| {
+                label.clone().unwrap_or_else(|| id.to_string())
+            })
+        };
         let worktree = matches!(
             routine.target,
             RoutineTarget::Project { worktree: true, .. }
@@ -1023,7 +1023,7 @@ impl Shell {
             work_directly: bool,
             space_id: Option<String>,
             worktree: bool,
-            model: Option<String>,
+            choice: cypher_proto::SessionChoice,
         }
         let seed = {
             let state = self.state.read(cx);
@@ -1036,7 +1036,7 @@ impl Shell {
                     work_directly: false,
                     space_id: None,
                     worktree: true,
-                    model: None,
+                    choice: Default::default(),
                 },
                 FormTarget::Routine(id) => {
                     let r = state.bot_records.routines.iter().find(|r| r.id == *id)?;
@@ -1046,7 +1046,6 @@ impl Shell {
                             space_id, worktree, ..
                         } => (Some(space_id.clone()), *worktree),
                     };
-                    let model = r.chosen_model().map(str::to_string);
                     Seed {
                         name: r.name.clone(),
                         prompt: r.prompt.clone(),
@@ -1055,7 +1054,7 @@ impl Shell {
                         work_directly: r.work_directly,
                         space_id,
                         worktree,
-                        model,
+                        choice: r.session_choice(),
                     }
                 }
             }
@@ -1065,7 +1064,6 @@ impl Shell {
             TextInput::settings_prompt_field("What moved, what's stuck, and what needs me?", cx)
         });
         let time = cx.new(|cx| TextInput::settings_field("09:00", false, cx));
-        let model_search = cx.new(|cx| TextInput::settings_field("Search models…", false, cx));
         let every = cx.new(|cx| TextInput::settings_field("2", false, cx));
         let date = cx.new(|cx| TextInput::settings_field("2026-11-10", false, cx));
         let (draft, texts) =
@@ -1102,11 +1100,7 @@ impl Shell {
             work_directly: seed.work_directly,
             space_id: seed.space_id,
             worktree: seed.worktree,
-            model: seed.model,
-            model_open: false,
-            model_search,
-            models: ModelList::Loading,
-            models_device: None,
+            choice: super::choice::ChoicePicker::new(seed.choice, cx),
             error: None,
             busy: false,
             _events: events,
@@ -1164,7 +1158,7 @@ impl Shell {
                 name: name.clone(),
                 prompt,
                 target: form_target(form.space_id.clone(), form.worktree),
-                model: form.model.clone(),
+                model: form.choice.choice.model.clone(),
                 schedule,
                 enabled: existing.is_none_or(|r| r.enabled),
                 write_notes: form.write_notes,
@@ -1177,6 +1171,9 @@ impl Shell {
                 worktree_path: None,
                 last_run: None,
                 next_run_at: None,
+                thinking: form.choice.choice.thinking,
+                fast: form.choice.choice.fast,
+                run_note: None,
             };
             routine.validate()?;
             if routine.target.space_id().is_some() && !coordinate {
@@ -1252,7 +1249,14 @@ impl Shell {
             }
             .into(),
         };
-        let model_picker = self.render_model_picker(bot, theme, cx);
+        let device = self.form_device(bot, cx);
+        let model_picker = self.render_choice(
+            super::choice::ChoiceSlot::RoutineForm,
+            device,
+            "Default: the workspace's.",
+            theme,
+            cx,
+        );
         let Some(form) = self.board.schedule.form.as_ref() else {
             return (head, div());
         };
@@ -1683,247 +1687,32 @@ impl Shell {
         id.to_string()
     }
 
-    /// Ask the routine's device for its models, once per device.
-    fn load_form_models(&mut self, bot: &Bot, cx: &mut Context<Self>) {
-        let Some(device) = self.form_device(bot, cx) else {
-            return;
-        };
-        let Some(form) = self.board.schedule.form.as_mut() else {
-            return;
-        };
-        if form.models_device.as_deref() == Some(device.as_str()) {
-            return;
-        }
-        form.models_device = Some(device.clone());
-        form.models = ModelList::Loading;
-        let asked = device.clone();
-        self.board_call(
-            methods::LIST_MODELS,
-            serde_json::json!({ "harness": "pi", "targetDeviceId": device }),
-            cx,
-            move |this, result, cx| {
-                let Some(form) = this.board.schedule.form.as_mut() else {
-                    return;
-                };
-                if form.models_device.as_deref() != Some(asked.as_str()) {
-                    return;
-                }
-                form.models = match result {
-                    Ok(value) => match serde_json::from_value::<Vec<cypher_proto::Model>>(value) {
-                        Ok(models) => {
-                            let models = crate::pickers::normalize_model_rows(models);
-                            this.board
-                                .schedule
-                                .model_labels
-                                .extend(models.iter().map(|m| (m.id.clone(), m.label.clone())));
-                            ModelList::Ready(models)
-                        }
-                        Err(err) => ModelList::Failed(err.to_string()),
-                    },
-                    Err(CallError::Unknown) => {
-                        ModelList::Failed("This device can't list its models.".into())
-                    }
-                    Err(CallError::Failed(text)) => ModelList::Failed(text),
-                };
-                cx.notify();
-            },
-        );
+    /// A model's label from any list loaded so far, else its id.
+    pub(super) fn known_model_label(&self, id: &str) -> String {
+        self.board
+            .schedule
+            .model_labels
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
     }
 
-    /// The form's model choice, drawn like Settings' model pickers: a row
-    /// with a bordered trigger naming it, opening a menu over it with a
-    /// search field over the device's models, "Default" first.
-    fn render_model_picker(
-        &mut self,
-        bot: &Bot,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        use crate::settings::widgets;
-        self.load_form_models(bot, cx);
-        let Some(form) = self.board.schedule.form.as_ref() else {
-            return div();
-        };
-        let current = match (&form.model, &form.models) {
-            (None, _) => "Default".to_string(),
-            (Some(id), ModelList::Ready(models)) => models
-                .iter()
-                .find(|m| &m.id == id)
-                .map(|m| m.label.clone())
-                .unwrap_or_else(|| id.clone()),
-            (Some(id), _) => id.clone(),
-        };
-        let popup = form.model_open.then(|| {
-            let row =
-                |id: Option<String>, label: String, selected: bool, cx: &mut Context<Self>| {
-                    div()
-                        .id(SharedString::from(format!(
-                            "bot-form-model-{}",
-                            id.as_deref().unwrap_or("default")
-                        )))
-                        .px(px(10.0))
-                        .py(px(8.0))
-                        .rounded(px(8.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .cursor_pointer()
-                        .bg(if selected {
-                            theme.ink(0.07)
-                        } else {
-                            gpui::transparent_black()
-                        })
-                        .hover(|style| style.bg(theme.ink(0.05)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(form) = this.board.schedule.form.as_mut() {
-                                form.model = id.clone();
-                                form.model_open = false;
-                            }
-                            cx.notify();
-                        }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(13.0))
-                                .text_color(theme.text)
-                                .child(SharedString::from(label)),
-                        )
-                        .child(div().w(px(16.0)).when(selected, |row| {
-                            row.child(icon(icons::CHECK).size(px(12.0)).text_color(theme.accent))
-                        }))
-                };
-            let chosen = form.model.clone();
-            let mut menu = div()
-                .w(px(280.0))
-                .rounded(px(10.0))
-                .bg(theme.surface_overlay)
-                .border_1()
-                .border_color(theme.border_strong)
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    if let Some(form) = this.board.schedule.form.as_mut() {
-                        form.model_open = false;
-                    }
-                    cx.notify();
-                }))
-                .child(div().p(px(8.0)).child(form.model_search.clone()))
-                .child(
-                    div()
-                        .px(px(4.0))
-                        .child(row(None, "Default".into(), chosen.is_none(), cx)),
-                );
-            match form.models.clone() {
-                ModelList::Ready(models) => {
-                    let query = form.model_search.read(cx).text().trim().to_lowercase();
-                    let matching: Vec<_> = models
-                        .into_iter()
-                        .filter(|m| {
-                            query.is_empty()
-                                || m.label.to_lowercase().contains(&query)
-                                || m.id.to_lowercase().contains(&query)
-                        })
-                        .collect();
-                    if matching.is_empty() {
-                        menu = menu.child(
-                            div()
-                                .p(px(12.0))
-                                .text_size(px(12.0))
-                                .text_color(theme.text_muted)
-                                .child("No matching models."),
-                        );
-                    } else {
-                        let mut list = div()
-                            .id("bot-form-model-list")
-                            .max_h(px(240.0))
-                            .overflow_y_scroll()
-                            .px(px(4.0))
-                            .pb(px(4.0));
-                        for m in matching {
-                            let on = chosen.as_deref() == Some(m.id.as_str());
-                            list = list.child(row(Some(m.id), m.label, on, cx));
-                        }
-                        menu = menu.child(list);
-                    }
-                }
-                ModelList::Failed(error) => {
-                    menu = menu.child(widgets::error_strip(theme, &error).mt(px(0.0)))
-                }
-                ModelList::Loading => {
-                    menu = menu.child(
-                        div()
-                            .p(px(12.0))
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .child("Loading models…"),
-                    )
-                }
-            }
-            // The row sits at the form's foot, by the window's corner: the
-            // menu opens upward, aligned to the trigger's right edge.
-            popover::anchored_menu_above_end("bot-form-model-popup", menu.into_any_element(), None)
-        });
-        let trigger = widgets::ghost_action(theme)
-            .id("bot-form-model-trigger")
-            .relative()
-            .w(px(180.0))
-            .flex_none()
-            .border_1()
-            .border_color(theme.border)
-            .hover(|s| widgets::ghost_hover(theme, s))
-            .on_click(cx.listener(|this, _, window, cx| {
-                if let Some(form) = this.board.schedule.form.as_mut() {
-                    form.model_open = !form.model_open;
-                    if form.model_open {
-                        window.focus(&form.model_search.focus_handle(cx), cx);
-                    }
-                }
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(theme.text)
-                    .child(SharedString::from(current)),
-            )
-            .child(
-                icon(icons::ALT_ARROW_DOWN)
-                    .size(px(12.0))
-                    .text_color(theme.text_muted),
-            )
-            .children(popup);
-        parts::group_box().child(
-            div()
-                .px(px(12.0))
-                .py(px(9.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(12.0))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.0))
-                        .child(
-                            div()
-                                .text_size(px(12.5))
-                                .text_color(theme.text)
-                                .child("Model"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.5))
-                                .text_color(theme.text_muted)
-                                .child("Default: the workspace chat's."),
-                        ),
-                )
-                .child(trigger),
-        )
+    /// The routine form's picker, while the form is open.
+    pub(super) fn routine_form_choice(&mut self) -> Option<&mut super::choice::ChoicePicker> {
+        self.board
+            .schedule
+            .form
+            .as_mut()
+            .map(|form| &mut form.choice)
+    }
+
+    /// Model labels by id, so a routine page names its model as the
+    /// pickers do.
+    pub(super) fn remember_model_labels(&mut self, models: &[cypher_proto::Model]) {
+        self.board
+            .schedule
+            .model_labels
+            .extend(models.iter().map(|m| (m.id.clone(), m.label.clone())));
     }
 }
 
@@ -2471,6 +2260,9 @@ mod tests {
             worktree_path: None,
             last_run: None,
             next_run_at: None,
+            thinking: None,
+            fast: None,
+            run_note: None,
         };
         assert_eq!(routine.validate(), Err("Name the routine.".into()));
     }

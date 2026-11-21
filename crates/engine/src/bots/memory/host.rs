@@ -370,8 +370,14 @@ impl Bots {
             manual,
         });
         self.write_routine(routine)?;
+        // A Run now's note applies to that run alone.
+        let note = manual
+            .then(|| routine.note_for(routine.run_requested_at))
+            .flatten()
+            .map(|note| format!("\n\nFor this run only: {note}"))
+            .unwrap_or_default();
         let prompt = format!(
-            "Routine \"{}\" · {}\n\n{}",
+            "Routine \"{}\" · {}\n\n{}{note}",
             routine.name,
             now.format("%A %B %-d, %Y, %H:%M"),
             routine.prompt
@@ -383,23 +389,25 @@ impl Bots {
                 .request_from_chat_row(&session, &prompt)
                 .ok_or_else(|| EngineError::Other("the routine thread has no row".into()))
                 .map(|mut request| {
-                    // The routine's model, else the workspace chat's as it is
-                    // now (the thread copied it once, when it was made).
-                    let chat_model = self
+                    // The routine's choice, else the workspace chat's as it
+                    // is now (the thread copied it once, when it was made).
+                    let chat = self
                         .inner
                         .workspace
                         .chat(&bot.chat_id)
                         .ok()
                         .flatten()
                         .and_then(|chat| chat.config)
-                        .and_then(|config| config.model);
-                    if let Some(model) = routine.chosen_model().map(str::to_string).or(chat_model) {
-                        request.model = Some(model);
-                    }
+                        .map(|config| p::SessionChoice::of_config(&config))
+                        .unwrap_or_default();
+                    routine
+                        .session_choice()
+                        .or(&chat)
+                        .apply_to_run(&mut request);
                     (request, None)
                 }),
             Some(space) => Ok(self
-                .project_request(routine, space, &session, &prompt)
+                .project_request(routine, space, &session, &prompt, &note)
                 .await),
         }
         .and_then(|(request, agent_prompt)| {
@@ -438,18 +446,28 @@ impl Bots {
         space: &Space,
         session: &str,
         prompt: &str,
+        note: &str,
     ) -> (p::RunRequest, Option<String>) {
         let worktree = matches!(
             routine.target,
             RoutineTarget::Project { worktree: true, .. }
         );
-        // The routine's model, else the workspace chat's, as a workspace
-        // routine's runs do.
-        let model = routine.chosen_model().map(str::to_string).or_else(|| {
+        // The routine's choice, else the workspace's for sessions, else the
+        // workspace chat's.
+        let choice = {
             let workspace = &self.inner.workspace;
-            let bot = workspace.bot(&routine.bot_id).ok().flatten()?;
-            workspace.chat(&bot.chat_id).ok().flatten()?.config?.model
-        });
+            let bot = workspace.bot(&routine.bot_id).ok().flatten();
+            let chat = bot
+                .as_ref()
+                .and_then(|bot| workspace.chat(&bot.chat_id).ok().flatten())
+                .and_then(|chat| chat.config)
+                .map(|config| p::SessionChoice::of_config(&config))
+                .unwrap_or_default();
+            routine
+                .session_choice()
+                .or(&bot.map(|b| b.session_choice).unwrap_or_default())
+                .or(&chat)
+        };
         let own = routine
             .worktree_path
             .clone()
@@ -484,10 +502,10 @@ impl Bots {
         {
             tracing::warn!(chat = %session, error = %err, "routine session cwd not moved");
         }
-        let request = p::RunRequest {
+        let mut request = p::RunRequest {
             prompt: prompt.to_string(),
             harness: None,
-            model,
+            model: None,
             reasoning: None,
             model_options: Default::default(),
             cwd,
@@ -498,13 +516,14 @@ impl Bots {
             resume: None,
             worktree: spec,
         };
+        choice.apply_to_run(&mut request);
         let agent_prompt = format!(
             "This is a background run of the routine \"{}\". Questions and permission \
              requests pause this run until your owner answers in Needs you. Never bypass \
              approval. For nonessential ambiguities, make the reasonable choice and say \
              what you assumed. Only what you write after your last tool call is delivered to your \
              owner: finish every tool call first, then write the whole answer in one \
-             piece.\n\n{}",
+             piece.\n\n{}{note}",
             routine.name, routine.prompt
         );
         (request, Some(agent_prompt))

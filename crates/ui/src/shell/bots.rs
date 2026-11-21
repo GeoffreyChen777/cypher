@@ -17,6 +17,7 @@ use cypher_proto::{Bot, BotScope, ProjectGrant};
 mod activity;
 mod board;
 mod chat;
+mod choice;
 mod column;
 mod dialog;
 mod items;

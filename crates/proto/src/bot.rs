@@ -109,6 +109,14 @@ pub struct Bot {
     #[serde(default)]
     pub paused: bool,
     pub created_at: DateTime<Utc>,
+    /// How its plans run: time limit, plans at once, sessions per plan.
+    #[serde(default, skip_serializing_if = "crate::PlanSettings::is_default")]
+    pub plans: crate::PlanSettings,
+    /// The model, thinking and Fast mode of the sessions it starts in
+    /// projects (plan steps, project routines); what it leaves out follows
+    /// its own chat.
+    #[serde(default, skip_serializing_if = "crate::SessionChoice::is_empty")]
+    pub session_choice: crate::SessionChoice,
 }
 
 impl Bot {
@@ -122,6 +130,7 @@ impl Bot {
                 "Instructions must be {BOT_INSTRUCTIONS_MAX_CHARS} characters or fewer."
             ));
         }
+        self.plans.validate()?;
         self.scope.validate()
     }
 }

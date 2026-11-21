@@ -436,13 +436,33 @@ pub fn decision_word(phase: PlanPhase) -> Option<(&'static str, bool)> {
     }
 }
 
-/// A plan card's one quiet line: "Plan · 4 steps · web-api · Studio".
-pub fn plan_sub(steps: usize, place: Option<&str>) -> String {
+/// A plan card's one quiet line: "Plan · 4 steps · web-api · Studio",
+/// and its time limit when it asked for its own: "· up to 8h".
+pub fn plan_sub(steps: usize, place: Option<&str>, limit: Option<u32>) -> String {
     let mut sub = format!("Plan · {}", steps_word(steps));
     if let Some(place) = place {
         sub.push_str(&format!(" · {place}"));
     }
+    if let Some(minutes) = limit {
+        sub.push_str(&format!(" · up to {}", limit_words(minutes)));
+    }
     sub
+}
+
+/// A time limit in hours and minutes: "8h", "1h 30m", "45m", "36h".
+pub fn limit_words(minutes: u32) -> String {
+    match (minutes / 60, minutes % 60) {
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h {m}m"),
+    }
+}
+
+/// A plan's own time limit, when it differs from its workspace's.
+pub fn own_limit(work: &BotWork, workspace_minutes: u32) -> Option<u32> {
+    work.time_limit_minutes
+        .map(cypher_proto::clamp_time_limit)
+        .filter(|minutes| *minutes != workspace_minutes)
 }
 
 /// When a notice happened, as its card says it: "Today 09:00", "Nov 3, 09:00".
@@ -496,10 +516,15 @@ impl Transcript {
                     places.first().cloned().flatten().filter(|first| {
                         places.iter().all(|p| p.as_deref() == Some(first.as_str()))
                     });
-                (work.clone(), common)
+                let workspace_limit = state
+                    .bots
+                    .iter()
+                    .find(|b| b.id == work.bot_id)
+                    .map_or(240, |b| b.plans.time_limit_minutes());
+                (work.clone(), common, own_limit(work, workspace_limit))
             })
         };
-        let Some((work, place)) = found else {
+        let Some((work, place, limit)) = found else {
             // Its record has not landed (or is gone): the title, and why
             // there is nothing more.
             let note = if *resolved {
@@ -540,7 +565,7 @@ impl Transcript {
             crate::kit::icons::CHECKLIST,
             tone,
             single_line(&work.title).into(),
-            plan_sub(work.steps.len(), place.as_deref()).into(),
+            plan_sub(work.steps.len(), place.as_deref(), limit).into(),
             theme,
         );
         let Some((word, approved)) = decision_word(phase) else {
@@ -804,6 +829,7 @@ mod tests {
             note: None,
             started_at: None,
             ended_at: None,
+            session_choice: Default::default(),
         }
     }
 
@@ -826,6 +852,10 @@ mod tests {
             decision: None,
             stop_requested_at: None,
             notify: false,
+            time_limit_minutes: None,
+            time_added_minutes: None,
+            warned_at: None,
+            coordinator_choice: Default::default(),
         }
     }
 
@@ -925,9 +955,10 @@ mod tests {
         for phase in [Cancelling, Cancelled] {
             assert_eq!(decision_word(phase), Some(("Rejected", false)), "{phase:?}");
         }
-        assert_eq!(plan_sub(1, None), "Plan · 1 step");
+        assert_eq!(plan_sub(1, None, None), "Plan · 1 step");
+        assert_eq!(plan_sub(2, None, Some(90)), "Plan · 2 steps · up to 1h 30m");
         assert_eq!(
-            plan_sub(4, Some("web-api · Studio")),
+            plan_sub(4, Some("web-api · Studio"), None),
             "Plan · 4 steps · web-api · Studio"
         );
     }

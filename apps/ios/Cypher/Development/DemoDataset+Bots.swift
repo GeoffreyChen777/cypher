@@ -55,6 +55,11 @@ extension DemoDataset {
         }
     }
 
+    func addWorkTime(workId: String, minutes: Int) async throws {
+        let ix = try index(of: workId, in: \.work, what: "plan")
+        botRecords.work[ix].timeAddedMinutes = (botRecords.work[ix].timeAddedMinutes ?? 0) + minutes
+    }
+
     func resolveApproval(approvalId: String, approve: Bool) async throws {
         let ix = try index(of: approvalId, in: \.approvals, what: "approval")
         botRecords.approvals[ix].decision = PlanDecision(approve: approve, at: nowMs())
@@ -64,10 +69,11 @@ extension DemoDataset {
         }
     }
 
-    func runRoutine(routineId: String) async throws {
+    func runRoutine(routineId: String, note: String?) async throws {
         let ix = try index(of: routineId, in: \.routines, what: "routine")
         let now = nowMs()
         botRecords.routines[ix].runRequestedAt = now
+        botRecords.routines[ix].runNote = note.map { RunNote(at: now, text: $0) }
         hostLater { demo in
             guard let ix = demo.botRecords.routines.firstIndex(where: { $0.id == routineId }) else { return }
             demo.botRecords.routines[ix].lastRun = RunRecord(
@@ -164,10 +170,14 @@ extension DemoDataset {
 
     func updateBot(
         botId: String, name: String, icon: String?, color: String?, instructions: String?,
-        scope: BotScope, capabilities: BotCapabilities?
+        scope: BotScope, capabilities: BotCapabilities?, plans: PlanSettings?, sessionChoice: SessionChoice?
     ) async throws {
         guard let ix = bots.firstIndex(where: { $0.id == botId }) else { throw BotActionError.missing("workspace") }
-        if let error = Bot.nameError(name) ?? scope.validationError { throw BotActionError(error) }
+        if let error = Bot.nameError(name) ?? scope.validationError ?? plans?.validationError {
+            throw BotActionError(error)
+        }
+        if let plans { bots[ix].plans = plans }
+        if let sessionChoice { bots[ix].sessionChoice = sessionChoice }
         try? await Task.sleep(nanoseconds: 200_000_000)
         bots[ix].name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         bots[ix].icon = icon.flatMap { $0.isEmpty ? nil : $0 }

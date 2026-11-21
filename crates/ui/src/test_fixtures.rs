@@ -98,6 +98,8 @@ pub fn bot() -> Bot {
         capabilities: Default::default(),
         paused: false,
         created_at: DateTime::<Utc>::UNIX_EPOCH,
+        plans: Default::default(),
+        session_choice: Default::default(),
     }
 }
 
@@ -119,6 +121,7 @@ pub fn bot_work(id: &str, bot_id: &str) -> BotWork {
             note: None,
             started_at: None,
             ended_at: None,
+            session_choice: Default::default(),
         }],
         state: WorkState::Proposed,
         chat_id: "bot-chat".into(),
@@ -131,6 +134,10 @@ pub fn bot_work(id: &str, bot_id: &str) -> BotWork {
         decision: None,
         stop_requested_at: None,
         notify: false,
+        time_limit_minutes: None,
+        time_added_minutes: None,
+        warned_at: None,
+        coordinator_choice: Default::default(),
     }
 }
 
@@ -155,5 +162,8 @@ pub fn bot_routine(id: &str, bot_id: &str) -> BotRoutine {
         worktree_path: None,
         last_run: None,
         next_run_at: None,
+        thinking: None,
+        fast: None,
+        run_note: None,
     }
 }

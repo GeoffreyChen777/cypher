@@ -21,19 +21,69 @@ impl Repos {
         repo_path: &Path,
         branch: &str,
     ) -> Result<Worktree, EngineError> {
+        self.create_named_worktree(repo_path, branch, None).await
+    }
+
+    /// [`Self::create_worktree`], on a new branch named `new_branch` when
+    /// given (its folder named after it), else a generated `cypher/<name>`.
+    /// A named branch that exists already is refused, never reused.
+    pub async fn create_named_worktree(
+        &self,
+        repo_path: &Path,
+        branch: &str,
+        new_branch: Option<&str>,
+    ) -> Result<Worktree, EngineError> {
         let repo_name = repo_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "repo".to_string());
         let base = self.worktrees_root().join(&repo_name);
         std::fs::create_dir_all(&base)?;
-        // Auto-generate a name colliding with neither an existing dir nor branch.
         let existing: HashSet<String> = self
             .branches(repo_path)
             .await
             .unwrap_or_default()
             .into_iter()
             .collect();
+        if let Some(new_branch) = new_branch {
+            valid_branch_name(new_branch).map_err(EngineError::Other)?;
+            if existing.contains(new_branch) || self.branch_exists(repo_path, new_branch).await {
+                return Err(EngineError::Other(format!(
+                    "A branch named {new_branch} exists already; pick another name."
+                )));
+            }
+            // The folder is the branch with `/` as `-`, never the generated
+            // `cypher/<folder>` shape, so a title rename leaves it alone.
+            let folder = new_branch.replace('/', "-");
+            let mut name = folder.clone();
+            let mut n = 2;
+            while base.join(&name).exists() {
+                name = format!("{folder}-{n}");
+                n += 1;
+            }
+            let path = base.join(&name);
+            self.git(
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    new_branch,
+                    &path.to_string_lossy(),
+                    branch,
+                ],
+                Some(repo_path),
+            )
+            .await?;
+            let checkout = self.checkout_identity(&path).await?;
+            return Ok(Worktree {
+                repo_path: repo_path.to_string_lossy().to_string(),
+                path: path.to_string_lossy().to_string(),
+                branch: new_branch.to_string(),
+                name,
+                checkout_id: Some(checkout.id),
+            });
+        }
+        // Auto-generate a name colliding with neither an existing dir nor branch.
         let mut name = None;
         for attempt in 0..50u64 {
             let seed = std::time::SystemTime::now()
@@ -77,6 +127,34 @@ impl Repos {
             checkout_id: Some(checkout.id),
         })
     }
+}
+
+/// A branch name a worktree may be created on: what `git check-ref-format
+/// --branch` takes, in plain terms the model can fix.
+pub fn valid_branch_name(name: &str) -> Result<(), String> {
+    let bad = |why: &str| Err(format!("\"{name}\" can't be a branch name: {why}."));
+    if name.is_empty() || name.len() > 200 {
+        return bad("give 1 to 200 characters");
+    }
+    if name.starts_with('-') || name.starts_with('/') || name.ends_with('/') {
+        return bad("it may not start with - or /, or end with /");
+    }
+    if name.ends_with('.') || name.ends_with(".lock") {
+        return bad("it may not end with . or .lock");
+    }
+    if name.contains("..") || name.contains("//") || name.contains("@{") || name == "@" {
+        return bad("it may not hold .., //, @{ or be @");
+    }
+    if name
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || "~^:?*[\\".contains(c))
+    {
+        return bad("no spaces or any of ~ ^ : ? * [ \\");
+    }
+    if name.split('/').any(|part| part.starts_with('.')) {
+        return bad("no part of it may start with .");
+    }
+    Ok(())
 }
 
 impl Repos {

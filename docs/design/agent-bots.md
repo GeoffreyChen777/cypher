@@ -318,8 +318,23 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
   progress ring and current step) and its page in the detail panel (each step's
   state, its sessions, elapsed time).
 - **Stop** ends the thread and interrupts every session it started.
-- Limits per bot: concurrent orchestrations (3), sessions per orchestration (8), turns per
-  worker, and a total time budget, all configurable.
+- Limits per bot, in its settings (`Bot.plans`, `PlanSettings`): a time limit per plan
+  (default 4 hours, 15 minutes to 72 hours), plans running at once (default 3, 1 to 10)
+  and sessions per plan (default 8, 1 to 24). Turns per worker are not limited.
+- **Time.** A plan may ask for its own limit (`propose_plan`'s `time_limit_minutes`, from
+  the owner's words); the card says it when it differs from the workspace's. While it
+  runs the owner adds time from its page (`Mutate addBotWorkTime`, an hour a tap, at most
+  72 hours in all). Fifteen minutes before the limit the coordinating session is told,
+  once per deadline, to start nothing new and report with `finish_work`; at the limit
+  the host stops it like Stop, saying why.
+- **Models.** Every session a workspace starts can have its own model, thinking level and
+  GPT Fast mode (`SessionChoice`). The workspace's settings hold the default for the
+  sessions it starts in projects (`Bot.sessionChoice`); a plan sets the coordinating
+  session's (`coordinatorChoice`) and each step's (`WorkStep.sessionChoice`), and a
+  `start_session` call may set its own. A worker takes the call's, else its step's, else
+  the workspace's, else the workspace chat's, field by field. Fast mode travels as
+  `modelOptions.fast` and reaches cypher-fast-mode.ts as `CYPHER_FAST_MODE`, which
+  applies a request once and then leaves the owner's own `/fast` alone.
 - Orchestration threads survive engine restarts like any chat: their transcript and the
   durable command queue carry the state.
 
@@ -372,7 +387,7 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
   the owner's: the thread waits for it. `wait_for_session` hands a thread each question
   once; called again on the same open question it holds until the owner answers, so the
   plan stays running (its step asking) instead of ending as failed the moment a worker
-  asks, and goes on from the answer. The thread's four-hour budget bounds the wait.
+  asks, and goes on from the answer. The plan's time limit (§6.6) bounds the wait.
 - **The brief** (`bots/work/text.rs`) carries the plan with step ids, projects and
   devices, the instruction verbatim in quotes, and what the thread may do in plain words.
   Its memory joins it with the memory track.
@@ -388,10 +403,10 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
   keeps it out of the Sessions view and in its workspace. The host also stamps the
   sessions of work started before the field existed, once each, so they move to their
   workspace too. Which step started a session still reads `BotRecords::started_by`.
-- **Limits.** 3 running orchestrations per bot (more approved plans wait for a slot), 8
-  sessions per orchestration, 8 per step, 10 steps per plan. The bot's `paused` flag keeps
-  approved plans waiting and refuses new worktrees and sessions. Turn and time budgets
-  are not built.
+- **Limits.** The workspace's plans at once (default 3; more approved plans wait for a
+  slot) and sessions per plan (default 8), 8 sessions per step, 10 steps per plan, and
+  the time limit (§6.6). The bot's `paused` flag keeps approved plans waiting and refuses
+  new worktrees and sessions. Turn budgets are not built.
 - **The activity log** gets a `botActivity` row for each proposal, start, cancel, finish,
   failure, Stop, worktree, session started, answered, steered or stopped, and approval
   asked.
@@ -483,9 +498,12 @@ routines apart is where they run and what they can reach:
 
 As built (P3, engine). A routine is a registry row: `botRoutines` (`BotRoutine`), with a
 `target` of `{kind: "workspace"}` or `{kind: "project", spaceId, worktree}` and an optional
-`model`. Every run, either kind, uses that model, else the workspace chat's model as it is
-at that run (a project target's own `model`, written before the field moved, still
-counts).
+`model`, `thinking` and `fast`. A workspace routine's runs use those, else the workspace
+chat's as it is at that run; a project routine's fall back to the workspace's choice for
+sessions first (§6.6). A project target's own `model`, written before the field moved,
+still counts. A save that leaves `model`, `thinking` or `fast` out clears it. A Run now
+may carry a note for that run only (`runNote: {at, text}`, written with
+`runRequestedAt`, used only when `at` matches it), appended to the run's prompt.
 Owner devices write the definition and `runRequestedAt` ("Run now"); the host writes only
 `threadChatId` (the standing session), `manualChatId` (the latest Run now's session),
 `worktreePath` (a project routine's own worktree), `lastRun` (with `manual` set for a Run
@@ -687,11 +705,11 @@ orchestration thread gets the rest but `stop_work` (it ends its own work with
 
 | Tool | Does |
 |---|---|
-| `propose_plan {title, summary?, steps: [{title, project?, detail?}]}` | Writes the plan; its card waits for the owner's approval, which starts an orchestration thread. Bot chat only. |
+| `propose_plan {title, summary?, steps: [{title, project?, detail?, session?}], time_limit_minutes?, coordinator?}` | Writes the plan; its card waits for the owner's approval, which starts an orchestration thread. `session` and `coordinator` are `{model?, thinking?, fast?}` for a step's sessions and the coordinating session; the time limit defaults to the workspace's (§6.6). Bot chat only. |
 | `list_work`, `get_work {work_id}` | The bot's plans with state and progress; one plan's steps, their sessions with status and links, and its result. |
 | `stop_work {work_id}` | Bot chat: stops running work at the owner's word, like the work page's Stop. A plan awaiting approval is the owner's to cancel. After a peer's answer, the owner approves it first (§4.3). |
-| `create_worktree {project, branch?}` | A new `cypher/<name>` worktree in one of the plan's projects, off `branch` (default HEAD), on that project's device: locally through the engine's repos, on another device through its forwardable `CreateWorktree` within 30 s. Returns the path. |
-| `start_session {step, project, prompt, title?, cwd?, model?}` | A session in one of the plan's projects or a worktree from `create_worktree`, recorded on the step; returns its id. |
+| `create_worktree {project, branch?, name?}` | A new worktree in one of the plan's projects, off `branch` (default HEAD), on a branch named `name` (refused when it exists) or a generated `cypher/<name>`, on that project's device: locally through the engine's repos, on another device through its forwardable `CreateWorktree` (`newBranch`) within 30 s. Returns the path. |
+| `start_session {step, project, prompt, title?, cwd? \| worktree?, branch?, branch_name?, model?, thinking?, fast?}` | A session in one of the plan's projects, a worktree from `create_worktree`, or (`worktree: true`) a new worktree this call makes; recorded on the step; returns its id and what it runs on. |
 | `wait_for_session {session_id, timeout_s?}` | Waits (default 300 s, at most 900) until a session settles or asks; returns its state, its last message and any question with its options, as quoted data. A question is read out once: called again while the same question is open, it waits for the owner's answer (or the wait's end, or Stop). |
 | `answer_session {session_id, answers? \| text?}` | Answers the question a session is asking (never a permission prompt). |
 | `steer_session {session_id, message}`, `stop_session {session_id}` | For sessions this work started; for others only with *Coordinate: steer* and the owner's approval of each action. |
@@ -704,8 +722,8 @@ orchestration thread gets the rest but `stop_work` (it ends its own work with
 |---|---|---|
 | `memory`, `search_history`, `read_history` | owner, routine | Memory ([memory.md](memory.md) §3, §5): the workspace's and the user's files, project stores read-only, and its own past threads. |
 | `list_routines` | owner, routine | The bot's routines: name, id, where each runs, schedule in words, next run, last result. |
-| `save_routine {id?, name, prompt, schedule, write_notes?, work_directly?, enabled?, project?, worktree?, model?}` | bot chat | Creates or changes a routine; with `project` (a project in scope, and *Coordinate*) it runs as a session there. Validates it and answers with what was saved and its next run. |
-| `run_routine {id}` | bot chat | Runs a routine now, like its page's Run now: a fresh run whose result is announced in the bot chat (§6.8); says when it will be skipped (paused, no *Coordinate*) or wait for a run in progress. After a peer's answer, the owner approves it first (§4.3). |
+| `save_routine {id?, name, prompt, schedule, write_notes?, work_directly?, enabled?, project?, worktree?, model?, thinking?, fast?}` | bot chat | Creates or changes a routine; with `project` (a project in scope, and *Coordinate*) it runs as a session there. Validates it and answers with what was saved and its next run. |
+| `run_routine {id, note?}` | bot chat | Runs a routine now, like its page's Run now, with `note` as extra instructions for this run only: a fresh run whose result is announced in the bot chat (§6.8); says when it will be skipped (paused, no *Coordinate*) or wait for a run in progress. After a peer's answer, the owner approves it first (§4.3). |
 | `delete_routine {id}` | bot chat | Deletes a routine and its sessions, like its page's Delete; same approval rule. |
 | `list_activity {since_hours?, kind?}` | owner, routine | The workspace's own activity log, newest first (default the last 24 h; `kind` = plans, sessions, routines, memory or network). |
 | `list_shortcuts`, `save_shortcut {id?, label, icon?, request}`, `delete_shortcut {id}` | bot chat | The sidebar's shortcut buttons (§13.1), kept only by asking. |
@@ -1353,7 +1371,13 @@ Behaviour:
 - Cards update live from the engine (`WatchBotRecords`: work, routines, notes, the
   audit log); they hold no state of their own. Resolving an item anywhere updates every
   count: the card, the switcher list and the logo's amber count.
-- Settings stay in the palette; no card edits permissions itself.
+- Settings stay in the palette; no card edits permissions itself. Besides the avatar,
+  permissions and instructions, the palette holds **Plans** (time limit, plans at once,
+  sessions per plan) and **Sessions it starts** (model, thinking, Fast mode; "Default"
+  follows the workspace chat). The routine form has the same three rows for its runs. A
+  running plan's page has **+1h** beside Stop; within 15 minutes of its limit it says how
+  long is left, in the warning colour. iOS has the same in the settings sheet, the
+  routine form and the work page's decision bar.
 - Usage meters and embedded transcripts are left out: rows link to the thread or session
   instead.
 

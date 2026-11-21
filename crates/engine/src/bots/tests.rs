@@ -84,6 +84,8 @@ fn view_with(scope: BotScope, sessions: Vec<Session>) -> View {
             capabilities: Default::default(),
             paused: false,
             created_at: at(0),
+            plans: Default::default(),
+            session_choice: Default::default(),
         },
         vec![space("s1", "/code/billing"), space("s2", "/code/secret")],
         vec![
@@ -665,6 +667,8 @@ fn index_targets_are_the_union_of_this_devices_reading_bots() {
         capabilities: Default::default(),
         paused: false,
         created_at: at(0),
+        plans: Default::default(),
+        session_choice: Default::default(),
     };
     let grant = |space: &str| BotScope {
         projects: ProjectGrant::Selected {

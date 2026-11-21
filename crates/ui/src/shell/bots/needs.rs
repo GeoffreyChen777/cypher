@@ -103,7 +103,16 @@ pub(super) fn plan_line(state: &crate::state::AppState, work: &cypher_proto::Bot
         .cloned()
         .flatten()
         .filter(|first| places.iter().all(|p| p.as_deref() == Some(first.as_str())));
-    crate::transcript::bot_plan::plan_sub(work.steps.len(), common.as_deref())
+    let workspace_limit = state
+        .bots
+        .iter()
+        .find(|b| b.id == work.bot_id)
+        .map_or(240, |b| b.plans.time_limit_minutes());
+    crate::transcript::bot_plan::plan_sub(
+        work.steps.len(),
+        common.as_deref(),
+        crate::transcript::bot_plan::own_limit(work, workspace_limit),
+    )
 }
 
 /// Who a session the workspace runs belongs to, for its card's source: the

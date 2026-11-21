@@ -30,7 +30,7 @@ mod worktrees;
 
 use file_index::FileIndexCache;
 pub use history::{GIT_HISTORY_DEFAULT_LIMIT, GIT_HISTORY_MAX_LIMIT};
-pub use worktrees::{chat_worktree_name, worktree_branch_from_title};
+pub use worktrees::{chat_worktree_name, valid_branch_name, worktree_branch_from_title};
 
 /// Existence probe timeout for user-chosen / remembered paths, which can point at
 /// dead network mounts where a bare `stat` hangs for minutes.

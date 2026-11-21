@@ -27,10 +27,10 @@ use cypher_rpc::methods;
 
 use super::{Role, is_within, role};
 use crate::EngineError;
-use crate::bots::Bots;
 use crate::bots::git::resolve_space;
 use crate::bots::prompt::space_name;
 use crate::bots::tools::{View, entry_text, when};
+use crate::bots::{Bots, ChoiceArgs};
 use crate::host::workspace_host::Fields;
 use crate::util::{lock, new_id, off_runtime};
 
@@ -65,6 +65,12 @@ struct ProposePlan {
     summary: Option<String>,
     #[serde(default)]
     steps: Vec<PlanStep>,
+    /// Minutes it may run; the workspace's limit when left out.
+    #[serde(default)]
+    time_limit_minutes: Option<f64>,
+    /// The coordinating session's model, thinking and Fast mode.
+    #[serde(default)]
+    coordinator: Option<ChoiceArgs>,
     /// Set by the `BotTool` RPC from the Pi tool call.
     #[serde(default, rename = "_toolCallId")]
     tool_call_id: Option<String>,
@@ -78,6 +84,9 @@ struct PlanStep {
     project: Option<String>,
     #[serde(default)]
     detail: Option<String>,
+    /// The model, thinking and Fast mode of the sessions it starts.
+    #[serde(default)]
+    session: Option<ChoiceArgs>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +99,9 @@ struct CreateWorktree {
     project: String,
     #[serde(default)]
     branch: Option<String>,
+    /// The new branch's name (default: a generated `cypher/<name>`).
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,6 +115,18 @@ struct StartSession {
     cwd: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
+    #[serde(default)]
+    fast: Option<bool>,
+    /// Start it in a new worktree of the project, made by this call.
+    #[serde(default)]
+    worktree: Option<bool>,
+    /// With `worktree`: the base branch or ref, and the new branch's name.
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    branch_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -683,6 +707,34 @@ impl Bots {
                 p::PLAN_DETAILS_MAX
             )));
         }
+        let time_limit = match args.time_limit_minutes {
+            None => view.bot.plans.time_limit_minutes(),
+            Some(minutes)
+                if minutes.is_finite()
+                    && (f64::from(p::PLAN_TIME_LIMIT_MIN_MINUTES)
+                        ..=f64::from(p::PLAN_TIME_LIMIT_MAX_MINUTES))
+                        .contains(&minutes) =>
+            {
+                minutes.round() as u32
+            }
+            Some(minutes) => {
+                return Err(refuse(format!(
+                    "A time limit of {minutes} minutes is out of range: give {} to {} \
+                     minutes ({} hours), or leave it out for the workspace's {}.",
+                    p::PLAN_TIME_LIMIT_MIN_MINUTES,
+                    p::PLAN_TIME_LIMIT_MAX_MINUTES,
+                    p::PLAN_TIME_LIMIT_MAX_MINUTES / 60,
+                    p::describe_minutes(view.bot.plans.time_limit_minutes())
+                )));
+            }
+        };
+        let coordinator_choice = args
+            .coordinator
+            .as_ref()
+            .map(ChoiceArgs::choice)
+            .transpose()
+            .map_err(|err| refuse(format!("The coordinator's choice: {err}")))?
+            .unwrap_or_default();
         let mut steps = Vec::with_capacity(args.steps.len());
         for (index, step) in args.steps.iter().enumerate() {
             if step.title.trim().is_empty() {
@@ -694,6 +746,13 @@ impl Bots {
                 }
                 _ => None,
             };
+            let session_choice = step
+                .session
+                .as_ref()
+                .map(ChoiceArgs::choice)
+                .transpose()
+                .map_err(|err| refuse(format!("Step {}'s sessions: {err}", index + 1)))?
+                .unwrap_or_default();
             steps.push(WorkStep {
                 id: (index + 1).to_string(),
                 title: step.title.trim().to_string(),
@@ -709,6 +768,7 @@ impl Bots {
                 note: None,
                 started_at: None,
                 ended_at: None,
+                session_choice,
             });
         }
         let instruction = self.latest_owner_message(&chat.id).await;
@@ -736,6 +796,10 @@ impl Bots {
             decision: None,
             stop_requested_at: None,
             notify: false,
+            time_limit_minutes: Some(time_limit),
+            time_added_minutes: None,
+            warned_at: None,
+            coordinator_choice,
         };
         work.clamp();
         self.inner.workspace.put_record(
@@ -760,7 +824,7 @@ impl Bots {
             .work_of(&view.bot.id)
             .filter(|w| w.state == WorkState::Running)
             .count();
-        if running >= p::MAX_RUNNING_WORK {
+        if running >= view.bot.plans.running_max() {
             waiting = format!(
                 " {running} plans are already running, the most at once; once approved it \
                  starts when one finishes."
@@ -778,10 +842,12 @@ impl Bots {
         }
         Ok(format!(
             "The plan \"{}\" (work {}) is waiting for your owner's approval in a card in this \
-             chat.{waiting} Stop here: end your turn with one line saying it awaits approval. \
-             Once approved, a background session carries it out and you are told here when \
-             it ends; list_work and get_work show where it stands.",
-            work.title, work.id
+             chat. Once running it may take {}.{waiting} Stop here: end your turn with one line \
+             saying it awaits approval. Once approved, a background session carries it out and \
+             you are told here when it ends; list_work and get_work show where it stands.",
+            work.title,
+            work.id,
+            p::describe_minutes(time_limit)
         ))
     }
 
@@ -910,6 +976,24 @@ impl Bots {
         if let Some(ended) = work.ended_at {
             out.push(format!("Ended {}", when(at(ended), view.now)));
         }
+        let limit = work.limit_minutes(view.bot.plans.time_limit_minutes());
+        match work.deadline_ms(view.bot.plans.time_limit_minutes()) {
+            Some(deadline) if work.state == WorkState::Running => {
+                let left = ((deadline - view.now.timestamp_millis()).max(0) / 60_000) as u32;
+                out.push(format!(
+                    "Time limit {}: about {} left",
+                    p::describe_minutes(limit),
+                    p::describe_minutes(left)
+                ));
+            }
+            _ => out.push(format!("Time limit {}", p::describe_minutes(limit))),
+        }
+        if !work.coordinator_choice.is_empty() {
+            out.push(format!(
+                "Coordinating session: {}",
+                work.coordinator_choice.describe()
+            ));
+        }
         if let Some(summary) = &work.summary {
             out.push(format!("Summary: {summary}"));
         }
@@ -935,6 +1019,12 @@ impl Bots {
             ));
             if let Some(note) = &step.note {
                 out.push(format!("   note: {note}"));
+            }
+            if !step.session_choice.is_empty() {
+                out.push(format!(
+                    "   sessions use {}",
+                    step.session_choice.describe()
+                ));
             }
             for session in &step.sessions {
                 match view.chats.iter().find(|c| &c.id == session) {
@@ -1070,30 +1160,70 @@ impl Bots {
     ) -> Result<String, EngineError> {
         self.refuse_if_paused(view)?;
         let space = self.plan_space(view, work, &args.project)?;
-        let name = space_name(&space);
+        let (worktree, base) = self
+            .make_worktree(
+                chat,
+                view,
+                work,
+                &space,
+                args.branch.as_deref(),
+                args.name.as_deref(),
+            )
+            .await?;
+        Ok(format!(
+            "Created a worktree of {} on {}: {} on the new branch {} (from {base}). \
+             Pass it as cwd to start_session.",
+            space_name(&space),
+            view.device(&space.device_id),
+            worktree.path,
+            worktree.branch
+        ))
+    }
+
+    /// A new worktree of `space` from `base` (default HEAD), on a branch
+    /// named `branch_name` or a generated one, on the project's device;
+    /// logged, so sessions of this work may run in it.
+    async fn make_worktree(
+        &self,
+        chat: &Chat,
+        view: &View,
+        work: &BotWork,
+        space: &Space,
+        base: Option<&str>,
+        branch_name: Option<&str>,
+    ) -> Result<(Worktree, String), EngineError> {
+        let name = space_name(space);
         let device = view.device(&space.device_id).to_string();
-        let base = args
-            .branch
-            .as_deref()
+        let base = base
             .map(str::trim)
             .filter(|b| !b.is_empty())
             .unwrap_or("HEAD")
             .to_string();
+        let branch_name = branch_name.map(str::trim).filter(|b| !b.is_empty());
+        if let Some(branch) = branch_name {
+            crate::git::repos::valid_branch_name(branch).map_err(refuse)?;
+        }
         self.gate(
             chat,
             view,
             work,
-            format!("Create a worktree of {name} on {device} (from {base})"),
+            match branch_name {
+                Some(branch) => {
+                    format!("Create a worktree of {name} on {device} (branch {branch} from {base})")
+                }
+                None => format!("Create a worktree of {name} on {device} (from {base})"),
+            },
         )
         .await?;
         let worktree = if space.device_id == self.device_id() {
             self.inner
                 .repos
-                .create_worktree(Path::new(&space.path), &base)
+                .create_named_worktree(Path::new(&space.path), &base, branch_name)
                 .await
                 .map_err(|err| refuse(format!("Could not create a worktree of {name}: {err}")))?
         } else {
-            self.remote_worktree(&space, &base, &device).await?
+            self.remote_worktree(space, &base, branch_name, &device)
+                .await?
         };
         self.log(
             &view.bot.id,
@@ -1103,11 +1233,7 @@ impl Bots {
             Some(&work.id),
             Some(&space.id),
         );
-        Ok(format!(
-            "Created a worktree of {name} on {device}: {} on the new branch {} (from {base}). \
-             Pass it as cwd to start_session.",
-            worktree.path, worktree.branch
-        ))
+        Ok((worktree, base))
     }
 
     /// `CreateWorktree` on the project's device, over the device relay.
@@ -1115,6 +1241,7 @@ impl Bots {
         &self,
         space: &Space,
         base: &str,
+        branch_name: Option<&str>,
         device: &str,
     ) -> Result<Worktree, EngineError> {
         let offline = || {
@@ -1135,6 +1262,7 @@ impl Bots {
                         "targetDeviceId": space.device_id,
                         "repoPath": space.path,
                         "branch": base,
+                        "newBranch": branch_name,
                     }),
                 )
                 .await
@@ -1152,11 +1280,18 @@ impl Bots {
         let value = tokio::time::timeout(REMOTE_TIMEOUT, call)
             .await
             .map_err(|_| offline())??;
-        serde_json::from_value(value).map_err(|err| {
+        let worktree: Worktree = serde_json::from_value(value).map_err(|err| {
             refuse(format!(
                 "{device} answered with an unreadable worktree: {err}"
             ))
-        })
+        })?;
+        // A device from before branch names makes one up instead.
+        if let Some(branch) = branch_name
+            && worktree.branch != branch
+        {
+            tracing::info!(device, wanted = branch, got = %worktree.branch, "worktree branch not named");
+        }
+        Ok(worktree)
     }
 
     /// Whether `cwd` is somewhere a session of this work may run in
@@ -1191,7 +1326,7 @@ impl Bots {
         };
         let space = self.plan_space(view, work, &args.project)?;
         let started = work.session_ids().count();
-        if started >= p::MAX_SESSIONS_PER_WORK {
+        if started >= view.bot.plans.sessions_max() {
             return Err(refuse(format!(
                 "This work has started {started} sessions, the most one orchestration may. \
                  Reuse one with steer_session, or finish with what you have."
@@ -1213,13 +1348,53 @@ impl Bots {
                 "Keep a session's prompt under {SESSION_PROMPT_MAX} characters."
             )));
         }
-        let cwd = match args.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        let choice = ChoiceArgs {
+            model: args.model.clone(),
+            thinking: args.thinking.clone(),
+            fast: args.fast,
+        }
+        .choice()
+        .map_err(refuse)?;
+        let wants_worktree = args.worktree.unwrap_or(false);
+        let cwd_arg = args.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty());
+        if wants_worktree && cwd_arg.is_some() {
+            return Err(refuse(
+                "Pass either cwd (an existing worktree) or worktree: true (a new one), not both.",
+            ));
+        }
+        if !wants_worktree
+            && args
+                .branch_name
+                .as_deref()
+                .is_some_and(|b| !b.trim().is_empty())
+        {
+            return Err(refuse(
+                "branch_name names the branch of a new worktree; pass worktree: true with it.",
+            ));
+        }
+        let mut made = None;
+        let cwd = match cwd_arg {
+            None if wants_worktree => {
+                let (worktree, base) = self
+                    .make_worktree(
+                        chat,
+                        view,
+                        work,
+                        &space,
+                        args.branch.as_deref(),
+                        args.branch_name.as_deref(),
+                    )
+                    .await?;
+                let path = worktree.path.clone();
+                made = Some((worktree, base));
+                path
+            }
             None => space.path.clone(),
             Some(cwd) if self.allowed_cwd(work, &space, cwd) => cwd.to_string(),
             Some(cwd) => {
                 return Err(refuse(format!(
                     "{cwd} is neither {}'s folder nor a worktree this work created there. Use \
-                     create_worktree first.",
+                     create_worktree first, or pass worktree: true.",
                     space_name(&space)
                 )));
             }
@@ -1253,23 +1428,14 @@ impl Bots {
                 model_options: Default::default(),
                 sandbox: SandboxLevel::WorkspaceWrite,
             });
-        let model = args
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|m| !m.is_empty())
-            .map(String::from);
-        let config = ChatConfig {
-            harness: bot_config.harness,
-            model_options: if model.is_some() {
-                Default::default()
-            } else {
-                bot_config.model_options
-            },
-            model: model.or(bot_config.model),
-            reasoning: bot_config.reasoning,
+        // This call's choice, else the step's, else the workspace's for
+        // sessions, else the workspace chat's own config.
+        let choice = choice.or(&step.session_choice).or(&view.bot.session_choice);
+        let mut config = ChatConfig {
             sandbox: SandboxLevel::WorkspaceWrite,
+            ..bot_config
         };
+        choice.apply(&mut config);
         let session_id = new_id();
         ws.create_chat(
             &session_id,
@@ -1330,9 +1496,22 @@ impl Bots {
             Some(&work.id),
             Some(&space.id),
         );
+        let place = match &made {
+            Some((worktree, base)) => format!(
+                "in a new worktree, {cwd}, on the new branch {} (from {base})",
+                worktree.branch
+            ),
+            None => format!("in {cwd}"),
+        };
+        let runs_on = p::SessionChoice::of_config(&config).describe();
+        let runs_on = if runs_on.is_empty() {
+            String::new()
+        } else {
+            format!(" It runs on {runs_on}.")
+        };
         Ok(format!(
             "Started session {session_id} (\"{title}\") in {name} on {device} for step \
-             {step_id}, in {cwd}. Follow it with wait_for_session. Link: \
+             {step_id}, {place}.{runs_on} Follow it with wait_for_session. Link: \
              [{title}](cypher://session/{session_id})"
         ))
     }

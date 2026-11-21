@@ -16,6 +16,12 @@ pub enum Fields<'a> {
     /// Every field but these: the host leaves an owner's control fields
     /// alone, and an owner device leaves the host's state alone.
     Except(&'a [&'a str]),
+    /// [`Fields::Except`], writing `null` for each of `clear` the value
+    /// leaves out, so an optional field set back to none is cleared.
+    ExceptClearing {
+        drop: &'a [&'a str],
+        clear: &'a [&'a str],
+    },
 }
 
 /// `value`'s fields as a row write, filtered by `fields`. A field the value
@@ -41,6 +47,12 @@ pub fn record_fields<T: Serialize>(
             }
         }
         Fields::Except(drop) => map.retain(|key, _| !drop.contains(&key.as_str())),
+        Fields::ExceptClearing { drop, clear } => {
+            map.retain(|key, _| !drop.contains(&key.as_str()));
+            for key in clear {
+                map.entry(key.to_string()).or_insert(Value::Null);
+            }
+        }
     }
     Ok(map)
 }

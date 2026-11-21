@@ -70,11 +70,23 @@ pub const ANSWER_MAX: usize = 8_000;
 pub const PLAN_STEPS_MAX: usize = 10;
 pub const STEP_SESSIONS_MAX: usize = 8;
 
-/// Limits the host enforces per bot (§6.6).
+/// Limits the host enforces per bot (§6.6), when its [`PlanSettings`]
+/// leave them out.
 pub const MAX_RUNNING_WORK: usize = 3;
 pub const MAX_SESSIONS_PER_WORK: usize = 8;
 /// How long an orchestration may run before the host stops it.
 pub const WORK_TIME_BUDGET_MS: i64 = 4 * 60 * 60 * 1000;
+/// What an owner may set them to.
+pub const PLAN_TIME_LIMIT_MIN_MINUTES: u32 = 15;
+pub const PLAN_TIME_LIMIT_MAX_MINUTES: u32 = 72 * 60;
+pub const RUNNING_WORK_CAP: u32 = 10;
+pub const SESSIONS_PER_WORK_CAP: u32 = 24;
+/// Time an owner adds to a running plan, in all.
+pub const PLAN_TIME_ADDED_MAX_MINUTES: u32 = 72 * 60;
+/// The coordinating session is told this long before its time is up.
+pub const PLAN_WARN_BEFORE_MS: i64 = 15 * 60 * 1000;
+/// A model id, as a session choice names it.
+pub const MODEL_ID_MAX: usize = 200;
 /// Records the host keeps per bot before pruning the oldest.
 pub const KEEP_ACTIVITY: usize = 200;
 pub const KEEP_FINISHED_WORK: usize = 40;
@@ -126,6 +138,201 @@ impl BotCapabilities {
             coordinate: true,
             steer: false,
         }
+    }
+}
+
+// ── session choices and plan settings ───────────────────────────────────────
+
+/// The model, thinking level and GPT Fast mode of a session a workspace
+/// starts. Each field left out follows what the session falls back to (a
+/// step's choice, then the workspace's, then its chat's).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SessionChoice {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<crate::ReasoningLevel>,
+    /// GPT Fast mode (priority processing on GPT models from 5.4 on).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fast: Option<bool>,
+}
+
+/// The `modelOptions` key a run's GPT Fast mode travels in.
+pub const FAST_MODEL_OPTION: &str = "fast";
+
+impl SessionChoice {
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none() && self.thinking.is_none() && self.fast.is_none()
+    }
+
+    /// `self`, with what it leaves out taken from `fallback`.
+    pub fn or(&self, fallback: &SessionChoice) -> SessionChoice {
+        SessionChoice {
+            model: self.model.clone().or_else(|| fallback.model.clone()),
+            thinking: self.thinking.or(fallback.thinking),
+            fast: self.fast.or(fallback.fast),
+        }
+    }
+
+    /// Blank model ids read as none; ids are capped.
+    pub fn clamp(&mut self) {
+        self.model = clip_opt(&self.model, MODEL_ID_MAX);
+    }
+
+    /// What a chat config chooses, as a choice.
+    pub fn of_config(config: &crate::ChatConfig) -> SessionChoice {
+        SessionChoice {
+            model: config.model.clone(),
+            thinking: config.reasoning,
+            fast: config
+                .model_options
+                .get(FAST_MODEL_OPTION)
+                .and_then(serde_json::Value::as_bool),
+        }
+    }
+
+    /// Apply the choice to a session's config: a model it names replaces
+    /// the config's (and the old model's options, Fast mode aside), a
+    /// thinking level replaces its level, Fast mode its switch.
+    pub fn apply(&self, config: &mut crate::ChatConfig) {
+        if let Some(model) = self.model.as_deref().filter(|m| !m.trim().is_empty()) {
+            if config.model.as_deref() != Some(model) {
+                config
+                    .model_options
+                    .retain(|key, _| key == FAST_MODEL_OPTION);
+            }
+            config.model = Some(model.trim().to_string());
+        }
+        if let Some(thinking) = self.thinking {
+            config.reasoning = Some(thinking);
+        }
+        if let Some(fast) = self.fast {
+            config
+                .model_options
+                .insert(FAST_MODEL_OPTION.into(), fast.into());
+        }
+    }
+
+    /// [`Self::apply`] to a run's request.
+    pub fn apply_to_run(&self, request: &mut crate::RunRequest) {
+        let mut config = crate::ChatConfig {
+            harness: request.harness.unwrap_or(crate::HarnessId::Pi),
+            model: request.model.take(),
+            reasoning: request.reasoning,
+            model_options: std::mem::take(&mut request.model_options),
+            sandbox: request.sandbox,
+        };
+        self.apply(&mut config);
+        request.model = config.model;
+        request.reasoning = config.reasoning;
+        request.model_options = config.model_options;
+    }
+
+    /// "claude-opus-5-5, high thinking, Fast mode", for a model to read;
+    /// empty when it chooses nothing.
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(model) = &self.model {
+            parts.push(model.clone());
+        }
+        if let Some(thinking) = self.thinking {
+            parts.push(format!("{} thinking", thinking.word()));
+        }
+        match self.fast {
+            Some(true) => parts.push("Fast mode".into()),
+            Some(false) => parts.push("no Fast mode".into()),
+            None => {}
+        }
+        parts.join(", ")
+    }
+}
+
+/// How a workspace's plans run (§6.6). Each limit left out is the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PlanSettings {
+    /// Minutes a plan may run before the host stops it (default 240).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_limit_minutes: Option<u32>,
+    /// Plans running at once; approved ones wait for a slot (default 3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub running_max: Option<u32>,
+    /// Sessions one plan may start (default 8).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sessions_max: Option<u32>,
+}
+
+impl PlanSettings {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// A plan's time limit, in minutes, within what an owner may set.
+    pub fn time_limit_minutes(&self) -> u32 {
+        clamp_time_limit(
+            self.time_limit_minutes
+                .unwrap_or((WORK_TIME_BUDGET_MS / 60_000) as u32),
+        )
+    }
+
+    pub fn running_max(&self) -> usize {
+        self.running_max
+            .map_or(MAX_RUNNING_WORK, |n| n.clamp(1, RUNNING_WORK_CAP) as usize)
+    }
+
+    pub fn sessions_max(&self) -> usize {
+        self.sessions_max.map_or(MAX_SESSIONS_PER_WORK, |n| {
+            n.clamp(1, SESSIONS_PER_WORK_CAP) as usize
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(minutes) = self.time_limit_minutes
+            && !(PLAN_TIME_LIMIT_MIN_MINUTES..=PLAN_TIME_LIMIT_MAX_MINUTES).contains(&minutes)
+        {
+            return Err(format!(
+                "A plan's time limit is {} minutes to {} hours.",
+                PLAN_TIME_LIMIT_MIN_MINUTES,
+                PLAN_TIME_LIMIT_MAX_MINUTES / 60
+            ));
+        }
+        if self
+            .running_max
+            .is_some_and(|n| !(1..=RUNNING_WORK_CAP).contains(&n))
+        {
+            return Err(format!("Plans at once is 1 to {RUNNING_WORK_CAP}."));
+        }
+        if self
+            .sessions_max
+            .is_some_and(|n| !(1..=SESSIONS_PER_WORK_CAP).contains(&n))
+        {
+            return Err(format!(
+                "Sessions per plan is 1 to {SESSIONS_PER_WORK_CAP}."
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// `minutes` within what a plan's time limit may be.
+pub fn clamp_time_limit(minutes: u32) -> u32 {
+    minutes.clamp(PLAN_TIME_LIMIT_MIN_MINUTES, PLAN_TIME_LIMIT_MAX_MINUTES)
+}
+
+/// "4 hours", "90 minutes", "1 hour 30 minutes".
+pub fn describe_minutes(minutes: u32) -> String {
+    let plural = |n: u32, one: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {one}s")
+        }
+    };
+    match (minutes / 60, minutes % 60) {
+        (0, m) => plural(m, "minute"),
+        (h, 0) => plural(h, "hour"),
+        (h, m) => format!("{} {}", plural(h, "hour"), plural(m, "minute")),
     }
 }
 
@@ -201,13 +408,46 @@ pub struct BotWork {
     /// that ended under an engine without notices lacks it and gets none.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub notify: bool,
+    /// Minutes it may run, set when it was proposed (the plan's own, else
+    /// the workspace's). Rows from before it run on the workspace's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_limit_minutes: Option<u32>,
+    /// Owner-written: minutes added to the limit while it runs, in all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_added_minutes: Option<u32>,
+    /// Host-written: when the coordinating session was told its time is
+    /// nearly up, against the limit as it was then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warned_at: Option<i64>,
+    /// The coordinating session's model, thinking and Fast mode; what it
+    /// leaves out follows the workspace's chat.
+    #[serde(default, skip_serializing_if = "SessionChoice::is_empty")]
+    pub coordinator_choice: SessionChoice,
 }
 
 impl BotWork {
     /// The fields only an owner device writes.
-    pub const OWNER_FIELDS: &'static [&'static str] = &["decision", "stopRequestedAt"];
+    pub const OWNER_FIELDS: &'static [&'static str] =
+        &["decision", "stopRequestedAt", "timeAddedMinutes"];
+
+    /// Its whole time limit in minutes: its own (else `fallback`, the
+    /// workspace's) plus what the owner added.
+    pub fn limit_minutes(&self, fallback: u32) -> u32 {
+        let own = self.time_limit_minutes.map_or(fallback, clamp_time_limit);
+        own + self
+            .time_added_minutes
+            .unwrap_or(0)
+            .min(PLAN_TIME_ADDED_MAX_MINUTES)
+    }
+
+    /// When it is stopped for time, once it has started.
+    pub fn deadline_ms(&self, fallback: u32) -> Option<i64> {
+        self.started_at
+            .map(|started| started + i64::from(self.limit_minutes(fallback)) * 60_000)
+    }
 
     pub fn clamp(&mut self) {
+        self.coordinator_choice.clamp();
         self.title = clip(&self.title, TITLE_MAX);
         self.instruction = clip(&self.instruction, INSTRUCTION_MAX);
         self.summary = clip_opt(&self.summary, DETAIL_MAX);
@@ -399,6 +639,10 @@ pub struct WorkStep {
     pub started_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<i64>,
+    /// The model, thinking and Fast mode of the sessions it starts; what it
+    /// leaves out follows the workspace's choice for sessions.
+    #[serde(default, skip_serializing_if = "SessionChoice::is_empty")]
+    pub session_choice: SessionChoice,
 }
 
 impl WorkStep {
@@ -407,6 +651,7 @@ impl WorkStep {
         self.detail = clip_opt(&self.detail, STEP_DETAIL_MAX);
         self.note = clip_opt(&self.note, STEP_NOTE_MAX);
         self.sessions.truncate(STEP_SESSIONS_MAX);
+        self.session_choice.clamp();
     }
 }
 
@@ -725,6 +970,14 @@ pub struct BotRoutine {
     /// `target`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Its runs' thinking level; `None` follows what the model falls back
+    /// to (a project routine the workspace's choice for sessions, then the
+    /// workspace chat's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<crate::ReasoningLevel>,
+    /// Its runs' GPT Fast mode; `None` follows the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast: Option<bool>,
     #[serde(default)]
     pub schedule: Schedule,
     #[serde(default = "yes")]
@@ -742,6 +995,12 @@ pub struct BotRoutine {
     /// Owner-written: run once now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_requested_at: Option<i64>,
+    /// Owner-written with a Run now: extra instructions for that run only.
+    /// It belongs to the request it was written with (`at` is that
+    /// request's `runRequestedAt`), so a later Run now without one never
+    /// repeats it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_note: Option<RunNote>,
     // Host-written (the bot's device for a workspace routine, the
     // project's for a project routine):
     /// The standing session scheduled runs reuse.
@@ -759,7 +1018,36 @@ pub struct BotRoutine {
     pub next_run_at: Option<i64>,
 }
 
+/// A Run now's extra instructions ([`BotRoutine::run_note`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunNote {
+    pub at: i64,
+    pub text: String,
+}
+
+/// A Run now's note, at most this long.
+pub const RUN_NOTE_MAX: usize = 2_000;
+
 impl BotRoutine {
+    /// Its runs' model, thinking level and Fast mode, as far as it names
+    /// them.
+    pub fn session_choice(&self) -> SessionChoice {
+        SessionChoice {
+            model: self.chosen_model().map(str::to_string),
+            thinking: self.thinking,
+            fast: self.fast,
+        }
+    }
+
+    /// The note the Run now requested at `requested_at` carries.
+    pub fn note_for(&self, requested_at: Option<i64>) -> Option<&str> {
+        let note = self.run_note.as_ref()?;
+        (Some(note.at) == requested_at)
+            .then_some(note.text.trim())
+            .filter(|text| !text.is_empty())
+    }
+
     /// The model its runs should use, when it names one.
     pub fn chosen_model(&self) -> Option<&str> {
         self.model.as_deref().or(match &self.target {
@@ -767,6 +1055,9 @@ impl BotRoutine {
             RoutineTarget::Workspace => None,
         })
     }
+
+    /// The owner's optional fields: a save that leaves one out clears it.
+    pub const OWNER_OPTIONAL_FIELDS: &'static [&'static str] = &["model", "thinking", "fast"];
 
     /// The fields the host writes; everything else is the owner's.
     pub const HOST_FIELDS: &'static [&'static str] = &[
@@ -780,6 +1071,10 @@ impl BotRoutine {
     pub fn clamp(&mut self) {
         self.name = clip(&self.name, TITLE_MAX);
         self.prompt = clip(&self.prompt, PROMPT_MAX);
+        self.model = clip_opt(&self.model, MODEL_ID_MAX);
+        if let Some(note) = &mut self.run_note {
+            note.text = clip(&note.text, RUN_NOTE_MAX);
+        }
         if let Some(run) = &mut self.last_run {
             run.clamp();
         }
@@ -1418,6 +1713,7 @@ mod tests {
                     note: None,
                     started_at: None,
                     ended_at: None,
+                    session_choice: Default::default(),
                 })
                 .collect(),
             state: WorkState::Proposed,
@@ -1431,6 +1727,10 @@ mod tests {
             decision: None,
             stop_requested_at: None,
             notify: false,
+            time_limit_minutes: None,
+            time_added_minutes: None,
+            warned_at: None,
+            coordinator_choice: Default::default(),
         };
         work.clamp();
         let units = serde_json::to_string(&work).unwrap().encode_utf16().count();
@@ -1444,18 +1744,139 @@ mod tests {
         // registry takes.
         work.result = Some("\"".repeat(RESULT_MAX));
         work.instruction = "\"".repeat(INSTRUCTION_MAX);
+        // The most sessions any workspace may let a plan start, and the
+        // longest model choices, too.
+        let choice = SessionChoice {
+            model: Some("m".repeat(MODEL_ID_MAX)),
+            thinking: Some(crate::ReasoningLevel::XHigh),
+            fast: Some(true),
+        };
+        work.coordinator_choice = choice.clone();
+        work.time_limit_minutes = Some(PLAN_TIME_LIMIT_MAX_MINUTES);
+        work.time_added_minutes = Some(PLAN_TIME_ADDED_MAX_MINUTES);
+        work.warned_at = Some(1_794_465_204_971);
+        let steps = work.steps.len();
         for (index, step) in work.steps.iter_mut().enumerate() {
             step.detail = Some("\"".repeat(STEP_DETAIL_MAX));
             step.note = Some("n".repeat(STEP_NOTE_MAX));
-            if index < MAX_SESSIONS_PER_WORK {
-                step.sessions = vec!["0".repeat(36)];
-            }
+            let share = (SESSIONS_PER_WORK_CAP as usize).div_ceil(steps);
+            let count = share.min(
+                SESSIONS_PER_WORK_CAP as usize
+                    - (index * share).min(SESSIONS_PER_WORK_CAP as usize),
+            );
+            step.sessions = vec!["0".repeat(36); count];
+            step.session_choice = choice.clone();
             step.started_at = Some(1_794_465_204_971);
             step.ended_at = Some(1_794_465_204_971);
         }
+        assert_eq!(work.session_ids().count(), SESSIONS_PER_WORK_CAP as usize);
         work.clamp();
         let units = serde_json::to_string(&work).unwrap().encode_utf16().count();
         assert!(units <= WORK_ROW_MAX, "{units}");
+        assert_eq!(
+            work.session_ids().count(),
+            SESSIONS_PER_WORK_CAP as usize,
+            "no session dropped"
+        );
+    }
+
+    #[test]
+    fn a_session_choice_falls_back_field_by_field_and_applies_to_a_config() {
+        let call = SessionChoice {
+            model: Some("call".into()),
+            ..Default::default()
+        };
+        let step = SessionChoice {
+            model: Some("step".into()),
+            thinking: Some(crate::ReasoningLevel::High),
+            fast: None,
+        };
+        let workspace = SessionChoice {
+            thinking: Some(crate::ReasoningLevel::Low),
+            fast: Some(true),
+            ..Default::default()
+        };
+        let choice = call.or(&step).or(&workspace);
+        assert_eq!(choice.model.as_deref(), Some("call"));
+        assert_eq!(choice.thinking, Some(crate::ReasoningLevel::High));
+        assert_eq!(choice.fast, Some(true));
+        assert_eq!(choice.describe(), "call, high thinking, Fast mode");
+
+        let mut options = serde_json::Map::new();
+        options.insert("effort".into(), "x".into());
+        let mut config = crate::ChatConfig {
+            harness: crate::HarnessId::Pi,
+            model: Some("chat".into()),
+            reasoning: Some(crate::ReasoningLevel::Medium),
+            model_options: options,
+            sandbox: crate::SandboxLevel::WorkspaceWrite,
+        };
+        choice.apply(&mut config);
+        assert_eq!(config.model.as_deref(), Some("call"));
+        assert_eq!(config.reasoning, Some(crate::ReasoningLevel::High));
+        assert_eq!(
+            serde_json::Value::Object(config.model_options.clone()),
+            serde_json::json!({ "fast": true }),
+            "the old model's options go; Fast mode is set"
+        );
+        assert_eq!(SessionChoice::of_config(&config), choice);
+
+        // An empty choice changes nothing, and is left out of the row.
+        let before = config.clone();
+        SessionChoice::default().apply(&mut config);
+        assert_eq!(config, before);
+        let mut blank = SessionChoice {
+            model: Some("  ".into()),
+            ..Default::default()
+        };
+        blank.clamp();
+        assert!(blank.is_empty());
+    }
+
+    #[test]
+    fn plan_settings_default_and_stay_in_bounds() {
+        let plans = PlanSettings::default();
+        assert_eq!(plans.time_limit_minutes(), 240);
+        assert_eq!(plans.running_max(), MAX_RUNNING_WORK);
+        assert_eq!(plans.sessions_max(), MAX_SESSIONS_PER_WORK);
+        assert!(plans.validate().is_ok() && plans.is_default());
+        let wild = PlanSettings {
+            time_limit_minutes: Some(1),
+            running_max: Some(0),
+            sessions_max: Some(99),
+        };
+        assert!(wild.validate().is_err());
+        assert_eq!(wild.time_limit_minutes(), PLAN_TIME_LIMIT_MIN_MINUTES);
+        assert_eq!(wild.running_max(), 1);
+        assert_eq!(wild.sessions_max(), SESSIONS_PER_WORK_CAP as usize);
+        assert_eq!(
+            serde_json::to_value(PlanSettings {
+                time_limit_minutes: Some(480),
+                ..Default::default()
+            })
+            .unwrap(),
+            serde_json::json!({ "timeLimitMinutes": 480 })
+        );
+        assert_eq!(describe_minutes(240), "4 hours");
+        assert_eq!(describe_minutes(90), "1 hour 30 minutes");
+        assert_eq!(describe_minutes(1), "1 minute");
+    }
+
+    #[test]
+    fn a_run_note_belongs_to_its_request() {
+        let mut routine: BotRoutine = serde_json::from_value(serde_json::json!({
+            "id": "r", "botId": "b", "name": "n", "prompt": "p",
+            "createdAt": 0, "updatedAt": 0,
+            "runRequestedAt": 5, "runNote": { "at": 5, "text": " only web " },
+        }))
+        .unwrap();
+        assert_eq!(routine.note_for(Some(5)), Some("only web"));
+        routine.run_requested_at = Some(9);
+        assert_eq!(
+            routine.note_for(Some(9)),
+            None,
+            "a later request without one"
+        );
     }
 
     #[test]
@@ -1470,6 +1891,7 @@ mod tests {
             note: None,
             started_at: None,
             ended_at: None,
+            session_choice: Default::default(),
         };
         let mut work = BotWork {
             id: "w".into(),
@@ -1493,6 +1915,10 @@ mod tests {
             decision: None,
             stop_requested_at: None,
             notify: false,
+            time_limit_minutes: None,
+            time_added_minutes: None,
+            warned_at: None,
+            coordinator_choice: Default::default(),
         };
         let before = work.clone();
         work.clamp();
@@ -1511,6 +1937,7 @@ mod tests {
             note: None,
             started_at: Some(10),
             ended_at: None,
+            session_choice: Default::default(),
         };
         let work = |state: WorkState| BotWork {
             id: "w".into(),
@@ -1535,6 +1962,10 @@ mod tests {
             decision: None,
             stop_requested_at: None,
             notify: false,
+            time_limit_minutes: None,
+            time_added_minutes: None,
+            warned_at: None,
+            coordinator_choice: Default::default(),
         };
         let states = |w: &BotWork| w.steps.iter().map(|s| s.state).collect::<Vec<_>>();
         use StepState::{Asking, Done, Failed, Pending, Running, Skipped};
@@ -1576,6 +2007,7 @@ mod tests {
             note: None,
             started_at: None,
             ended_at: None,
+            session_choice: Default::default(),
         };
         let work = |id: &str, state: WorkState, sessions: Vec<&str>| BotWork {
             id: id.into(),
@@ -1595,6 +2027,10 @@ mod tests {
             decision: None,
             stop_requested_at: None,
             notify: false,
+            time_limit_minutes: None,
+            time_added_minutes: None,
+            warned_at: None,
+            coordinator_choice: Default::default(),
         };
         records.work = vec![
             work("plan", WorkState::Proposed, vec![]),

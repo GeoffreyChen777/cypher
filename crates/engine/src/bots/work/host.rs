@@ -181,15 +181,18 @@ impl Bots {
                     WorkState::Running if w.stop_requested_at.is_some() => {
                         self.stop_work(bot, w, &sessions, None)
                     }
-                    // The time budget (§6.6) stops it like the owner would.
-                    WorkState::Running if over_budget(w, p::now_ms()) => self.stop_work(
-                        bot,
-                        w,
-                        &sessions,
-                        Some("It ran past its 4-hour time budget, so it was stopped."),
-                    ),
+                    // The time limit (§6.6) stops it like the owner would.
+                    WorkState::Running if over_budget(bot, w, p::now_ms()) => {
+                        let limit = w.limit_minutes(bot.plans.time_limit_minutes());
+                        let reason = format!(
+                            "It ran past its time limit of {}, so it was stopped.",
+                            p::describe_minutes(limit)
+                        );
+                        self.stop_work(bot, w, &sessions, Some(&reason))
+                    }
                     WorkState::Running => {
                         running += 1;
+                        self.warn_before_deadline(bot, w, p::now_ms());
                         self.follow_work(bot, w, &sessions)
                     }
                     // Ended work whose steps were left open (a row from an
@@ -215,7 +218,8 @@ impl Bots {
             // start work and a slot is free.
             approved.sort_by_key(|(at, _)| *at);
             for (_, w) in approved {
-                if bot.paused || !bot.capabilities.coordinate || running >= p::MAX_RUNNING_WORK {
+                if bot.paused || !bot.capabilities.coordinate || running >= bot.plans.running_max()
+                {
                     break;
                 }
                 if let Err(err) = self.start_work(bot, w) {
@@ -427,7 +431,7 @@ impl Bots {
     }
 
     /// The hidden orchestration thread: an owner thread of the bot, in its
-    /// folder, with the bot chat's config.
+    /// folder, with the bot chat's config and the plan's coordinator choice.
     fn create_thread(
         &self,
         bot: &Bot,
@@ -441,6 +445,17 @@ impl Bots {
             .and_then(|c| c.cwd.clone())
             .unwrap_or_else(|| self.folder(&bot.id).to_string_lossy().into_owned());
         let now = chrono::Utc::now();
+        let mut config = bot_chat.and_then(|c| c.config);
+        if !work.coordinator_choice.is_empty() {
+            let config = config.get_or_insert_with(|| p::ChatConfig {
+                harness: p::HarnessId::Pi,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: p::SandboxLevel::ReadOnly,
+            });
+            work.coordinator_choice.apply(config);
+        }
         let chat = Chat {
             id: thread_id.to_string(),
             device_id: self.device_id().to_string(),
@@ -450,7 +465,7 @@ impl Bots {
             cwd: Some(folder),
             branch: None,
             checkout_id: None,
-            config: bot_chat.and_then(|c| c.config),
+            config,
             last_message_preview: None,
             last_message_at: None,
             created_at: now,
@@ -720,10 +735,65 @@ impl Bots {
     }
 }
 
-/// Running work past [`p::WORK_TIME_BUDGET_MS`] since it started.
-fn over_budget(work: &BotWork, now_ms: i64) -> bool {
-    work.started_at
-        .is_some_and(|started| now_ms - started > p::WORK_TIME_BUDGET_MS)
+/// Running work past its time limit ([`BotWork::deadline_ms`]).
+fn over_budget(bot: &Bot, work: &BotWork, now_ms: i64) -> bool {
+    work.deadline_ms(bot.plans.time_limit_minutes())
+        .is_some_and(|deadline| now_ms > deadline)
+}
+
+/// Whether the coordinating session is owed its warning now: its deadline
+/// is near, and it was not yet told about this deadline (time the owner
+/// added since moves the deadline, and earns a warning of its own).
+fn owes_warning(bot: &Bot, work: &BotWork, now_ms: i64) -> bool {
+    let Some(deadline) = work.deadline_ms(bot.plans.time_limit_minutes()) else {
+        return false;
+    };
+    let warn_at = deadline - p::PLAN_WARN_BEFORE_MS;
+    now_ms >= warn_at && now_ms <= deadline && work.warned_at.is_none_or(|at| at < warn_at)
+}
+
+impl Bots {
+    /// Tell a running plan's coordinating session its time is nearly up,
+    /// once per deadline, so it can wrap up and report before it is stopped.
+    fn warn_before_deadline(&self, bot: &Bot, work: &BotWork, now_ms: i64) {
+        if !owes_warning(bot, work, now_ms) {
+            return;
+        }
+        let Some(thread) = work.thread_chat_id.as_deref() else {
+            return;
+        };
+        let left = work
+            .deadline_ms(bot.plans.time_limit_minutes())
+            .map_or(0, |deadline| ((deadline - now_ms).max(0) / 60_000) as u32);
+        let text = format!(
+            "About {} left before this plan's time limit; then it is stopped with every \
+             session it started.",
+            p::describe_minutes(left.max(1))
+        );
+        let agent_prompt = format!(
+            "{text} Don't start anything new. Let running sessions finish what they can, \
+             record each step's state with update_step, and call finish_work with what was \
+             done and what is left, so your owner gets a result rather than a stopped plan. \
+             Your owner can add time from the plan's page; get_work shows the time left."
+        );
+        let queued = self.inner.doc_host.queue_agent_command(
+            thread,
+            SessionCommandPayload::Steer {
+                prompt: text,
+                message_id: Some(format!("{}-warn-{}", work.id, now_ms)),
+                agent_prompt: Some(agent_prompt),
+            },
+            cypher_doc::command_author::PLAN,
+        );
+        if let Err(err) = queued {
+            tracing::warn!(work = %work.id, error = %err, "could not warn the plan's session");
+            return;
+        }
+        if let Err(err) = self.edit_work(&work.id, |w| w.warned_at = Some(now_ms)) {
+            tracing::warn!(work = %work.id, error = %err, "could not record the warning");
+        }
+        tracing::info!(work = %work.id, left_minutes = left, "warned the plan of its time limit");
+    }
 }
 
 #[cfg(test)]
@@ -741,6 +811,25 @@ mod tests {
             note: None,
             started_at: None,
             ended_at: None,
+            session_choice: Default::default(),
+        }
+    }
+
+    fn bot(plans: p::PlanSettings) -> Bot {
+        Bot {
+            id: "b".into(),
+            name: "Bob".into(),
+            icon: None,
+            color: None,
+            host_device_id: "d".into(),
+            chat_id: "c".into(),
+            instructions: None,
+            scope: Default::default(),
+            capabilities: p::BotCapabilities::new_bot(),
+            paused: false,
+            created_at: chrono::DateTime::from_timestamp_millis(0).unwrap(),
+            plans,
+            session_choice: Default::default(),
         }
     }
 
@@ -763,16 +852,71 @@ mod tests {
             decision: None,
             stop_requested_at: None,
             notify: false,
+            time_limit_minutes: None,
+            time_added_minutes: None,
+            warned_at: None,
+            coordinator_choice: Default::default(),
         }
     }
 
+    const MINUTE: i64 = 60_000;
+
     #[test]
     fn work_stops_at_its_time_budget() {
+        let bot = bot(Default::default());
         let mut work = work("w", WorkState::Running, 0);
-        assert!(!over_budget(&work, 10), "not started");
+        assert!(!over_budget(&bot, &work, 10), "not started");
         work.started_at = Some(1_000);
-        assert!(!over_budget(&work, 1_000 + p::WORK_TIME_BUDGET_MS));
-        assert!(over_budget(&work, 1_001 + p::WORK_TIME_BUDGET_MS));
+        assert!(!over_budget(&bot, &work, 1_000 + p::WORK_TIME_BUDGET_MS));
+        assert!(over_budget(&bot, &work, 1_001 + p::WORK_TIME_BUDGET_MS));
+    }
+
+    #[test]
+    fn the_time_limit_is_the_plans_else_the_workspaces_plus_what_was_added() {
+        let hour = 60 * MINUTE;
+        let bot = bot(p::PlanSettings {
+            time_limit_minutes: Some(120),
+            ..Default::default()
+        });
+        let mut work = work("w", WorkState::Running, 0);
+        work.started_at = Some(0);
+        assert!(
+            !over_budget(&bot, &work, 2 * hour),
+            "the workspace's two hours"
+        );
+        assert!(over_budget(&bot, &work, 2 * hour + 1));
+
+        work.time_limit_minutes = Some(30);
+        assert!(over_budget(&bot, &work, 30 * MINUTE + 1), "the plan's own");
+
+        work.time_added_minutes = Some(60);
+        assert!(!over_budget(&bot, &work, 90 * MINUTE), "an hour added");
+        assert!(over_budget(&bot, &work, 90 * MINUTE + 1));
+
+        // Out-of-range values written by hand are held to the bounds.
+        work.time_limit_minutes = Some(1);
+        work.time_added_minutes = None;
+        assert!(!over_budget(&bot, &work, 15 * MINUTE));
+    }
+
+    #[test]
+    fn the_warning_comes_once_per_deadline() {
+        let bot = bot(Default::default());
+        let mut work = work("w", WorkState::Running, 0);
+        work.started_at = Some(0);
+        work.time_limit_minutes = Some(60);
+        assert!(!owes_warning(&bot, &work, 44 * MINUTE), "too early");
+        assert!(owes_warning(&bot, &work, 45 * MINUTE));
+        work.warned_at = Some(45 * MINUTE);
+        assert!(!owes_warning(&bot, &work, 50 * MINUTE), "already told");
+        // The owner adds an hour: a new deadline earns a new warning.
+        work.time_added_minutes = Some(60);
+        assert!(!owes_warning(&bot, &work, 60 * MINUTE));
+        assert!(owes_warning(&bot, &work, 105 * MINUTE));
+        assert!(
+            !owes_warning(&bot, &work, 121 * MINUTE),
+            "past it: it stops instead"
+        );
     }
 
     #[test]

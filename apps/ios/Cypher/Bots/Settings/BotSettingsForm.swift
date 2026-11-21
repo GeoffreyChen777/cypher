@@ -45,6 +45,10 @@ struct BotSettingsDraft: Equatable {
     var instructions = ""
     /// A new workspace's chat model; nil = the host's default.
     var model: String?
+    /// How its plans run.
+    var plans = PlanSettings()
+    /// The model, thinking and Fast mode of the sessions it starts.
+    var sessionChoice = SessionChoice()
 
     /// An existing workspace, as saved.
     init(bot: Bot) {
@@ -65,6 +69,8 @@ struct BotSettingsDraft: Equatable {
         transcripts = bot.scope.transcripts
         capabilities = bot.capabilities
         instructions = bot.instructions ?? ""
+        plans = bot.plans
+        sessionChoice = bot.sessionChoice
     }
 
     /// A new workspace: the next robot face and colour, so a few made in a
@@ -104,7 +110,29 @@ struct BotSettingsDraft: Equatable {
         if instructions.count > BotLimits.instructionsMaxChars {
             return "Instructions must be \(BotLimits.instructionsMaxChars) characters or fewer."
         }
-        return scope.validationError
+        return scope.validationError ?? plans.validationError
+    }
+
+    /// The time limit as the picker sets it: the default stored as none,
+    /// so it follows a later default.
+    var timeLimit: Int {
+        get { plans.timeLimit }
+        set { plans.timeLimitMinutes = newValue == PlanSettings.defaultTimeLimit ? nil : newValue }
+    }
+
+    var runningMax: Int {
+        get { plans.running }
+        set { plans.runningMax = newValue == PlanSettings.defaultRunning ? nil : newValue }
+    }
+
+    var sessionsMax: Int {
+        get { plans.sessions }
+        set { plans.sessionsMax = newValue == PlanSettings.defaultSessions ? nil : newValue }
+    }
+
+    /// The limits the picker offers, and this workspace's own.
+    var timeLimitOptions: [Int] {
+        Array(Set(PlanSettings.timeLimitChoices + [plans.timeLimit])).sorted()
     }
 
     var createRequest: CreateBotRequest {

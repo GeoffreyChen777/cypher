@@ -560,6 +560,40 @@ fn the_chat_sandbox_level_reaches_the_permission_extension() {
     assert_eq!(level(&probe), Some(None));
 }
 
+/// A run's GPT Fast mode (`modelOptions.fast`, set when a workspace chose
+/// it) reaches cypher-fast-mode.ts as `CYPHER_FAST_MODE`; a run that asks
+/// nothing clears any the engine itself inherited.
+#[test]
+fn a_requested_fast_mode_reaches_the_runtime() {
+    let harness = harness();
+    let fast = |options: serde_json::Value| {
+        let mut request = request("scenario:happy");
+        request.model_options = options.as_object().cloned().unwrap_or_default();
+        let cmd = harness
+            .spawn_run_command(
+                Some(&request.cwd),
+                &RunHostContext::default(),
+                None,
+                &request,
+            )
+            .expect("run command builds");
+        env_of(&cmd, "CYPHER_FAST_MODE")
+    };
+    assert_eq!(
+        fast(serde_json::json!({ "fast": true })),
+        Some(Some("on".into()))
+    );
+    assert_eq!(
+        fast(serde_json::json!({ "fast": false })),
+        Some(Some("off".into()))
+    );
+    assert_eq!(
+        fast(serde_json::json!({})),
+        Some(None),
+        "cleared, never inherited"
+    );
+}
+
 /// The owner's own words reach the permission extension through the run's
 /// environment, which the agent can't change; a run without them clears any
 /// the engine itself inherited.

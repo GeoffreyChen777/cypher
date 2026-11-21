@@ -242,6 +242,8 @@ mod tests {
             capabilities: Default::default(),
             paused: false,
             created_at: DateTime::from_timestamp_millis(0).unwrap(),
+            plans: Default::default(),
+            session_choice: Default::default(),
         }
     }
 

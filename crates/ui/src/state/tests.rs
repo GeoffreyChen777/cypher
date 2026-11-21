@@ -683,6 +683,7 @@ fn an_ended_plan_from_an_older_host_reads_with_its_steps_closed() {
         note: None,
         started_at: Some(10),
         ended_at: None,
+        session_choice: Default::default(),
     };
     let work = |id: &str, state: WorkState, ended_at: Option<i64>| BotWork {
         id: id.into(),
@@ -702,6 +703,10 @@ fn an_ended_plan_from_an_older_host_reads_with_its_steps_closed() {
         decision: None,
         stop_requested_at: None,
         notify: false,
+        time_limit_minutes: None,
+        time_added_minutes: None,
+        warned_at: None,
+        coordinator_choice: Default::default(),
     };
     let mut s = AppState::new();
     s.apply_bot_records(BotRecords {
@@ -1878,6 +1883,8 @@ fn session_context_mirrors_main_lists(cx: &mut gpui::TestAppContext) {
             capabilities: Default::default(),
             paused: false,
             created_at: Utc::now(),
+            plans: Default::default(),
+            session_choice: Default::default(),
         }]);
         cx.notify();
     });

@@ -3,7 +3,7 @@
 //! (§6.2). The prompts describe; the tools enforce on every call.
 
 use cypher_proto::{
-    Bot, BotWork, Device, INSTRUCTION_MAX, MAX_SESSIONS_PER_WORK, RESULT_MAX, Space,
+    Bot, BotWork, Device, INSTRUCTION_MAX, PLAN_WARN_BEFORE_MS, RESULT_MAX, Space, describe_minutes,
 };
 
 use super::Role;
@@ -203,6 +203,12 @@ pub(super) fn brief(
         if let Some(detail) = &step.detail {
             lines.push(format!("   {detail}"));
         }
+        if !step.session_choice.is_empty() {
+            lines.push(format!(
+                "   Its sessions use {} (start_session applies it for you).",
+                step.session_choice.describe()
+            ));
+        }
     }
     // A message over the cap was stored cut; the thread must know its end
     // is missing rather than take the ellipsis for the owner's.
@@ -231,7 +237,8 @@ pub(super) fn brief(
     ]);
     if bot.capabilities.coordinate {
         lines.push(format!(
-            "- Create worktrees and start sessions (at most {MAX_SESSIONS_PER_WORK} in all) in {}.",
+            "- Create worktrees and start sessions (at most {} in all) in {}.",
+            bot.plans.sessions_max(),
             if projects.is_empty() {
                 "your projects".to_string()
             } else {
@@ -256,6 +263,12 @@ pub(super) fn brief(
         ),
         (false, _) => "- No direct work: Work directly is off; use sessions.".to_string(),
     });
+    lines.push(format!(
+        "- Time: the plan is stopped {} after it started, with every session it started. \
+         You are told {} before; finish or report what you have by then.",
+        describe_minutes(work.limit_minutes(bot.plans.time_limit_minutes())),
+        describe_minutes((PLAN_WARN_BEFORE_MS / 60_000) as u32),
+    ));
     lines.extend([String::new(), "Start with step 1.".to_string()]);
     lines.join("\n")
 }
@@ -284,6 +297,8 @@ mod tests {
             },
             paused: false,
             created_at: DateTime::from_timestamp_millis(0).unwrap(),
+            plans: Default::default(),
+            session_choice: Default::default(),
         }
     }
 
@@ -326,6 +341,7 @@ mod tests {
             note: None,
             started_at: None,
             ended_at: None,
+            session_choice: Default::default(),
         };
         let work = BotWork {
             id: "w1".into(),
@@ -348,6 +364,10 @@ mod tests {
             decision: None,
             stop_requested_at: None,
             notify: false,
+            time_limit_minutes: None,
+            time_added_minutes: None,
+            warned_at: None,
+            coordinator_choice: Default::default(),
         };
         let spaces = [
             space("sp-a", "mac-a", "/w/app-a"),

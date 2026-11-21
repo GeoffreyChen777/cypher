@@ -201,8 +201,21 @@ struct WorkItemPage: View {
                         },
                     ], busy: actions.busy)
             } else if phase.running {
+                // Its time: how long is left, and an hour more while the
+                // owner may still add one (work.rs `time_button`).
+                let fallback = bot?.plans.timeLimit ?? PlanSettings.defaultTimeLimit
+                let left = work.deadlineMs(fallback: fallback).map { max(0, $0 - nowMs()) }
+                let canAdd = (work.timeAddedMinutes ?? 0) + 60 <= PlanSettings.maxAddedMinutes
                 BotDecisionBar(
-                    decisions: [BotDecision(title: "Stop", role: .destructive) { confirmStop = true }],
+                    note: left.map {
+                        "\(BotTime.span($0)) left of \(PlanSettings.limitWords(work.limitMinutes(fallback: fallback)))"
+                    },
+                    decisions: [
+                        BotDecision(title: "+1 hour", enabled: canAdd) {
+                            actions.run { try await model.workspaceData().addWorkTime(workId: work.id, minutes: 60) }
+                        },
+                        BotDecision(title: "Stop", role: .destructive) { confirmStop = true },
+                    ],
                     busy: actions.busy)
             }
         }
@@ -310,9 +323,16 @@ struct WorkFlow: View {
     @ViewBuilder
     private func stepContent(_ ix: Int, _ step: WorkStep, numbered: Bool) -> some View {
         let space = shared ? nil : step.project.flatMap { id in model.spaces.first { $0.id == id } }
-        let detail = (numbered ? step.detail : step.note).flatMap {
+        let said = (numbered ? step.detail : step.note).flatMap {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
         }
+        // While it waits, what its sessions run on, when the plan chose it.
+        let runs = numbered ? step.sessionChoice.words().map { "Its sessions: \($0)." } : nil
+        let detail: String? =
+            switch (said, runs) {
+            case (let said?, let runs?): "\(said)\n\n\(runs)"
+            case (let said, let runs): said ?? runs
+            }
         // A step with one session is that session: its row would say the
         // step's title and state again, so the step is the way in.
         let link = step.sessions.count == 1 ? step.sessions.first.flatMap { model.chat(id: $0)?.id } : nil

@@ -401,9 +401,10 @@ pub(super) fn session_mark(
 pub(super) fn icon_button(
     key: impl Into<SharedString>,
     path: &'static str,
-    tip: &'static str,
+    tip: impl Into<SharedString>,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    let tip: SharedString = tip.into();
     let key: SharedString = key.into();
     let key = &key;
     div()
@@ -422,7 +423,7 @@ pub(super) fn icon_button(
         ))
         .on_hover(motion::hover_listener(key))
         .tooltip(move |_, cx| {
-            cx.new(|_| super::super::session::FindTooltip(tip.into()))
+            cx.new(|_| super::super::session::FindTooltip(tip.clone()))
                 .into()
         })
         .child(icon(path).size(px(14.0)).text_color(motion::hover_blend(

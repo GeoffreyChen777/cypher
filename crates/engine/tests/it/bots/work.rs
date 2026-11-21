@@ -46,7 +46,12 @@ fn harness(runs: Runs, words: Words, finish: bool) -> support::TestHarness {
         if brief && finish {
             return support::reply(HarnessId::Pi, &request, "sess", "All done.");
         }
-        if brief || request.prompt == "long" {
+        // The time warning reaches this stand-in as a turn of its own (a real
+        // Pi takes it mid-turn): the coordinator carries on.
+        let warned = request
+            .prompt
+            .contains("left before this plan's time limit");
+        if brief || warned || request.prompt == "long" {
             let interrupt = controls.interrupt.clone();
             let rest = futures::stream::once(async move {
                 interrupt.cancelled().await;
@@ -1155,6 +1160,292 @@ async fn limits_and_refusals_hold() {
     {
         let _ = rig.core.sessions.interrupt(thread).await;
     }
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plans_time_limit_models_and_limits_follow_the_owners_settings() {
+    let rig = rig(false);
+    let bot = rig.bot(coordinate()).await;
+    rig.mutate(serde_json::json!({
+        "op": "updateBot", "botId": bot.id, "name": "Bob", "scope": billing_only(),
+        "plans": { "timeLimitMinutes": 120, "runningMax": 1, "sessionsMax": 3 },
+        "sessionChoice": { "model": "ws-model", "thinking": "low" },
+    }))
+    .await;
+    let bot = rig.core.workspace.bot(&bot.id).unwrap().expect("the bot");
+    assert_eq!(bot.plans.time_limit_minutes(), 120);
+    assert_eq!(bot.session_choice.model.as_deref(), Some("ws-model"));
+    let refused = rig
+        .client()
+        .call(
+            cypher_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "updateBot", "botId": bot.id, "name": "Bob", "scope": billing_only(),
+                "plans": { "timeLimitMinutes": 5 },
+            }),
+        )
+        .await;
+    assert!(refused.is_err(), "a limit out of range is refused");
+
+    rig.core
+        .doc_host
+        .open(&bot.chat_id)
+        .unwrap()
+        .write_user_message("m-1", "Fix it with Opus, give it 90 minutes", 1_000)
+        .unwrap();
+    let propose = |extra: serde_json::Value| {
+        let mut args = serde_json::json!({
+            "title": "Fix rounding",
+            "steps": [
+                {
+                    "title": "Fix", "project": "sp-billing",
+                    "session": { "model": "step-model", "thinking": "xhigh", "fast": true },
+                },
+                { "title": "Test", "project": "sp-billing" },
+            ],
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            args[key] = value.clone();
+        }
+        args
+    };
+    let bad = rig
+        .tool(
+            &bot.chat_id,
+            "propose_plan",
+            propose(serde_json::json!({ "time_limit_minutes": 5 })),
+        )
+        .await;
+    assert!(bad.contains("out of range"), "{bad}");
+    let bad = rig
+        .tool(
+            &bot.chat_id,
+            "propose_plan",
+            propose(serde_json::json!({ "coordinator": { "thinking": "huge" } })),
+        )
+        .await;
+    assert!(bad.contains("is no thinking level"), "{bad}");
+    let text = tool(
+        &rig.client(),
+        &bot.chat_id,
+        "propose_plan",
+        propose(serde_json::json!({
+            "time_limit_minutes": 90,
+            "coordinator": { "model": "coord-model", "thinking": "high" },
+        })),
+        Some("call-1"),
+    )
+    .await;
+    assert!(text.contains("it may take 1 hour 30 minutes"), "{text}");
+    let work_id = rig
+        .core
+        .workspace
+        .read_bot_records()
+        .work
+        .into_iter()
+        .find(|w| w.title == "Fix rounding")
+        .expect("the plan")
+        .id;
+    let work = rig.work(&work_id);
+    assert_eq!(work.time_limit_minutes, Some(90));
+    assert_eq!(
+        work.coordinator_choice.model.as_deref(),
+        Some("coord-model")
+    );
+    assert_eq!(
+        work.steps[0].session_choice.thinking,
+        Some(p::ReasoningLevel::XHigh)
+    );
+
+    // The coordinating session runs on the plan's choice, and its brief
+    // says how long it has and how many sessions it may start.
+    let thread = rig.approve(&work_id).await;
+    let (brief, _) =
+        wait_for_some("the brief", || rig.run_of("Carry out this approved plan")).await;
+    assert_eq!(brief.model.as_deref(), Some("coord-model"));
+    assert_eq!(brief.reasoning, Some(p::ReasoningLevel::High));
+    assert!(
+        brief
+            .prompt
+            .contains("stopped 1 hour 30 minutes after it started"),
+        "{}",
+        brief.prompt
+    );
+    assert!(
+        brief.prompt.contains("at most 3 in all"),
+        "{}",
+        brief.prompt
+    );
+    assert!(
+        brief
+            .prompt
+            .contains("Its sessions use step-model, xhigh thinking, Fast mode"),
+        "{}",
+        brief.prompt
+    );
+
+    // A session takes the call's choice, else its step's, else the
+    // workspace's for sessions.
+    for (step, prompt, extra) in [
+        (1, "one", serde_json::json!({})),
+        (2, "two", serde_json::json!({})),
+        (
+            2,
+            "three",
+            serde_json::json!({ "model": "call-model", "fast": false }),
+        ),
+    ] {
+        let mut args =
+            serde_json::json!({ "step": step, "project": "sp-billing", "prompt": prompt });
+        for (key, value) in extra.as_object().unwrap() {
+            args[key] = value.clone();
+        }
+        let started = rig.tool(&thread, "start_session", args).await;
+        assert!(started.starts_with("Started session"), "{started}");
+    }
+    let fast = |r: &RunRequest| r.model_options.get("fast").and_then(|v| v.as_bool());
+    let (one, _) = wait_for_some("run one", || rig.run_of("one")).await;
+    assert_eq!(
+        (one.model.as_deref(), one.reasoning, fast(&one)),
+        (
+            Some("step-model"),
+            Some(p::ReasoningLevel::XHigh),
+            Some(true)
+        )
+    );
+    let (two, _) = wait_for_some("run two", || rig.run_of("two")).await;
+    assert_eq!(
+        (two.model.as_deref(), two.reasoning, fast(&two)),
+        (Some("ws-model"), Some(p::ReasoningLevel::Low), None)
+    );
+    let (three, _) = wait_for_some("run three", || rig.run_of("three")).await;
+    assert_eq!(
+        (three.model.as_deref(), three.reasoning, fast(&three)),
+        (
+            Some("call-model"),
+            Some(p::ReasoningLevel::Low),
+            Some(false)
+        )
+    );
+    let fourth = rig
+        .tool(
+            &thread,
+            "start_session",
+            serde_json::json!({ "step": 2, "project": "sp-billing", "prompt": "four" }),
+        )
+        .await;
+    assert!(fourth.contains("has started 3 sessions"), "{fourth}");
+
+    // One plan at a time: the next approved one waits.
+    let next = rig.propose(&bot, "Next").await;
+    rig.mutate(serde_json::json!({ "op": "resolveBotPlan", "workId": next, "approve": true }))
+        .await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(rig.work(&next).state, WorkState::Proposed, "no slot");
+
+    // Near its limit the coordinating session is told to wrap up, once.
+    let started = p::now_ms() - 80 * 60_000;
+    rig.core
+        .workspace
+        .update_record(
+            p::KIND_BOT_WORK,
+            &work_id,
+            [("startedAt".to_string(), serde_json::json!(started))]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+    let warnings = || {
+        rig.core
+            .doc_host
+            .open(&thread)
+            .unwrap()
+            .doc()
+            .read_commands()
+            .unwrap()
+            .into_iter()
+            .filter(|c| {
+                matches!(
+                    &c.payload,
+                    SessionCommandPayload::Steer { agent_prompt: Some(text), .. }
+                        if text.contains("Don't start anything new")
+                )
+            })
+            .count()
+    };
+    wait_for(|| warnings() == 1, "the warning").await;
+    assert!(rig.work(&work_id).warned_at.is_some());
+    let details = rig
+        .tool(
+            &bot.chat_id,
+            "get_work",
+            serde_json::json!({ "work_id": work_id }),
+        )
+        .await;
+    assert!(
+        details.contains("Time limit 1 hour 30 minutes: about 9 minutes left")
+            || details.contains("Time limit 1 hour 30 minutes: about 10 minutes left"),
+        "{details}"
+    );
+
+    // The owner adds an hour: no stop at the old limit, and a new warning
+    // only near the new one.
+    rig.mutate(serde_json::json!({ "op": "addBotWorkTime", "workId": work_id, "minutes": 60 }))
+        .await;
+    assert_eq!(rig.work(&work_id).time_added_minutes, Some(60));
+    let refused = rig
+        .client()
+        .call(
+            cypher_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "addBotWorkTime", "workId": next, "minutes": 60 }),
+        )
+        .await;
+    assert!(refused.is_err(), "only a running plan gets more time");
+    rig.core
+        .workspace
+        .update_record(
+            p::KIND_BOT_WORK,
+            &work_id,
+            [(
+                "startedAt".to_string(),
+                serde_json::json!(p::now_ms() - 100 * 60_000),
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        rig.work(&work_id).state,
+        WorkState::Running,
+        "100 minutes in, 150 allowed"
+    );
+    assert_eq!(warnings(), 1, "the new deadline is still far");
+
+    // Past it, the plan stops and says why.
+    rig.core
+        .workspace
+        .update_record(
+            p::KIND_BOT_WORK,
+            &work_id,
+            [(
+                "startedAt".to_string(),
+                serde_json::json!(p::now_ms() - 151 * 60_000),
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .unwrap();
+    wait_for(
+        || rig.work(&work_id).state == WorkState::Stopped,
+        "stopped for time",
+    )
+    .await;
+    assert_eq!(
+        rig.work(&work_id).result.as_deref(),
+        Some("It ran past its time limit of 2 hours 30 minutes, so it was stopped.")
+    );
     rig.core.shutdown().await;
 }
 

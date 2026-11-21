@@ -1487,6 +1487,8 @@ fn bot(id: &str, chat_id: &str) -> Bot {
         capabilities: Default::default(),
         paused: false,
         created_at: ts(4_000),
+        plans: Default::default(),
+        session_choice: Default::default(),
     }
 }
 

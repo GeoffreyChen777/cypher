@@ -188,7 +188,9 @@ final class RoutineScheduleTests: XCTestCase {
         var draft = RoutineDraft(routine: existing, now: now, calendar: calendar)
         XCTAssertEqual(draft.spaceId, "s")
         XCTAssertFalse(draft.worktree)
-        XCTAssertEqual(draft.model, "anthropic/opus", "a target's model moves onto the routine")
+        XCTAssertEqual(draft.choice.model, "anthropic/opus", "a target's model moves onto the routine")
+        draft.choice.thinking = "high"
+        draft.choice.fast = true
         XCTAssertFalse(draft.enabled)
         draft.name = "Release 0.9"
         // Its time has passed, but it is the time it had.
@@ -197,6 +199,8 @@ final class RoutineScheduleTests: XCTestCase {
         XCTAssertEqual(saved.createdAt, 5)
         XCTAssertEqual(saved.updatedAt, ms(now))
         XCTAssertEqual(saved.model, "anthropic/opus")
+        XCTAssertEqual(saved.thinking, "high")
+        XCTAssertEqual(saved.fast, true)
         XCTAssertEqual(saved.target, .project(spaceId: "s", worktree: false, model: nil))
         XCTAssertEqual(saved.schedule, .once(at: "2026-11-09T10:00"))
         XCTAssertTrue(saved.writeNotes && saved.workDirectly)

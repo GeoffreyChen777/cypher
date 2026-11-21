@@ -38,6 +38,9 @@ const ENV_PERMISSION_LEVEL: &str = "CYPHER_PERMISSION_LEVEL";
 /// text a dangerous command may run on without a dialog. Set or cleared on
 /// every spawn, so a run never inherits another chat's (or the engine's).
 const ENV_OWNER_WORDS: &str = "CYPHER_OWNER_WORDS";
+/// GPT Fast mode a run asks for (`on`/`off`; cypher-fast-mode.ts), from its
+/// request's `modelOptions.fast`. Set or cleared on every spawn.
+const ENV_FAST_MODE: &str = "CYPHER_FAST_MODE";
 const ENV_PACKAGE_DIR: &str = "PI_PACKAGE_DIR";
 /// Set only in agent-bot runs; the bot tools extension registers its tools
 /// only when it sees this.
@@ -271,6 +274,32 @@ fn inject_engine_client(cmd: &mut Command) -> std::io::Result<()> {
 }
 
 /// The wire name of a sandbox level (`SandboxLevel`'s serde form).
+/// What a process is launched with beyond its host context: the requested
+/// model and thinking level, the permission level and GPT Fast mode.
+/// Discovery processes launch with none.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Launch<'a> {
+    pub model: Option<&'a str>,
+    pub thinking: Option<&'a str>,
+    pub sandbox: Option<SandboxLevel>,
+    pub fast: Option<bool>,
+}
+
+impl<'a> Launch<'a> {
+    /// A run's launch, from its request.
+    pub fn of(request: &'a RunRequest) -> Self {
+        Self {
+            model: request.model.as_deref(),
+            thinking: request.reasoning.map(thinking_level),
+            sandbox: Some(request.sandbox),
+            fast: request
+                .model_options
+                .get(cypher_proto::FAST_MODEL_OPTION)
+                .and_then(serde_json::Value::as_bool),
+        }
+    }
+}
+
 fn permission_level(level: SandboxLevel) -> &'static str {
     match level {
         SandboxLevel::ReadOnly => "read-only",
@@ -328,7 +357,7 @@ impl PiHarness {
         host: &RunHostContext,
         append_prompt: Option<&PathBuf>,
     ) -> Result<Command, HarnessError> {
-        self.spawn_command_with_config(cwd, host, append_prompt, None, None, None)
+        self.spawn_command_with_config(cwd, host, append_prompt, Launch::default())
     }
 
     /// Test seam for the exact command used by a normal run, including the
@@ -344,14 +373,7 @@ impl PiHarness {
         append_prompt: Option<&PathBuf>,
         request: &RunRequest,
     ) -> Result<Command, HarnessError> {
-        self.spawn_command_with_config(
-            cwd,
-            host,
-            append_prompt,
-            request.model.as_deref(),
-            request.reasoning.map(thinking_level),
-            Some(request.sandbox),
-        )
+        self.spawn_command_with_config(cwd, host, append_prompt, Launch::of(request))
     }
 
     fn spawn_command_with_config(
@@ -359,10 +381,14 @@ impl PiHarness {
         cwd: Option<&str>,
         host: &RunHostContext,
         append_prompt: Option<&PathBuf>,
-        requested_model: Option<&str>,
-        requested_thinking: Option<&str>,
-        sandbox: Option<SandboxLevel>,
+        launch: Launch<'_>,
     ) -> Result<Command, HarnessError> {
+        let Launch {
+            model: requested_model,
+            thinking: requested_thinking,
+            sandbox,
+            fast,
+        } = launch;
         let (exe, mut args) = self.resolve_program()?;
         for extension in [
             CHAT_RENDERING_EXTENSION,
@@ -409,6 +435,10 @@ impl PiHarness {
         if let Some(level) = sandbox {
             cmd.env(ENV_PERMISSION_LEVEL, permission_level(level));
         }
+        cmd.env_remove(ENV_FAST_MODE);
+        if let Some(fast) = fast {
+            cmd.env(ENV_FAST_MODE, if fast { "on" } else { "off" });
+        }
         cmd.env_remove(ENV_OWNER_WORDS);
         if let Some(words) = host.owner_words.as_deref().filter(|w| !w.is_empty()) {
             cmd.env(ENV_OWNER_WORDS, words);
@@ -446,18 +476,9 @@ impl PiHarness {
         cwd: Option<&str>,
         host: &RunHostContext,
         append_prompt: Option<&PathBuf>,
-        requested_model: Option<&str>,
-        requested_thinking: Option<&str>,
-        sandbox: Option<SandboxLevel>,
+        launch: Launch<'_>,
     ) -> Result<(Child, crate::process::StderrTail), HarnessError> {
-        let mut cmd = self.spawn_command_with_config(
-            cwd,
-            host,
-            append_prompt,
-            requested_model,
-            requested_thinking,
-            sandbox,
-        )?;
+        let mut cmd = self.spawn_command_with_config(cwd, host, append_prompt, launch)?;
         let exe = cmd.as_std().get_program().to_string_lossy().into_owned();
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())

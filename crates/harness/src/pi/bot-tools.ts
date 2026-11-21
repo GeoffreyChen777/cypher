@@ -54,6 +54,19 @@ function text(value: string) {
   return { content: [{ type: "text" as const, text: value }], details: undefined };
 }
 
+// A session's model, thinking level and GPT Fast mode; what is left out
+// follows the default the description names.
+const THINKING = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+function choiceFields(defaults: string) {
+  return {
+    model: Type.Optional(Type.String({ description: `Model id, e.g. claude-bridge/claude-opus-5-5 (default: ${defaults})` })),
+    thinking: Type.Optional(
+      Type.Union(THINKING.map((level) => Type.Literal(level)), { description: `Thinking level (default: ${defaults})` }),
+    ),
+    fast: Type.Optional(Type.Boolean({ description: `GPT Fast mode, for GPT models from 5.4 on (default: ${defaults})` })),
+  };
+}
+
 type ToolDef = {
   name: string;
   label: string;
@@ -145,7 +158,7 @@ const TOOLS: ToolDef[] = [
     // itself, never from a script.
     exposure: "model-only",
     description:
-      "Propose a plan for work that takes more than a couple of steps or touches another device. It shows your owner a plan card to approve; once approved, a background session carries it out and reports back here. That session reads only the plan and your owner's last message, not this conversation, so the steps' details must carry whatever else it needs. Text over a limit is refused, never cut. After proposing, stop and wait: end your turn.",
+      "Propose a plan for work that takes more than a couple of steps or touches another device. It shows your owner a plan card to approve; once approved, a background session carries it out and reports back here. That session reads only the plan and your owner's last message, not this conversation, so the steps' details must carry whatever else it needs. Text over a limit is refused, never cut. Set time_limit_minutes, a coordinator or a step's session only when your owner asked for it (\"give it 8 hours\", \"use Opus with high thinking for the fix\"); otherwise the workspace's settings apply. After proposing, stop and wait: end your turn.",
     parameters: Type.Object({
       title: Type.String({ description: "Short title of the task, at most 120 characters" }),
       summary: Type.Optional(Type.String({ description: "One or two sentences, at most 400 characters: the approach and how the steps depend on each other" })),
@@ -154,8 +167,21 @@ const TOOLS: ToolDef[] = [
           title: Type.String({ description: "What this step does, at most 160 characters" }),
           project: Type.Optional(Type.String({ description: "Project id or name it works in" })),
           detail: Type.Optional(Type.String({ description: "How: directly or in a session, worktree, how it gets another step's change (path, pushed branch, version), and the constraints and decisions from this conversation the step depends on. At most 1,500 characters a step and 4,000 across the plan" })),
+          session: Type.Optional(
+            Type.Object(choiceFields("the workspace's choice for sessions"), {
+              description: "The model, thinking level and Fast mode of the sessions this step starts",
+            }),
+          ),
         }),
         { minItems: 1, maxItems: 10 },
+      ),
+      time_limit_minutes: Type.Optional(
+        Type.Integer({ minimum: 15, maximum: 4320, description: "How long the plan may run once approved, in minutes, 15 to 4320 (72 hours); then it is stopped with its sessions. Default: the workspace's limit" }),
+      ),
+      coordinator: Type.Optional(
+        Type.Object(choiceFields("this chat's"), {
+          description: "The model, thinking level and Fast mode of the background session that carries out the plan",
+        }),
       ),
     }),
   },
@@ -186,10 +212,11 @@ const TOOLS: ToolDef[] = [
     name: "create_worktree",
     label: "Create worktree",
     description:
-      "Create a new git worktree (an isolated checkout on a fresh branch) in a project, on that project's device. Returns its path for start_session's cwd.",
+      "Create a new git worktree (an isolated checkout on a fresh branch) in a project, on that project's device. Returns its path for start_session's cwd. To start one session in a new worktree, start_session's worktree: true does both.",
     parameters: Type.Object({
       project: Type.String({ description: "Project id or name" }),
       branch: Type.Optional(Type.String({ description: "Base branch or ref (default: the checkout's current HEAD)" })),
+      name: Type.Optional(Type.String({ description: "The new branch's name, e.g. fix/login-timeout (default: a generated cypher/<name>); refused when it exists" })),
     }),
     timeoutMs: 11 * 60_000,
   },
@@ -197,14 +224,17 @@ const TOOLS: ToolDef[] = [
     name: "start_session",
     label: "Start session",
     description:
-      "Start a coding session in a project for one step of the plan, with a self-contained prompt. Returns the session id; follow it with wait_for_session.",
+      "Start a coding session in a project for one step of the plan, with a self-contained prompt. Returns the session id; follow it with wait_for_session. Its model, thinking level and Fast mode are the step's (as the plan set them), else the workspace's choice for sessions, else your own; pass them only to differ from that.",
     parameters: Type.Object({
       step: Type.String({ description: "The plan step id this session works on" }),
       project: Type.String({ description: "Project id or name" }),
       prompt: Type.String({ description: "The full task for the session: what to do, where, how to verify, what to report back" }),
       title: Type.Optional(Type.String({ description: "Session title (default: the step's title)" })),
       cwd: Type.Optional(Type.String({ description: "A worktree path from create_worktree (default: the project's folder)" })),
-      model: Type.Optional(Type.String({ description: "Model id (default: your own)" })),
+      worktree: Type.Optional(Type.Boolean({ description: "Start it in a new worktree made by this call, instead of cwd (default off)" })),
+      branch: Type.Optional(Type.String({ description: "worktree only: the base branch or ref (default: the checkout's current HEAD)" })),
+      branch_name: Type.Optional(Type.String({ description: "worktree only: the new branch's name (default: generated)" })),
+      ...choiceFields("the step's, else the workspace's for sessions, else yours"),
     }),
     timeoutMs: 11 * 60_000,
   },
@@ -305,16 +335,21 @@ const TOOLS: ToolDef[] = [
       enabled: Type.Optional(Type.Boolean({ description: "Off keeps it but runs it only by hand (default on)" })),
       project: Type.Optional(Type.String({ description: "Run as a session in this project (id or name) instead of as you; \"\" moves it back to you; leave out to keep where it runs" })),
       worktree: Type.Optional(Type.Boolean({ description: "project only: run in its own worktree, kept across runs, instead of the project's checkout (default off)" })),
-      model: Type.Optional(Type.String({ description: "The model its runs use, e.g. claude-bridge/claude-haiku-5-5 (default: the workspace chat's)" })),
+      model: Type.Optional(Type.String({ description: "The model its runs use, e.g. claude-bridge/claude-haiku-5-5; \"\" goes back to the default (in a project the workspace's choice for sessions, else the workspace chat's); leave out to keep it" })),
+      thinking: Type.Optional(
+        Type.Union([...THINKING, ""].map((level) => Type.Literal(level)), { description: "Its runs' thinking level; \"\" goes back to the default; leave out to keep it" }),
+      ),
+      fast: Type.Optional(Type.Boolean({ description: "Its runs' GPT Fast mode (GPT models from 5.4 on); leave out to keep it" })),
     }),
   },
   {
     name: "run_routine",
     label: "Ran routine",
     description:
-      "Run one of your routines now, when your owner asks: a fresh run, like the routine page's Run now; its result is posted in this chat when it ends. Pass the id from list_routines.",
+      "Run one of your routines now, when your owner asks: a fresh run, like the routine page's Run now; its result is posted in this chat when it ends. Pass the id from list_routines, and a note when your owner adds something for this run only (\"run the morning brief, but only for the cypher project\").",
     parameters: Type.Object({
       id: Type.String({ description: "The routine's id, from list_routines" }),
+      note: Type.Optional(Type.String({ description: "Extra instructions for this run only, at most 2,000 characters; the routine itself is unchanged" })),
     }),
   },
   {
