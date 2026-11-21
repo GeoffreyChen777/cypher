@@ -84,7 +84,13 @@ while read -r line; do
   *'"type":"get_available_models"'*)
     # A marker in --session-dir makes the FIRST snapshot empty (real pi's RPC
     # catalog is empty until the async refresh finishes). Discovery must poll.
-    if [ -f "$SESSION_DIR/.empty-models-once" ]; then
+    if [ -f "$SESSION_DIR/.models-then-silence" ]; then
+      # One snapshot, then nothing more: a pi that stops answering mid-probe
+      # (or whose start left the probe no time). Discovery must keep what it
+      # read instead of failing at its outer bound.
+      emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"get_available_models\",\"success\":true,\"data\":{\"models\":[{\"id\":\"claude-opus-5\",\"name\":\"Claude Opus 5\",\"provider\":\"claude-bridge\",\"reasoning\":true,\"contextWindow\":1000000}]}}"
+      exec sleep 30
+    elif [ -f "$SESSION_DIR/.empty-models-once" ]; then
       rm -f "$SESSION_DIR/.empty-models-once"
       emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"get_available_models\",\"success\":true,\"data\":{\"models\":[]}}"
     elif [ -f "$SESSION_DIR/.partial-models-once" ]; then

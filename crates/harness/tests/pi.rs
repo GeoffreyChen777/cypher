@@ -854,6 +854,28 @@ async fn models_keep_polling_after_an_extension_only_snapshot() {
 }
 
 #[tokio::test]
+async fn models_listed_before_pi_stops_answering_are_kept() {
+    // The probe's outer bound passes while a request is unanswered. The
+    // catalog read until then is returned (and cached), not thrown away for
+    // an error every later listing would wait out again.
+    let dir = tempfile::tempdir().expect("session dir");
+    std::fs::write(dir.path().join(".models-then-silence"), b"").expect("marker");
+    let harness = PiHarness::new(dir.path().to_path_buf())
+        .with_executable(fixture_path())
+        .with_model_catalog_wait(Duration::from_millis(400));
+    let models = harness
+        .models()
+        .await
+        .expect("the models pi listed before it stopped answering");
+    let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["claude-bridge/claude-opus-5"]);
+    // Cached: no second probe, which would wait out the bound again.
+    let started = std::time::Instant::now();
+    assert_eq!(harness.models().await.expect("cached models"), models);
+    assert!(started.elapsed() < Duration::from_millis(500));
+}
+
+#[tokio::test]
 async fn models_retry_when_first_catalog_snapshot_is_empty() {
     let dir = tempfile::tempdir().expect("session dir");
     std::fs::write(dir.path().join(".empty-models-once"), b"").expect("marker");

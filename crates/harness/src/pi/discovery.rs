@@ -82,18 +82,19 @@ impl PiHarness {
             .as_deref()
             .map(expected_model_providers)
             .unwrap_or_default();
+        // Outside the probe: what it has read survives the outer bound below.
+        let mut best: Vec<Model> = Vec::new();
         let discovery = async {
             let state = client.request("get_state", Map::new()).await?;
             let deadline = Instant::now() + wait;
             let stable_for = wait.min(MODEL_CATALOG_STABLE);
-            let mut best: Vec<Model> = Vec::new();
             let mut unchanged_since: Option<Instant> = None;
             loop {
                 let available = match client.request("get_available_models", Map::new()).await {
                     Ok(value) => value,
                     Err(_err) if !best.is_empty() => {
                         return Ok(DiscoveredModels {
-                            models: best,
+                            models: std::mem::take(&mut best),
                             from_catalog: true,
                         });
                     }
@@ -107,7 +108,7 @@ impl PiHarness {
                 }
                 if catalog_covers(&best, &expected) {
                     return Ok(DiscoveredModels {
-                        models: best,
+                        models: std::mem::take(&mut best),
                         from_catalog: true,
                     });
                 }
@@ -115,7 +116,7 @@ impl PiHarness {
                     let since = unchanged_since.get_or_insert(now);
                     if now.duration_since(*since) >= stable_for {
                         return Ok(DiscoveredModels {
-                            models: best,
+                            models: std::mem::take(&mut best),
                             from_catalog: true,
                         });
                     }
@@ -124,7 +125,7 @@ impl PiHarness {
                     let from_catalog = !best.is_empty();
                     return Ok(DiscoveredModels {
                         models: if from_catalog {
-                            best
+                            std::mem::take(&mut best)
                         } else {
                             models_from_responses(&available, &state)
                         },
@@ -140,6 +141,16 @@ impl PiHarness {
         shutdown_child(&mut child, self.kill_grace).await;
         match result {
             Ok(inner) => inner,
+            // The bound passed first: Pi was slow to start (the wait above
+            // counts from its first answer, so a start over two seconds puts
+            // that deadline past this one) or stopped answering. What it
+            // listed until then is still its catalog. Failing instead threw
+            // it away, and since a failure caches nothing, every later
+            // listing waited out the same bound and failed the same way.
+            Err(_) if !best.is_empty() => Ok(DiscoveredModels {
+                models: best,
+                from_catalog: true,
+            }),
             Err(_) => Err(HarnessError::Protocol("model discovery timed out".into())),
         }
     }
