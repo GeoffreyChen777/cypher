@@ -106,8 +106,13 @@ extension WorkspaceStore {
             var description: String?
             var reasoningLevels: [String]?
         }
+        // A host with no cached catalog starts Pi and waits for its providers:
+        // up to 10s by its own bound (crates/harness/src/pi/discovery.rs), so
+        // the default deadline could give up on an answer that was coming. A
+        // link that has stopped answering is caught sooner, by the relay
+        // client's own watch.
         let wire: [WireModel] = try await relayClient(for: deviceId)
-            .call(method: "ListModels", params: ["harness": harness])
+            .call(method: "ListModels", params: ["harness": harness], timeoutSeconds: 20)
         var seen = Set<String>()
         return wire.filter { !$0.id.isEmpty && seen.insert($0.id).inserted }.map {
             ModelInfo(

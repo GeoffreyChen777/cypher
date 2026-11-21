@@ -10,7 +10,10 @@
 //! - client → DO: the DO stamps `from = connId` and forwards to the host socket;
 //! - host → DO: must carry `to = connId`; the DO strips routing keys and delivers;
 //! - relay control frames use kind [`RELAY_KIND`] with payload `{"error": code}` —
-//!   codes `host_offline`, `host_closed`, `client_gone`, `client_closed`;
+//!   codes `host_offline`, `host_closed`, `client_gone`, `client_closed`. Clients get
+//!   `host_closed` when the last host socket leaves and when a host socket supersedes
+//!   another: a link's state (virtual connection, streams, Noise session) lives in one
+//!   host relay session and does not carry over to the next;
 //! - nudge frames use kind [`NUDGE_KIND`] with payload `{"chatId": …}`;
 //! - bot network nudges use kind [`BOTS_NUDGE_KIND`] with payload `{"botRoomId": …}`.
 //!

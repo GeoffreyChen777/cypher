@@ -94,6 +94,17 @@ A client that finds the host in its group sends the first handshake message
 - Hosts re-check membership on every sealed frame, so a removal ends open
   sessions as soon as the host learns of it.
 - A cached plaintext link is replaced once the host's key becomes known.
+- A session lives in one host relay session. When the host replaces its relay
+  socket (its uplink died silently and it re-joined, or the engine restarted
+  faster than the old socket closed), the new relay session holds none of the
+  clients' Noise state, while the clients' own sockets to the relay never
+  dropped. Both ends say so, because a client left unaware calls into a link
+  that can never answer: the `DeviceRoom` sends every client `host_closed`
+  when a host socket supersedes another, and a host that receives a sealed
+  frame for a session it does not hold refuses it with
+  `secure_channel_failed` (which also covers a relay that predates the
+  notice). Clients treat both as link down and dial a fresh session. The
+  policy refusals (`untrusted_device`, `receive_only`) are not retried.
 
 ## "Only paired devices"
 
@@ -262,10 +273,31 @@ a single ordered outbox (Noise counts messages, so fragments must leave in
 sealing order); without one it refuses under the group's policy. A plaintext
 link opened before pairing is replaced on the next call.
 
+The relay keeps the phone's socket open whatever happens to the host behind
+it, and its `pong` is the Durable Object's own answer, so an open socket says
+nothing about the host. While a call waits, `DeviceRelayClient` watches the
+link: after 3 seconds without a frame from the host it sends a probe
+(`ListHarnesses`, which the host answers without starting Pi), and a probe
+unanswered for 4 seconds ends the link. The calls waiting on it are sent again
+on a fresh one, as after any link drop (three attempts in all). A host that
+answers the probe keeps its link however long the call itself takes. Without
+this, a link that had gone dead while looking connected (the phone's flow
+dropped in the background or on a network hop, or the host re-joined the relay)
+made every later call wait out its own deadline: the session's "Couldn't load
+models" notice came back on every Retry until the app was restarted.
+
 Checks:
 
 - `DeviceTrustTests` (CypherTests): the shared vectors, joining, a swapped
   device list, rollback, removal and re-pairing against an in-memory edge.
+- `DeviceRelayClientTests` (CypherTests): a silent link is probed, ended and
+  its call sent again; an answered probe keeps a slow call's link; a lost
+  session is dialed again and a policy refusal is not; an ended link's late
+  socket error leaves its successor alone.
+- `crates/rpc/tests/device_room.rs`: a sealed link learns that the host
+  re-joined, from the relay and, on a relay that says nothing, from the host.
+- `apps/edge/test/workerd/device-room.workerd.test.ts`: what the `DeviceRoom`
+  tells clients when the host's socket is replaced or the last host leaves.
 - `scripts/tests/device-trust-vectors.swift`: the vectors without a simulator
   (macOS stage of `scripts/check.sh`).
 - End to end, Development builds only: launch the Dev app with

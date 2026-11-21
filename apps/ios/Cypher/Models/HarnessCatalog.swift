@@ -197,7 +197,18 @@ final class RemotePiCatalog {
     private(set) var models: [ModelInfo] = []
     private(set) var loading = false
     private(set) var error: PiCatalogError?
+    /// What the link or the device said when the load failed for a reason
+    /// `error` doesn't name (a timeout, a refused link, the device's own
+    /// error text). Shown with the notice's details, so a failure can be
+    /// told from another.
+    private(set) var reason: String?
     private var generation = UUID()
+
+    /// The failure's explanation with its reason, for one line of text.
+    var failureText: String? {
+        guard let error else { return nil }
+        return reason.map { "\(error.message) (\($0))" } ?? error.message
+    }
 
     func models(for deviceId: String) -> [ModelInfo] {
         self.deviceId == deviceId && !loading ? models : []
@@ -209,6 +220,7 @@ final class RemotePiCatalog {
         self.deviceId = deviceId
         models = []
         error = nil
+        reason = nil
         loading = true
         defer {
             if generation == ticket { loading = false }
@@ -220,7 +232,17 @@ final class RemotePiCatalog {
             error = result.isEmpty ? .noModels : nil
         } catch {
             guard generation == ticket, !Task.isCancelled else { return }
-            self.error = (error as? PiCatalogError) ?? .unavailable
+            if let known = error as? PiCatalogError {
+                self.error = known
+            } else {
+                self.error = .unavailable
+                reason = Self.reason(for: error)
+            }
         }
+    }
+
+    static func reason(for error: Error) -> String {
+        if error is DecodingError { return "The device sent a model list this version of the app can't read." }
+        return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 }

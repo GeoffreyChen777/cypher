@@ -1,6 +1,7 @@
 // Injectable WebSocket and clock seams for the room clients (ChatRoomClient,
-// RegistryClient). Production uses URLSession and the system uptime clock;
-// tests substitute in-memory fakes to drive the socket lifecycle.
+// RegistryClient) and the device relay client. Production uses URLSession and
+// the system uptime clock; tests substitute in-memory fakes to drive the
+// socket lifecycle.
 
 import Foundation
 
@@ -19,8 +20,12 @@ protocol WebSocketTransport: Sendable {
 }
 
 struct URLSessionWebSocketTransport: WebSocketTransport {
+    /// The largest message the socket accepts; nil keeps URLSession's 1 MiB.
+    var maximumMessageSize: Int?
+
     func open(_ request: URLRequest) -> any WebSocketConnection {
         let task = URLSession.shared.webSocketTask(with: request.liftingBearer())
+        if let maximumMessageSize { task.maximumMessageSize = maximumMessageSize }
         task.resume()
         return task
     }

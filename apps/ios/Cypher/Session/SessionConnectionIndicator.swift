@@ -34,6 +34,13 @@ enum SessionConnectionPhase: Equatable {
         }
     }
 
+    /// The notice's details; `reason` is what the link or the device said
+    /// when the catalog failed for a reason the phase doesn't name.
+    func detail(reason: String?) -> String {
+        guard case .catalogFailure = self, let reason, !reason.isEmpty else { return detail }
+        return "\(detail)\n\n\(reason)"
+    }
+
     var detail: String {
         switch self {
         case .catalogFailure(let error): error.message
@@ -50,6 +57,8 @@ enum SessionConnectionPhase: Equatable {
 /// above the input or move the transcript around.
 struct SessionConnectionIndicator: View {
     let phase: SessionConnectionPhase
+    /// `RemotePiCatalog.reason`, shown under a catalog failure's details.
+    var reason: String?
     let retryRevision: Int
     let retry: () -> Void
     @Environment(\.scenePhase) private var scenePhase
@@ -92,7 +101,7 @@ struct SessionConnectionIndicator: View {
         .alert("Connection details", isPresented: $showDetails) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(phase.detail)
+            Text(phase.detail(reason: reason))
         }
     }
 }

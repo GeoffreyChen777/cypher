@@ -18,9 +18,22 @@
 // "noise") and then every RPC frame travels sealed (kind "rpcx"), mirroring
 // crates/rpc/src/device_room/links.rs. Sealed frames must leave in the order
 // they were sealed, so every frame goes through one outbox.
+//
+// Link health: the relay keeps a client's socket open whatever happens to the
+// host behind it, and its "pong" is the Durable Object's own answer, so an
+// open socket proves nothing about the host. A link can stop answering for
+// good while looking connected: the phone's flow died silently (background,
+// network hop), or the host re-joined the relay with a session that holds
+// none of this link's state. So while a call waits, the link is watched: a
+// host silent past `Timing.quietNs` gets a probe (`ListHarnesses`, which the
+// host answers at once), and a probe unanswered past `Timing.probeDeadlineNs`
+// ends the link. Its calls are then sent again on a fresh one.
 
 import CryptoKit
 import Foundation
+import OSLog
+
+let relayLog = Logger(subsystem: "ai.mvp-lab.cypher.ios", category: "relay")
 
 enum RelayError: LocalizedError {
     case notConnected
@@ -60,14 +73,49 @@ actor DeviceRelayClient {
     static let reply: UInt8 = 2
     static let refused: UInt8 = 3
 
+    /// Refusals that state the host's policy; a fresh dial changes nothing.
+    /// Any other reason means this link's session is unusable (the host no
+    /// longer holds it, or a frame did not open), which a fresh dial cures.
+    static let policyRefusals: Set<String> = ["untrusted_device", "receive_only"]
+    /// The probe: cheap on the host, which answers it without starting Pi
+    /// (the Rust client proves a new link with the same call).
+    static let probeMethod = "ListHarnesses"
+
+    struct Timing: Sendable {
+        /// A waiting call and a host silent this long: send a probe.
+        var quietNs: UInt64 = 3_000_000_000
+        /// A probe unanswered this long: the link is dead.
+        var probeDeadlineNs: UInt64 = 4_000_000_000
+        var watchTickNs: UInt64 = 1_000_000_000
+        var handshakeNs: UInt64 = 10_000_000_000
+        var pingIntervalNs: UInt64 = 30_000_000_000
+        /// Pause before a call is sent again on a fresh link, per attempt.
+        var retrySpacingNs: UInt64 = 250_000_000
+    }
+
     private let deviceId: String
     private let config: AppConfig
+    private let transport: any WebSocketTransport
+    private let clock: any RoomClock
+    private let timing: Timing
 
-    private var socket: URLSessionWebSocketTask?
+    private var socket: (any WebSocketConnection)?
+    /// Counts links: every teardown moves it on, so a task that belonged to
+    /// an earlier link (its socket's late receive error, its timers) can tell
+    /// and leaves the successor alone.
+    private var generation = 0
     private var receiveTask: Task<Void, Never>?
     private var pingTask: Task<Void, Never>?
+    private var watchTask: Task<Void, Never>?
     private var nextId: UInt64 = 1
     private var pending: [UInt64: CheckedContinuation<Result<Data, RelayError>, Never>] = [:]
+    /// When each waiting unary call was sent (clock time).
+    private var sentAt: [UInt64: UInt64] = [:]
+    /// The host's last frame on this link (clock time). The relay's "pong"
+    /// does not count.
+    private var lastHostFrame: UInt64 = 0
+    /// Set while a probe awaits its answer.
+    private var probeSentAt: UInt64?
     /// Open streaming calls. An id belongs to a unary waiter or a stream,
     /// never both.
     private var streams: [UInt64: AsyncThrowingStream<Data, Error>.Continuation] = [:]
@@ -81,9 +129,18 @@ actor DeviceRelayClient {
     private var outbox: AsyncStream<Data>.Continuation?
     private var senderTask: Task<Void, Never>?
 
-    init(deviceId: String, config: AppConfig) {
+    init(
+        deviceId: String, config: AppConfig,
+        // Checkout patches are capped at 3 MiB before JSON escaping. Keep a
+        // finite transport ceiling, but don't reject normal diffs at 1 MiB.
+        transport: any WebSocketTransport = URLSessionWebSocketTransport(maximumMessageSize: 8 * 1024 * 1024),
+        clock: any RoomClock = SystemRoomClock(), timing: Timing = Timing()
+    ) {
         self.deviceId = deviceId
         self.config = config
+        self.transport = transport
+        self.clock = clock
+        self.timing = timing
     }
 
     // MARK: Lifecycle
@@ -134,11 +191,7 @@ actor DeviceRelayClient {
             URLQueryItem(name: "connId", value: UUID().uuidString.lowercased()),
             URLQueryItem(name: "token", value: token),
         ]
-        let task = URLSession.shared.webSocketTask(with: URLRequest(url: components.url!).liftingBearer())
-        // Checkout patches are capped at 3 MiB before JSON escaping. Keep a
-        // finite transport ceiling, but don't reject normal diffs at 1 MiB.
-        task.maximumMessageSize = 8 * 1024 * 1024
-        task.resume()
+        let task = transport.open(URLRequest(url: components.url!))
         if let secure {
             do {
                 session = try await handshake(task, local: secure.local, host: secure.host)
@@ -149,6 +202,8 @@ actor DeviceRelayClient {
         }
         socket = task
         connected = true
+        lastHostFrame = clock.now()
+        let gen = generation
 
         let (frames, outbox) = AsyncStream<Data>.makeStream()
         self.outbox = outbox
@@ -157,29 +212,39 @@ actor DeviceRelayClient {
                 do {
                     try await task.send(.data(frame))
                 } catch {
-                    await self?.teardown(error: .notConnected)
+                    await self?.linkFailed(gen: gen, error: .notConnected)
                     return
                 }
             }
         }
         receiveTask = Task { [weak self] in
             while !Task.isCancelled {
-                guard let self else { return }
-                guard let sock = await self.socket else { return }
                 do {
-                    let message = try await sock.receive()
-                    await self.handleInbound(message)
+                    let message = try await task.receive()
+                    guard let self else {
+                        // The client was let go without a close: its socket
+                        // goes with it rather than staying open unowned.
+                        task.cancel(with: .goingAway, reason: nil)
+                        return
+                    }
+                    await self.handleInbound(message, gen: gen)
                 } catch {
-                    await self.teardown(error: .hostOffline)
+                    await self?.linkFailed(gen: gen, error: .hostOffline)
                     return
                 }
             }
         }
+        let clock = clock
+        let pingInterval = timing.pingIntervalNs
         pingTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 30_000_000_000)
-                guard let self else { return }
-                await self.sendPing()
+                await clock.sleep(nanoseconds: pingInterval)
+                guard !Task.isCancelled else { return }
+                guard let self else {
+                    task.cancel(with: .goingAway, reason: nil)
+                    return
+                }
+                await self.sendPing(gen: gen)
             }
         }
     }
@@ -187,15 +252,19 @@ actor DeviceRelayClient {
     /// The client half of the Noise IK handshake: hello, then the host's
     /// reply or refusal. Ten seconds, like the Rust client.
     private func handshake(
-        _ task: URLSessionWebSocketTask,
+        _ task: any WebSocketConnection,
         local: Curve25519.KeyAgreement.PrivateKey,
         host: Curve25519.KeyAgreement.PublicKey
     ) async throws -> NoiseSession {
         var initiator = NoiseInitiator(local: local, hostDeviceId: deviceId, hostKey: host)
         let first = try initiator.first(localDeviceId: config.deviceId)
         try await task.send(.data(Self.encodeFrame(header: Self.noiseHeader, payload: Data([Self.hello]) + first)))
+        let clock = clock
+        let deadline = timing.handshakeNs
         let timer = Task {
-            try await Task.sleep(nanoseconds: 10_000_000_000)
+            await clock.sleep(nanoseconds: deadline)
+            // The sleep also returns when this timer is cancelled.
+            guard !Task.isCancelled else { return }
             task.cancel(with: .goingAway, reason: nil)
         }
         defer { timer.cancel() }
@@ -265,9 +334,23 @@ actor DeviceRelayClient {
         teardown(error: .notConnected)
     }
 
+    /// A failure reported by one of a link's own tasks; ignored once that
+    /// link has been replaced.
+    private func linkFailed(gen: Int, error: RelayError) {
+        guard gen == generation else { return }
+        teardown(error: error)
+    }
+
     private func teardown(error: RelayError) {
+        generation += 1
         receiveTask?.cancel()
+        receiveTask = nil
         pingTask?.cancel()
+        pingTask = nil
+        watchTask?.cancel()
+        watchTask = nil
+        probeSentAt = nil
+        sentAt.removeAll()
         outbox?.finish()
         outbox = nil
         senderTask?.cancel()
@@ -288,8 +371,65 @@ actor DeviceRelayClient {
         }
     }
 
-    private func sendPing() async {
+    private func sendPing(gen: Int) async {
+        guard gen == generation else { return }
         try? await socket?.send(.string("ping"))
+    }
+
+    // MARK: Link health
+
+    /// Runs while calls wait on this link (see the header).
+    private func watchLink() {
+        guard watchTask == nil else { return }
+        let gen = generation
+        let clock = clock
+        let tick = timing.watchTickNs
+        watchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await clock.sleep(nanoseconds: tick)
+                guard let self, !Task.isCancelled, await self.watchTick(gen: gen) else { return }
+            }
+        }
+    }
+
+    /// One look at the link; false once there is nothing left to watch.
+    private func watchTick(gen: Int) -> Bool {
+        guard gen == generation, connected else { return false }
+        let now = clock.now()
+        if let probe = probeSentAt {
+            if lastHostFrame >= probe {
+                // Any frame since the probe left is the host's end at work.
+                probeSentAt = nil
+            } else if now - probe >= timing.probeDeadlineNs {
+                relayLog.warning(
+                    "relay \(self.deviceId, privacy: .public): the device stopped answering on this link; dialing again"
+                )
+                teardown(error: .hostOffline)
+                return false
+            } else {
+                return true
+            }
+        }
+        guard let oldest = sentAt.values.min() else {
+            watchTask = nil
+            return false
+        }
+        if now - max(oldest, lastHostFrame) >= timing.quietNs {
+            sendProbe(at: now)
+        }
+        return true
+    }
+
+    private func sendProbe(at now: UInt64) {
+        let id = nextId
+        nextId += 1
+        guard
+            let payload = try? JSONSerialization.data(
+                withJSONObject: ["id": id, "method": Self.probeMethod, "params": [String: Any]()] as [String: Any])
+        else { return }
+        // Armed before the frame is queued: its answer must find it set.
+        probeSentAt = now
+        try? enqueue(payload)
     }
 
     // MARK: RPC
@@ -320,8 +460,9 @@ actor DeviceRelayClient {
                 guard attempt < 2 else { throw error }
                 switch error {
                 case .hostOffline, .notConnected:
-                    teardown(error: error)
-                    try? await Task.sleep(nanoseconds: UInt64(attempt + 1) * 250_000_000)
+                    // The link is gone (`callOnce` saw to it); the call is
+                    // sent again on a fresh one.
+                    await clock.sleep(nanoseconds: UInt64(attempt + 1) * timing.retrySpacingNs)
                 case .rpc, .timeout, .notPaired:
                     throw error
                 }
@@ -336,6 +477,7 @@ actor DeviceRelayClient {
         timeoutSeconds: UInt64
     ) async throws -> Response {
         try await connect()
+        let gen = generation
         let id = nextId
         nextId += 1
         // Always send a params object — the engine's serde rejects a missing
@@ -347,20 +489,27 @@ actor DeviceRelayClient {
         // Install the waiter before sending. URLSession's async send may yield
         // long enough for a fast host reply to reach handleInbound; registering
         // afterward loses that reply and turns a successful call into a timeout.
+        let clock = clock
         let result: Result<Data, RelayError> = await withCheckedContinuation { continuation in
             pending[id] = continuation
+            sentAt[id] = clock.now()
             do {
                 try enqueue(payload)
+                watchLink()
             } catch {
                 failCall(id: id, error: (error as? RelayError) ?? .notConnected)
             }
-            Task {
-                try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
-                self.timeoutCall(id: id)
+            Task { [weak self] in
+                await clock.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
+                await self?.timeoutCall(id: id)
             }
         }
         switch result {
-        case .failure(let error): throw error
+        case .failure(let error):
+            // A link that could not take the frame is not kept. One that was
+            // torn down already has moved the generation on.
+            if case .notConnected = error, gen == generation { teardown(error: error) }
+            throw error
         case .success(let ok):
             return try JSONDecoder().decode(Response.self, from: ok)
         }
@@ -421,6 +570,7 @@ actor DeviceRelayClient {
     }
 
     private func failCall(id: UInt64, error: RelayError) {
+        sentAt[id] = nil
         if let continuation = pending.removeValue(forKey: id) {
             continuation.resume(returning: .failure(error))
         }
@@ -432,31 +582,43 @@ actor DeviceRelayClient {
 
     // MARK: Inbound
 
-    private func handleInbound(_ message: URLSessionWebSocketTask.Message) {
+    private func handleInbound(_ message: URLSessionWebSocketTask.Message, gen: Int) {
+        guard gen == generation else { return }
         switch message {
         case .string:
-            return  // "pong"
+            return  // "pong": the relay's own answer, no word from the host
         case .data(let data):
             guard let (header, payload) = Self.decodeFrame(data) else { return }
             switch header.k {
             case Self.rpcKind:
                 // A secure link never accepts plaintext from the relay.
                 guard session == nil else { return }
+                lastHostFrame = clock.now()
                 handleRpcPayload(payload)
             case Self.secureKind:
                 guard var current = session else { return }
                 do {
                     let message = try current.open(payload)
                     session = current
+                    lastHostFrame = clock.now()
                     if let message { handleRpcPayload(message) }
                 } catch {
                     teardown(error: .rpc("The secure connection to the device failed"))
                 }
             case Self.noiseKind:
-                // The host ended the session (this phone left the group).
-                if payload.first == Self.refused {
-                    teardown(
-                        error: .notPaired(Self.refusalMessage(String(decoding: payload.dropFirst(), as: UTF8.self))))
+                guard payload.first == Self.refused else { return }
+                let reason = String(decoding: payload.dropFirst(), as: UTF8.self)
+                if Self.policyRefusals.contains(reason) {
+                    // The host ended the session (this phone left the group,
+                    // or became receive-only).
+                    teardown(error: .notPaired(Self.refusalMessage(reason)))
+                } else {
+                    // The session is gone, not the permission: the host holds
+                    // no state for this link any more. Link down; dial again.
+                    relayLog.info(
+                        "relay \(self.deviceId, privacy: .public): the device dropped this session (\(reason, privacy: .public)); dialing again"
+                    )
+                    teardown(error: .hostOffline)
                 }
             case Self.relayKind:
                 // {"error":"host_offline"|"host_closed"|...} — link down.
@@ -491,6 +653,7 @@ actor DeviceRelayClient {
                 continue
             }
             guard let continuation = pending.removeValue(forKey: id) else { continue }
+            sentAt[id] = nil
             if let err = obj["err"] as? String {
                 continuation.resume(returning: .failure(.rpc(err)))
             } else if obj.keys.contains("ok"),

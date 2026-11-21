@@ -3,9 +3,11 @@
 //! The fake implements the `DeviceRoom` DO's relay semantics (apps/edge/src/device/device-room.ts):
 //! route client frames to the single host socket with `from` stamped; route host frames
 //! by `to` (bounce `client_gone` when the target left); host supersede (a new host join
-//! closes the predecessor); `client_closed` on client disconnect; `host_closed` broadcast
-//! on host disconnect; `host_offline` bounce when a client sends with no host; nudge
-//! frames delivered to the host.
+//! closes the predecessor and tells the clients `host_closed`, since what they held with
+//! the predecessor's session is gone); `client_closed` on client disconnect; `host_closed`
+//! broadcast when the last host leaves (a superseded socket closing says nothing more);
+//! `host_offline` bounce when a client sends with no host; nudge frames delivered to the
+//! host.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -48,6 +50,20 @@ struct RelayState {
     seen: Vec<Vec<u8>>,
     /// Flip one byte of every sealed frame on its way to a client.
     tamper_sealed: bool,
+    /// Behave like an edge from before the supersede notice: a replaced host
+    /// socket tells the clients nothing.
+    silent_supersede: bool,
+}
+
+impl RelayState {
+    fn tell_clients_host_closed(&self) {
+        for client in self.clients.values() {
+            let header = DeviceFrameHeader::new("", RELAY_KIND);
+            let _ = client.send(Out::Frame(
+                encode_device_frame(&header, &relay_error(HOST_CLOSED)).expect("encode"),
+            ));
+        }
+    }
 }
 
 struct FakeRelay {
@@ -154,9 +170,13 @@ async fn handle_socket(stream: tokio::net::TcpStream, state: Arc<Mutex<RelayStat
     {
         let mut st = state.lock().expect("lock");
         if is_host {
-            // One live host socket: close any predecessor (backend restart / supersede).
+            // One live host socket: close any predecessor (backend restart / supersede)
+            // and reset the clients, whose links ended with its session.
             if let Some(old) = st.host.take() {
                 let _ = old.send(Out::Close);
+                if !st.silent_supersede {
+                    st.tell_clients_host_closed();
+                }
             }
             st.host = Some(tx.clone());
         } else {
@@ -235,14 +255,11 @@ async fn handle_socket(stream: tokio::net::TcpStream, state: Arc<Mutex<RelayStat
     {
         let mut st = state.lock().expect("lock");
         if is_host {
+            // Only the last host leaving is announced here: a superseded
+            // socket closing must not reset links made with its successor.
             if st.host.as_ref().is_some_and(|h| h.same_channel(&tx)) {
                 st.host = None;
-            }
-            for client in st.clients.values() {
-                let header = DeviceFrameHeader::new("", RELAY_KIND);
-                let _ = client.send(Out::Frame(
-                    encode_device_frame(&header, &relay_error(HOST_CLOSED)).expect("encode"),
-                ));
+                st.tell_clients_host_closed();
             }
         } else {
             st.clients.remove(&conn_id);
@@ -340,6 +357,26 @@ fn cache(edge_url: &str) -> Arc<LinkCache> {
     // expected failure take four and a half seconds.
     config.dial_retry_spacing = Duration::from_millis(20);
     LinkCache::new(config)
+}
+
+/// Replace the host's relay socket under it, as a silently dead uplink and its
+/// re-join do: a second host socket joins (the relay closes the HostRelay's),
+/// and the HostRelay's reconnect supersedes it right back. Returns once the
+/// HostRelay holds the room again, with a session that knows no client.
+async fn replace_host_socket(relay: &FakeRelay) {
+    let rogue_url = device_room_ws_url(&relay.edge_url(), "dev-a", "host", None, "t");
+    let (rogue_ws, _) = tokio_tungstenite::connect_async(&rogue_url)
+        .await
+        .expect("rogue joins");
+    // The rogue stays until the HostRelay's re-join closes its socket.
+    let (_, mut rogue_stream) = rogue_ws.split();
+    loop {
+        match rogue_stream.next().await {
+            Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => break,
+            Some(Ok(_)) => {}
+        }
+    }
+    relay.wait_host_connected().await;
 }
 
 fn noop_nudge() -> cypher_rpc::NudgeHandler {
@@ -638,23 +675,10 @@ async fn host_supersede_drops_old_links_and_recovers() {
     let client = links.client("dev-a").await.expect("dials");
     assert!(client.call("Echo", serde_json::json!({})).await.is_ok());
 
-    // A rogue host joins: the relay closes the HostRelay's socket (supersede) and, when
-    // the rogue's socket later closes, clients see host_closed. The HostRelay backs off
-    // and reclaims the room; old links are down and the cache re-dials.
-    let rogue_url = device_room_ws_url(&relay.edge_url(), "dev-a", "host", None, "t");
-    let (rogue_ws, _) = tokio_tungstenite::connect_async(&rogue_url)
-        .await
-        .expect("rogue joins");
-    // Wait for the supersede to land, then let the rogue die: the HostRelay's reconnect
-    // supersedes it right back (proved by its socket closing).
-    let (_, mut rogue_stream) = rogue_ws.split();
-    loop {
-        match rogue_stream.next().await {
-            Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => break,
-            Some(Ok(_)) => {}
-        }
-    }
-    relay.wait_host_connected().await;
+    // A rogue host joins: the relay closes the HostRelay's socket (supersede) and tells
+    // the clients host_closed. The HostRelay backs off and reclaims the room; old links
+    // are down and the cache re-dials.
+    replace_host_socket(&relay).await;
 
     // The pre-supersede link died; in-flight/new calls on it fail rather than hang.
     let err = client
@@ -1074,6 +1098,74 @@ async fn a_tampered_sealed_frame_kills_the_link() {
     .await
     .expect("fails fast instead of hanging");
     assert!(result.is_err(), "a tampered reply must not be accepted");
+}
+
+#[tokio::test]
+async fn a_sealed_link_is_told_when_its_session_went_with_the_hosts_old_socket() {
+    // An edge that says nothing when a host socket is replaced (every Worker
+    // before the supersede notice): only the host can tell the client.
+    let relay = FakeRelay::start().await;
+    relay.state.lock().unwrap().silent_supersede = true;
+    let pair = Pair::new();
+    let _host = trusted_host(&relay, pair.host(true, true)).await;
+    let links = trusted_cache(&relay, pair.client(true, true));
+    let client = links.client("dev-a").await.expect("paired client connects");
+    client
+        .call("Echo", serde_json::json!({}))
+        .await
+        .expect("echo over the first session");
+
+    // The host re-joins the relay: its new session holds no Noise state for
+    // this client, whose socket to the relay never dropped.
+    replace_host_socket(&relay).await;
+
+    // The stranded link ends instead of swallowing calls for good.
+    let err = tokio::time::timeout(
+        Duration::from_secs(3),
+        client.call("Echo", serde_json::json!({})),
+    )
+    .await
+    .expect("the call ends instead of waiting on a session the host no longer has")
+    .expect_err("the old session is gone");
+    assert!(
+        matches!(err, RpcError::Closed | RpcError::Transport(_)),
+        "got: {err}"
+    );
+
+    // And the next call dials a fresh session.
+    let recovered = loop {
+        match links.client("dev-a").await {
+            Ok(client) => break client,
+            Err(_) => tokio::time::sleep(Duration::from_millis(60)).await,
+        }
+    };
+    let echoed = recovered
+        .call("Echo", serde_json::json!({}))
+        .await
+        .expect("echo over the new session");
+    assert_eq!(echoed["host"], "host-a");
+}
+
+#[tokio::test]
+async fn a_replaced_host_socket_resets_sealed_links_at_once() {
+    // The relay itself announces the replacement, so a client learns of it
+    // without sending anything: an open stream ends instead of going quiet.
+    let relay = FakeRelay::start().await;
+    let pair = Pair::new();
+    let _host = trusted_host(&relay, pair.host(true, true)).await;
+    let links = trusted_cache(&relay, pair.client(true, true));
+    let client = links.client("dev-a").await.expect("paired client connects");
+    let mut stream = client
+        .subscribe("Never", serde_json::json!({}))
+        .await
+        .expect("stream opens");
+
+    replace_host_socket(&relay).await;
+
+    let ended = tokio::time::timeout(Duration::from_secs(3), stream.recv())
+        .await
+        .expect("the stream ends with the host's old socket");
+    assert!(ended.is_none(), "got: {ended:?}");
 }
 
 #[tokio::test]

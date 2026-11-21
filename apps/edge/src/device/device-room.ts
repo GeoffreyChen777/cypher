@@ -149,7 +149,8 @@ export class DeviceRoom implements DurableObject {
       const pair = new WebSocketPair();
       if (role === "host") {
         // One live host socket: close any predecessor (backend restart).
-        for (const stale of this.ctx.getWebSockets(HOST_TAG)) {
+        const predecessors = this.ctx.getWebSockets(HOST_TAG);
+        for (const stale of predecessors) {
           try {
             stale.close(4409, "superseded by new host connection");
           } catch {
@@ -157,6 +158,14 @@ export class DeviceRoom implements DurableObject {
           }
         }
         this.ctx.acceptWebSocket(pair[1], [HOST_TAG]);
+        // A host that replaces its socket starts a new relay session: every
+        // client's virtual connection, its open streams and its Noise session
+        // ended with the old one, while the clients' own sockets stay up. Tell
+        // them now. The predecessor's close is not announced later (a
+        // successor is live by then), and a client left unaware keeps calling
+        // into a link the new session cannot answer: sealed frames for a
+        // session the host no longer holds are undecipherable to it.
+        if (predecessors.length > 0) this.tellClientsHostClosed();
         this.replayNudges(pair[1]);
       } else {
         this.ctx.acceptWebSocket(pair[1], [clientTag(connId)]);
@@ -326,6 +335,12 @@ export class DeviceRoom implements DurableObject {
     // replaced it.
     if (this.liveHost(ws)) return;
     // Host went away: notify every client.
+    this.tellClientsHostClosed();
+  }
+
+  /** `host_closed` to every client: its link ended with the host socket it
+   * was made with, so it must dial again. */
+  private tellClientsHostClosed(): void {
     for (const client of this.ctx.getWebSockets()) {
       const cs = client.deserializeAttachment() as SocketState | null;
       if (cs?.role !== "client") continue;
