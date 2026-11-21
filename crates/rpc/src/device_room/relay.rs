@@ -409,7 +409,17 @@ impl Host {
         match header.k.as_str() {
             NOISE_KIND => self.hello(&from, &payload, conns).await,
             SECURE_KIND => {
-                let Some(conn) = conns.get(&from) else { return };
+                let Some(conn) = conns.get(&from) else {
+                    // A sealed frame for a session this host doesn't hold: the
+                    // client opened it with a host session that has ended (this
+                    // device re-joined the relay, or restarted) while the
+                    // client's own socket stayed up. Dropping the frame would
+                    // leave the client calling into a link that can never
+                    // answer; the refusal makes it dial a fresh session.
+                    tracing::info!(conn = %from, "device-room: sealed frame for a session this host doesn't hold; asking the client to reconnect");
+                    self.refuse(&from, CHANNEL_FAILED).await;
+                    return;
+                };
                 let Some(session) = &conn.session else { return };
                 if self.trust.require_paired()
                     && !conn
