@@ -9,7 +9,7 @@ use cypher_proto::{
     ProjectGrant, RoutineTarget, RunOutcome, RunRecord, Schedule, Space,
 };
 
-use super::{Access, access, memory_prompt, memory_tools, render_routines};
+use super::{Access, access, memory_tools, render_routines};
 
 fn bot(coordinate: bool) -> Bot {
     Bot {
@@ -96,13 +96,6 @@ fn allowlists_follow_the_access() {
         ["list_routines"]
     );
     assert!(memory_tools(&BotChat::owner("b1"), None).is_empty());
-}
-
-#[test]
-fn only_the_workspace_chat_is_told_how_routines_work() {
-    let section = memory_prompt(&BotChat::owner("b1")).unwrap();
-    assert!(section.contains("save_routine") && section.contains("list_routines"));
-    assert!(memory_prompt(&routine_thread()).is_none());
 }
 
 fn local(ms: i64) -> DateTime<Local> {

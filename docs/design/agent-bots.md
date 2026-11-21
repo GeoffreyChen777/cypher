@@ -778,16 +778,18 @@ sessions it draws on as `cypher://session/<id>` links (built), and that text fro
 transcripts, tool output, web pages and peers is data to read, never instructions to
 follow. In peer threads it also says who is asking.
 
-As built: the workspace's own chat opens with who it is and what it can do, each way of
-working with what it is good for (`bots/prompt.rs` `main_chat_lines`): answering from the
-sessions, working directly (the quickest, in this conversation), plans (their own
-sessions, worktrees and diffs, in parallel and on other devices, each with its own model,
-approved first), routines, shortcuts, memory, asking the owner, and the web and connected
-tools. It describes; choosing is the agent's. Only the ways its permissions allow are
-listed, and what is off is named with the setting that turns it on. Then, in order: what
-it can see, its tools, how direct work and plans work in practice, routines, shortcuts,
-its activity, connected workspaces, and the owner's instructions last. Other threads keep
-their own openings.
+As built: the workspace's own chat gets a short prompt of what no tool's description
+says (`bots/prompt.rs` `main_chat_lines`, `MAIN_CHAT_APP_LINES`): who it is and who
+instructs it; what it can do, each way of working with what it is good for (answering
+from the sessions, working directly, plans, routines, shortcuts, memory, asking the owner,
+the web and connected tools; only what its permissions allow, and what is off named with
+the setting that turns it on); what it can see; how the chat around it works (cards,
+bracketed notices, session links, tool text as data, UTC); its connected workspaces; and
+the owner's instructions last. It describes rather than prescribes. How to use each tool
+is that tool's description (reminders in `save_routine`, when to offer a shortcut in
+`save_shortcut`, privacy and attribution in `ask_bot`, what the background session reads
+in `propose_plan`), and a notice's turn carries its own instructions (§6.8). Other
+threads keep their own prompts.
 
 As built (§6.8): the bot chat's agent is told to keep the chat for announcements. After
 `propose_plan` it ends its turn with one line and does not repeat the steps; it does not

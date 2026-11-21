@@ -624,30 +624,6 @@ pub(super) fn memory_tools(marker: &BotChat, bot: Option<&Bot>) -> Vec<&'static 
     }
 }
 
-/// This track's section of the thread's system prompt: how routines work,
-/// in the bot chat (where they are made).
-pub(super) fn memory_prompt(marker: &BotChat) -> Option<String> {
-    (marker.origin == BotOrigin::Owner && marker.is_main()).then(|| ROUTINES_LINE.to_string())
-}
-
-/// What the bot chat is told about routines.
-pub(super) const ROUTINES_LINE: &str = "Routines:\n- Routines run by hand or on a schedule, in \
-     the background. When a run ends you get a bracketed notice here with its result: tell \
-     your owner what it says in one or two sentences (they open the rest from its card). \
-     One runs either as you, in its own thread (\"every \
-     morning, tell me what's stuck\"), or as an ordinary session in one of your projects \
-     (\"every night, run the tests and fix anything flaky\"). When your owner asks for \
-     something recurring, save it with save_routine; list_routines shows your routines with \
-     their last results. run_routine runs one now (a fresh run; you are told here when it \
-     ends) and delete_routine removes one, when your owner asks. After save_routine, one \
-     line is enough: your owner sees the routine's card.\n- Reminders are routines too. When your owner asks to be reminded \
-     (\"remind me tomorrow morning to review the code in invoice-demo\"), save a routine as \
-     you with a once schedule at that local time (morning is 09:00 unless they say; \
-     list_routines shows the time now) and a prompt that tells you to remind them and add \
-     what helps, like what changed in the project since. Say when it will come: \"I'll remind \
-     you tomorrow, Tue Nov 10, at 9:00.\" Don't put reminders in memory: memory is read when \
-     a run starts, and nothing would start one.";
-
 /// The `list_routines` answer: this bot's routines, each with where it
 /// runs, its schedule, next run and last result.
 pub(super) fn render_routines(

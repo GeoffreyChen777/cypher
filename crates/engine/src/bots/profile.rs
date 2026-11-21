@@ -50,18 +50,24 @@ pub fn bot_env(workspace: &WorkspaceHost, chat: &Chat) -> Option<BotRunEnv> {
         None => prompt::orphan_prompt(),
     };
     if let Some(bot) = &bot {
-        for section in [
-            work::work_prompt(workspace, bot, marker),
-            memory::memory_prompt(marker),
-            shortcuts::shortcuts_prompt(marker),
-            activity::activity_prompt(marker),
-            network::network_prompt(workspace, bot, marker),
-            // Last, so they read as the final word on how to work.
-            prompt::owner_instructions(bot, marker.origin),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        // The workspace's own chat says what it can do in its opening and
+        // leaves how to use each tool to the tool's description; other
+        // threads get their track's sections.
+        let sections = if main.is_some() {
+            vec![
+                network::network_prompt(workspace, bot, marker),
+                prompt::owner_instructions(bot, marker.origin),
+            ]
+        } else {
+            vec![
+                work::work_prompt(workspace, bot, marker),
+                activity::activity_prompt(marker),
+                network::network_prompt(workspace, bot, marker),
+                // Last, so they read as the final word on how to work.
+                prompt::owner_instructions(bot, marker.origin),
+            ]
+        };
+        for section in sections.into_iter().flatten() {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&section);
         }
@@ -337,8 +343,8 @@ mod tests {
     }
 
     /// The workspace's own chat reads top to bottom: what it can do, what
-    /// it sees, its tools, how each way of working works, and the owner's
-    /// instructions last.
+    /// it sees, how the chat around it works, and the owner's instructions
+    /// last.
     #[tokio::test]
     async fn the_workspace_chat_prompt_reads_in_order() {
         let dir = tempfile::tempdir().unwrap();
@@ -371,13 +377,15 @@ mod tests {
         let order = [
             at("What you can do:"),
             at("What you can see:"),
-            at("Your tools:"),
-            at("Working directly and plans, in practice:"),
-            at("Routines:"),
+            at("How this chat works:"),
             at("Your owner's instructions:\nAnswer in German."),
         ];
         assert!(order.windows(2).all(|w| w[0] < w[1]), "{prompt}");
         assert!(prompt.trim_end().ends_with("Answer in German."));
+        // Each tool's use is its description's, not a section here.
+        for section in ["Routines:", "Shortcuts:", "Your activity:", "in practice:"] {
+            assert!(!prompt.contains(section), "{section}");
+        }
     }
 
     #[tokio::test]

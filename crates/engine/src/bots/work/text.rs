@@ -15,48 +15,10 @@ pub(super) fn prompt(bot: &Bot, role: &Role, roots: &[String]) -> Option<String>
     let caps = bot.capabilities;
     let mut lines = Vec::new();
     match role {
-        Role::Main => {
-            // What each way of working is good for is the prompt's opening
-            // (prompt.rs); this is how they work.
-            if caps.work_directly {
-                lines.push(if roots.is_empty() {
-                    "- Your shell and file tools have nothing to work in: none of your \
-                     projects is on this device."
-                        .to_string()
-                } else {
-                    "- Working directly, your working directory is your own private folder: \
-                     use absolute paths or cd into a checkout. The shell's \"getcwd\" \
-                     warning about that folder is harmless."
-                        .to_string()
-                });
-            }
-            if caps.coordinate {
-                lines.extend([
-                    "- A plan names its steps, the project each works in, and how a step \
-                     gets another's change: a path on the same device, a pushed branch \
-                     across devices, a published version."
-                        .to_string(),
-                    "- The background session that carries a plan out starts from the plan \
-                     and your owner's last message only, never this conversation, so the \
-                     steps' details carry whatever else it needs: constraints, decisions \
-                     made here, what to ask your owner."
-                        .to_string(),
-                    "- A proposed plan waits for your owner's approval in a card in this \
-                     chat, which shows its steps and the Approve button. After \
-                     propose_plan, end your turn with one line saying it awaits approval."
-                        .to_string(),
-                    "- Your owner follows a running plan beside this conversation. When it \
-                     ends you get a bracketed notice with the result, and its card holds \
-                     the rest, so a sentence or two answers it. list_work and get_work show \
-                     where any plan stands."
-                        .to_string(),
-                ]);
-            }
-            if lines.is_empty() {
-                return None;
-            }
-            lines.insert(0, "Working directly and plans, in practice:".to_string());
-        }
+        // The workspace's own chat says what plans are good for in its
+        // opening (prompt.rs), and propose_plan's description how to write
+        // one.
+        Role::Main => return None,
         Role::Work(_) => {
             lines.extend([
                 "You are carrying out one plan your owner approved, in a background \
@@ -405,17 +367,8 @@ mod tests {
     }
 
     #[test]
-    fn prompts_say_how_plans_work_and_how_to_finish() {
-        let main = prompt(&bot(true, true, false), &Role::Main, &["/w/app-a".into()]).unwrap();
-        assert!(main.contains("propose_plan"), "{main}");
-        assert!(main.contains("waits for your owner's approval"), "{main}");
-        assert!(main.contains("end your turn with one line"), "{main}");
-        assert!(main.contains("use absolute paths"), "{main}");
-        let reading = prompt(&bot(false, false, false), &Role::Main, &[]);
-        assert!(reading.is_none(), "a read-only bot keeps the base prompt");
-        let no_plans = prompt(&bot(true, false, false), &Role::Main, &[]).unwrap();
-        assert!(no_plans.contains("none of your projects is on this device"));
-        assert!(!no_plans.contains("propose_plan"));
+    fn a_work_thread_is_told_how_to_finish() {
+        assert!(prompt(&bot(true, true, false), &Role::Main, &["/w/app-a".into()]).is_none());
 
         let thread = prompt(&bot(false, true, false), &Role::Work("w".into()), &[]).unwrap();
         for words in [
