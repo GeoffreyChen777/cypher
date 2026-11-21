@@ -16,7 +16,7 @@ struct PiCatalogNotice: View {
                 Text(
                     catalog.loading
                         ? "Loading Pi models from \(deviceName)…"
-                        : "\(deviceName): \(catalog.error?.message ?? "")"
+                        : "\(deviceName): \(catalog.failureText ?? "")"
                 )
                 .font(Theme.sans(12))
                 .foregroundStyle(Theme.textMuted)

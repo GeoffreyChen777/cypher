@@ -49,6 +49,11 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   “Pi default” fallback. Empty/error states explain how to prepare **that
   device** using desktop Agents/Providers settings; the phone does not install
   Runtime. Retry, picker refresh, reconnect and foregrounding reload catalogs.
+  A load that fails for a reason the notice doesn't name (the device didn't
+  respond, refused the link, or answered with its own error) keeps that
+  reason: tapping "Couldn't load models" shows it under the explanation, and
+  the new-session notice appends it. A host with no cached catalog starts Pi
+  to list its models, so that one call waits 20 seconds rather than 10.
 - **Continue, don't copy:** opening a desktop session retains its chat ID,
   host, working directory and model options. Model changes require an explicit
   available selection; unavailable configured models are not silently replaced.
@@ -76,6 +81,11 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   tap the notice for setup details. Returning to foreground/retrying renews
   the grace period. This is a display threshold, not a new transport timeout:
   automatic reconnect and existing command/draft protections are unchanged.
+  The host calls behind it (models, slash commands, uploads, forks) ride the
+  device relay link, which is watched while a call waits: a link whose device
+  has stopped answering is replaced within about 8 seconds and the call sent
+  again, so the row keeps its spinner instead of failing on every Retry
+  ([device trust, iOS](../../docs/design/device-trust.md#ios)).
 - **Steer bubbles:** explicit steer instructions remain right-aligned, with a
   small arrow/Steer label, softer fill, thin border and 14pt same-turn spacing
   (normal new exchanges retain 36pt). The synced, append-only command ledger's

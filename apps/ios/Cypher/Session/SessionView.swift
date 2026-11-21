@@ -1034,7 +1034,9 @@ struct SessionView: View {
                 connection == .ready && recovery == nil && status == .working ? sessionRow(chat: chat)?.progress : nil
             HStack(spacing: 6) {
                 if connection != .ready {
-                    SessionConnectionIndicator(phase: connection, retryRevision: connectionRetry) {
+                    SessionConnectionIndicator(
+                        phase: connection, reason: catalog.reason, retryRevision: connectionRetry
+                    ) {
                         connectionRetry += 1
                         model.foregrounded()
                     }

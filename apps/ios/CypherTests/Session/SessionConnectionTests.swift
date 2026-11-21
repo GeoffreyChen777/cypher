@@ -28,6 +28,18 @@ final class SessionConnectionTests: XCTestCase {
         }
     }
 
+    func testACatalogFailuresDetailsCarryItsReason() {
+        let failed = SessionConnectionPhase.catalogFailure(.unavailable)
+        XCTAssertEqual(failed.detail(reason: nil), PiCatalogError.unavailable.message)
+        XCTAssertEqual(
+            failed.detail(reason: "The device didn't respond"),
+            "\(PiCatalogError.unavailable.message)\n\nThe device didn't respond")
+        // A reason left from an earlier load says nothing about other phases.
+        for phase in [SessionConnectionPhase.missingModel, .connecting] {
+            XCTAssertEqual(phase.detail(reason: "stale"), phase.detail)
+        }
+    }
+
     func testReadyReadOnlyAndQuestionPanelDoNotWaitForAnUnusedCatalog() {
         let ready = SessionConnectionPhase.resolve(
             transportReady: true, needsCatalog: true, catalogMatches: true,

@@ -1,6 +1,10 @@
 import XCTest
 @testable import Cypher
 
+private struct ModelInfoProbe: Decodable {
+    let id: String
+}
+
 final class PiCatalogTests: XCTestCase {
     func testOnlyPiIsOffered() throws {
         XCTAssertEqual(HarnessCatalog.harnesses.map(\.id), ["pi"])
@@ -40,6 +44,34 @@ final class PiCatalogTests: XCTestCase {
         XCTAssertEqual(catalog.error, .unavailable)
         XCTAssertFalse(catalog.loading)
         XCTAssertTrue(catalog.models.isEmpty)
+    }
+
+    /// "Couldn't load models" covers a timeout, a refused link and the
+    /// device's own error alike; the reason kept beside it tells them apart.
+    @MainActor
+    func testAFailedLoadKeepsWhatTheLinkOrTheDeviceSaid() async {
+        let catalog = RemotePiCatalog()
+        await catalog.load(deviceId: "a") { _ in throw RelayError.timeout }
+        XCTAssertEqual(catalog.reason, "The device didn't respond")
+        await catalog.load(deviceId: "a") { _ in throw RelayError.rpc("model discovery timed out") }
+        XCTAssertEqual(catalog.error, .unavailable)
+        XCTAssertEqual(catalog.reason, "model discovery timed out")
+        XCTAssertEqual(catalog.failureText, "\(PiCatalogError.unavailable.message) (model discovery timed out)")
+        await catalog.load(deviceId: "a") { _ in
+            try JSONDecoder().decode([ModelInfoProbe].self, from: Data(#"[{"id":1}]"#.utf8)).map { _ in
+                ModelInfo(id: "m", label: "m", description: nil, reasoningLevels: [])
+            }
+        }
+        XCTAssertEqual(catalog.reason, "The device sent a model list this version of the app can't read.")
+
+        // A failure the catalog names itself needs no second line, and a
+        // later load starts clean.
+        await catalog.load(deviceId: "a") { _ in throw PiCatalogError.runtimeUnavailable }
+        XCTAssertNil(catalog.reason)
+        XCTAssertEqual(catalog.failureText, PiCatalogError.runtimeUnavailable.message)
+        await catalog.load(deviceId: "a") { _ in HarnessCatalog.demoModels }
+        XCTAssertNil(catalog.reason)
+        XCTAssertNil(catalog.failureText)
     }
 
     @MainActor
