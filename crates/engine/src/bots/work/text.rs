@@ -19,12 +19,9 @@ pub(super) fn prompt(bot: &Bot, role: &Role, roots: &[String]) -> Option<String>
             if !caps.work_directly && !caps.coordinate {
                 return None;
             }
-            lines.push("How you get work done:".to_string());
-            lines.push(
-                "- Answer questions yourself, from what your tools show. Not every message is \
-                 a task."
-                    .to_string(),
-            );
+            // When to answer, work directly or plan is the prompt's opening
+            // (prompt.rs); this is how each is done.
+            lines.push("Getting work done:".to_string());
             lines.extend(direct_lines(caps.work_directly, roots));
             if caps.coordinate {
                 lines.extend([
