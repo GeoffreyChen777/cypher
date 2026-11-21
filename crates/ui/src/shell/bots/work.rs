@@ -609,17 +609,22 @@ impl Shell {
         let mut controls: Vec<AnyElement> = Vec::new();
         if thread_listed {
             let thread = PanelItem::Thread(work.thread_chat_id.clone().unwrap_or_default());
+            let tip = match super::choice::choice_words(&work.coordinator_choice, |id| {
+                self.known_model_label(id)
+            }) {
+                Some(words) => {
+                    format!("Open the coordinator: the session that runs this plan ({words})")
+                }
+                None => "Open the coordinator: the session that runs this plan".to_string(),
+            };
             controls.push(
                 // Not a step's session (those are rows under their step):
                 // the one that runs the plan and starts them.
-                super::items::icon_button(
-                    "bot-work-thread",
-                    icons::HIERARCHY,
-                    "Open the coordinator: the session that runs this plan",
-                    theme,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.open_panel(thread.clone(), cx)))
-                .into_any_element(),
+                super::items::icon_button("bot-work-thread", icons::HIERARCHY, tip, theme)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.open_panel(thread.clone(), cx)),
+                    )
+                    .into_any_element(),
             );
         }
         if phase.ended() {
@@ -688,6 +693,7 @@ impl Shell {
                     .into_any_element(),
             );
         } else if phase.running() {
+            controls.extend(self.time_button(work, theme, cx));
             controls.push(
                 self.stop_button("bot-work-stop", &work.id, theme, cx)
                     .into_any_element(),
@@ -757,6 +763,64 @@ impl Shell {
             title,
             place.map(IntoElement::into_any_element),
             theme,
+        )
+    }
+
+    /// A running plan's time: "+1h" adds an hour to its limit; near the end
+    /// it says how long is left, in the warning colour. `None` once no
+    /// more time may be added.
+    fn time_button(
+        &self,
+        work: &BotWork,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let fallback = self
+            .state
+            .read(cx)
+            .bots
+            .iter()
+            .find(|b| b.id == work.bot_id)
+            .map_or(240, |b| b.plans.time_limit_minutes());
+        let deadline = work.deadline_ms(fallback)?;
+        let added = work.time_added_minutes.unwrap_or(0);
+        if added + 60 > cypher_proto::PLAN_TIME_ADDED_MAX_MINUTES {
+            return None;
+        }
+        let left = (deadline - cypher_proto::now_ms()).max(0);
+        let near = left <= cypher_proto::PLAN_WARN_BEFORE_MS;
+        let left_words = format_span(left);
+        let tip = SharedString::from(format!(
+            "Time limit {}: {left_words} left. Add an hour.",
+            crate::transcript::bot_plan::limit_words(work.limit_minutes(fallback))
+        ));
+        let id = work.id.clone();
+        Some(
+            popover::btn_ghost(
+                theme,
+                &if near {
+                    format!("{left_words} left · +1h")
+                } else {
+                    "+1h".to_string()
+                },
+                "bot-work-time",
+            )
+            .id("bot-work-time")
+            .flex_none()
+            .px(px(10.0))
+            .py(px(4.0))
+            .when(near, |el| el.text_color(theme.warning))
+            .tooltip(move |_, cx| {
+                let tip = tip.clone();
+                cx.new(|_| super::super::session::FindTooltip(tip)).into()
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.mutate(
+                    serde_json::json!({ "op": "addBotWorkTime", "workId": id, "minutes": 60 }),
+                    cx,
+                )
+            }))
+            .into_any_element(),
         )
     }
 
@@ -873,7 +937,15 @@ impl Shell {
             // While it waits the plan says what each step will do; once it
             // runs, what the step reported.
             let detail = if numbered {
-                step.detail.clone()
+                // What its sessions run on, when the plan chose it.
+                let runs = super::choice::choice_words(&step.session_choice, |id| {
+                    self.known_model_label(id)
+                })
+                .map(|words| format!("Its sessions: {words}."));
+                match (step.detail.clone().filter(|d| !d.trim().is_empty()), runs) {
+                    (Some(detail), Some(runs)) => Some(format!("{detail}\n\n{runs}")),
+                    (detail, runs) => detail.or(runs),
+                }
             } else {
                 step.note.clone()
             }
@@ -1240,6 +1312,7 @@ mod tests {
             note: None,
             started_at: None,
             ended_at: None,
+            session_choice: Default::default(),
         }
     }
 
@@ -1262,6 +1335,10 @@ mod tests {
             decision: None,
             stop_requested_at: None,
             notify: false,
+            time_limit_minutes: None,
+            time_added_minutes: None,
+            warned_at: None,
+            coordinator_choice: Default::default(),
         }
     }
 

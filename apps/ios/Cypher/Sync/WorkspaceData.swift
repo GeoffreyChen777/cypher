@@ -69,9 +69,11 @@ protocol WorkspaceData: AnyObject {
     func resolvePlan(workId: String, approve: Bool) async throws
     /// Stop running work and every session it started.
     func stopWork(workId: String) async throws
+    /// Give a running plan `minutes` more.
+    func addWorkTime(workId: String, minutes: Int) async throws
     func resolveApproval(approvalId: String, approve: Bool) async throws
-    /// Run a routine once now.
-    func runRoutine(routineId: String) async throws
+    /// Run a routine once now; `note` is extra instructions for this run.
+    func runRoutine(routineId: String, note: String?) async throws
     func setRoutineEnabled(routineId: String, enabled: Bool) async throws
     /// A connection's reply mode and narrowed scope (nil = the workspace's).
     func updateConnection(connectionId: String, replyMode: ReplyMode, scope: BotScope?) async throws
@@ -96,7 +98,7 @@ protocol WorkspaceData: AnyObject {
     /// an optional one; nil capabilities leave them alone).
     func updateBot(
         botId: String, name: String, icon: String?, color: String?, instructions: String?,
-        scope: BotScope, capabilities: BotCapabilities?
+        scope: BotScope, capabilities: BotCapabilities?, plans: PlanSettings?, sessionChoice: SessionChoice?
     ) async throws
     /// Delete a workspace with its chats and records.
     func deleteBot(botId: String) async throws
@@ -124,6 +126,19 @@ extension Chat {
 }
 
 extension WorkspaceData {
+    func runRoutine(routineId: String) async throws {
+        try await runRoutine(routineId: routineId, note: nil)
+    }
+
+    func updateBot(
+        botId: String, name: String, icon: String?, color: String?, instructions: String?,
+        scope: BotScope, capabilities: BotCapabilities?
+    ) async throws {
+        try await updateBot(
+            botId: botId, name: name, icon: icon, color: color, instructions: instructions, scope: scope,
+            capabilities: capabilities, plans: nil, sessionChoice: nil)
+    }
+
     func chat(id: String) -> Chat? {
         chats.first { $0.id == id }
     }

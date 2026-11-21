@@ -73,6 +73,50 @@ pub struct CreateBot {
     /// Absent from older clients: a new bot's defaults.
     #[serde(default)]
     pub capabilities: Option<cypher_proto::BotCapabilities>,
+    #[serde(default)]
+    pub plans: cypher_proto::PlanSettings,
+    #[serde(default)]
+    pub session_choice: cypher_proto::SessionChoice,
+}
+
+/// A session's model, thinking level and Fast mode, as a tool names them.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ChoiceArgs {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub thinking: Option<String>,
+    #[serde(default)]
+    pub fast: Option<bool>,
+}
+
+impl ChoiceArgs {
+    /// The choice, or what's wrong with it in words the model reads.
+    pub(crate) fn choice(&self) -> Result<cypher_proto::SessionChoice, String> {
+        let thinking = match self.thinking.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(word) => Some(
+                cypher_proto::ReasoningLevel::CHOOSABLE
+                    .into_iter()
+                    .find(|level| level.word().eq_ignore_ascii_case(word))
+                    .ok_or_else(|| {
+                        format!(
+                            "\"{word}\" is no thinking level; use one of {}.",
+                            cypher_proto::ReasoningLevel::CHOOSABLE
+                                .map(cypher_proto::ReasoningLevel::word)
+                                .join(", ")
+                        )
+                    })?,
+            ),
+        };
+        let mut choice = cypher_proto::SessionChoice {
+            model: self.model.clone(),
+            thinking,
+            fast: self.fast,
+        };
+        choice.clamp();
+        Ok(choice)
+    }
 }
 
 /// This engine's bot service: creation on the host and the tool surface.
@@ -234,6 +278,12 @@ impl Bots {
                 .unwrap_or_else(cypher_proto::BotCapabilities::new_bot),
             paused: false,
             created_at: now,
+            plans: request.plans,
+            session_choice: {
+                let mut choice = request.session_choice;
+                choice.clamp();
+                choice
+            },
         };
         bot.validate().map_err(EngineError::Other)?;
         let folder = self.inner.root.join(&bot.id);

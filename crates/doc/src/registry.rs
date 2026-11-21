@@ -50,6 +50,10 @@ pub struct BotUpdate {
     pub capabilities: Option<cypher_proto::BotCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plans: Option<cypher_proto::PlanSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_choice: Option<cypher_proto::SessionChoice>,
 }
 
 /// Row kinds — the four sidebar tables, plus agent-bot definitions.
@@ -1351,6 +1355,8 @@ impl RegistryDoc {
             ("capabilities", serde_json::to_value(bot.capabilities)?),
             ("paused", json!(bot.paused)),
             ("createdAt", json!(bot.created_at.timestamp_millis())),
+            ("plans", serde_json::to_value(bot.plans)?),
+            ("sessionChoice", serde_json::to_value(&bot.session_choice)?),
         ]);
         self.write(KIND_BOTS, &bot.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1383,6 +1389,12 @@ impl RegistryDoc {
         }
         if let Some(paused) = update.paused {
             set.insert("paused".into(), json!(paused));
+        }
+        if let Some(plans) = &update.plans {
+            set.insert("plans".into(), serde_json::to_value(plans)?);
+        }
+        if let Some(choice) = &update.session_choice {
+            set.insert("sessionChoice".into(), serde_json::to_value(choice)?);
         }
         if set.is_empty() {
             return Ok(true);

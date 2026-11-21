@@ -61,7 +61,14 @@ pub(super) async fn create_worktree(rpc: &EngineRpc, params: Value) -> Result<Rp
     let p: CreateWorktreeParams = parse_params(params)?;
     let worktree = rpc
         .repos
-        .create_worktree(std::path::Path::new(&p.repo_path), &p.branch)
+        .create_named_worktree(
+            std::path::Path::new(&p.repo_path),
+            &p.branch,
+            p.new_branch
+                .as_deref()
+                .map(str::trim)
+                .filter(|b| !b.is_empty()),
+        )
         .await
         .map_err(failed)?;
     RpcReply::value(&worktree)

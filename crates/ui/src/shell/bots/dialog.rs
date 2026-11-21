@@ -48,6 +48,10 @@ pub(in crate::shell) struct BotDialog {
     transcripts: bool,
     /// What it may do beyond reading (§4.2).
     capabilities: cypher_proto::BotCapabilities,
+    /// How its plans run: time limit, plans at once, sessions per plan.
+    plans: cypher_proto::PlanSettings,
+    /// The model, thinking and Fast mode of the sessions it starts.
+    pub(super) choice: super::choice::ChoicePicker,
     error: Option<SharedString>,
     busy: bool,
     focus_pending: bool,
@@ -163,6 +167,13 @@ impl Shell {
             .as_ref()
             .map(|b| b.scope.clone())
             .unwrap_or_default();
+        let choice = super::choice::ChoicePicker::new(
+            existing
+                .as_ref()
+                .map(|b| b.session_choice.clone())
+                .unwrap_or_default(),
+            cx,
+        );
         self.dialogs.bot = Some(BotDialog {
             bot_id,
             name,
@@ -187,6 +198,8 @@ impl Shell {
             capabilities: existing
                 .as_ref()
                 .map_or_else(cypher_proto::BotCapabilities::new_bot, |b| b.capabilities),
+            plans: existing.as_ref().map(|b| b.plans).unwrap_or_default(),
+            choice,
             error: None,
             busy: false,
             focus_pending: true,
@@ -221,6 +234,9 @@ impl Shell {
         if let Err(message) = cypher_proto::validate_name(&name) {
             return fail(self, message, cx);
         }
+        if let Err(message) = dialog.plans.validate() {
+            return fail(self, message, cx);
+        }
         let mut body = serde_json::json!({
             "name": name,
             "icon": dialog.icon,
@@ -229,11 +245,22 @@ impl Shell {
             "scope": scope,
             "capabilities": dialog.capabilities,
         });
+        let plans = dialog.plans;
+        let choice = dialog.choice.choice.clone();
         if let Some(bot_id) = dialog.bot_id.clone() {
             body["op"] = "updateBot".into();
             body["botId"] = bot_id.into();
+            body["plans"] = serde_json::json!(plans);
+            body["sessionChoice"] = serde_json::json!(choice);
             self.mutate(body, cx);
             return self.close_bot_dialog(cx);
+        }
+        // Sent only when set: a host from before them refuses the fields.
+        if !plans.is_default() {
+            body["plans"] = serde_json::json!(plans);
+        }
+        if !choice.is_empty() {
+            body["sessionChoice"] = serde_json::json!(choice);
         }
         let Some(host) = dialog.host.clone() else {
             return fail(self, "Pick the device the workspace runs on.".into(), cx);
@@ -273,6 +300,15 @@ impl Shell {
     ) -> Option<AnyElement> {
         self.dialogs.bot.as_ref()?;
         let hosts = self.bot_hosts(cx);
+        // Drawn first: it needs the shell, the rest of the form the dialog.
+        let host_device = self.dialogs.bot.as_ref().and_then(|d| d.host.clone());
+        let session_choice = self.render_choice(
+            super::choice::ChoiceSlot::BotDialog,
+            host_device,
+            "Default: the workspace chat's.",
+            theme,
+            cx,
+        );
         let (projects, access) = {
             let state = self.state.read(cx);
             let projects: Vec<(String, String, String)> = state
@@ -680,6 +716,162 @@ impl Shell {
                 caps.steer,
                 |d| d.capabilities.steer = !d.capabilities.steer,
             ));
+        // ── Plans: how long one may run, how many at once, their sessions ──
+        let plans = dialog.plans;
+        let limit = plans.time_limit_minutes();
+        let mut limits: Vec<u32> = vec![60, 120, 240, 480, 720, 1440];
+        if !limits.contains(&limit) {
+            limits.push(limit);
+            limits.sort_unstable();
+        }
+        let short = |minutes: u32| match (minutes / 60, minutes % 60) {
+            (0, m) => format!("{m}m"),
+            (h, 0) => format!("{h}h"),
+            (h, m) => format!("{h}h{m}"),
+        };
+        let limit_pick = div()
+            .flex_none()
+            .p(px(2.0))
+            .rounded(px(8.0))
+            .bg(crate::kit::theme::ink(0.05))
+            .flex()
+            .flex_row()
+            .gap(px(2.0))
+            .children(limits.into_iter().map(|minutes| {
+                let on = minutes == limit;
+                div()
+                    .id(SharedString::from(format!("bot-plan-limit-{minutes}")))
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(6.0))
+                    .text_size(px(12.0))
+                    .cursor_pointer()
+                    .text_color(if on { theme.text } else { theme.text_muted })
+                    .when(on, |el| {
+                        el.bg(crate::kit::theme::card_selected_bg())
+                            .shadow(crate::kit::theme::card_selected_shadows())
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                    })
+                    .when(!on, |el| el.hover(|s| s.text_color(theme.text)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(d) = this.dialogs.bot.as_mut() {
+                            // The default is stored as none, so it follows
+                            // a later default.
+                            d.plans.time_limit_minutes = (minutes
+                                != (cypher_proto::WORK_TIME_BUDGET_MS / 60_000) as u32)
+                                .then_some(minutes);
+                        }
+                        cx.notify();
+                    }))
+                    .child(SharedString::from(short(minutes)))
+            }));
+        let stepper =
+            |id: &str, value: usize, max: u32, set: fn(&mut cypher_proto::PlanSettings, u32)| {
+                let button = |suffix: &str, glyph: &'static str, enabled: bool, next: u32| {
+                    div()
+                        .id(SharedString::from(format!("{id}-{suffix}")))
+                        .size(px(22.0))
+                        .rounded(px(6.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(!enabled, |el| el.opacity(0.35))
+                        .when(enabled, |el| {
+                            el.cursor_pointer()
+                                .hover(|s| s.bg(theme.element_hover))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(d) = this.dialogs.bot.as_mut() {
+                                        set(&mut d.plans, next);
+                                    }
+                                    cx.notify();
+                                }))
+                        })
+                        .child(
+                            div()
+                                .text_size(px(14.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(glyph)),
+                        )
+                };
+                let value = value as u32;
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(button(
+                        "less",
+                        "−",
+                        value > 1,
+                        value.saturating_sub(1).max(1),
+                    ))
+                    .child(
+                        div()
+                            .w(px(26.0))
+                            .flex()
+                            .justify_center()
+                            .text_size(px(13.0))
+                            .text_color(theme.text)
+                            .child(SharedString::from(value.to_string())),
+                    )
+                    .child(button("more", "+", value < max, (value + 1).min(max)))
+            };
+        let plan_row = |first: bool, title: &str, detail: &str, control: AnyElement| {
+            div()
+                .when(!first, |el| el.border_t_1().border_color(hairline))
+                .px(px(12.0))
+                .py(px(10.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(12.0))
+                .child(permission_text(title, detail))
+                .child(control)
+        };
+        let plans_box = div()
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(hairline)
+            .bg(crate::kit::theme::ink(0.02))
+            .flex()
+            .flex_col()
+            .child(plan_row(
+                true,
+                "Time limit",
+                "How long a plan may run before it stops. A plan can ask for its own, and you \
+                 can add time while it runs.",
+                limit_pick.into_any_element(),
+            ))
+            .child(plan_row(
+                false,
+                "Plans at once",
+                "Approved plans wait for a free slot.",
+                stepper(
+                    "bot-plan-running",
+                    plans.running_max(),
+                    cypher_proto::RUNNING_WORK_CAP,
+                    |p, n| {
+                        p.running_max = (n as usize != cypher_proto::MAX_RUNNING_WORK).then_some(n)
+                    },
+                )
+                .into_any_element(),
+            ))
+            .child(plan_row(
+                false,
+                "Sessions per plan",
+                "The most sessions one plan may start.",
+                stepper(
+                    "bot-plan-sessions",
+                    plans.sessions_max(),
+                    cypher_proto::SESSIONS_PER_WORK_CAP,
+                    |p, n| {
+                        p.sessions_max =
+                            (n as usize != cypher_proto::MAX_SESSIONS_PER_WORK).then_some(n)
+                    },
+                )
+                .into_any_element(),
+            ));
         let read_only = !(caps.work_directly || caps.coordinate || caps.steer);
         let summary = access.map(|(sessions, spaces)| {
             let text = match (sessions, spaces) {
@@ -745,6 +937,20 @@ impl Shell {
             .child(section("Permissions"))
             .child(permissions)
             .children(summary)
+            .child(section("Plans"))
+            .child(plans_box)
+            .child(section("Sessions it starts"))
+            .child(div().mx(px(-8.0)).child(session_choice))
+            .child(
+                div()
+                    .mt(px(6.0))
+                    .text_size(px(11.5))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(
+                        "For plan steps and project routines. A plan step or a routine can \
+                         choose its own.",
+                    )),
+            )
             .child(section("Instructions"))
             .child(popover::dialog_field(
                 dialog.instructions.clone().into_any_element(),

@@ -108,6 +108,15 @@ struct BotSettingsSheet: View {
             instructionsSection(draft)
             if !editing { modelSection(draft) }
             if editing {
+                plansSection(draft)
+                SessionChoiceSection(
+                    choice: draft.sessionChoice,
+                    models: sessionModels,
+                    fallback: "For plan steps and project routines; a step or a routine can choose its own. "
+                        + "Default: the workspace chat's.",
+                    header: "Sessions It Starts", id: "bot-settings-sessions")
+            }
+            if editing {
                 Section {
                     Button("Delete Workspace…", role: .destructive) { confirmDelete = true }
                         .foregroundStyle(Theme.danger)
@@ -347,8 +356,45 @@ struct BotSettingsSheet: View {
         }
     }
 
+    private func plansSection(_ draft: Binding<BotSettingsDraft>) -> some View {
+        let value = draft.wrappedValue
+        return Section {
+            Picker("Time limit", selection: draft.timeLimit) {
+                ForEach(value.timeLimitOptions, id: \.self) { minutes in
+                    Text(PlanSettings.limitWords(minutes)).tag(minutes)
+                }
+            }
+            .pickerStyle(.menu)
+            .accessibilityIdentifier("bot-settings-time-limit")
+            Stepper(value: draft.runningMax, in: PlanSettings.runningRange) {
+                LabeledContent("Plans at once", value: "\(value.plans.running)")
+            }
+            .accessibilityIdentifier("bot-settings-running")
+            Stepper(value: draft.sessionsMax, in: PlanSettings.sessionsRange) {
+                LabeledContent("Sessions per plan", value: "\(value.plans.sessions)")
+            }
+            .accessibilityIdentifier("bot-settings-sessions-max")
+        } header: {
+            Text("Plans")
+        } footer: {
+            Text(
+                "A plan stops at its time limit, with its sessions; it can ask for its own, and you can add time while it runs. Approved plans wait for a free slot."
+            )
+        }
+        .groupedRowStyle()
+    }
+
+    /// The host's models for the sessions' picker.
+    private var sessionModels: ModelChoices {
+        if loadingModels { return .loading }
+        if models.isEmpty, let host = draft?.hostDeviceId, !model.deviceOnline(host) {
+            return .unavailable("\(model.deviceName(host)) is offline, so its models can't be listed.")
+        }
+        return .ready(models)
+    }
+
     private func loadModels() async {
-        guard !editing, let host = draft?.hostDeviceId, model.deviceOnline(host), let data = model.data else {
+        guard let host = draft?.hostDeviceId, model.deviceOnline(host), let data = model.data else {
             models = []
             return
         }
@@ -357,7 +403,7 @@ struct BotSettingsSheet: View {
         let loaded = (try? await data.piModels(deviceId: host)) ?? []
         guard !Task.isCancelled else { return }
         models = loaded
-        if let chosen = draft?.model, !loaded.contains(where: { $0.id == chosen }) { draft?.model = nil }
+        if !editing, let chosen = draft?.model, !loaded.contains(where: { $0.id == chosen }) { draft?.model = nil }
     }
 
     // MARK: Actions
@@ -377,7 +423,8 @@ struct BotSettingsSheet: View {
                 if let botId {
                     try await data.updateBot(
                         botId: botId, name: draft.trimmedName, icon: draft.icon, color: draft.color,
-                        instructions: draft.savedInstructions, scope: draft.scope, capabilities: draft.capabilities)
+                        instructions: draft.savedInstructions, scope: draft.scope, capabilities: draft.capabilities,
+                        plans: draft.plans, sessionChoice: draft.sessionChoice)
                     dismiss()
                 } else {
                     guard let host = draft.hostDeviceId else {

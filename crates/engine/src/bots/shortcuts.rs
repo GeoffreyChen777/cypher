@@ -12,20 +12,6 @@ use crate::EngineError;
 use crate::host::workspace_host::Fields;
 use crate::util::new_id;
 
-/// What the workspace chat is told about shortcuts.
-const SHORTCUTS_LINE: &str = "Shortcuts:\n- Shortcuts are buttons at the bottom of \
-     your owner's sidebar. A click sends its request to you here, as if they had typed it. \
-     When your owner asks for a button (\"make this a shortcut\", \"add a button that…\"), save \
-     one with save_shortcut: a short label, an icon, and the request in their words, with \
-     {input} where each click should ask them for the part that changes. When they ask for \
-     the same kind of thing again and again, offer one. list_shortcuts shows them; rename, \
-     change or remove one when asked.";
-
-/// This track's section of the thread's prompt: the workspace chat's only.
-pub(super) fn shortcuts_prompt(marker: &BotChat) -> Option<String> {
-    (!shortcut_tools(marker).is_empty()).then(|| SHORTCUTS_LINE.to_string())
-}
-
 /// The tools of this track a thread may call: the workspace chat's only.
 pub(super) fn shortcut_tools(marker: &BotChat) -> Vec<&'static str> {
     if marker.origin == BotOrigin::Owner && marker.is_main() {

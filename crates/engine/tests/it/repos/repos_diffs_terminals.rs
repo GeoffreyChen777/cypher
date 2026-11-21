@@ -123,6 +123,29 @@ async fn repos_round_trip_add_branches_worktrees() {
         .expect("branches after worktree");
     assert!(branches.contains(&worktree.branch));
 
+    // A named branch: used as given, its folder named after it; a name
+    // that exists or that git would refuse is refused.
+    let named = repos
+        .create_named_worktree(&repo_dir, "main", Some("fix/login-timeout"))
+        .await
+        .expect("named worktree");
+    assert_eq!(named.branch, "fix/login-timeout");
+    assert!(named.path.ends_with("fix-login-timeout"), "{}", named.path);
+    let again = repos
+        .create_named_worktree(&repo_dir, "main", Some("fix/login-timeout"))
+        .await
+        .expect_err("an existing branch");
+    assert!(again.to_string().contains("exists already"), "{again}");
+    for bad in ["has space", "..x", "x.lock", "-x", "a:b"] {
+        assert!(
+            repos
+                .create_named_worktree(&repo_dir, "main", Some(bad))
+                .await
+                .is_err(),
+            "{bad}"
+        );
+    }
+
     // Refs carry checkout state: `main` is current (main folder), the
     // worktree's cypher/<name> branch maps to its linked-checkout path, and
     // a plain branch has neither.

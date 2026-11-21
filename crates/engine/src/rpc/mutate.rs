@@ -267,10 +267,19 @@ impl EngineRpc {
                 instructions,
                 scope,
                 capabilities,
+                plans,
+                session_choice,
             } => {
                 let name = name.trim().to_string();
                 cypher_proto::validate_name(&name).map_err(RpcError::BadParams)?;
                 scope.validate().map_err(RpcError::BadParams)?;
+                if let Some(plans) = &plans {
+                    plans.validate().map_err(RpcError::BadParams)?;
+                }
+                let session_choice = session_choice.map(|mut choice| {
+                    choice.clamp();
+                    choice
+                });
                 let instructions = instructions
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
@@ -288,6 +297,8 @@ impl EngineRpc {
                     scope: Some(scope),
                     capabilities,
                     paused: None,
+                    plans,
+                    session_choice,
                 };
                 if !self
                     .workspace
@@ -314,6 +325,7 @@ impl EngineRpc {
             }
             record @ (MutateParams::ResolveBotPlan { .. }
             | MutateParams::StopBotWork { .. }
+            | MutateParams::AddBotWorkTime { .. }
             | MutateParams::DeleteBotWork { .. }
             | MutateParams::ResolveBotApproval { .. }
             | MutateParams::SaveBotRoutine { .. }

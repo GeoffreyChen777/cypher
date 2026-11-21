@@ -3,7 +3,7 @@
 //! (§6.2). The prompts describe; the tools enforce on every call.
 
 use cypher_proto::{
-    Bot, BotWork, Device, INSTRUCTION_MAX, MAX_SESSIONS_PER_WORK, RESULT_MAX, Space,
+    Bot, BotWork, Device, INSTRUCTION_MAX, PLAN_WARN_BEFORE_MS, RESULT_MAX, Space, describe_minutes,
 };
 
 use super::Role;
@@ -15,51 +15,10 @@ pub(super) fn prompt(bot: &Bot, role: &Role, roots: &[String]) -> Option<String>
     let caps = bot.capabilities;
     let mut lines = Vec::new();
     match role {
-        Role::Main => {
-            if !caps.work_directly && !caps.coordinate {
-                return None;
-            }
-            lines.push("How you get work done:".to_string());
-            lines.push(
-                "- Answer questions yourself, from what your tools show. Not every message is \
-                 a task."
-                    .to_string(),
-            );
-            lines.extend(direct_lines(caps.work_directly, roots));
-            if caps.coordinate {
-                lines.extend([
-                    "- For anything with more than a couple of steps, real changes that \
-                     deserve their own session, worktree and diff, steps that can run in \
-                     parallel, or work on another device, propose a plan with propose_plan: \
-                     its steps, the project each works in, and how a step gets another's \
-                     change (a path on the same device, a pushed branch across devices, a \
-                     published version)."
-                        .to_string(),
-                    "- The background session that carries a plan out starts from the plan \
-                     and your owner's last message only, never this conversation: put \
-                     everything else it needs (constraints, decisions made here, what to \
-                     ask your owner) in the steps' details, within their limits."
-                        .to_string(),
-                    "- Every plan waits for your owner's approval in a card. After \
-                     propose_plan, stop: end your turn with one line saying the plan awaits \
-                     approval. Don't repeat its steps (the card opens them) and don't ask \
-                     in text whether to go ahead."
-                        .to_string(),
-                    "- Once approved, a background session carries the plan out. Your owner \
-                     follows it beside this conversation, so don't narrate its progress \
-                     here. When it ends you get a bracketed notice with the result: answer \
-                     that in one or two sentences. Use list_work and get_work to follow up \
-                     on plans, their steps and their sessions."
-                        .to_string(),
-                ]);
-            } else {
-                lines.push(
-                    "- You cannot start sessions or plans: your owner hasn't turned on \
-                     Coordinate. When a task needs that, say so."
-                        .to_string(),
-                );
-            }
-        }
+        // The workspace's own chat says what plans are good for in its
+        // opening (prompt.rs), and propose_plan's description how to write
+        // one.
+        Role::Main => return None,
         Role::Work(_) => {
             lines.extend([
                 "You are carrying out one plan your owner approved, in a background \
@@ -203,6 +162,12 @@ pub(super) fn brief(
         if let Some(detail) = &step.detail {
             lines.push(format!("   {detail}"));
         }
+        if !step.session_choice.is_empty() {
+            lines.push(format!(
+                "   Its sessions use {} (start_session applies it for you).",
+                step.session_choice.describe()
+            ));
+        }
     }
     // A message over the cap was stored cut; the thread must know its end
     // is missing rather than take the ellipsis for the owner's.
@@ -231,7 +196,8 @@ pub(super) fn brief(
     ]);
     if bot.capabilities.coordinate {
         lines.push(format!(
-            "- Create worktrees and start sessions (at most {MAX_SESSIONS_PER_WORK} in all) in {}.",
+            "- Create worktrees and start sessions (at most {} in all) in {}.",
+            bot.plans.sessions_max(),
             if projects.is_empty() {
                 "your projects".to_string()
             } else {
@@ -256,6 +222,12 @@ pub(super) fn brief(
         ),
         (false, _) => "- No direct work: Work directly is off; use sessions.".to_string(),
     });
+    lines.push(format!(
+        "- Time: the plan is stopped {} after it started, with every session it started. \
+         You are told {} before; finish or report what you have by then.",
+        describe_minutes(work.limit_minutes(bot.plans.time_limit_minutes())),
+        describe_minutes((PLAN_WARN_BEFORE_MS / 60_000) as u32),
+    ));
     lines.extend([String::new(), "Start with step 1.".to_string()]);
     lines.join("\n")
 }
@@ -284,6 +256,8 @@ mod tests {
             },
             paused: false,
             created_at: DateTime::from_timestamp_millis(0).unwrap(),
+            plans: Default::default(),
+            session_choice: Default::default(),
         }
     }
 
@@ -326,6 +300,7 @@ mod tests {
             note: None,
             started_at: None,
             ended_at: None,
+            session_choice: Default::default(),
         };
         let work = BotWork {
             id: "w1".into(),
@@ -348,6 +323,10 @@ mod tests {
             decision: None,
             stop_requested_at: None,
             notify: false,
+            time_limit_minutes: None,
+            time_added_minutes: None,
+            warned_at: None,
+            coordinator_choice: Default::default(),
         };
         let spaces = [
             space("sp-a", "mac-a", "/w/app-a"),
@@ -388,20 +367,8 @@ mod tests {
     }
 
     #[test]
-    fn prompts_say_when_to_plan_and_how_to_finish() {
-        let main = prompt(&bot(true, true, false), &Role::Main, &["/w/app-a".into()]).unwrap();
-        assert!(main.contains("propose_plan"), "{main}");
-        assert!(main.contains("waits for your owner's approval"), "{main}");
-        assert!(main.contains("stop: end your turn"), "{main}");
-        assert!(
-            main.contains("in these checkouts on this device: /w/app-a"),
-            "{main}"
-        );
-        let reading = prompt(&bot(false, false, false), &Role::Main, &[]);
-        assert!(reading.is_none(), "a read-only bot keeps the base prompt");
-        let no_plans = prompt(&bot(true, false, false), &Role::Main, &[]).unwrap();
-        assert!(no_plans.contains("none of your projects is on this device"));
-        assert!(no_plans.contains("hasn't turned on Coordinate"));
+    fn a_work_thread_is_told_how_to_finish() {
+        assert!(prompt(&bot(true, true, false), &Role::Main, &["/w/app-a".into()]).is_none());
 
         let thread = prompt(&bot(false, true, false), &Role::Work("w".into()), &[]).unwrap();
         for words in [

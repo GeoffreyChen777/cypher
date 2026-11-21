@@ -174,6 +174,9 @@ fn routine_def(id: &str, bot: &Bot, prompt: &str, schedule: Schedule) -> BotRout
         worktree_path: None,
         last_run: None,
         next_run_at: None,
+        thinking: None,
+        fast: None,
+        run_note: None,
     }
 }
 
@@ -1348,6 +1351,10 @@ async fn the_workspace_chat_runs_deletes_and_stops_what_the_owner_could() {
         }),
         stop_requested_at: None,
         notify: false,
+        time_limit_minutes: None,
+        time_added_minutes: None,
+        warned_at: None,
+        coordinator_choice: Default::default(),
     };
     core.workspace
         .put_record(
@@ -1515,4 +1522,160 @@ async fn the_owner_deleting_a_routine_mid_run_stops_the_run() {
         "the run to stop and its session to go",
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_routine_runs_on_its_own_choice_and_a_run_now_note_applies_once() {
+    let Rig {
+        core,
+        runs,
+        dir: _dir,
+        ..
+    } = rig().await;
+    let bot = create_bot(&core, true).await;
+    let saved = bot_tool(
+        &core,
+        &bot.chat_id,
+        "save_routine",
+        serde_json::json!({
+            "name": "Brief",
+            "prompt": "Summarize the day",
+            "schedule": { "kind": "manual" },
+            "model": "pi/brief-model",
+            "thinking": "high",
+            "fast": true,
+        }),
+    )
+    .await;
+    assert!(saved.starts_with("Saved routine"), "{saved}");
+    let id = core.workspace.read_bot_records().routines[0].id.clone();
+    let saved = routine(&core, &id);
+    assert_eq!(saved.thinking, Some(p::ReasoningLevel::High));
+    assert_eq!(saved.fast, Some(true));
+    let bad = bot_tool(
+        &core,
+        &bot.chat_id,
+        "save_routine",
+        serde_json::json!({
+            "id": id, "name": "Brief", "prompt": "Summarize the day",
+            "schedule": { "kind": "manual" }, "thinking": "lots",
+        }),
+    )
+    .await;
+    assert!(bad.contains("is no thinking level"), "{bad}");
+
+    let ran = bot_tool(
+        &core,
+        &bot.chat_id,
+        "run_routine",
+        serde_json::json!({ "id": id, "note": "Only the cypher project" }),
+    )
+    .await;
+    assert!(ran.contains("with your note for this run only"), "{ran}");
+    wait_for(
+        || last_outcome(&core, &id) == Some(RunOutcome::Done),
+        "the run with a note",
+    )
+    .await;
+    let requests = || -> Vec<RunRequest> {
+        runs.lock()
+            .unwrap()
+            .iter()
+            // The routine's own runs, not the workspace chat's turns about
+            // their results.
+            .filter(|(r, _)| {
+                r.prompt.contains("Summarize the day") && !r.prompt.starts_with("[Routine")
+            })
+            .map(|(r, _)| r.clone())
+            .collect()
+    };
+    let first = requests().pop().expect("the run");
+    assert!(
+        first
+            .prompt
+            .ends_with("Summarize the day\n\nFor this run only: Only the cypher project"),
+        "{}",
+        first.prompt
+    );
+    assert_eq!(first.model.as_deref(), Some("pi/brief-model"));
+    assert_eq!(first.reasoning, Some(p::ReasoningLevel::High));
+    assert_eq!(
+        first.model_options.get("fast"),
+        Some(&serde_json::json!(true))
+    );
+
+    // The next Run now, from the app, has no note: none is repeated.
+    let at = routine(&core, &id).last_run.unwrap().at;
+    mutate(
+        &core,
+        serde_json::json!({ "op": "runBotRoutine", "routineId": id }),
+    )
+    .await;
+    wait_for(
+        || {
+            routine(&core, &id)
+                .last_run
+                .is_some_and(|r| r.at > at && r.outcome == RunOutcome::Done)
+        },
+        "the second run",
+    )
+    .await;
+    let second = requests().pop().unwrap();
+    assert!(
+        second.prompt.ends_with("Summarize the day"),
+        "{}",
+        second.prompt
+    );
+
+    // A project routine without its own choice runs on the workspace's
+    // choice for sessions; "" clears the routine's model again.
+    let client = cypher_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            cypher_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "updateBot", "botId": bot.id, "name": "Bob",
+                "scope": bot.scope,
+                "sessionChoice": { "model": "pi/ws-model", "thinking": "minimal" },
+            }),
+        )
+        .await
+        .expect("updateBot");
+    let saved = bot_tool(
+        &core,
+        &bot.chat_id,
+        "save_routine",
+        serde_json::json!({
+            "id": id, "name": "Brief", "prompt": "Summarize the day",
+            "schedule": { "kind": "manual" }, "project": "web",
+            "model": "", "thinking": "", "fast": false,
+        }),
+    )
+    .await;
+    assert!(saved.contains("an ordinary session in web"), "{saved}");
+    let cleared = routine(&core, &id);
+    assert_eq!((cleared.model.clone(), cleared.thinking), (None, None));
+    let at = cleared.last_run.unwrap().at;
+    mutate(
+        &core,
+        serde_json::json!({ "op": "runBotRoutine", "routineId": id, "note": "Look at web" }),
+    )
+    .await;
+    wait_for(
+        || {
+            routine(&core, &id)
+                .last_run
+                .is_some_and(|r| r.at > at && r.outcome == RunOutcome::Done)
+        },
+        "the project run",
+    )
+    .await;
+    let project = requests().pop().unwrap();
+    assert_eq!(project.model.as_deref(), Some("pi/ws-model"));
+    assert_eq!(project.reasoning, Some(p::ReasoningLevel::Minimal));
+    assert_eq!(
+        project.model_options.get("fast"),
+        Some(&serde_json::json!(false))
+    );
+    core.shutdown().await;
 }

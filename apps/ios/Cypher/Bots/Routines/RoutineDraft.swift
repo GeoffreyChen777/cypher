@@ -157,8 +157,9 @@ struct RoutineDraft: Equatable {
     var spaceId: String?
     /// A project routine's own worktree rather than the project checkout.
     var worktree = true
-    /// The model its runs use; nil follows the workspace chat's.
-    var model: String?
+    /// Its runs' model, thinking and Fast mode; nil fields follow the
+    /// workspace's defaults.
+    var choice = SessionChoice()
     var schedule: ScheduleDraft
     var writeNotes = false
     var workDirectly = false
@@ -177,7 +178,7 @@ struct RoutineDraft: Equatable {
             self.spaceId = spaceId
             self.worktree = worktree
         }
-        model = routine.chosenModel
+        choice = routine.sessionChoice
         schedule = ScheduleDraft(schedule: routine.schedule, now: now, calendar: calendar)
         writeNotes = routine.writeNotes
         workDirectly = routine.workDirectly
@@ -213,7 +214,8 @@ struct RoutineDraft: Equatable {
             id: existing?.id ?? id(), botId: bot.id,
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines),
-            target: target, model: model, schedule: schedule, enabled: enabled,
+            target: target, model: choice.model, thinking: choice.thinking, fast: choice.fast,
+            schedule: schedule, enabled: enabled,
             writeNotes: writeNotes, workDirectly: workDirectly,
             createdAt: existing?.createdAt ?? nowMs, updatedAt: nowMs)
         if let error = routine.validationError { return .failure(BotActionError(error)) }

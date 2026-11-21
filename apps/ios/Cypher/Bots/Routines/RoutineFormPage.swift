@@ -22,13 +22,6 @@ struct RoutineFormPage: View {
 
     private enum Field { case name, prompt }
 
-    /// The device's models, as the form loads them.
-    enum ModelChoices: Equatable {
-        case loading
-        case ready([ModelInfo])
-        case unavailable(String)
-    }
-
     var body: some View {
         if let bot = model.bot(id: botId) {
             form(bot)
@@ -258,33 +251,12 @@ struct RoutineFormPage: View {
     }
 
     private func modelSection(_ bot: Bot) -> some View {
-        Section {
-            Picker(selection: $draft.model) {
-                Text("Default").tag(String?.none)
-                if let chosen = draft.model, !modelList.contains(where: { $0.id == chosen }) {
-                    Text(chosen).tag(String?.some(chosen))
-                }
-                ForEach(modelList) { info in
-                    Text(info.label).tag(String?.some(info.id))
-                }
-            } label: {
-                HStack(spacing: 8) {
-                    Text("Model")
-                    if models == .loading {
-                        ProgressView().controlSize(.small)
-                    }
-                }
-            }
-            .pickerStyle(.menu)
-            .accessibilityIdentifier("routine-form-model")
-        } footer: {
-            if case .unavailable(let why) = models {
-                Text("Default: the workspace chat's. \(why)")
-            } else {
-                Text("Default: the workspace chat's.")
-            }
-        }
-        .groupedRowStyle()
+        SessionChoiceSection(
+            choice: $draft.choice, models: models,
+            fallback: draft.spaceId == nil
+                ? "Default: the workspace chat's."
+                : "Default: the workspace's choice for sessions, else its chat's.",
+            id: "routine-form")
     }
 
     private func toggleLabel(_ title: String, _ detail: String) -> some View {
@@ -311,11 +283,6 @@ struct RoutineFormPage: View {
                 draft.schedule.hour = parts.hour ?? draft.schedule.hour
                 draft.schedule.minute = parts.minute ?? draft.schedule.minute
             })
-    }
-
-    private var modelList: [ModelInfo] {
-        if case .ready(let list) = models { return list }
-        return []
     }
 
     /// The device its runs use: its project's, else the workspace's host.

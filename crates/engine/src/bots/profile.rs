@@ -31,32 +31,46 @@ pub fn bot_env(workspace: &WorkspaceHost, chat: &Chat) -> Option<BotRunEnv> {
     let asker = network::asker(workspace, marker);
     let spaces = workspace.read_spaces().unwrap_or_default();
     let devices = workspace.read_devices().unwrap_or_default();
+    let workspace_roots = bot
+        .as_ref()
+        .map(|bot| work::workspace_roots(workspace, bot, marker))
+        .unwrap_or_default();
+    // The workspace's own chat opens with how it works (prompt.rs).
+    let main = (marker.origin == BotOrigin::Owner && marker.is_main())
+        .then_some(workspace_roots.as_slice());
     let mut system_prompt = match &bot {
         Some(bot) => prompt::system_prompt(
             bot,
             marker.origin,
             asker.as_ref().map(network::as_asker).as_ref(),
+            main,
             &spaces,
             &devices,
         ),
         None => prompt::orphan_prompt(),
     };
-    let mut workspace_roots = Vec::new();
     if let Some(bot) = &bot {
-        for section in [
-            work::work_prompt(workspace, bot, marker),
-            memory::memory_prompt(marker),
-            shortcuts::shortcuts_prompt(marker),
-            activity::activity_prompt(marker),
-            network::network_prompt(workspace, bot, marker),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        // The workspace's own chat says what it can do in its opening and
+        // leaves how to use each tool to the tool's description; other
+        // threads get their track's sections.
+        let sections = if main.is_some() {
+            vec![
+                network::network_prompt(workspace, bot, marker),
+                prompt::owner_instructions(bot, marker.origin),
+            ]
+        } else {
+            vec![
+                work::work_prompt(workspace, bot, marker),
+                activity::activity_prompt(marker),
+                network::network_prompt(workspace, bot, marker),
+                // Last, so they read as the final word on how to work.
+                prompt::owner_instructions(bot, marker.origin),
+            ]
+        };
+        for section in sections.into_iter().flatten() {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&section);
         }
-        workspace_roots = work::workspace_roots(workspace, bot, marker);
     }
     let mut tools = tools_for(marker, bot.as_ref());
     // A routine granted Work directly gets Pi's own tools too; the bot row
@@ -242,6 +256,8 @@ mod tests {
             capabilities: Default::default(),
             paused: false,
             created_at: DateTime::from_timestamp_millis(0).unwrap(),
+            plans: Default::default(),
+            session_choice: Default::default(),
         }
     }
 
@@ -324,6 +340,52 @@ mod tests {
             tools_for(&BotChat::new("b1", BotOrigin::Peer), None),
             cypher_proto::BOT_TOOLS
         );
+    }
+
+    /// The workspace's own chat reads top to bottom: what it can do, what
+    /// it sees, how the chat around it works, and the owner's instructions
+    /// last.
+    #[tokio::test]
+    async fn the_workspace_chat_prompt_reads_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceHost::open(
+            std::sync::Arc::new(cypher_sync::DocsStore::open(dir.path()).unwrap()),
+            crate::host::workspace_host::WorkspaceHostConfig {
+                device_id: "dev".into(),
+                device_name: "Local".into(),
+                platform: "linux".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+                allow_device_rejoin: false,
+            },
+        )
+        .unwrap();
+        let bot = Bot {
+            instructions: Some("Answer in German.".into()),
+            capabilities: cypher_proto::BotCapabilities::new_bot(),
+            ..bot_row()
+        };
+        let main = chat(Some(BotChat::owner("b1")));
+        ws.create_bot(&bot, &main).unwrap();
+        let prompt = bot_env(&ws, &main).expect("a bot run").system_prompt;
+        let at = |text: &str| {
+            prompt
+                .find(text)
+                .unwrap_or_else(|| panic!("{text:?} in:\n{prompt}"))
+        };
+        let order = [
+            at("What you can do:"),
+            at("What you can see:"),
+            at("How this chat works:"),
+            at("Your owner's instructions:\nAnswer in German."),
+        ];
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{prompt}");
+        assert!(prompt.trim_end().ends_with("Answer in German."));
+        // Each tool's use is its description's, not a section here.
+        for section in ["Routines:", "Shortcuts:", "Your activity:", "in practice:"] {
+            assert!(!prompt.contains(section), "{section}");
+        }
     }
 
     #[tokio::test]

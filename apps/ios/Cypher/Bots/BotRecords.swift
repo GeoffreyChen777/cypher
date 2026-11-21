@@ -61,11 +61,13 @@ struct WorkStep: Hashable, Identifiable, Sendable {
     var note: String?
     var startedAt: Int64?
     var endedAt: Int64?
+    /// The model, thinking and Fast mode of the sessions it starts.
+    var sessionChoice = SessionChoice()
 }
 
 extension WorkStep: Codable {
     private enum CodingKeys: String, CodingKey {
-        case id, title, project, detail, state, sessions, note, startedAt, endedAt
+        case id, title, project, detail, state, sessions, note, startedAt, endedAt, sessionChoice
     }
 
     init(from decoder: Decoder) throws {
@@ -79,6 +81,7 @@ extension WorkStep: Codable {
         note = try c.decodeIfPresent(String.self, forKey: .note)
         startedAt = try c.decodeIfPresent(Int64.self, forKey: .startedAt)
         endedAt = try c.decodeIfPresent(Int64.self, forKey: .endedAt)
+        sessionChoice = ((try? c.decodeIfPresent(SessionChoice.self, forKey: .sessionChoice)) ?? nil) ?? SessionChoice()
     }
 
     func encode(to encoder: Encoder) throws {
@@ -92,6 +95,7 @@ extension WorkStep: Codable {
         try c.encodeIfPresent(note, forKey: .note)
         try c.encodeIfPresent(startedAt, forKey: .startedAt)
         try c.encodeIfPresent(endedAt, forKey: .endedAt)
+        if !sessionChoice.isEmpty { try c.encode(sessionChoice, forKey: .sessionChoice) }
     }
 }
 
@@ -121,8 +125,34 @@ struct BotWork: Codable, Hashable, Identifiable, Sendable {
     var decision: PlanDecision?
     /// Owner-written: stop the orchestration and its sessions.
     var stopRequestedAt: Int64?
+    /// Minutes it may run, set when it was proposed; nil runs on the
+    /// workspace's.
+    var timeLimitMinutes: Int?
+    /// Owner-written: minutes added to the limit while it runs, in all.
+    var timeAddedMinutes: Int?
+    /// The coordinating session's model, thinking and Fast mode.
+    var coordinatorChoice = SessionChoice()
 
     var isLive: Bool { state == .proposed || state == .running }
+
+    /// Its whole limit: its own (else `fallback`, the workspace's) plus
+    /// what the owner added (bot_records.rs `limit_minutes`).
+    func limitMinutes(fallback: Int) -> Int {
+        let own = timeLimitMinutes.map { PlanSettings.clamp($0, PlanSettings.timeLimitRange) } ?? fallback
+        return own + min(timeAddedMinutes ?? 0, PlanSettings.maxAddedMinutes)
+    }
+
+    /// When it is stopped for time, once it has started.
+    func deadlineMs(fallback: Int) -> Int64? {
+        startedAt.map { $0 + Int64(limitMinutes(fallback: fallback)) * 60_000 }
+    }
+
+    /// Its own limit, when it differs from the workspace's.
+    func ownLimit(workspace: Int) -> Int? {
+        timeLimitMinutes.map { PlanSettings.clamp($0, PlanSettings.timeLimitRange) }.flatMap {
+            $0 == workspace ? nil : $0
+        }
+    }
 
     /// Awaiting the owner's approval: proposed, and nobody decided yet.
     var awaitingApproval: Bool { state == .proposed && decision == nil }
@@ -179,6 +209,7 @@ extension BotWork {
     private enum CodingKeys: String, CodingKey {
         case id, botId, title, instruction, summary, steps, state, chatId, toolCallId, threadChatId
         case createdAt, startedAt, endedAt, result, decision, stopRequestedAt
+        case timeLimitMinutes, timeAddedMinutes, coordinatorChoice
     }
 
     init(from decoder: Decoder) throws {
@@ -199,6 +230,10 @@ extension BotWork {
         result = try c.decodeIfPresent(String.self, forKey: .result)
         decision = try c.decodeIfPresent(PlanDecision.self, forKey: .decision)
         stopRequestedAt = try c.decodeIfPresent(Int64.self, forKey: .stopRequestedAt)
+        timeLimitMinutes = (try? c.decodeIfPresent(Int.self, forKey: .timeLimitMinutes)) ?? nil
+        timeAddedMinutes = (try? c.decodeIfPresent(Int.self, forKey: .timeAddedMinutes)) ?? nil
+        coordinatorChoice =
+            ((try? c.decodeIfPresent(SessionChoice.self, forKey: .coordinatorChoice)) ?? nil) ?? SessionChoice()
         closeSteps()
     }
 }
@@ -497,6 +532,9 @@ struct BotRoutine: Codable, Hashable, Identifiable, Sendable {
     var target: RoutineTarget = .workspace
     /// The model its runs use; nil follows the workspace chat's.
     var model: String?
+    /// Its runs' thinking level and Fast mode; nil follows the default.
+    var thinking: String?
+    var fast: Bool?
     var schedule: Schedule = .default
     var enabled = true
     /// May write to memory (a workspace routine's).
@@ -508,12 +546,24 @@ struct BotRoutine: Codable, Hashable, Identifiable, Sendable {
     var updatedAt: Int64
     /// Owner-written: run once now.
     var runRequestedAt: Int64?
+    /// Owner-written with a Run now: extra instructions for that run only.
+    var runNote: RunNote?
     // Host-written:
     var threadChatId: String?
     var manualChatId: String?
     var worktreePath: String?
     var lastRun: RunRecord?
     var nextRunAt: Int64?
+
+    /// Its runs' model, thinking and Fast mode, as far as it names them.
+    var sessionChoice: SessionChoice {
+        get { SessionChoice(model: chosenModel, thinking: thinking, fast: fast) }
+        set {
+            model = newValue.model
+            thinking = newValue.thinking
+            fast = newValue.fast
+        }
+    }
 
     /// The model its runs should use, when it names one.
     var chosenModel: String? {
@@ -537,8 +587,9 @@ struct BotRoutine: Codable, Hashable, Identifiable, Sendable {
 
 extension BotRoutine {
     private enum CodingKeys: String, CodingKey {
-        case id, botId, name, prompt, target, model, schedule, enabled, writeNotes, workDirectly
-        case createdAt, updatedAt, runRequestedAt, threadChatId, manualChatId, worktreePath, lastRun, nextRunAt
+        case id, botId, name, prompt, target, model, thinking, fast, schedule, enabled, writeNotes, workDirectly
+        case createdAt, updatedAt, runRequestedAt, runNote, threadChatId, manualChatId, worktreePath, lastRun
+        case nextRunAt
     }
 
     init(from decoder: Decoder) throws {
@@ -549,6 +600,8 @@ extension BotRoutine {
         prompt = try c.decode(String.self, forKey: .prompt)
         target = try c.decode(.target, or: .workspace)
         model = try c.decodeIfPresent(String.self, forKey: .model)
+        thinking = (try? c.decodeIfPresent(String.self, forKey: .thinking)) ?? nil
+        fast = (try? c.decodeIfPresent(Bool.self, forKey: .fast)) ?? nil
         schedule = try c.decode(.schedule, or: .default)
         enabled = try c.decode(.enabled, or: true)
         writeNotes = try c.decode(.writeNotes, or: false)
@@ -556,12 +609,21 @@ extension BotRoutine {
         createdAt = try c.decode(Int64.self, forKey: .createdAt)
         updatedAt = try c.decode(Int64.self, forKey: .updatedAt)
         runRequestedAt = try c.decodeIfPresent(Int64.self, forKey: .runRequestedAt)
+        runNote = (try? c.decodeIfPresent(RunNote.self, forKey: .runNote)) ?? nil
         threadChatId = try c.decodeIfPresent(String.self, forKey: .threadChatId)
         manualChatId = try c.decodeIfPresent(String.self, forKey: .manualChatId)
         worktreePath = try c.decodeIfPresent(String.self, forKey: .worktreePath)
         lastRun = try c.decodeIfPresent(RunRecord.self, forKey: .lastRun)
         nextRunAt = try c.decodeIfPresent(Int64.self, forKey: .nextRunAt)
     }
+}
+
+/// A Run now's extra instructions, for the request at `at` alone.
+struct RunNote: Codable, Hashable, Sendable {
+    var at: Int64
+    var text: String
+
+    static let max = 2_000
 }
 
 // MARK: - Shortcuts

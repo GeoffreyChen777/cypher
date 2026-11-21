@@ -113,11 +113,24 @@ struct SaveRoutine {
     worktree: Option<bool>,
     #[serde(default)]
     model: Option<String>,
+    /// A thinking level; "" goes back to following the default.
+    #[serde(default)]
+    thinking: Option<String>,
+    #[serde(default)]
+    fast: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RoutineId {
     id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunRoutine {
+    id: String,
+    /// Extra instructions for this run only.
+    #[serde(default)]
+    note: Option<String>,
 }
 
 fn args<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Result<T, EngineError> {
@@ -181,14 +194,37 @@ impl Bots {
             "list_routines" => self.list_routines(&chat.id),
             "save_routine" => self.save_routine(&bot, &chat.id, args::<SaveRoutine>(raw)?),
             "run_routine" => {
-                let routine = self.own_routine(&bot, args::<RoutineId>(raw)?)?;
+                let args = args::<RunRoutine>(raw)?;
+                let note = args
+                    .note
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                    .map(String::from);
+                if let Some(note) = &note
+                    && note.chars().count() > p::RUN_NOTE_MAX
+                {
+                    return Err(EngineError::Other(format!(
+                        "The note has {} characters; keep it under {}.",
+                        note.chars().count(),
+                        p::RUN_NOTE_MAX
+                    )));
+                }
+                let routine = self.own_routine(&bot, RoutineId { id: args.id })?;
                 self.gate_owner(
                     &bot,
                     chat,
-                    format!("Run the routine \"{}\" now", routine.name),
+                    match &note {
+                        Some(note) => format!(
+                            "Run the routine \"{}\" now, for this run: {}",
+                            routine.name,
+                            p::clip(note, 200)
+                        ),
+                        None => format!("Run the routine \"{}\" now", routine.name),
+                    },
                 )
                 .await?;
-                self.run_routine_now(&bot, &routine)
+                self.run_routine_now(&bot, &routine, note)
             }
             "delete_routine" => {
                 let routine = self.own_routine(&bot, args::<RoutineId>(raw)?)?;
@@ -232,10 +268,21 @@ impl Bots {
 
     /// Run Now: a fresh run the scheduler starts on its next pass, like the
     /// routine page's button; its result is announced in this chat.
-    fn run_routine_now(&self, bot: &Bot, routine: &BotRoutine) -> Result<String, EngineError> {
+    fn run_routine_now(
+        &self,
+        bot: &Bot,
+        routine: &BotRoutine,
+        note: Option<String>,
+    ) -> Result<String, EngineError> {
         let now = p::now_ms();
         let mut fields = serde_json::Map::new();
         fields.insert("runRequestedAt".into(), now.into());
+        if let Some(text) = &note {
+            fields.insert(
+                "runNote".into(),
+                serde_json::json!({ "at": now, "text": text }),
+            );
+        }
         self.inner
             .workspace
             .update_record(p::KIND_BOT_ROUTINES, &routine.id, fields)?;
@@ -249,8 +296,13 @@ impl Bots {
             return Ok(format!("\"{}\" didn't run. {reason}", routine.name));
         }
         let mut out = vec![format!(
-            "Started \"{}\": a fresh run; its result will be posted in this chat when it ends.",
-            routine.name
+            "Started \"{}\": a fresh run{}; its result will be posted in this chat when it ends.",
+            routine.name,
+            if note.is_some() {
+                ", with your note for this run only"
+            } else {
+                ""
+            }
         )];
         if schedule::is_running(routine.last_run.as_ref()) {
             out.push("A run is going now; this one starts when it ends.".into());
@@ -326,10 +378,27 @@ impl Bots {
             ),
             None => None,
         };
+        // A model or level left out keeps the routine's; "" clears it.
+        let cleared_model = args.model.as_deref().is_some_and(|m| m.trim().is_empty());
         let model = args
             .model
             .map(|m| m.trim().to_string())
             .filter(|m| !m.is_empty());
+        let thinking = match args.thinking.as_deref().map(str::trim) {
+            None => existing.as_ref().and_then(|r| r.thinking),
+            Some("") => None,
+            Some(word) => Some(
+                super::ChoiceArgs {
+                    thinking: Some(word.to_string()),
+                    ..Default::default()
+                }
+                .choice()
+                .map_err(EngineError::Other)?
+                .thinking
+                .expect("a level was given"),
+            ),
+        };
+        let fast = args.fast.or(existing.as_ref().and_then(|r| r.fast));
         let target = match args.project.as_deref().map(str::trim) {
             Some("") => RoutineTarget::Workspace,
             Some(project) => {
@@ -358,6 +427,7 @@ impl Bots {
         let model = model.or_else(|| {
             existing
                 .as_ref()
+                .filter(|_| !cleared_model)
                 .and_then(|r| r.chosen_model().map(str::to_string))
         });
         let target = match target {
@@ -391,6 +461,8 @@ impl Bots {
             prompt: args.prompt,
             target,
             model,
+            thinking,
+            fast,
             schedule: args.schedule,
             enabled: args
                 .enabled
@@ -407,6 +479,7 @@ impl Bots {
             created_at: existing.as_ref().map_or(now, |r| r.created_at),
             updated_at: now,
             run_requested_at: None,
+            run_note: None,
             thread_chat_id: None,
             manual_chat_id: None,
             worktree_path: None,
@@ -428,7 +501,10 @@ impl Bots {
             p::KIND_BOT_ROUTINES,
             &routine.id,
             &routine,
-            Fields::Except(&[BotRoutine::HOST_FIELDS, &["runRequestedAt"]].concat()),
+            Fields::ExceptClearing {
+                drop: &[BotRoutine::HOST_FIELDS, &["runRequestedAt", "runNote"]].concat(),
+                clear: BotRoutine::OWNER_OPTIONAL_FIELDS,
+            },
         )?;
         self.wake_schedule();
         let mut out = vec![format!(
@@ -548,30 +624,6 @@ pub(super) fn memory_tools(marker: &BotChat, bot: Option<&Bot>) -> Vec<&'static 
     }
 }
 
-/// This track's section of the thread's system prompt: how routines work,
-/// in the bot chat (where they are made).
-pub(super) fn memory_prompt(marker: &BotChat) -> Option<String> {
-    (marker.origin == BotOrigin::Owner && marker.is_main()).then(|| ROUTINES_LINE.to_string())
-}
-
-/// What the bot chat is told about routines.
-pub(super) const ROUTINES_LINE: &str = "Routines:\n- Routines run by hand or on a schedule, in \
-     the background. When a run ends you get a bracketed notice here with its result: tell \
-     your owner what it says in one or two sentences (they open the rest from its card). \
-     One runs either as you, in its own thread (\"every \
-     morning, tell me what's stuck\"), or as an ordinary session in one of your projects \
-     (\"every night, run the tests and fix anything flaky\"). When your owner asks for \
-     something recurring, save it with save_routine; list_routines shows your routines with \
-     their last results. run_routine runs one now (a fresh run; you are told here when it \
-     ends) and delete_routine removes one, when your owner asks. After save_routine, one \
-     line is enough: your owner sees the routine's card.\n- Reminders are routines too. When your owner asks to be reminded \
-     (\"remind me tomorrow morning to review the code in invoice-demo\"), save a routine as \
-     you with a once schedule at that local time (morning is 09:00 unless they say; \
-     list_routines shows the time now) and a prompt that tells you to remind them and add \
-     what helps, like what changed in the project since. Say when it will come: \"I'll remind \
-     you tomorrow, Tue Nov 10, at 9:00.\" Don't put reminders in memory: memory is read when \
-     a run starts, and nothing would start one.";
-
 /// The `list_routines` answer: this bot's routines, each with where it
 /// runs, its schedule, next run and last result.
 pub(super) fn render_routines(
@@ -666,8 +718,9 @@ pub(super) fn render_routines(
                     format!(" · a session in {place}, in {checkout}")
                 }
             });
-            if let Some(model) = r.chosen_model() {
-                line.push_str(&format!(" · model {model}"));
+            let choice = r.session_choice();
+            if !choice.is_empty() {
+                line.push_str(&format!(" · runs on {}", choice.describe()));
             }
             if r.write_notes {
                 line.push_str(" · writes memory");

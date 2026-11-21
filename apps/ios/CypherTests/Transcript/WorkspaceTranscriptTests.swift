@@ -109,6 +109,7 @@ final class WorkspaceTranscriptTests: XCTestCase {
             XCTAssertTrue(decision.approved, id)
         }
         XCTAssertEqual(BotWork.planLine(steps: 1, place: nil), "Plan · 1 step")
+        XCTAssertEqual(BotWork.planLine(steps: 2, place: nil, limit: 90), "Plan · 2 steps · up to 1h 30m")
         XCTAssertEqual(
             BotWork.planLine(steps: 4, place: "web-api · Studio"), "Plan · 4 steps · web-api · Studio")
     }

@@ -9,7 +9,7 @@ use cypher_proto::{
     ProjectGrant, RoutineTarget, RunOutcome, RunRecord, Schedule, Space,
 };
 
-use super::{Access, access, memory_prompt, memory_tools, render_routines};
+use super::{Access, access, memory_tools, render_routines};
 
 fn bot(coordinate: bool) -> Bot {
     Bot {
@@ -32,6 +32,8 @@ fn bot(coordinate: bool) -> Bot {
         },
         paused: false,
         created_at: Utc::now(),
+        plans: Default::default(),
+        session_choice: Default::default(),
     }
 }
 
@@ -96,13 +98,6 @@ fn allowlists_follow_the_access() {
     assert!(memory_tools(&BotChat::owner("b1"), None).is_empty());
 }
 
-#[test]
-fn only_the_workspace_chat_is_told_how_routines_work() {
-    let section = memory_prompt(&BotChat::owner("b1")).unwrap();
-    assert!(section.contains("save_routine") && section.contains("list_routines"));
-    assert!(memory_prompt(&routine_thread()).is_none());
-}
-
 fn local(ms: i64) -> DateTime<Local> {
     Local.timestamp_millis_opt(ms).unwrap()
 }
@@ -141,6 +136,9 @@ fn the_schedule_lists_routines_and_where_they_run() {
             manual: false,
         }),
         next_run_at: Some(nine.timestamp_millis()),
+        thinking: None,
+        fast: None,
+        run_note: None,
     });
     let mut nightly = records.routines[0].clone();
     nightly.id = "r2".into();

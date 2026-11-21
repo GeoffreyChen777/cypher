@@ -65,6 +65,51 @@ final class BotModelTests: XCTestCase {
         XCTAssertNil(reply.icon)
     }
 
+    func testPlanSettingsAndSessionChoicesReadTheEngineShape() throws {
+        let bot = try decodeFixture(
+            Bot.self,
+            #"""
+            {"id":"b","name":"Bob","hostDeviceId":"d","chatId":"c","createdAt":0,
+             "plans":{"timeLimitMinutes":90,"runningMax":2},
+             "sessionChoice":{"model":"pi/opus","thinking":"high","fast":true}}
+            """#)
+        XCTAssertEqual(bot.plans.timeLimit, 90)
+        XCTAssertEqual(bot.plans.running, 2)
+        XCTAssertEqual(bot.plans.sessions, PlanSettings.defaultSessions)
+        XCTAssertEqual(bot.sessionChoice, SessionChoice(model: "pi/opus", thinking: "high", fast: true))
+        XCTAssertEqual(bot.sessionChoice.words(), "pi/opus · High thinking · Fast mode")
+        // Out of range, as a newer or hand-written row may be: the defaults.
+        let wild = try decodeFixture(
+            Bot.self,
+            #"{"id":"b","name":"Bob","hostDeviceId":"d","chatId":"c","createdAt":0,"plans":{"timeLimitMinutes":1}}"#)
+        XCTAssertTrue(wild.plans.isDefault)
+        XCTAssertEqual(
+            try encodedJSON(PlanSettings(timeLimitMinutes: 480)), try jsonFixture(#"{"timeLimitMinutes":480}"#))
+
+        let work = try decodeFixture(
+            BotWork.self,
+            #"""
+            {"id":"w","botId":"b","title":"T","chatId":"c","createdAt":0,"startedAt":1000,"state":"running",
+             "timeLimitMinutes":60,"timeAddedMinutes":30,"coordinatorChoice":{"model":"pi/haiku"},
+             "steps":[{"id":"1","title":"Fix","sessionChoice":{"thinking":"xhigh"}}]}
+            """#)
+        XCTAssertEqual(work.limitMinutes(fallback: 240), 90)
+        XCTAssertEqual(work.deadlineMs(fallback: 240), 1000 + 90 * 60_000)
+        XCTAssertEqual(work.ownLimit(workspace: 240), 60)
+        XCTAssertNil(work.ownLimit(workspace: 60), "the workspace's own limit is not said again")
+        XCTAssertEqual(work.coordinatorChoice.model, "pi/haiku")
+        XCTAssertEqual(work.steps[0].sessionChoice.thinking, "xhigh")
+
+        let routine = try decodeFixture(
+            BotRoutine.self,
+            #"""
+            {"id":"r","botId":"b","name":"n","prompt":"p","createdAt":0,"updatedAt":0,
+             "thinking":"low","fast":false,"runNote":{"at":5,"text":"only web"}}
+            """#)
+        XCTAssertEqual(routine.sessionChoice, SessionChoice(model: nil, thinking: "low", fast: false))
+        XCTAssertEqual(routine.runNote, RunNote(at: 5, text: "only web"))
+    }
+
     func testAnUnreadableScopeReadsAsTheEmptyScope() throws {
         // rows.rs RawBot: a scope from a newer app sees nothing, never more.
         let bot = try decodeFixture(

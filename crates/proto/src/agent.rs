@@ -35,6 +35,34 @@ pub enum ReasoningLevel {
     Ultrathink,
 }
 
+impl ReasoningLevel {
+    /// The levels a workspace may choose for a session it starts, lowest
+    /// first (the retired harness's are read, never offered).
+    pub const CHOOSABLE: [ReasoningLevel; 6] = [
+        ReasoningLevel::Minimal,
+        ReasoningLevel::Low,
+        ReasoningLevel::Medium,
+        ReasoningLevel::High,
+        ReasoningLevel::XHigh,
+        ReasoningLevel::Max,
+    ];
+
+    /// Its wire name: `minimal`, `low`, … `xhigh`, `max`.
+    pub fn word(self) -> &'static str {
+        match self {
+            ReasoningLevel::Minimal => "minimal",
+            ReasoningLevel::Low => "low",
+            ReasoningLevel::Medium => "medium",
+            ReasoningLevel::High => "high",
+            ReasoningLevel::XHigh => "xhigh",
+            ReasoningLevel::Max => "max",
+            ReasoningLevel::Ultra => "ultra",
+            ReasoningLevel::Ultracode => "ultracode",
+            ReasoningLevel::Ultrathink => "ultrathink",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxLevel {

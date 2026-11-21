@@ -128,6 +128,29 @@ impl EngineRpc {
                     return Err(missing("task"));
                 }
             }
+            MutateParams::AddBotWorkTime { work_id, minutes } => {
+                let work = ws
+                    .record::<p::BotWork>(p::KIND_BOT_WORK, &work_id)
+                    .ok_or_else(|| missing("task"))?;
+                if work.state != p::WorkState::Running {
+                    return Err(RpcError::BadParams(
+                        "Only a running plan can be given more time.".into(),
+                    ));
+                }
+                let added = work.time_added_minutes.unwrap_or(0);
+                if minutes == 0 || added + minutes > p::PLAN_TIME_ADDED_MAX_MINUTES {
+                    return Err(RpcError::BadParams(format!(
+                        "A plan can be given at most {} more in all.",
+                        p::describe_minutes(p::PLAN_TIME_ADDED_MAX_MINUTES)
+                    )));
+                }
+                ws.update_record(
+                    p::KIND_BOT_WORK,
+                    &work_id,
+                    fields(&[("timeAddedMinutes", (added + minutes).into())]),
+                )
+                .map_err(failed)?;
+            }
             MutateParams::DeleteBotWork { work_id } => {
                 let work = ws
                     .record::<p::BotWork>(p::KIND_BOT_WORK, &work_id)
@@ -187,7 +210,11 @@ impl EngineRpc {
                     p::KIND_BOT_ROUTINES,
                     &routine.id.clone(),
                     &routine,
-                    Fields::Except(&[p::BotRoutine::HOST_FIELDS, &["runRequestedAt"]].concat()),
+                    Fields::ExceptClearing {
+                        drop: &[p::BotRoutine::HOST_FIELDS, &["runRequestedAt", "runNote"]]
+                            .concat(),
+                        clear: p::BotRoutine::OWNER_OPTIONAL_FIELDS,
+                    },
                 )
                 .map_err(failed)?;
             }
@@ -241,13 +268,23 @@ impl EngineRpc {
                     .map_err(failed)?;
                 }
             }
-            MutateParams::RunBotRoutine { routine_id } => {
+            MutateParams::RunBotRoutine { routine_id, note } => {
+                let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+                if note
+                    .as_deref()
+                    .is_some_and(|n| n.chars().count() > p::RUN_NOTE_MAX)
+                {
+                    return Err(RpcError::BadParams(format!(
+                        "Keep the note under {} characters.",
+                        p::RUN_NOTE_MAX
+                    )));
+                }
+                let mut set = vec![("runRequestedAt", now.into())];
+                if let Some(text) = note {
+                    set.push(("runNote", serde_json::json!({ "at": now, "text": text })));
+                }
                 if !ws
-                    .update_record(
-                        p::KIND_BOT_ROUTINES,
-                        &routine_id,
-                        fields(&[("runRequestedAt", now.into())]),
-                    )
+                    .update_record(p::KIND_BOT_ROUTINES, &routine_id, fields(&set))
                     .map_err(failed)?
                 {
                     return Err(missing("routine"));

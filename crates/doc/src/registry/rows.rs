@@ -225,6 +225,12 @@ pub(crate) struct RawBot {
     paused: Option<bool>,
     #[serde(default)]
     created_at: i64,
+    /// Raw like `scope`: unreadable plan settings read as the defaults.
+    #[serde(default)]
+    plans: Option<serde_json::Value>,
+    /// Raw like `scope`: an unreadable choice reads as none.
+    #[serde(default)]
+    session_choice: Option<serde_json::Value>,
 }
 
 impl From<RawBot> for Bot {
@@ -254,6 +260,15 @@ impl From<RawBot> for Bot {
                 .unwrap_or_default(),
             paused: raw.paused.unwrap_or(false),
             created_at: dt(raw.created_at),
+            plans: raw
+                .plans
+                .and_then(|value| serde_json::from_value::<cypher_proto::PlanSettings>(value).ok())
+                .filter(|plans| plans.validate().is_ok())
+                .unwrap_or_default(),
+            session_choice: raw
+                .session_choice
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_default(),
         }
     }
 }

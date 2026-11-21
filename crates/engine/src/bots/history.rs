@@ -40,6 +40,8 @@ impl Bots {
             capabilities: Default::default(),
             paused: false,
             created_at: Utc::now(),
+            plans: Default::default(),
+            session_choice: Default::default(),
         };
         let sessions = workspace.read_sessions()?;
         Ok(View {

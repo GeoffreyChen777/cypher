@@ -51,6 +51,11 @@ struct Bot: Codable, Hashable, Identifiable, Sendable {
     var paused = false
     /// Epoch ms.
     var createdAt: Int64
+    /// How its plans run: time limit, plans at once, sessions per plan.
+    var plans = PlanSettings()
+    /// The model, thinking and Fast mode of the sessions it starts in
+    /// projects; what it leaves out follows its own chat.
+    var sessionChoice = SessionChoice()
 }
 
 extension Bot {
@@ -72,6 +77,10 @@ extension Bot {
         capabilities =
             ((try? c.decodeIfPresent(BotCapabilities.self, forKey: .capabilities)) ?? nil) ?? BotCapabilities()
         paused = ((try? c.decodeIfPresent(Bool.self, forKey: .paused)) ?? nil) ?? false
+        // Unreadable settings read as the defaults, like rows.rs.
+        let plans = ((try? c.decodeIfPresent(PlanSettings.self, forKey: .plans)) ?? nil) ?? PlanSettings()
+        self.plans = plans.validationError == nil ? plans : PlanSettings()
+        sessionChoice = ((try? c.decodeIfPresent(SessionChoice.self, forKey: .sessionChoice)) ?? nil) ?? SessionChoice()
         if let ms = try? c.decodeIfPresent(Int64.self, forKey: .createdAt) {
             createdAt = ms
         } else if let text = try? c.decodeIfPresent(String.self, forKey: .createdAt) {
@@ -108,6 +117,82 @@ func rfc3339Millis(_ text: String) -> Int64? {
     formatter.formatOptions = [.withInternetDateTime]
     guard let date = formatter.date(from: base) else { return nil }
     return Int64(((date.timeIntervalSince1970 + fraction) * 1000).rounded())
+}
+
+// MARK: - Session choices and plan settings
+
+/// bot_records.rs `SessionChoice`: the model, thinking level and GPT Fast
+/// mode of a session a workspace starts. Each nil follows what the session
+/// falls back to (a step's choice, the workspace's, its chat's).
+struct SessionChoice: Codable, Hashable, Sendable {
+    var model: String?
+    /// Lowercase: "minimal" … "xhigh", "max".
+    var thinking: String?
+    var fast: Bool?
+
+    /// The levels a workspace may choose, lowest first.
+    static let levels = ["minimal", "low", "medium", "high", "xhigh", "max"]
+
+    var isEmpty: Bool { model == nil && thinking == nil && fast == nil }
+
+    /// "Opus 5.5 · High thinking · Fast mode"; nil when it chooses nothing.
+    func words(label: (String) -> String = { $0 }) -> String? {
+        var parts: [String] = []
+        if let model { parts.append(label(model)) }
+        if let thinking { parts.append("\(HarnessCatalog.reasoningLabel(thinking)) thinking") }
+        if let fast { parts.append(fast ? "Fast mode" : "No Fast mode") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
+/// bot_records.rs `PlanSettings`: how a workspace's plans run. Each nil
+/// is the default.
+struct PlanSettings: Codable, Hashable, Sendable {
+    var timeLimitMinutes: Int?
+    var runningMax: Int?
+    var sessionsMax: Int?
+
+    static let defaultTimeLimit = 240
+    static let timeLimitRange = 15...(72 * 60)
+    static let defaultRunning = 3
+    static let runningRange = 1...10
+    static let defaultSessions = 8
+    static let sessionsRange = 1...24
+    /// Time an owner adds to a running plan, in all.
+    static let maxAddedMinutes = 72 * 60
+    /// The coordinating session is warned this long before its time is up.
+    static let warnBeforeMs: Int64 = 15 * 60 * 1000
+    /// The limits the settings offer; a workspace's own is added.
+    static let timeLimitChoices = [60, 120, 240, 480, 720, 1_440]
+
+    var isDefault: Bool { timeLimitMinutes == nil && runningMax == nil && sessionsMax == nil }
+
+    var timeLimit: Int { Self.clamp(timeLimitMinutes ?? Self.defaultTimeLimit, Self.timeLimitRange) }
+    var running: Int { runningMax.map { Self.clamp($0, Self.runningRange) } ?? Self.defaultRunning }
+    var sessions: Int { sessionsMax.map { Self.clamp($0, Self.sessionsRange) } ?? Self.defaultSessions }
+
+    /// `PlanSettings::validate`; nil when the engine accepts it.
+    var validationError: String? {
+        if let minutes = timeLimitMinutes, !Self.timeLimitRange.contains(minutes) {
+            return "A plan's time limit is 15 minutes to 72 hours."
+        }
+        if let n = runningMax, !Self.runningRange.contains(n) { return "Plans at once is 1 to 10." }
+        if let n = sessionsMax, !Self.sessionsRange.contains(n) { return "Sessions per plan is 1 to 24." }
+        return nil
+    }
+
+    static func clamp(_ value: Int, _ range: ClosedRange<Int>) -> Int {
+        min(max(value, range.lowerBound), range.upperBound)
+    }
+
+    /// "4h", "1h 30m", "45m".
+    static func limitWords(_ minutes: Int) -> String {
+        switch (minutes / 60, minutes % 60) {
+        case (0, let m): "\(m)m"
+        case (let h, 0): "\(h)h"
+        case (let h, let m): "\(h)h \(m)m"
+        }
+    }
 }
 
 // MARK: - Scope

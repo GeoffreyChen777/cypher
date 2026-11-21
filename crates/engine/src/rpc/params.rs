@@ -93,6 +93,9 @@ pub(super) struct CreateWorktreeParams {
     #[serde(alias = "repo")]
     pub(super) repo_path: String,
     pub(super) branch: String,
+    /// The new branch's name; a generated one when absent (older callers).
+    #[serde(default)]
+    pub(super) new_branch: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -412,6 +415,11 @@ pub(super) enum MutateParams {
         /// Absent from older clients: the capabilities are left alone.
         #[serde(default)]
         capabilities: Option<cypher_proto::BotCapabilities>,
+        /// Absent from older clients: left alone, like the capabilities.
+        #[serde(default)]
+        plans: Option<cypher_proto::PlanSettings>,
+        #[serde(default)]
+        session_choice: Option<cypher_proto::SessionChoice>,
     },
     /// The bot's kill switch: no routine runs and no new work starts.
     #[serde(rename_all = "camelCase")]
@@ -422,6 +430,9 @@ pub(super) enum MutateParams {
     /// Stop running work and every session it started.
     #[serde(rename_all = "camelCase")]
     StopBotWork { work_id: String },
+    /// Give a running plan more time: `minutes` on top of its limit.
+    #[serde(rename_all = "camelCase")]
+    AddBotWorkTime { work_id: String, minutes: u32 },
     /// Delete finished work and its background session; the sessions it
     /// started in projects stay.
     #[serde(rename_all = "camelCase")]
@@ -436,7 +447,12 @@ pub(super) enum MutateParams {
     DeleteBotRoutine { routine_id: String },
     /// Run a routine once now.
     #[serde(rename_all = "camelCase")]
-    RunBotRoutine { routine_id: String },
+    RunBotRoutine {
+        routine_id: String,
+        /// Extra instructions for this run only.
+        #[serde(default)]
+        note: Option<String>,
+    },
     /// Remove a sidebar shortcut (the agent makes them, docs §13.1).
     #[serde(rename_all = "camelCase")]
     DeleteBotShortcut { shortcut_id: String },

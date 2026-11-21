@@ -34,7 +34,9 @@ struct BotPlanCard: View {
         let places = work.steps.map { step in step.project.flatMap(place) }
         // Where it works, named when every step shares the project.
         let common = places.first.flatMap { $0 }.flatMap { first in places.allSatisfy { $0 == first } ? first : nil }
-        let subtitle = BotWork.planLine(steps: work.steps.count, place: common)
+        let workspaceLimit = model.bot(id: work.botId)?.plans.timeLimit ?? PlanSettings.defaultTimeLimit
+        let subtitle = BotWork.planLine(
+            steps: work.steps.count, place: common, limit: work.ownLimit(workspace: workspaceLimit))
         let details: () -> Void = { openPage?(.workItem(work.id)) }
         return BotCardSurface {
             if let decision = work.decisionWord {
@@ -151,11 +153,12 @@ extension BotWork {
         }
     }
 
-    /// A plan card's one quiet line: "Plan · 4 steps · web-api · Studio"
-    /// (bot_plan.rs `plan_sub`).
-    static func planLine(steps: Int, place: String?) -> String {
+    /// A plan card's one quiet line: "Plan · 4 steps · web-api · Studio",
+    /// and its time limit when it asked for its own (bot_plan.rs `plan_sub`).
+    static func planLine(steps: Int, place: String?, limit: Int? = nil) -> String {
         var line = "Plan · \(steps) step\(steps == 1 ? "" : "s")"
         if let place { line += " · \(place)" }
+        if let limit { line += " · up to \(PlanSettings.limitWords(limit))" }
         return line
     }
 }

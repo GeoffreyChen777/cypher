@@ -20,12 +20,32 @@ extension WorkspaceStore {
         try updateRecord("botWork", workId, what: "plan", ["stopRequestedAt": .int(nowMs())])
     }
 
+    /// bots.rs `AddBotWorkTime`: `minutes` more for a running plan.
+    func addWorkTime(workId: String, minutes: Int) async throws {
+        guard let work = botRecords.work.first(where: { $0.id == workId }) else { throw BotActionError.missing("plan") }
+        guard work.state == .running else { throw BotActionError("Only a running plan can be given more time.") }
+        let added = (work.timeAddedMinutes ?? 0) + minutes
+        guard minutes > 0, added <= PlanSettings.maxAddedMinutes else {
+            throw BotActionError("A plan can be given at most 72 hours more in all.")
+        }
+        try updateRecord("botWork", workId, what: "plan", ["timeAddedMinutes": .int(Int64(added))])
+    }
+
     func resolveApproval(approvalId: String, approve: Bool) async throws {
         try updateRecord("botApprovals", approvalId, what: "approval", ["decision": decision(approve)])
     }
 
-    func runRoutine(routineId: String) async throws {
-        try updateRecord("botRoutines", routineId, what: "routine", ["runRequestedAt": .int(nowMs())])
+    /// Run now, with `note` as extra instructions for this run only.
+    func runRoutine(routineId: String, note: String?) async throws {
+        let now = nowMs()
+        var set: [String: JSONValue] = ["runRequestedAt": .int(now)]
+        if let note = note?.trimmingCharacters(in: .whitespacesAndNewlines), !note.isEmpty {
+            guard note.count <= RunNote.max else {
+                throw BotActionError("Keep the note under \(RunNote.max.formatted()) characters.")
+            }
+            set["runNote"] = .object(["at": .int(now), "text": .string(note)])
+        }
+        try updateRecord("botRoutines", routineId, what: "routine", set)
     }
 
     func setRoutineEnabled(routineId: String, enabled: Bool) async throws {
@@ -117,16 +137,21 @@ extension WorkspaceStore {
 
     func updateBot(
         botId: String, name: String, icon: String?, color: String?, instructions: String?,
-        scope: BotScope, capabilities: BotCapabilities?
+        scope: BotScope, capabilities: BotCapabilities?, plans: PlanSettings?,
+        sessionChoice: SessionChoice?
     ) async throws {
         guard let bot = bot(id: botId) else { throw BotActionError.missing("workspace") }
-        if let error = Bot.nameError(name) ?? scope.validationError { throw BotActionError(error) }
+        if let error = Bot.nameError(name) ?? scope.validationError ?? plans?.validationError {
+            throw BotActionError(error)
+        }
         var params: [String: Any] = [
             "op": "updateBot", "botId": botId, "name": name,
             "icon": icon ?? NSNull(), "color": color ?? NSNull(), "instructions": instructions ?? NSNull(),
             "scope": try jsonObject(scope),
         ]
         if let capabilities { params["capabilities"] = try jsonObject(capabilities) }
+        if let plans { params["plans"] = try jsonObject(plans) }
+        if let sessionChoice { params["sessionChoice"] = try jsonObject(sessionChoice) }
         try await mutate(bot, params, hostOnly: false)
     }
 

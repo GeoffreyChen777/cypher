@@ -1894,6 +1894,8 @@ pub(super) fn test_bot(id: &str) -> cypher_proto::Bot {
         capabilities: Default::default(),
         paused: false,
         created_at: Utc::now(),
+        plans: Default::default(),
+        session_choice: Default::default(),
     }
 }
 
@@ -2296,6 +2298,7 @@ fn needs_you_counts_records_and_worker_questions_across_bots() {
             note: None,
             started_at: None,
             ended_at: None,
+            session_choice: Default::default(),
         }],
         state,
         chat_id: format!("{bot}-chat"),
@@ -2308,6 +2311,10 @@ fn needs_you_counts_records_and_worker_questions_across_bots() {
         decision: None,
         stop_requested_at: None,
         notify: false,
+        time_limit_minutes: None,
+        time_added_minutes: None,
+        warned_at: None,
+        coordinator_choice: Default::default(),
     };
     let records = cypher_proto::BotRecords {
         work: vec![
