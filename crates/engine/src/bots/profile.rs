@@ -336,9 +336,9 @@ mod tests {
         );
     }
 
-    /// The workspace's own chat reads top to bottom: how it works, what it
-    /// sees, its tools, the details of each way of working, and the
-    /// owner's instructions last.
+    /// The workspace's own chat reads top to bottom: what it can do, what
+    /// it sees, its tools, how each way of working works, and the owner's
+    /// instructions last.
     #[tokio::test]
     async fn the_workspace_chat_prompt_reads_in_order() {
         let dir = tempfile::tempdir().unwrap();
@@ -369,10 +369,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("{text:?} in:\n{prompt}"))
         };
         let order = [
-            at("How you work:"),
+            at("What you can do:"),
             at("What you can see:"),
             at("Your tools:"),
-            at("Getting work done:"),
+            at("Working directly and plans, in practice:"),
             at("Routines:"),
             at("Your owner's instructions:\nAnswer in German."),
         ];

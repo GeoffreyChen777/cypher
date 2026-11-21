@@ -1694,8 +1694,12 @@ async fn working_directly_gets_local_roots_a_write_level_and_a_gate() {
         "cwd stays the bot's folder"
     );
     assert!(
+        env.system_prompt.contains(&format!(
+            "you run commands and edit files yourself in {}",
+            billing.to_string_lossy()
+        )),
+        "{}",
         env.system_prompt
-            .contains("in these checkouts on this device")
     );
 
     // Routine and peer threads get no roots and read-only.

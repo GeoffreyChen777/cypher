@@ -16,46 +16,46 @@ pub(super) fn prompt(bot: &Bot, role: &Role, roots: &[String]) -> Option<String>
     let mut lines = Vec::new();
     match role {
         Role::Main => {
-            if !caps.work_directly && !caps.coordinate {
-                return None;
+            // What each way of working is good for is the prompt's opening
+            // (prompt.rs); this is how they work.
+            if caps.work_directly {
+                lines.push(if roots.is_empty() {
+                    "- Your shell and file tools have nothing to work in: none of your \
+                     projects is on this device."
+                        .to_string()
+                } else {
+                    "- Working directly, your working directory is your own private folder: \
+                     use absolute paths or cd into a checkout. The shell's \"getcwd\" \
+                     warning about that folder is harmless."
+                        .to_string()
+                });
             }
-            // When to answer, work directly or plan is the prompt's opening
-            // (prompt.rs); this is how each is done.
-            lines.push("Getting work done:".to_string());
-            lines.extend(direct_lines(caps.work_directly, roots));
             if caps.coordinate {
                 lines.extend([
-                    "- For anything with more than a couple of steps, real changes that \
-                     deserve their own session, worktree and diff, steps that can run in \
-                     parallel, or work on another device, propose a plan with propose_plan: \
-                     its steps, the project each works in, and how a step gets another's \
-                     change (a path on the same device, a pushed branch across devices, a \
-                     published version)."
+                    "- A plan names its steps, the project each works in, and how a step \
+                     gets another's change: a path on the same device, a pushed branch \
+                     across devices, a published version."
                         .to_string(),
                     "- The background session that carries a plan out starts from the plan \
-                     and your owner's last message only, never this conversation: put \
-                     everything else it needs (constraints, decisions made here, what to \
-                     ask your owner) in the steps' details, within their limits."
+                     and your owner's last message only, never this conversation, so the \
+                     steps' details carry whatever else it needs: constraints, decisions \
+                     made here, what to ask your owner."
                         .to_string(),
-                    "- Every plan waits for your owner's approval in a card. After \
-                     propose_plan, stop: end your turn with one line saying the plan awaits \
-                     approval. Don't repeat its steps (the card opens them) and don't ask \
-                     in text whether to go ahead."
+                    "- A proposed plan waits for your owner's approval in a card in this \
+                     chat, which shows its steps and the Approve button. After \
+                     propose_plan, end your turn with one line saying it awaits approval."
                         .to_string(),
-                    "- Once approved, a background session carries the plan out. Your owner \
-                     follows it beside this conversation, so don't narrate its progress \
-                     here. When it ends you get a bracketed notice with the result: answer \
-                     that in one or two sentences. Use list_work and get_work to follow up \
-                     on plans, their steps and their sessions."
+                    "- Your owner follows a running plan beside this conversation. When it \
+                     ends you get a bracketed notice with the result, and its card holds \
+                     the rest, so a sentence or two answers it. list_work and get_work show \
+                     where any plan stands."
                         .to_string(),
                 ]);
-            } else {
-                lines.push(
-                    "- You cannot start sessions or plans: your owner hasn't turned on \
-                     Coordinate. When a task needs that, say so."
-                        .to_string(),
-                );
             }
+            if lines.is_empty() {
+                return None;
+            }
+            lines.insert(0, "Working directly and plans, in practice:".to_string());
         }
         Role::Work(_) => {
             lines.extend([
@@ -405,20 +405,17 @@ mod tests {
     }
 
     #[test]
-    fn prompts_say_when_to_plan_and_how_to_finish() {
+    fn prompts_say_how_plans_work_and_how_to_finish() {
         let main = prompt(&bot(true, true, false), &Role::Main, &["/w/app-a".into()]).unwrap();
         assert!(main.contains("propose_plan"), "{main}");
         assert!(main.contains("waits for your owner's approval"), "{main}");
-        assert!(main.contains("stop: end your turn"), "{main}");
-        assert!(
-            main.contains("in these checkouts on this device: /w/app-a"),
-            "{main}"
-        );
+        assert!(main.contains("end your turn with one line"), "{main}");
+        assert!(main.contains("use absolute paths"), "{main}");
         let reading = prompt(&bot(false, false, false), &Role::Main, &[]);
         assert!(reading.is_none(), "a read-only bot keeps the base prompt");
         let no_plans = prompt(&bot(true, false, false), &Role::Main, &[]).unwrap();
         assert!(no_plans.contains("none of your projects is on this device"));
-        assert!(no_plans.contains("hasn't turned on Coordinate"));
+        assert!(!no_plans.contains("propose_plan"));
 
         let thread = prompt(&bot(false, true, false), &Role::Work("w".into()), &[]).unwrap();
         for words in [
