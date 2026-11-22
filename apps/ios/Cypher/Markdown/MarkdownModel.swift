@@ -17,6 +17,9 @@ struct InlineStyle: Hashable {
     var link: String? = nil
     /// The run is a LaTeX formula (its text is the TeX source), not prose.
     var math: MathKind? = nil
+    /// The run is a mention chip in a sent prompt (`code` too): violet on its
+    /// own wash, never a file reference chip.
+    var mention = false
 
     static let plain = InlineStyle()
 }

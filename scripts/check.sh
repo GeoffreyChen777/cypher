@@ -115,6 +115,8 @@ stage_runtime() {
   # node --test only: the pure suites import their sources directly (Node
   # type stripping) and need neither an install nor a staged runtime.
   run npm --prefix pi-runtime test
+  # The workspace tools the engine embeds (crates/harness/src/pi).
+  run "$NODE" --test crates/harness/src/pi/bot-tools.test.mjs
 }
 
 stage_workflows() {

@@ -5,6 +5,11 @@
 //! it. Inline-code washes and links are drawn and hit-tested here too; text
 //! selection, find, math and file chips are not (callers fall back to the
 //! ordinary text element for those).
+//!
+//! A word shaped on its own takes its ascent and descent from its own runs
+//! only — a word of inline code (a smaller, monospace run) would sit higher
+//! than the prose beside it. So every piece is painted on the baseline of
+//! the whole line it was cut from ([`Piece::shift`]).
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -24,23 +29,44 @@ const MAX_GAP_EM: f32 = 1.6;
 /// What a link click is handed: its target.
 pub type LinkClick = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
-/// Inline-code washes, as the markdown renderer paints them.
+/// Inline-code washes, as the markdown renderer paints them: each a code
+/// box ([`super::render::code_box_band`]) centered on code set in `font` at
+/// [`super::render::code_size_in`] of the text.
 #[derive(Clone)]
 pub struct CodeWash {
     pub ranges: Vec<Range<usize>>,
     pub color: Hsla,
     pub radius: f32,
     pub pad_x: f32,
-    /// The wash's height as a multiple of the font size.
-    pub height_em: f32,
+    /// The code font.
+    pub font: gpui::Font,
 }
 
 /// One shaped piece of a row: a word (or a whole ragged row), where it
-/// starts in the text and how far in from the left it sits.
+/// starts in the text and how far in from the left it sits, and the ascent
+/// and descent of the whole line it was cut from (whose baseline it shares).
 struct Piece {
     range: Range<usize>,
     line: ShapedLine,
     x: Pixels,
+    line_metrics: (Pixels, Pixels),
+}
+
+impl Piece {
+    /// How far down to paint this piece so it sits on its line's baseline:
+    /// gpui places a line's baseline at `(h - ascent - descent) / 2 + ascent`
+    /// from its own metrics, which for a lone word can differ from the
+    /// line's.
+    fn shift(&self) -> Pixels {
+        baseline_shift(self.line_metrics, (self.line.ascent, self.line.descent))
+    }
+}
+
+/// How far down a piece laid out with `own` `(ascent, descent)` must paint
+/// to sit on the baseline of a line with `line` metrics, both in the same
+/// line box.
+pub(super) fn baseline_shift(line: (Pixels, Pixels), own: (Pixels, Pixels)) -> Pixels {
+    ((line.0 - line.1) - (own.0 - own.1)) / 2.0
 }
 
 struct Laid {
@@ -152,6 +178,7 @@ fn lay_out(
     for line in lines.iter() {
         let len = line.len();
         let layout = &line.unwrapped_layout;
+        let line_metrics = (layout.ascent, layout.descent);
         let mut starts: Vec<usize> = line
             .wrap_boundaries
             .iter()
@@ -179,6 +206,7 @@ fn lay_out(
                     line: shape(&whole),
                     range: whole.clone(),
                     x: px(0.0),
+                    line_metrics,
                 }]
             };
             // A paragraph's last row, or one with nothing to share out,
@@ -201,6 +229,7 @@ fn lay_out(
                                     range: range.clone(),
                                     x: px(x),
                                     line,
+                                    line_metrics,
                                 };
                                 x += f32::from(piece.line.width()) + gap;
                                 piece
@@ -217,14 +246,15 @@ fn lay_out(
     rows
 }
 
-/// The rectangles `range` covers, row by row, `pad_x` wider each side.
+/// The rectangles `range` covers, row by row, `pad_x` wider each side;
+/// `band` gives each piece's `(top, height)` within its line box.
 fn range_boxes(
     rows: &[Vec<Piece>],
     range: &Range<usize>,
     origin: gpui::Point<Pixels>,
     line_height: Pixels,
     pad_x: f32,
-    inset_y: f32,
+    band: impl Fn(&Piece) -> (f32, f32),
 ) -> Vec<Bounds<Pixels>> {
     let mut out = Vec::new();
     for (row_ix, row) in rows.iter().enumerate() {
@@ -239,9 +269,10 @@ fn range_boxes(
             }
             let x0 = origin.x + piece.x + piece.line.x_for_index(s - piece.range.start);
             let x1 = origin.x + piece.x + piece.line.x_for_index(e - piece.range.start);
+            let (top, height) = band(piece);
             out.push(Bounds::from_corners(
-                point(x0 - px(pad_x), y + px(inset_y)),
-                point(x1 + px(pad_x), y + line_height - px(inset_y)),
+                point(x0 - px(pad_x), y + px(top)),
+                point(x1 + px(pad_x), y + px(top + height)),
             ));
         }
     }
@@ -349,11 +380,25 @@ impl Element for JustifiedText {
         let origin = bounds.origin;
         let line_height = laid.line_height;
         if let Some(code) = &self.code {
-            let wash_h = f32::from(laid.font_size) * code.height_em;
-            let inset_y = ((f32::from(line_height) - wash_h) / 2.0).max(0.0);
+            let code_size = super::render::code_size_in(f32::from(laid.font_size));
+            let system = window.text_system();
+            let font_id = system.resolve_font(&code.font);
+            let code_metrics = (
+                f32::from(system.ascent(font_id, px(code_size))),
+                // Font metrics give the descent as a negative distance.
+                f32::from(system.descent(font_id, px(code_size))).abs(),
+            );
+            let band = |piece: &Piece| {
+                let (ascent, descent) = piece.line_metrics;
+                super::render::code_box_band(
+                    f32::from(line_height),
+                    (f32::from(ascent), f32::from(descent)),
+                    code_metrics,
+                    code_size,
+                )
+            };
             for range in &code.ranges {
-                for rect in range_boxes(&laid.rows, range, origin, line_height, code.pad_x, inset_y)
-                {
+                for rect in range_boxes(&laid.rows, range, origin, line_height, code.pad_x, band) {
                     window.paint_quad(quad(
                         rect,
                         px(code.radius),
@@ -369,7 +414,7 @@ impl Element for JustifiedText {
             let y = origin.y + line_height * row_ix as f32;
             for piece in row {
                 let _ = piece.line.paint(
-                    point(origin.x + piece.x, y),
+                    point(origin.x + piece.x, y + piece.shift()),
                     line_height,
                     TextAlign::Left,
                     None,
@@ -386,9 +431,11 @@ impl Element for JustifiedText {
             .links
             .iter()
             .flat_map(|(range, url)| {
-                range_boxes(&laid.rows, range, origin, line_height, 0.0, 0.0)
-                    .into_iter()
-                    .map(move |rect| (rect, url.clone()))
+                range_boxes(&laid.rows, range, origin, line_height, 0.0, |_| {
+                    (0.0, f32::from(line_height))
+                })
+                .into_iter()
+                .map(move |rect| (rect, url.clone()))
             })
             .collect();
         let over = |at: gpui::Point<Pixels>| targets.iter().find(|(r, _)| r.contains(&at));

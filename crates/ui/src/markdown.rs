@@ -24,6 +24,8 @@ pub mod mend;
 pub mod mermaid;
 pub mod parser;
 pub mod render;
+#[cfg(test)]
+mod run_font_size_tests;
 pub mod selection;
 pub mod session_link;
 pub mod veil;

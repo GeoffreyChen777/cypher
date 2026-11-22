@@ -299,6 +299,7 @@ impl gpui::Element for TextInputElement {
                     background_color: None,
                     underline: None,
                     strikethrough: None,
+                    font_size: None,
                 };
                 let line = window
                     .text_system()

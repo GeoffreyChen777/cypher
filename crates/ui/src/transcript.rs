@@ -383,6 +383,9 @@ pub struct Transcript {
     /// the held writes answered from them (on their way, or failed with
     /// what to say), by held write id.
     memory_cards: memory_card::MemoryCards,
+    /// The `propose_plan` calls that made a plan ([`bot_plan::PlanCalls`]),
+    /// as rows were built.
+    plan_calls: bot_plan::PlanCalls,
     memory_busy: std::collections::HashSet<String>,
     memory_errors: HashMap<String, SharedString>,
     /// In-chat find (⌘F). `None` while the find bar is closed — the shell
@@ -612,6 +615,7 @@ impl Transcript {
             rewind_armed: None,
             rewind_disarm: None,
             memory_cards: Default::default(),
+            plan_calls: Default::default(),
             memory_busy: Default::default(),
             memory_errors: HashMap::new(),
             find: None,

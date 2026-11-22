@@ -59,7 +59,7 @@ final class AppearanceTests: XCTestCase {
             XCTAssertEqual(rgba(whiteAlpha(0.06), style)[3], 0.06, accuracy: 0.001)
             for surface in [Theme.bg, Theme.surface, Theme.surfaceRaised, Theme.sheetPanel] {
                 for text in [
-                    Theme.text, Theme.textMuted, Theme.inlineCodeText,
+                    Theme.text, Theme.textMuted, Theme.inlineCodeText, Theme.mentionText,
                     Theme.tokenKeyword, Theme.tokenString, Theme.tokenNumber,
                 ] {
                     XCTAssertGreaterThanOrEqual(contrast(text, surface, style), 4.5)
@@ -77,7 +77,7 @@ final class AppearanceTests: XCTestCase {
             XCTAssertGreaterThan(bubble[2], bubble[0] + 0.05)
             XCTAssertGreaterThanOrEqual(contrast(Theme.userBubble, Theme.bg, style), 1.2)
             // What a bubble paints: prompt text and mention chips.
-            for text in [Theme.text, Theme.inlineCodeText] {
+            for text in [Theme.text, Theme.mentionText] {
                 XCTAssertGreaterThanOrEqual(contrast(text, Theme.userBubble, style), 4.5)
             }
         }

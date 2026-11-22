@@ -372,7 +372,7 @@ enum Mentions {
                         text: display.substring(with: NSRange(location: at, length: chip.display.location - at)),
                         style: .plain))
             }
-            runs.append(InlineRun(text: chip.text, style: InlineStyle(code: true)))
+            runs.append(InlineRun(text: chip.text, style: InlineStyle(code: true, mention: true)))
             at = chip.display.location + chip.display.length
         }
         if at < display.length { runs.append(InlineRun(text: display.substring(from: at), style: .plain)) }

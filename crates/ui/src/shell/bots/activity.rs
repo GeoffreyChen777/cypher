@@ -212,6 +212,7 @@ fn entry_text(entry: &BotActivity, theme: &Theme) -> gpui::Div {
         background_color: None,
         underline: None,
         strikethrough: None,
+        font_size: None,
     };
     let verb_color = if failed {
         theme.danger

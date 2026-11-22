@@ -862,9 +862,10 @@ impl Transcript {
     pub(super) fn sync(&mut self, cx: &mut Context<Self>) {
         // Cheap gate first: every tile's context notifies on unrelated list
         // frames too; the rows only depend on what the revision covers.
-        let (revision, memory_cards) = {
+        let (revision, memory_cards, plan_calls) = {
             let s = self.state.read(cx);
             let memory_cards = super::memory_card::MemoryCards::of(&s.bot_records);
+            let plan_calls = super::bot_plan::PlanCalls::of(&s.bot_records);
             let revision = (
                 s.transcript_revision(),
                 s.selected_chat.clone(),
@@ -877,7 +878,7 @@ impl Transcript {
                 ),
                 memory_cards.key,
             );
-            (revision, memory_cards)
+            (revision, memory_cards, plan_calls)
         };
         if self.synced_revision.as_ref() == Some(&revision) {
             return;
@@ -886,6 +887,7 @@ impl Transcript {
         let plans_key = revision.4;
         self.synced_revision = Some(revision);
         self.memory_cards = memory_cards;
+        self.plan_calls = plan_calls;
         let (selected, entries, echoes, steers) = {
             let s = self.state.read(cx);
             let echoes: Vec<(SessionMessageEntry, bool)> = s
@@ -1181,7 +1183,9 @@ impl Transcript {
 
     fn cached_rows_for(&mut self, entry: &SessionMessageEntry, pending: bool) -> Vec<Row> {
         let streaming = entry.status == Some(MessageStatus::Streaming);
-        let fingerprint = entry_fingerprint(entry, pending) ^ self.memory_cards.entry_key(entry);
+        let fingerprint = entry_fingerprint(entry, pending)
+            ^ self.memory_cards.entry_key(entry)
+            ^ self.plan_calls.entry_key(entry).rotate_left(1);
         if !streaming
             && let Some(cached) = self.row_cache.get(&entry.id)
             && cached.fingerprint == fingerprint
@@ -1192,12 +1196,13 @@ impl Transcript {
         let live_parsers = &mut self.live_parsers;
         let tree_cache = &mut self.tree_cache;
         let memory_cards = &self.memory_cards;
+        let plan_calls = &self.plan_calls;
         let mut parse = |key: &str, text: &str| -> Arc<BlockTree> {
             // Render-cache invalidation rides on the row diff in `sync` (only
             // rows whose content hash changed are spliced — the reparsed tail).
             parse_for_row(streaming, key, text, live_parsers, tree_cache).0
         };
-        let rows = entry_rows(entry, pending, memory_cards, &mut parse);
+        let rows = entry_rows(entry, pending, memory_cards, plan_calls, &mut parse);
 
         if !streaming {
             self.row_cache.insert(

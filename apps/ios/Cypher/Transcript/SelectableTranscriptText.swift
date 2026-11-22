@@ -5,6 +5,8 @@ import UIKit
 
 extension NSAttributedString.Key {
     static let cypherInlineCode = NSAttributedString.Key("cypher.inlineCode")
+    /// Under a mention chip in a sent prompt: its wash color.
+    static let cypherMentionWash = NSAttributedString.Key("cypher.mentionWash")
 }
 
 /// The transcript entry a piece of selectable text belongs to.
@@ -44,7 +46,8 @@ enum TranscriptTextStyle {
         // File references show as chips, labelled together so two files of
         // one name keep a folder apart.
         let references = runs.map { run in
-            run.style.code && run.style.link == nil && run.style.math == nil ? FileReference.detect(run.text) : nil
+            run.style.code && !run.style.mention && run.style.link == nil && run.style.math == nil
+                ? FileReference.detect(run.text) : nil
         }
         let labels = FileReference.labels(references.compactMap { $0 })
         var chips = 0
@@ -60,7 +63,9 @@ enum TranscriptTextStyle {
                     result.append(FileReferenceChip.margin(proseAttributes))
                 }
                 result.append(
-                    FileReferenceChip.string(raw: run.text, reference: reference, label: labels[chips], size: size))
+                    FileReferenceChip.string(
+                        raw: run.text, reference: reference, label: labels[chips], size: size,
+                        weight: FileReferenceChip.weight(base: weight, bold: run.style.bold), index: chips))
                 if index + 1 < runs.count, !runs[index + 1].style.code {
                     result.append(FileReferenceChip.margin(proseAttributes))
                 }
@@ -96,9 +101,22 @@ enum TranscriptTextStyle {
                 result.append(NSAttributedString(string: "\n", attributes: proseAttributes))
                 breakPending = false
             }
+            if run.style.mention {
+                // A mention chip keeps its look: violet code type a little
+                // under the prose, on a violet wash (`paintMentions`).
+                result.append(
+                    NSAttributedString(
+                        string: run.text,
+                        attributes: [
+                            .font: Theme.monoUI(size - 1.5),
+                            .foregroundColor: UIColor(Theme.mentionText),
+                            .cypherMentionWash: UIColor(Theme.mentionWash),
+                        ]))
+                continue
+            }
             var font =
                 run.style.code
-                ? Theme.monoUI(size - 1.5)
+                ? Theme.monoUI(size * Theme.codeScale)
                 : Theme.sansUI(size, weight: run.style.bold ? .semibold : weight)
             if run.style.italic,
                 let descriptor = font.fontDescriptor.withSymbolicTraits(
@@ -116,7 +134,13 @@ enum TranscriptTextStyle {
                 attributes[.link] = url
                 attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
             }
+            let start = result.length
             result.append(NSAttributedString(string: run.text, attributes: attributes))
+            if run.style.code {
+                InlineCodeBox.addRoom(
+                    result, code: NSRange(location: start, length: result.length - start),
+                    afterProse: index > 0 && !runs[index - 1].style.code)
+            }
         }
         let paragraph = NSMutableParagraphStyle()
         paragraph.minimumLineHeight = lineHeight
@@ -186,13 +210,13 @@ enum TranscriptTextStyle {
         }
     }
 
-    /// Thinking's quieter tone: body text takes the muted color; inline code
-    /// and links keep theirs.
+    /// Thinking's quieter tone: body text and inline code (which reads in
+    /// the body ink) take the muted color; links and mentions keep theirs.
     static func muted(_ text: NSAttributedString) -> NSAttributedString {
         let result = NSMutableAttributedString(attributedString: text)
         var plain: [NSRange] = []
         result.enumerateAttributes(in: NSRange(location: 0, length: result.length)) { attributes, range, _ in
-            if attributes[.cypherInlineCode] == nil, attributes[.link] == nil { plain.append(range) }
+            if attributes[.link] == nil, attributes[.cypherMentionWash] == nil { plain.append(range) }
         }
         let color = UIColor(Theme.textMuted)
         for range in plain { result.addAttribute(.foregroundColor, value: color, range: range) }
@@ -330,9 +354,13 @@ enum TranscriptTextStyle {
         }
         if result.length > 0 {
             // The break belongs to the paragraph before it (but is not part
-            // of a formula that ends it).
+            // of a formula, inline code, a chip, a mention or a link that
+            // ends it: their boxes and copies would take the break in).
             var previous = result.attributes(at: result.length - 1, effectiveRange: nil)
-            for key in [NSAttributedString.Key.attachment, .cypherMathSource, .cypherDisplayMath] {
+            for key in [
+                NSAttributedString.Key.attachment, .cypherMathSource, .cypherDisplayMath, .cypherInlineCode,
+                .cypherMentionWash, .cypherFileChip, .cypherFileRef, .cypherFileGlyph, .link, .underlineStyle, .kern,
+            ] {
                 previous[key] = nil
             }
             result.append(NSAttributedString(string: "\n", attributes: previous))
@@ -392,31 +420,50 @@ enum TranscriptTextStyle {
     }
 }
 
-/// Preserve the rounded inline-code wash without a second text overlay.
+/// Preserve the rounded inline-code wash and file reference chips without a
+/// second text overlay.
 final class TranscriptTextLayoutManager: NSLayoutManager {
+    override init() {
+        super.init()
+        delegate = FileReferenceChipLineBreaks.shared
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        delegate = FileReferenceChipLineBreaks.shared
+    }
+
     override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: CGPoint) {
         if let storage = textStorage, let container = textContainers.first {
             let characters = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
-            FileReferenceChip.paintGlyphs(
+            FileReferenceChip.paint(
                 self, storage: storage, container: container, characters: characters, origin: origin)
-            storage.enumerateAttribute(.cypherInlineCode, in: characters) { value, range, _ in
-                guard let color = value as? UIColor else { return }
-                let glyphs = self.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
-                self.enumerateEnclosingRects(
-                    forGlyphRange: glyphs,
-                    withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
-                    in: container
-                ) { rect, _ in
-                    // The native text view's glyph bounds place this wash
-                    // slightly above the visible ink; nudge it down.
-                    let rect = rect.offsetBy(dx: origin.x, dy: origin.y + 2.5)
-                        .insetBy(dx: -2, dy: 2)
-                    color.setFill()
-                    UIBezierPath(roundedRect: rect, cornerRadius: MD.inlineCodeRadius).fill()
-                }
-            }
+            InlineCodeBox.paint(self, storage: storage, container: container, characters: characters, origin: origin)
+            paintMentions(storage: storage, container: container, characters: characters, origin: origin)
         }
         super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
+    }
+
+    /// A sent prompt's mention chips: their wash over the glyphs' line
+    /// rects, as before inline code had its own box.
+    private func paintMentions(
+        storage: NSTextStorage, container: NSTextContainer, characters: NSRange, origin: CGPoint
+    ) {
+        storage.enumerateAttribute(.cypherMentionWash, in: characters) { value, range, _ in
+            guard let color = value as? UIColor else { return }
+            let glyphs = glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            enumerateEnclosingRects(
+                forGlyphRange: glyphs,
+                withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                in: container
+            ) { rect, _ in
+                // The native text view's glyph bounds place this wash
+                // slightly above the visible ink; nudge it down.
+                let rect = rect.offsetBy(dx: origin.x, dy: origin.y + 2.5).insetBy(dx: -2, dy: 2)
+                color.setFill()
+                UIBezierPath(roundedRect: rect, cornerRadius: MD.mentionRadius).fill()
+            }
+        }
     }
 }
 
@@ -430,7 +477,7 @@ final class TranscriptTextMeasurer {
     static let shared = TranscriptTextMeasurer()
 
     private let storage = NSTextStorage()
-    private let layout = NSLayoutManager()
+    private let layout = TranscriptTextLayoutManager()
     private let container = NSTextContainer(size: .zero)
     /// How many layouts it has run (tests).
     private(set) var layouts = 0
@@ -502,8 +549,8 @@ struct SelectableTranscriptText: UIViewRepresentable {
         view.backgroundColor = .clear
         view.textContainerInset = .zero
         view.dataDetectorTypes = []
-        // Links carry their own look (underlined text; a chip's glyph, name
-        // and muted lines), so the view adds none.
+        // Links carry their own look (underlined text; a chip's box, glyph,
+        // name and muted lines), so the view adds none.
         view.linkTextAttributes = [:]
         view.tintColor = UIColor(Theme.accent)
         // Repaint custom inline-code backgrounds as well as glyphs on a live

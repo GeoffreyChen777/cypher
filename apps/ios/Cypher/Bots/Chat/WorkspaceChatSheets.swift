@@ -19,6 +19,7 @@ struct WorkspaceChatSheets: ViewModifier {
     @Binding var deletingBot: Bot?
     @Binding var showMemorySettings: Bool
     let memoryCards: Set<String>
+    let planCalls: Set<String>
     let openChat: (String) -> Void
     /// Opens the workspace's board at a page (a notice's details).
     let openPage: ((BotPage) -> Void)?
@@ -40,6 +41,7 @@ struct WorkspaceChatSheets: ViewModifier {
             .environment(\.openBotRoute, openRoute)
             .environment(\.seedComposer, seedComposer)
             .environment(\.transcriptMemoryCards, memoryCards)
+            .environment(\.transcriptPlanCalls, planCalls)
             .sheet(item: $boardSheet, onDismiss: boardDismissed) { target in
                 BoardSheet(target: target, openChat: openChat)
                     .environment(\.openBotChat, openChat)
