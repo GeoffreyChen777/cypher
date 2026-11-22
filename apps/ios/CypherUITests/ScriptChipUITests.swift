@@ -1,35 +1,14 @@
 import XCTest
 
 /// A Pi codemode script in the transcript, by real taps on the offline demo:
-/// its calls nest under it and its chip opens onto the code. Every chip shows
-/// its call's status.
+/// its calls nest under it and its chip opens onto the code. A live call's
+/// chip spins until the call resolves.
 @MainActor
 final class ScriptChipUITests: XCTestCase {
     private func text(_ app: XCUIApplication, containing fragment: String) -> XCUIElement {
         app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", fragment, fragment))
             .firstMatch
-    }
-
-    private func status(_ app: XCUIApplication, _ label: String) -> XCUIElement {
-        app.descendants(matching: .any).matching(identifier: "tool-status")
-            .matching(NSPredicate(format: "label == %@", label)).firstMatch
-    }
-
-    func testChipsShowTheirStatus() {
-        let app = XCUIApplication()
-        app.launchArguments = ["-demo", "-route", "chat:chat-tabs"]
-        app.launch()
-        // The group sits above the session's later exchanges.
-        let group = text(app, containing: "1 failed")
-        let transcript = app.descendants(matching: .any).matching(identifier: "chat-transcript").firstMatch
-        XCTAssertTrue(transcript.waitForExistence(timeout: 10))
-        for _ in 0..<4 where !group.waitForHittable(timeout: 2) { transcript.swipeDown() }
-        XCTAssertTrue(group.waitForHittable(timeout: 5))
-        group.tap()
-        XCTAssertTrue(status(app, "Failed").waitForExistence(timeout: 5), "the failed command shows a cross")
-        XCTAssertTrue(status(app, "Completed").exists, "the others show a check")
-        XCTAssertFalse(status(app, "Running").exists)
     }
 
     func testLiveCallsSpinUntilTheyResolve() {

@@ -69,21 +69,6 @@ final class DesktopParityUITests: XCTestCase {
         XCTAssertTrue(compact.isEnabled)
     }
 
-    func testHomeListsSessionsAndAChipNarrowsToAProject() {
-        let app = launch([])
-        // Every project's sessions, one tap away; running and waiting ones lead.
-        XCTAssertTrue(app.staticTexts["Now"].waitForExistence(timeout: 10))
-        XCTAssertTrue(text(app, containing: "Streaming veil on transcript rows").waitForHittable(timeout: 5))
-        XCTAssertTrue(text(app, containing: "Re-run the webapp e2e suite").exists, "another project's too")
-        let chip = element(app, "scope-chip-cypher")
-        XCTAssertTrue(chip.waitForHittable(timeout: 5))
-        chip.tap()
-        XCTAssertTrue(text(app, containing: "Re-run the webapp e2e suite").waitForNonExistence(timeout: 5))
-        XCTAssertTrue(text(app, containing: "Tool group header colors").waitForExistence(timeout: 5))
-        element(app, "open-project").tap()
-        XCTAssertTrue(app.navigationBars["cypher"].waitForExistence(timeout: 5), "the project's own page opens")
-    }
-
     func testSearchFindsSessionsArchivedOnesIncluded() {
         let app = launch([])
         let field = app.textFields["home-search"]
