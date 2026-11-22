@@ -226,7 +226,9 @@ describe("durable unread-conversation badges", () => {
       const chat = (id: string, fields: Row["fields"]) =>
         f.rows.set(`chats/${id}`, row("chats", id, { spaceId: "project", deviceId: "host", ...fields }));
       try {
-        chat("routine", { bot: { botId: "ws", origin: "routine", thread: { kind: "routineSession", routineId: "r" } } });
+        // A peer's thread never asks the owner. (Routine and plan threads
+        // ask through their workspace's Needs you: workspace-needs-you.)
+        chat("routine", { bot: { botId: "ws", origin: "peer", thread: { kind: "peer", connectionId: "c" } } });
         chat("memory", { memory: { kind: "consolidate" } });
         chat("plan", { startedBy: { botId: "ws", workId: "w" } });
         chat("kid", { child: { parentChatId: "routine", parentRunId: "run", agent: "planner" } });

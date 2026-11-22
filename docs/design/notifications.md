@@ -30,8 +30,29 @@ is no Smart/Always/Off policy.
   asks, and stops counting once it works again (the owner usually answers in
   the workspace, which never opens the session). A workspace's hidden threads
   (work, routine, peer, routine-session, unknown kinds) and memory passes
-  never notify or count; the Worker answers their host reports with
-  `ignored: "hidden"`. A subagent chat is no more visible than its parent.
+  never notify or count as themselves; the Worker answers their host reports
+  with `ignored: "hidden"` — except a plan's work thread, a routine's thread
+  and a project routine's session, whose questions are announced through
+  their workspace (below). A subagent chat is no more visible than its parent.
+- **Workspaces.** A workspace's own chat has no project: its notices are filed
+  under the workspace instead (`projectId` = the bot id, plus
+  `workspaceId` = the same id), so it can be muted like a project. Any other
+  project-less chat still never notifies (`ignored: "space"`). Everything on
+  a workspace's **Needs you** card is announced as ONE `input` notice of that
+  workspace's own chat, naming the item in `itemKind` / `itemId`: `plan`
+  (a `botWork` row proposed and undecided; work id), `approval`
+  (`botApprovals` pending; approval id), `review` (an incoming
+  `botExchanges` row awaiting review; exchange id) and `asking` (one of the
+  hidden threads above going `awaitingInput`; that thread's chat id). A
+  record item is announced once, when its host creates it waiting or moves
+  it into that state (a row first seen more than eight hours after it was
+  made is a baseline); later syncs of the waiting item never repeat it. A
+  thread's questions follow a session's rule (each question of a run once).
+  Deciding the item anywhere, or the thread working again, withdraws a
+  pending alert and the chat's unread mark when that mark is the item's. A
+  workspace turn's "completed" never displaces a pending item alert. No
+  client reports a workspace's chat as the session on screen, so without a
+  target its alerts go to every phone.
 - No output-token, tool-call or progress notifications. Completions under 30
   seconds are skipped when run duration is known.
 - Independent child results default off. A child asking for input can still
@@ -65,7 +86,7 @@ is no Smart/Always/Off policy.
 - Same chat visible on iPhone is silent in-app; another page gets a short
   in-app banner. Background delivery uses a normal APNs alert.
 - Lock-screen content is generic, e.g. “Task completed / Open Cypher to view the
-  session.” No project name, prompt, transcript, tool arguments or provider keys
+  session.” (“…the workspace.” for a workspace's notices). No project name, prompt, transcript, tool arguments or provider keys
   are included.
 
 ### App icon badge
@@ -122,7 +143,8 @@ is no Smart/Always/Off policy.
   same session rule, so the counts differ only where the phone policy filters
   events out (short runs, muted projects, disabled categories, child results)
   or the desktop counts what phones are never told about (project-less chats
-  and a workspace's own chat).
+  other than a workspace's own). Needs you items count as their workspace's
+  one chat, as the Dock counts that chat once.
 
 Activity reports carry only the selected session and a monotonic client
 sequence. No keys, coordinates or content are collected. Online headless
