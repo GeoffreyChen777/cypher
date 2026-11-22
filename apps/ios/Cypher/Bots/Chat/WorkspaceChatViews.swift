@@ -92,8 +92,8 @@ struct WorkspaceStatusAccessory: View {
 }
 
 /// Shortcuts over the composer: each chip sends its request as if typed
-/// (the draft stays); one with a blank asks for its text first. Long press
-/// moves or deletes it. Only the agent makes shortcuts.
+/// (the draft stays); one with a blank asks for its text first, which may be
+/// left empty. Long press moves or deletes it. Only the agent makes shortcuts.
 struct ShortcutBar: View {
     let shortcuts: [BotShortcut]
     /// Sends a request; false when it couldn't be queued.
@@ -129,10 +129,12 @@ struct ShortcutBar: View {
             isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } }),
             presenting: asking
         ) { shortcut in
-            TextField("Text for \(shortcut.label)", text: $input)
+            TextField("Optional text", text: $input)
             Button("Cancel", role: .cancel) {}
+            // The text is optional: left empty, the blank drops out. Only a
+            // request that is nothing but its blank needs some.
             Button("Send") { fire(shortcut, input: input) }
-                .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(shortcut.request(with: input).isEmpty)
         } message: { shortcut in
             Text(clip(shortcut.request, max: 160))
         }
@@ -170,7 +172,7 @@ struct ShortcutBar: View {
             Divider()
             Button("Delete", systemImage: "trash", role: .destructive) { delete(shortcut) }
         }
-        .accessibilityHint(shortcut.wantsInput ? "Asks for text, then sends" : "Sends this request")
+        .accessibilityHint(shortcut.wantsInput ? "Asks for optional text, then sends" : "Sends this request")
         .accessibilityIdentifier("shortcut-\(shortcut.id)")
     }
 

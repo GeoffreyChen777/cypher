@@ -674,6 +674,8 @@ mod tests {
         let s = shortcut("Fix {input}, then test {input}", None);
         assert!(s.wants_input());
         assert_eq!(s.request_with(" #42 "), "Fix #42, then test #42");
+        // Left empty, the blanks drop out and the text closes up.
+        assert_eq!(s.request_with(" "), "Fix, then test");
         assert!(sends_without_input(&s));
         assert!(!sends_without_input(&shortcut(" {input} ", None)));
         let plain = shortcut("What's stuck?", None);
