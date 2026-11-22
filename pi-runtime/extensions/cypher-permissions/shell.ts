@@ -647,6 +647,17 @@ function read(
       vars.poisoned = true;
     }
     const loop = blocks.includes("loop");
+    if (evaluate && program === "alias") {
+      // An alias's text is code a later command of the line may run (`shopt -s expand_aliases`): read it as such.
+      for (const word of words.slice(1)) {
+        if (word === UNKNOWN) throw new Opaque("an alias known only when it runs");
+        const at = word.indexOf("=");
+        if (at <= 0) continue;
+        const commands = reread(word.slice(at + 1), forkVariables(vars));
+        if (commands === undefined || !spend(commands.length)) throw new Opaque("an alias");
+        for (const command of commands) out.push(apart(command, loop));
+      }
+    }
     // A call of a function the line defined runs its body; the call's redirections stay its own.
     const fn = evaluate && words.length > 0 && words[0] !== UNKNOWN && vars.functions.has(words[0]);
     const programRuns = !fn || !call(words[0], loop);

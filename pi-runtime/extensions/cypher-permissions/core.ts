@@ -1327,7 +1327,8 @@ export class Permissions {
     };
     return {
       ...this.creationFacts(),
-      recordable: (path) => this.recordablePath(path),
+      // What is the chat's anyway (its workspace, scratch) needs no entry.
+      recordable: (path) => this.recordablePath(path) && !this.paths.inWorkspace(path) && !this.paths.inScratch(path),
       exists: (path) => {
         try {
           lstatSync(path);

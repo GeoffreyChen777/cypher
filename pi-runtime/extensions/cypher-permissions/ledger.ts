@@ -22,10 +22,13 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-/** The kinds of things a ledger entry can be (entities.ts names the same kinds). */
-export type LedgerKind = "repo" | "branch" | "pr" | "tag" | "release" | "path" | "process" | "simulator" | "host" | "package" | "container" | "worktree" | "image" | "resource";
+import { ENTITY_KINDS } from "./entities.ts";
+import type { EntityKind } from "./entities.ts";
 
-export const LEDGER_KINDS: readonly LedgerKind[] = ["repo", "branch", "pr", "tag", "release", "path", "process", "simulator", "host", "package", "container", "worktree", "image", "resource"];
+/** The kinds of things a ledger entry can be: the entities' (entities.ts). */
+export type LedgerKind = EntityKind;
+
+export const LEDGER_KINDS: readonly LedgerKind[] = ENTITY_KINDS;
 
 /** One thing a command made, or one a command acts on. Field names as entities.ts has them. */
 export interface LedgerEntity {
@@ -63,6 +66,7 @@ type Match = "exact" | "path" | "hex-prefix" | "caseless";
 
 export const MATCHING: Readonly<Record<LedgerKind, Match>> = {
   repo: "caseless",
+  remote: "exact",
   branch: "exact",
   pr: "exact",
   tag: "exact",

@@ -672,3 +672,8 @@ test("property: the always-ask floor holds through every wrapper the evaluator r
     }
   }
 });
+
+test("evaluator: an alias's text is code the line may run", () => {
+  assert.deepEqual(words("shopt -s expand_aliases\nalias ls='rm -rf ~'\nls"), [["shopt", "-s", "expand_aliases"], ["rm", "-rf", home], ["alias", `ls=rm -rf ~`], ["ls"]]);
+  assert.equal(parseShell("alias $x", home, EVAL).kind, "opaque");
+});
