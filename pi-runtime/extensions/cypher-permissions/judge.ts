@@ -49,6 +49,8 @@ export interface JudgeRequest {
   ownerWords?: OwnerWords;
   /** What a dangerous command acts on, as Cypher read it from the line. */
   targets?: readonly string[];
+  /** Why Cypher can't read (all of) what a dangerous command acts on. */
+  unknownTarget?: string;
   /** What this task made (created.ts), as Cypher recorded it: what it may undo as local work. */
   created?: readonly string[];
 }
@@ -219,6 +221,13 @@ export function judgePrompt(request: JudgeRequest): string {
   lines.push(`- project folders: ${request.workspaceRoots.join(", ")}`);
   if (request.command) lines.push("", "## The command", untrusted(clip(request.command, 3000)));
   if (danger && request.targets?.length) lines.push("", "## What the command acts on (read by Cypher from the line)", ...request.targets.map((target) => `- ${target}`));
+  if (danger && request.unknownTarget) {
+    lines.push(
+      "",
+      "## What Cypher couldn't read",
+      `${request.unknownTarget}. It can run only once, and only if you cite the consent that asks for exactly this command: its "source" and a "quote" copied from it. Cypher checks the quote is in that consent and not taken back since; anything it could read must be what that consent names. If no consent of the owner's asks for this, answer "ask-user".`,
+    );
+  }
   if (request.remembers?.length) {
     lines.push(
       "",

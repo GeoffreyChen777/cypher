@@ -1239,7 +1239,7 @@ export function downloadsAndRuns(commands: readonly { words: readonly string[]; 
  * sends. Not for `remote`, the line ssh runs on another machine: its
  * variables and files are that machine's.
  */
-export function assessOpaque(line: string, facts: RiskFacts, remote = false): Assessment {
+export function assessOpaque(line: string, facts: RiskFacts, remote = false, cwd?: string): Assessment {
   // Its words with `$` are unknown: look for the installed app in its text
   // instead. Only a line that writes where it names it is dangerous; one
   // that reads it is local work like any other read.
@@ -1262,8 +1262,12 @@ export function assessOpaque(line: string, facts: RiskFacts, remote = false): As
   if (sender) {
     const file = all.find((word, at) => {
       if (word === UNKNOWN || word.startsWith("-") || USES_KEY.test(all[at - 1] ?? "") || /IdentityFile/i.test(all[at - 1] ?? "")) return false;
-      const classification = facts.classify(word, undefined);
-      return classification?.zone === "sensitive" && present(classification.path);
+      // The word, or the file a sender reads it as (`@.env`, `key=@file`), from where the line runs.
+      const names = [word, word.replace(/^[^=@]*=?@/, "")].filter((name, index, list) => name && list.indexOf(name) === index);
+      return names.some((name) => {
+        const classification = facts.classify(name, cwd);
+        return classification?.zone === "sensitive" && present(classification.path);
+      });
     });
     const secret = file ?? (namesSecret(line) ? "a value in this line" : undefined);
     if (secret) return { tier: "danger", kind: `may send a secret off this machine (${secret}) through ${basename(sender)}`, key: "secret-off-machine", floor: true };

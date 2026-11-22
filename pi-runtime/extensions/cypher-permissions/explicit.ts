@@ -304,7 +304,8 @@ export interface Target {
 }
 
 /** A line's targets, or why one can't be read before it runs. */
-export type LineTargets = { targets: Target[] } | { unknown: string };
+/** What a dangerous line acts on; or why some of it can't be read, with the targets that could (`known`). */
+export type LineTargets = { targets: Target[] } | { unknown: string; known?: Target[] };
 
 /** What reading targets needs to know about the machine. */
 export interface TargetFacts {
@@ -321,6 +322,8 @@ export interface TargetCommand {
   cwd: string | undefined;
   /** The classifier found it dangerous. */
   danger: boolean;
+  /** Files its dangerous redirections write (canonical): targets of their own. */
+  writes?: readonly string[];
 }
 
 const VERSION = /(?<![\w.])v?(\d+\.\d+(?:\.\d+)*)(?![\d])/g;
@@ -378,7 +381,17 @@ const MOVES_HEAD = /^(commit|merge|reset|checkout|switch|pull|rebase|cherry-pick
  * line runs; a line with a danger whose target this can't read gives why.
  */
 export function lineTargets(commands: readonly TargetCommand[], facts: TargetFacts): LineTargets {
+  const read = readLineTargets(commands, facts);
+  return read.unknown === undefined ? { targets: read.targets } : { unknown: read.unknown, known: read.targets };
+}
+
+/** Every target the line's dangerous commands name, and the first reason one can't be read. */
+function readLineTargets(commands: readonly TargetCommand[], facts: TargetFacts): { targets: Target[]; unknown?: string } {
   const targets: Target[] = [];
+  let unknown: string | undefined;
+  const cannot = (why: { unknown: string }) => {
+    unknown ??= why.unknown;
+  };
   /** Tags the line creates, with the commit (undefined: known only when it runs). */
   const created = new Map<string, string | undefined>();
   /** Branches the line creates (`git switch -c x`). */
@@ -387,6 +400,10 @@ export function lineTargets(commands: readonly TargetCommand[], facts: TargetFac
   for (const command of commands) {
     const words = command.words;
     const program = basename(words[0] ?? "");
+    for (const path of command.writes ?? []) {
+      if (path === UNKNOWN) cannot({ unknown: "it writes a file known only when it runs" });
+      else targets.push(targetOf({ kind: "path", name: path }, "write", command.cwd));
+    }
     if (program === "git") {
       const { sub, rest, dir } = gitParts(words, command.cwd);
       const made = (sub === "switch" || sub === "checkout") && rest.findIndex((word) => /^-[cCbB]$|^--create$|^--force-create$/.test(word));
@@ -412,27 +429,39 @@ export function lineTargets(commands: readonly TargetCommand[], facts: TargetFac
       if (sub !== "push") {
         // Any other git command by the table (`git worktree remove x`), where `-C` took it.
         const read = sub === undefined ? undefined : readTool(["git", sub, ...rest]);
-        if (read === undefined) return { unknown: `Cypher can't tell what \`git ${sub ?? ""}\` acts on` };
-        if ("unknown" in read) return read;
+        if (read === undefined) {
+          cannot({ unknown: `Cypher can't tell what \`git ${sub ?? ""}\` acts on` });
+          continue;
+        }
+        if ("unknown" in read) {
+          cannot(read);
+          continue;
+        }
         const found = toolTargets(read, ["git", sub!, ...rest], dir, facts);
-        if ("unknown" in found) return found;
-        targets.push(...found.targets);
+        if ("unknown" in found) cannot(found);
+        else targets.push(...found.targets);
         continue;
       }
       const read = pushTargets(rest, dir, created, branches, facts);
-      if ("unknown" in read) return read;
-      targets.push(...read.targets);
+      if ("unknown" in read) cannot(read);
+      else targets.push(...read.targets);
       continue;
     }
     if (!command.danger) continue;
     const read = readTool(words);
-    if (read === undefined) return { unknown: `Cypher can't tell from your words what \`${program}\` acts on` };
-    if ("unknown" in read) return read;
+    if (read === undefined) {
+      cannot({ unknown: `Cypher can't tell from your words what \`${program}\` acts on` });
+      continue;
+    }
+    if ("unknown" in read) {
+      cannot(read);
+      continue;
+    }
     const found = toolTargets(read, words, command.cwd, facts);
-    if ("unknown" in found) return found;
-    targets.push(...found.targets);
+    if ("unknown" in found) cannot(found);
+    else targets.push(...found.targets);
   }
-  return { targets };
+  return { targets, ...(unknown !== undefined ? { unknown } : {}) };
 }
 
 /** A target from an entity the table read, with what the command does to it. */
@@ -726,6 +755,7 @@ const ACTION_WORDS: Readonly<Record<string, RegExp>> = {
   erase: /erase|wipe|reset|clear|清空|重置|抹掉/i,
   apply: /apply|deploy|scale|roll ?out|restart|upgrade|install|uninstall|roll ?back|部署|上线|扩容|缩容|重启|升级|回滚|卸载/i,
   rename: /rename|重命名|改名/i,
+  write: /write|add|append|edit|change|update|set|put|save|写|加|添加|追加|修改|改|更新|保存/i,
   archive: /archive|归档/i,
 };
 
@@ -843,6 +873,14 @@ export interface ExplicitResult {
   passed: ("quote" | "target" | "current")[];
   /** Targets the consent covers as a standard follow-up of what it asks for (lifecycle.ts), with why. */
   followUps?: string[];
+  /**
+   * The line's target (or part of it) can't be read: what passed is the
+   * consent alone (its kind, quote, not taken back since) and the targets
+   * that could be read. It may run once, never remembered.
+   */
+  once?: boolean;
+  /** Why the target can't be read. */
+  unknown?: string;
 }
 
 /**
@@ -851,7 +889,9 @@ export interface ExplicitResult {
  * it back.
  */
 export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: OwnerWords | undefined, entries: readonly Entry[], facts: ExplicitFacts): ExplicitResult {
-  const targets = "targets" in read ? read.targets : [];
+  // A line whose target can't be read (all or part of it): only the consent can be checked (see below), and the targets that could be read.
+  const unknown = "unknown" in read ? read.unknown : undefined;
+  const targets = "targets" in read ? read.targets : (read.known ?? []);
   const result = (passed: ExplicitResult["passed"], reason?: string, extra: Partial<ExplicitResult> = {}): ExplicitResult => ({
     ok: reason === undefined,
     ...(reason ? { reason } : {}),
@@ -860,7 +900,6 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
     passed,
     ...extra,
   });
-  if ("unknown" in read) return result([], `${read.unknown}, so Cypher can't check it against your words`);
   if (!owner) return result([], "Cypher didn't pass your own words to this check (an older Cypher, or a run Cypher didn't start)");
   const quote = claim.quote?.trim();
   if (!quote) return result([], "the reviewing model quoted none of your words");
@@ -869,6 +908,8 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
   if (weight(wanted) < MIN_QUOTE_WEIGHT) return result([], `"${quote}" is too short to ask for this`);
   // The consent the model relies on: the latest owner word of its kind holding the quote.
   const kind = claim.source && SOURCES.has(claim.source) ? (claim.source as ConsentSource) : undefined;
+  // Without a target to check, the consent must be cited exactly: its kind too.
+  if (unknown !== undefined && kind === undefined) return result([], `${unknown}, and the reviewing model cited no consent of yours by its kind`);
   let at = -1;
   owner.messages.forEach((message, index) => {
     if ((kind === undefined || message.source === kind) && normalize(consentText(message)).includes(wanted)) at = index;
@@ -888,11 +929,16 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
   const opened = openedPullRequests(entries);
   const context: EntityContext = { ...(originRepo ? { currentRepo: originRepo } : {}), prs: opened, ...(origin ? { cwd: origin } : {}), home: facts.home ?? homedir() };
   const claimed = claim.targets ?? [];
-  if (claimed.length === 0) return result(["quote"], "the reviewing model named no target", source);
-  const strange = claimed.find((item) => !targets.some((target) => sameTarget(item, target, originRepo, context)));
-  if (strange) return result(["quote"], `the reviewing model named ${strange.kind} ${strange.value}, but the command acts on ${targets.map(describeTarget).join(", ")}`, source);
+  // A target that can't be read can't be compared with the model's: then only the known ones are checked, below.
+  if (unknown === undefined) {
+    if (claimed.length === 0) return result(["quote"], "the reviewing model named no target", source);
+    const strange = claimed.find((item) => !targets.some((target) => sameTarget(item, target, originRepo, context)));
+    if (strange) return result(["quote"], `the reviewing model named ${strange.kind} ${strange.value}, but the command acts on ${targets.map(describeTarget).join(", ")}`, source);
+  }
+  // What a "wait" is about can't be told against a target nobody can read: any counts.
+  const takesBack = (text: string) => (unknown !== undefined ? retractsAny(text) : retracts(text, targets));
   // A reply or an answer that itself says to wait consents to nothing, whatever it answers.
-  if ((message.source === "reply" || message.source === "answer") && retracts(message.text, targets)) {
+  if ((message.source === "reply" || message.source === "answer") && takesBack(message.text)) {
     return result(["quote"], `your answer was "${message.text.trim().slice(0, 140)}"`, source);
   }
   // Every target must be what the owner's consent asks for, or a standard follow-up of it (lifecycle.ts).
@@ -909,7 +955,7 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
   for (const later of owner.messages.slice(at + 1)) {
     const text = later.text.trim();
     const short = text.length > 140 ? `${text.slice(0, 140)}…` : text;
-    if (retracts(text, targets)) return result(["quote", "target"], `you wrote later: "${short}"`, source);
+    if (takesBack(text)) return result(["quote", "target"], `you wrote later: "${short}"`, source);
     // A reply or an answer about the same thing carries on with it.
     const about = later.source === "reply" ? later.proposal : later.source === "answer" ? later.question : undefined;
     const carriesOn =
@@ -917,7 +963,14 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
       targets.some((target) => mentions(text, target.value) || (about !== undefined && concerns(about, target)));
     if (!carriesOn) return result(["quote", "target"], `you've written since ("${short}"), so that request may be about earlier work`, source);
   }
+  // The target can't be read: the checked consent lets it run once, never remembered.
+  if (unknown !== undefined) return result(["quote", "current"], undefined, { ...source, once: true, unknown, ...(followUps.length ? { followUps } : {}) });
   return result(["quote", "target", "current"], undefined, { ...source, ...(followUps.length ? { followUps } : {}) });
+}
+
+/** Whether a message says to wait or not do something, whatever about. */
+function retractsAny(text: string): boolean {
+  return sentences(text.normalize("NFKC").replace(REMINDER, " ")).some((sentence) => RETRACTION.test(sentence));
 }
 
 /**

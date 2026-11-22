@@ -1495,7 +1495,7 @@ export class Permissions {
   /** The risk tier of a whole line: its most dangerous command (risk.ts). */
   assess(command: string, cwd: string): LineAssessment {
     const parsed = this.parse(command, cwd);
-    if (parsed.kind === "opaque") return { ...assessOpaque(command, this.riskFacts()), commands: [], parsed };
+    if (parsed.kind === "opaque") return { ...assessOpaque(command, this.riskFacts(), false, cwd), commands: [], parsed };
     const commands = this.commandsOf(parsed.commands, cwd);
     const facts = this.riskFacts();
     // An inert builtin or a filter needs no rule, but its redirections can still be dangerous (`echo x >> ~/.zshrc`).
@@ -1688,23 +1688,30 @@ export class Permissions {
       // reaches it, but may only run when the owner's own words ask for
       // exactly it, which explicit.ts checks against the model's quote and
       // the target Cypher read from the line; a line whose target can't be
-      // read asks. Everything the line only does to what this task made is
-      // not a danger in the first place (risk.ts `facts.created`).
+      // read reaches it too, and may run once when the consent it cites
+      // checks (its kind, its quote, not taken back) and no target that can
+      // be read is outside it. Everything the line only does to what this
+      // task made is not a danger in the first place (risk.ts `facts.created`).
       const floor = this.alwaysAsk(line);
-      const targets: LineTargets | undefined = dangerous && floor === undefined ? this.lineTargets(line) : undefined;
-      const unknownTarget =
-        targets && "unknown" in targets
-          ? targets.unknown
-          : dangerous && floor === undefined && line.parsed.kind === "opaque"
-            ? `it uses ${line.parsed.reason}, which Cypher can't read`
-            : undefined;
-      const reviewable = !dangerous || (floor === undefined && unknownTarget === undefined);
+      const targets: LineTargets | undefined =
+        dangerous && floor === undefined
+          ? line.parsed.kind === "opaque"
+            ? { unknown: `it uses ${line.parsed.reason}, which Cypher can't read`, known: [] }
+            : this.lineTargets(line)
+          : undefined;
+      const unknownTarget = targets && "unknown" in targets ? targets.unknown : undefined;
+      // A danger runs on the owner's own words: the ones they have written by now. A target that can't be read runs on
+      // nothing else, so with no words at all the model isn't asked.
+      if (dangerous && floor === undefined && mode === "assisted") await this.refreshOwnerWords();
+      const noWords = unknownTarget !== undefined && !this.ownerWords?.messages.length;
+      const reviewable = !dangerous || (floor === undefined && !noWords);
       if (floor !== undefined) audit.explicit = { ok: false, reason: `only you can approve this: ${floor}`, targets: [], passed: [] };
-      else if (unknownTarget) audit.explicit = { ok: false, reason: `${unknownTarget}, so Cypher can't check it against your words`, targets: [], passed: [] };
+      else if (noWords) {
+        const why = this.ownerWords ? "you've written nothing a danger could run on" : "Cypher didn't pass your own words to this check (an older Cypher, or a run Cypher didn't start)";
+        audit.explicit = { ok: false, reason: unknownTarget ? `${unknownTarget}, and ${why}` : why, targets: [], passed: [] };
+      } else if (unknownTarget) audit.explicit = { ok: false, reason: `${unknownTarget}, and the reviewing model cited no consent of yours`, targets: [], passed: [] };
       let review: string | undefined;
       if (mode === "assisted" && floor === undefined && reviewable) {
-        // A danger runs on the owner's own words: the ones they have written by now.
-        if (dangerous) await this.refreshOwnerWords();
         const purpose = [proposal.label && `Purpose: ${proposal.label}`, proposal.reason && `Reason: ${proposal.reason}`].filter(Boolean).join("\n");
         // An approval is remembered for the commands' own categories, never for patterns the agent proposed; a danger's, never.
         const memo = dangerous ? [] : patterns.filter((pattern) => !pattern.proposed);
@@ -1720,6 +1727,7 @@ export class Permissions {
             tierReason: line.kind,
             remembers: memo.map((pattern) => describePattern(pattern.match)),
             ...(targets && "targets" in targets ? { targets: targets.targets.map((target) => describeTarget(target)) } : {}),
+            ...(targets && "unknown" in targets ? { targets: (targets.known ?? []).map((target) => describeTarget(target)), unknownTarget: targets.unknown } : {}),
             created: this.createdSummary(line),
           },
           ctx,
@@ -1734,7 +1742,7 @@ export class Permissions {
         if (verdict.decision === "approve" && (!dangerous || explicit?.ok)) {
           // `approve-once`: this call runs, and nothing is remembered; so does
           // an approval of a line that reads a secret (risk.ts `once`).
-          const kept = verdict.once || line.once === true || line.assessments?.some((assessment) => assessment.once === true) ? [] : memo;
+          const kept = verdict.once || explicit?.once === true || line.once === true || line.assessments?.some((assessment) => assessment.once === true) ? [] : memo;
           for (const pattern of kept) this.addCommandGrant(pattern, "chat", "judge", label);
           const reason = explicit?.ok ? `${verdict.reason} (your words: "${explicit.quote}")` : verdict.reason;
           finish({ decision: "allow", decidedBy: "judge", reason, scope: kept.length ? "chat" : "once", prompted: false });
@@ -1841,8 +1849,16 @@ export class Permissions {
 
   /** What a dangerous line's commands act on (explicit.ts), or why that is known only when it runs. */
   lineTargets(line: LineAssessment): LineTargets {
+    const facts = this.riskFacts();
     return lineTargets(
-      line.commands.map((item, index) => ({ words: item.words, cwd: item.cwd, danger: line.assessments![index].tier === "danger" })),
+      line.commands.map((item, index) => {
+        const danger = line.assessments![index].tier === "danger";
+        // A dangerous redirection's file is a target of its own; the command's words, only when they are dangerous too.
+        const fromWrites = danger && redirectRisk(item, facts)?.tier === "danger";
+        const wordsDanger = danger && (!fromWrites || (!item.inert && assessCommand({ ...item, writes: [] }, facts).tier === "danger"));
+        const writes = fromWrites ? item.writes.map((path) => (path === UNKNOWN ? UNKNOWN : (this.classify(path, item.cwd ?? this.cwd).path ?? path))) : [];
+        return { words: item.words, cwd: item.cwd, danger: wordsDanger, ...(writes.length ? { writes } : {}) };
+      }),
       this.targetFacts(),
     );
   }

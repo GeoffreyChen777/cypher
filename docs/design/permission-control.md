@@ -491,10 +491,10 @@ rules (`commands.ts`, in `permissions.json`'s `commands`, a project's
     as before; each command now says how it is joined (`joint`) and whether it runs in the
     line's own shell (`topLevel`), which tells, from the line's exit status, which commands
     surely succeeded (§7.3.3).
-  What is still unknown or opaque goes to the model when it is not dangerous by itself
-  (an unknown program is `local`); a danger whose target is unknown still asks the user,
-  because no code-checked fact can stand for it. The always-ask floor holds through every
-  wrapper (tests: `cypher-permissions-provenance.test.mjs`).
+  What is still unknown or opaque goes to the model: an unknown program is `local`, and a
+  danger whose target can't be read runs only on a cited consent the code checks
+  (§7.3.7). The always-ask floor holds through every wrapper (tests:
+  `cypher-permissions-provenance.test.mjs`).
 - **Deciding**: every command in the line is checked (inert builtins and filters skipped). An unknown
   word matches only `**` in an `allow` rule, but anything a `deny` or `ask` rule names. A
   `deny` that matches blocks the line before it runs, escalated or not. If every command
@@ -997,6 +997,30 @@ as before, `rm -rf`, `mv`, `chmod -R`, `git reset --hard` / `checkout --` / `cle
 what it made, and `kill` of processes running in it (`processFacts.inCreated`). Local
 work still goes to the model, which sees the ledger's line saying why. Anything else stays
 a danger and asks.
+
+#### 7.3.7 Dangers whose target can't be read (2026-11-22)
+
+A dangerous line whose target Cypher can't read — a word known only when it runs (`git
+push origin $BRANCH`, `rm -rf $DIR`, `gh pr merge $(…)`), a program the tool table has no
+row for, or a line the reader can't follow at all — goes to the model like any danger,
+with the owner's words and their consent sources, the ledger and the brief (each labelled
+by trust) and a section saying what Cypher couldn't read. The code-checked fact is then the
+part that can be checked (explicit.ts `checkExplicit`, `once`):
+
+- the model must cite a consent by its kind and quote it (`consent: {source, quote}`); a
+  quote without a kind fails;
+- the quote is in an owner's message of that kind (a reply's text with the proposal right
+  before it, an answer with the option picked; never the brief, steering or a
+  translation), long enough to ask for something;
+- nothing the owner wrote since takes it back (any "wait" or "don't" counts, since what
+  it is about can't be told against an unread target) or moves on;
+- every target that *can* be read (`LineTargets.known`: other commands of the line, a
+  dangerous redirection's file) is what that consent names, as in §7.3.2.
+
+Then it runs **once** and nothing is remembered (no chat grant, no task grant); otherwise
+the user is asked, with the reason. With no owner's words at all, the model isn't asked.
+The always-ask floor (§7.3.1) never reaches the model: an opaque line is held to it by its
+text, reading a sender's `@file` from where the line runs.
 
 #### 7.3.6 Lifecycle closure (2026-11-22)
 
