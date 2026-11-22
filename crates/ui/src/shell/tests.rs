@@ -2315,6 +2315,8 @@ fn needs_you_counts_records_and_worker_questions_across_bots() {
         time_added_minutes: None,
         warned_at: None,
         coordinator_choice: Default::default(),
+        body_rev: None,
+        result_rev: None,
     };
     let records = cypher_proto::BotRecords {
         work: vec![

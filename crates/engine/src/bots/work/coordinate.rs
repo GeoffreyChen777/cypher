@@ -790,6 +790,8 @@ impl Bots {
             time_added_minutes: None,
             warned_at: None,
             coordinator_choice,
+            body_rev: None,
+            result_rev: None,
         };
         work.clamp();
         self.inner.workspace.put_record(

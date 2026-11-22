@@ -20,6 +20,7 @@ use chrono::{DateTime, Datelike, Duration, NaiveDateTime, NaiveTime, TimeZone, U
 use serde::{Deserialize, Serialize};
 
 use crate::BotScope;
+use crate::plan_body::REV_MAX;
 
 /// Registry row kinds.
 pub const KIND_BOT_WORK: &str = "botWork";
@@ -431,6 +432,17 @@ pub struct BotWork {
     /// leaves out follows the workspace's chat.
     #[serde(default, skip_serializing_if = "SessionChoice::is_empty")]
     pub coordinator_choice: SessionChoice,
+    /// Host-written, set when the plan's text was cut to fit the row: the
+    /// rev of the full text in the workspace chat doc's
+    /// `planBodies[id].plan` ([`PlanBody`](crate::PlanBody)). Absent = the
+    /// row is the whole plan: `instruction` and the steps' details are not
+    /// previews.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_rev: Option<String>,
+    /// The same for `result` (`planBodies[id].result`,
+    /// [`PlanResult`](crate::PlanResult)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_rev: Option<String>,
 }
 
 impl BotWork {
@@ -454,8 +466,14 @@ impl BotWork {
             .map(|started| started + i64::from(self.limit_minutes(fallback)) * 60_000)
     }
 
+    /// Cap every text to fit the row. Over a cap, `instruction`, the steps'
+    /// details and `result` become previews (an ellipsis marks each cut);
+    /// [`Self::cut_plan`] and [`Self::cut_result`] keep the full text as a
+    /// body when that happens.
     pub fn clamp(&mut self) {
         self.coordinator_choice.clamp();
+        self.body_rev = clip_opt(&self.body_rev, REV_MAX);
+        self.result_rev = clip_opt(&self.result_rev, REV_MAX);
         self.title = clip(&self.title, TITLE_MAX);
         self.instruction = clip(&self.instruction, INSTRUCTION_MAX);
         self.summary = clip_opt(&self.summary, DETAIL_MAX);
@@ -1798,6 +1816,8 @@ mod tests {
             time_added_minutes: None,
             warned_at: None,
             coordinator_choice: Default::default(),
+            body_rev: None,
+            result_rev: None,
         };
         work.clamp();
         let units = serde_json::to_string(&work).unwrap().encode_utf16().count();
@@ -1996,6 +2016,8 @@ mod tests {
             time_added_minutes: Some(PLAN_TIME_ADDED_MAX_MINUTES),
             warned_at: at,
             coordinator_choice: choice.clone(),
+            body_rev: None,
+            result_rev: None,
         };
         // The proposal as the engine stores it: nothing has run yet.
         let proposed = |detail: &str| {
@@ -2098,6 +2120,8 @@ mod tests {
             time_added_minutes: None,
             warned_at: None,
             coordinator_choice: Default::default(),
+            body_rev: None,
+            result_rev: None,
         };
         let before = work.clone();
         work.clamp();
@@ -2145,6 +2169,8 @@ mod tests {
             time_added_minutes: None,
             warned_at: None,
             coordinator_choice: Default::default(),
+            body_rev: None,
+            result_rev: None,
         };
         let states = |w: &BotWork| w.steps.iter().map(|s| s.state).collect::<Vec<_>>();
         use StepState::{Asking, Done, Failed, Pending, Running, Skipped};
@@ -2210,6 +2236,8 @@ mod tests {
             time_added_minutes: None,
             warned_at: None,
             coordinator_choice: Default::default(),
+            body_rev: None,
+            result_rev: None,
         };
         records.work = vec![
             work("plan", WorkState::Proposed, vec![]),

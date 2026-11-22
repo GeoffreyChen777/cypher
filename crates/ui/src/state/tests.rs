@@ -707,6 +707,8 @@ fn an_ended_plan_from_an_older_host_reads_with_its_steps_closed() {
         time_added_minutes: None,
         warned_at: None,
         coordinator_choice: Default::default(),
+        body_rev: None,
+        result_rev: None,
     };
     let mut s = AppState::new();
     s.apply_bot_records(BotRecords {

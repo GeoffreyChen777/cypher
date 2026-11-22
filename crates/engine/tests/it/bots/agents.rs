@@ -945,6 +945,8 @@ async fn owner_turns_learn_where_their_plans_stand() {
         time_added_minutes: None,
         warned_at: None,
         coordinator_choice: Default::default(),
+        body_rev: None,
+        result_rev: None,
     };
     core.workspace
         .put_record(
