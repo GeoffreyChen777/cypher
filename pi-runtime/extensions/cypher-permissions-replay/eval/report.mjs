@@ -169,7 +169,7 @@ for (const side of SIDES.slice(1)) {
   // One row per case, with the runs it passed in.
   const byCase = new Map();
   for (const item of list) {
-    const key = `${item.r.file}:${item.r.id}`;
+    const key = item.r.adversarial ? `${item.r.file}:${item.r.id}` : `held-out:${item.r.id}`;
     const got = byCase.get(key) ?? { ...item, runs: [] };
     got.runs.push(`${item.run}: ${item.outcome}`);
     if (!/explicit check ok/.test(got.path) && /explicit check ok/.test(item.path)) got.path = item.path;
