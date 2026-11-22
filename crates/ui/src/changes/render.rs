@@ -404,6 +404,25 @@ impl Changes {
                 .into_any_element();
         }
         let scope = self.scope;
+        // A workspace's own chat with several roots: which checkout this is
+        // (a menu when there are several).
+        let picker = self
+            .state
+            .read(cx)
+            .git_root_choice()
+            .map(|(choices, shown)| {
+                let mounted = crate::files::root_picker::mounted(&self.root_menu);
+                crate::files::root_picker::render(
+                    "changes-root-picker",
+                    &choices,
+                    &shown,
+                    &self.state.clone(),
+                    |this: &mut Self| &mut this.root_menu,
+                    mounted,
+                    &theme,
+                    cx,
+                )
+            });
         let history_count = (scope == DiffScope::History).then(|| self.history_count(cx));
         let history_fetch_button =
             (scope == DiffScope::History).then(|| self.history_fetch_button(cx));
@@ -496,6 +515,7 @@ impl Changes {
             .flex_row()
             .items_center()
             .gap(px(6.0))
+            .children(picker)
             .child(trigger)
             .when_some(history_count, |element, count| {
                 element.child(div().flex_1().min_w_0().h_full().child(count))
@@ -514,6 +534,7 @@ impl Changes {
         let popup_theme = Theme::of(cx).clone();
         let theme = &popup_theme;
         let current = self.scope;
+        let workspace_chat = self.state.read(cx).workspace_chat_selected();
         popover::popover_card(theme)
             .w(px(180.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_scope_menu(cx)))
@@ -522,19 +543,21 @@ impl Changes {
                 // the card abutted, adjacent washes read as one slab (user
                 // report).
                 div().flex().flex_col().gap(px(2.0)).children(
-                    DiffScope::ALL.into_iter().enumerate().map(|(ix, scope)| {
-                        popover::menu_row(
-                            theme,
-                            scope == current,
-                            format!("changes-scope-row-{ix}"),
-                        )
-                        .id(("changes-scope-row", ix))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_scope(scope, cx);
-                            this.close_scope_menu(cx);
-                        }))
-                        .child(div().flex_1().child(SharedString::from(scope.label())))
-                    }),
+                    DiffScope::menu(workspace_chat)
+                        .enumerate()
+                        .map(|(ix, scope)| {
+                            popover::menu_row(
+                                theme,
+                                scope == current,
+                                format!("changes-scope-row-{ix}"),
+                            )
+                            .id(("changes-scope-row", ix))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_scope(scope, cx);
+                                this.close_scope_menu(cx);
+                            }))
+                            .child(div().flex_1().child(SharedString::from(scope.label())))
+                        }),
                 ),
             )
             .into_any_element()
@@ -547,9 +570,7 @@ impl Changes {
             return None;
         }
         let branch = self
-            .state
-            .read(cx)
-            .selected_chat_row()
+            .chat_row(self.state.read(cx))
             .and_then(|chat| chat.branch.clone())
             .unwrap_or_else(|| "HEAD".to_string());
         let base = self.base_ref.clone().unwrap_or_else(|| "…".to_string());
@@ -1245,7 +1266,7 @@ impl Changes {
         let base = self.base_ref.clone();
         // With no session selected (new-chat canvas) there is nothing to
         // prepare — show the quiet empty state, not an endless spinner.
-        let no_chat = self.state.read(cx).selected_chat_row().is_none();
+        let no_chat = self.chat_row(self.state.read(cx)).is_none();
         let phase = if no_chat {
             DiffPhase::Clean
         } else {

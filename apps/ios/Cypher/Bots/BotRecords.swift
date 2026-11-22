@@ -656,9 +656,45 @@ struct BotShortcut: Codable, Hashable, Identifiable, Sendable {
     /// Whether a tap asks for text first.
     var wantsInput: Bool { request.contains(Self.input) }
 
-    /// The request a tap sends, with `input` in every blank.
+    /// Punctuation that sits against the word before it.
+    private static let tight: Set<Character> = [",", ".", ":", ";", "!", "?", "，", "。", "：", "；", "！", "？"]
+
+    /// The request a tap sends, with `input` in every blank. Left empty, the
+    /// blanks are dropped and the text around each tidied (see
+    /// `join(_:overBlankWith:)`); the rest of the request stays as written.
+    /// The same as bot_records.rs `BotShortcut::request_with`.
     func request(with input: String) -> String {
-        request.replacingOccurrences(of: Self.input, with: input.trimmingCharacters(in: .whitespacesAndNewlines))
+        let input = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard input.isEmpty, wantsInput else {
+            return request.replacingOccurrences(of: Self.input, with: input)
+        }
+        let pieces = request.components(separatedBy: Self.input)
+        var out = pieces[0]
+        for piece in pieces.dropFirst() { Self.join(&out, overBlankWith: piece) }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Appends `next` to `out` where an empty blank was: the spaces and tabs
+    /// on both sides become one space (none before `tight` punctuation or at
+    /// a line's edge, none when neither side had any); a blank that started
+    /// the text or a line, or followed punctuation, takes the punctuation
+    /// after it along ("{input}, please review" → "please review"); a blank
+    /// alone on its line takes the line. Line breaks elsewhere stay.
+    private static func join(_ out: inout String, overBlankWith next: String) {
+        let gap: (Character) -> Bool = { $0 == " " || $0 == "\t" }
+        let spaced = out.last.map(gap) == true || next.first.map(gap) == true
+        while let last = out.last, gap(last) { out.removeLast() }
+        var next = Substring(next).drop(while: gap)
+        if out.isEmpty || out.last == "\n" || out.last.map(tight.contains) == true {
+            next = next.drop(while: tight.contains).drop(while: gap)
+        }
+        if out.last == "\n", next.first == "\n" { next = next.dropFirst() }
+        if spaced, let last = out.last, last != "\n", let first = next.first, first != "\n",
+            !tight.contains(first)
+        {
+            out.append(" ")
+        }
+        out += next
     }
 }
 

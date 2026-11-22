@@ -1,9 +1,16 @@
 //! The Botboard's workspace column: the current bot's conversation as one
 //! card, and the detail panel sliding in beside it. The card renders the
 //! board slot with the session machinery a tile uses, under a header naming
-//! the bot instead of a tab strip; there is no close button and no rail
-//! (a bot chat has no terminal, dock or split to offer).
+//! the bot instead of a tab strip, with a tile's rail in its top-right
+//! corner (no close button, no split or zoom): the terminal, and the dock
+//! with Files and Git over the workspace's folder and granted projects.
+//!
+//! The right side is for details, one at a time: the chat's dock and the
+//! detail panel never show together. Opening either shuts the other, and
+//! the rail's side panel button stands for both: it shuts whichever is
+//! open, else opens the one shown last ([`side_toggle`]).
 
+use super::super::session::SlotId;
 use super::super::workspace_view::TILE_HEADER_HEIGHT;
 use super::*;
 
@@ -14,6 +21,43 @@ const CHAT_MIN_W: f32 = 380.0;
 
 /// The drag payload of the panel's resize handle.
 pub(in crate::shell) struct BotPanelResize;
+
+/// Which of the two the Botboard's right side showed last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(in crate::shell) enum BoardSide {
+    /// The detail panel (Needs you, a plan, a session…).
+    #[default]
+    Panel,
+    /// The chat's dock (Files, Git, side chats, pages).
+    Dock,
+}
+
+/// What the chat's side panel button does on the Botboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::shell) enum SideToggle {
+    /// Shut what is open (both, should both ever be).
+    Close,
+    OpenDock,
+    OpenPanel,
+}
+
+/// The side panel button's press: shut what is open, else reopen what was
+/// shown last; the dock only with a tab to show (an empty dock is only its
+/// picker), the panel otherwise. Pure.
+pub(in crate::shell) fn side_toggle(
+    dock_open: bool,
+    panel_open: bool,
+    last: BoardSide,
+    dock_has_tabs: bool,
+) -> SideToggle {
+    if dock_open || panel_open {
+        SideToggle::Close
+    } else if last == BoardSide::Dock && dock_has_tabs {
+        SideToggle::OpenDock
+    } else {
+        SideToggle::OpenPanel
+    }
+}
 
 impl Shell {
     /// The workspace column on the Botboard (see the module docs).
@@ -51,6 +95,22 @@ impl Shell {
             Some(sid) => self.render_session(sid, window, cx),
             None => self.render_board_placeholder(&theme, cx),
         };
+        // A tile's rail, floating over the card's right edge like a
+        // focused tile's (Windows: under the caption buttons).
+        let rail = self.board.slot.map(|sid| {
+            let top = if cfg!(target_os = "windows") {
+                Theme::TITLEBAR_HEIGHT
+            } else {
+                super::super::dock::RAIL_MARGIN
+            };
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .w(px(super::super::dock::RAIL_WIDTH))
+                .child(self.render_session_rail(sid, top, window, cx))
+        });
         let card_bg = crate::appearance::chat_style::panel_background(
             crate::appearance::chat_style::settings(cx),
             Theme::of(cx),
@@ -67,8 +127,10 @@ impl Shell {
             .bg(card_bg)
             .shadow_sm()
             .overflow_hidden()
+            .relative()
             .child(header)
             .child(div().flex_1().min_h_0().relative().flex().child(body))
+            .children(rail)
             .into_any_element()
     }
 
@@ -96,9 +158,9 @@ impl Shell {
             .items_center()
             .gap(px(8.0))
             .pl(px(left))
-            .pr(px(titlebar_right_padding(
+            .pr(px(board_header_right_inset(
+                self.board.slot.is_some(),
                 cfg!(target_os = "windows"),
-                12.0,
             )))
             .when_some(bot, |el, bot| {
                 el.child(crate::appearance::bot_style::bot_avatar(
@@ -125,9 +187,9 @@ impl Shell {
     }
 
     /// The bot's own actions where a tile keeps its own: the activity log,
-    /// pause (or resume), settings, and at the corner the button that opens
-    /// and closes the detail panel. A press here never starts the window
-    /// drag the header is.
+    /// pause (or resume) and settings. The detail panel opens and closes
+    /// from the rail's side panel button beside them. A press here never
+    /// starts the window drag the header is.
     fn render_board_actions(&self, bot: &Bot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let edit_id = bot.id.clone();
         let settings = super::items::icon_button(
@@ -164,17 +226,6 @@ impl Shell {
                     cx,
                 )
             }));
-        let open = self.board.panel.is_some();
-        let panel = super::items::icon_button(
-            "bot-header-panel",
-            icons::SIDEBAR_MINIMALISTIC,
-            "Side panel",
-            theme,
-        )
-        // Held down while the panel is open.
-        .when(open, |el| el.bg(crate::kit::theme::ink(0.07)))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx)));
         div()
             .flex_none()
             .flex()
@@ -184,7 +235,6 @@ impl Shell {
             .child(activity)
             .child(pause)
             .child(settings)
-            .child(panel)
             .into_any_element()
     }
 
@@ -374,6 +424,41 @@ impl Shell {
             .min(room.max(crate::prefs::BOT_PANEL_MIN + PANEL_GAP))
     }
 
+    /// The chat's side panel button on the Botboard ([`side_toggle`]).
+    pub(in crate::shell) fn toggle_board_side(&mut self, sid: SlotId, cx: &mut Context<Self>) {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
+            return;
+        };
+        let dock_open = slot.dock.open;
+        let tabs = !self.dock_surface_rows(slot, cx).is_empty();
+        let panel_open = self.board.panel.is_some();
+        match side_toggle(dock_open, panel_open, self.board.side, tabs) {
+            SideToggle::Close => {
+                if dock_open {
+                    self.toggle_dock(sid, cx);
+                }
+                self.close_panel(cx);
+            }
+            SideToggle::OpenDock => self.toggle_dock(sid, cx),
+            SideToggle::OpenPanel => self.toggle_panel(cx),
+        }
+    }
+
+    /// Shut the Botboard chat's dock (the detail panel is opening).
+    pub(super) fn close_board_dock(&mut self, cx: &mut Context<Self>) {
+        let Some(sid) = self.board.slot else {
+            return;
+        };
+        if self
+            .tiles
+            .slots
+            .get(&sid)
+            .is_some_and(|slot| slot.dock.open)
+        {
+            self.toggle_dock(sid, cx);
+        }
+    }
+
     /// Dragging the handle: the panel's left edge follows the pointer.
     pub(in crate::shell) fn on_bot_panel_drag(
         &mut self,
@@ -388,5 +473,57 @@ impl Shell {
         self.board.panel_tween = None;
         self.schedule_save(cx);
         cx.notify();
+    }
+}
+
+/// The board header's right inset: room for the rail where its card shares
+/// the header band (on Windows the rail starts under the caption buttons,
+/// which the titlebar padding already clears).
+fn board_header_right_inset(rail: bool, is_windows: bool) -> f32 {
+    if rail && !is_windows {
+        4.0 + super::super::dock::RAIL_WIDTH
+    } else {
+        titlebar_right_padding(is_windows, 12.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_side_button_shuts_what_is_open_and_reopens_the_last() {
+        use BoardSide::{Dock, Panel};
+        // Whatever is open shuts — both, should both ever be.
+        for last in [Panel, Dock] {
+            assert_eq!(side_toggle(true, false, last, true), SideToggle::Close);
+            assert_eq!(side_toggle(false, true, last, true), SideToggle::Close);
+            assert_eq!(side_toggle(true, true, last, true), SideToggle::Close);
+        }
+        // Shut: what was shown last comes back.
+        assert_eq!(
+            side_toggle(false, false, Panel, true),
+            SideToggle::OpenPanel
+        );
+        assert_eq!(side_toggle(false, false, Dock, true), SideToggle::OpenDock);
+        // A dock with no tab left has only its picker: the panel instead.
+        assert_eq!(
+            side_toggle(false, false, Dock, false),
+            SideToggle::OpenPanel
+        );
+    }
+
+    #[test]
+    fn the_board_header_clears_the_rail() {
+        let rail = super::super::super::dock::RAIL_WIDTH;
+        assert_eq!(board_header_right_inset(true, false), 4.0 + rail);
+        assert_eq!(
+            board_header_right_inset(false, false),
+            titlebar_right_padding(false, 12.0)
+        );
+        assert_eq!(
+            board_header_right_inset(true, true),
+            titlebar_right_padding(true, 12.0)
+        );
     }
 }

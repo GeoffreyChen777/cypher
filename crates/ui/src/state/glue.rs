@@ -186,6 +186,7 @@ impl AppState {
             self.mark_chat_seen(id, cx);
         }
         self.spawn_transcript_watches(cx);
+        self.sync_file_roots(cx);
         cx.notify();
     }
 

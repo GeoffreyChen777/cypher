@@ -119,6 +119,22 @@ impl ChoiceArgs {
     }
 }
 
+/// The projects `bot`'s scope grants on `device_id`, in `spaces` order: what
+/// its owner threads may work in directly, the folders its own chat's Files
+/// and Changes panels may open beside its private one, and the checkouts the
+/// diff watch follows for it. Projects on other devices are reached through
+/// sessions there.
+pub(crate) fn granted_local_spaces(
+    bot: &Bot,
+    spaces: Vec<cypher_proto::Space>,
+    device_id: &str,
+) -> Vec<cypher_proto::Space> {
+    spaces
+        .into_iter()
+        .filter(|space| space.device_id == device_id && bot.scope.sees_space(&space.id))
+        .collect()
+}
+
 /// This engine's bot service: creation on the host and the tool surface.
 #[derive(Clone)]
 pub struct Bots {

@@ -80,6 +80,16 @@ impl DiffScope {
         Self::History,
     ];
 
+    /// The scopes the scope menu offers. A workspace's own chat has no
+    /// Latest turn: the engine records a turn's start tree in the chat's own
+    /// folder only (the workspace's, not a checkout), never in the granted
+    /// projects its Git shows.
+    pub fn menu(workspace_chat: bool) -> impl Iterator<Item = DiffScope> {
+        Self::ALL
+            .into_iter()
+            .filter(move |scope| !(workspace_chat && *scope == Self::LatestTurn))
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::WorkingTree => "Working tree",

@@ -326,6 +326,38 @@ final class BotModelTests: XCTestCase {
         XCTAssertEqual(records.shortcuts(of: "b1").map(\.id), ["a", "b", "c"])
     }
 
+    /// The same cases as bot_records.rs
+    /// `an_empty_blank_drops_out_and_the_text_around_it_closes_up`.
+    func testAnEmptyBlankDropsOutAndTheTextAroundItClosesUp() {
+        func with(_ request: String, _ input: String) -> String {
+            BotShortcut(id: "s", botId: "b", label: "x", request: request, createdAt: 1, updatedAt: 1)
+                .request(with: input)
+        }
+        let cases: [(String, String, String)] = [
+            ("Create a PR from branch {input} to main.", "", "Create a PR from branch to main."),
+            ("Fix the tests. {input}", "  ", "Fix the tests."),
+            // A leading blank takes its orphaned punctuation with it.
+            ("{input}, please review", "", "please review"),
+            ("Review the branch {input}.", "", "Review the branch."),
+            ("Check {input} , then {input}  ship", "", "Check, then ship"),
+            ("Before, {input}, after", "", "Before, after"),
+            ("Fix it:\t{input}\nThen ship.", "", "Fix it:\nThen ship."),
+            // A blank alone on its line takes the line; other lines stay.
+            ("Line one\n{input}\nLine two\n\nLine  three", "", "Line one\nLine two\n\nLine  three"),
+            ("Explain{input}simply", "", "Explainsimply"),
+            ("请修复{input}，然后测试", "", "请修复，然后测试"),
+            ("{input}", "", ""),
+            // Without a blank, or with text, nothing is tidied.
+            ("  What's  stuck?  ", "", "  What's  stuck?  "),
+            ("Create a PR from branch {input} to main.", " dev ", "Create a PR from branch dev to main."),
+            ("{input}, please review", "This", "This, please review"),
+            ("Fix  {input} ,then", "x", "Fix  x ,then"),
+        ]
+        for (request, input, sent) in cases {
+            XCTAssertEqual(with(request, input), sent, "\(request.debugDescription) + \(input.debugDescription)")
+        }
+    }
+
     func testNetworkRecordsDefaultTheirOwnerFields() throws {
         let connection = try decodeFixture(
             BotConnection.self,

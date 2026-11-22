@@ -202,7 +202,9 @@ pub mod methods {
     pub const FETCH_ALL: &str = "FetchAll";
     pub const SWITCH_REF: &str = "SwitchRef";
     pub const LIST_FOLDERS: &str = "ListFolders";
-    /// Fuzzy relative-path search rooted in a known chat or space checkout.
+    /// Fuzzy relative-path search rooted in a known chat or space checkout;
+    /// {query, chatId | spaceId, path?, rootSpaceId?} (`rootSpaceId` with
+    /// `chatId`, as for the file RPCs).
     pub const SEARCH_FILES: &str = "SearchFiles";
     /// `#` issue completion for a chat or space checkout, answered with the
     /// host device's GitHub credential; {chatId | spaceId, path?, query}.
@@ -217,8 +219,15 @@ pub mod methods {
     pub const POLL_GITHUB_LOGIN: &str = "PollGithubLogin";
     pub const CANCEL_GITHUB_LOGIN: &str = "CancelGithubLogin";
     pub const SIGN_OUT_GITHUB: &str = "SignOutGithub";
-    /// Read-only browser; {chatId, cwd, path}. cwd must still be the chat's
-    /// assigned checkout, and path is relative with no symlink traversal.
+    /// The folders a chat's Files and Changes panels may open; {chatId} →
+    /// `[ChatFileRoot]`. A session: its checkout. A workspace's own chat: its
+    /// private folder, then each granted project on its host device.
+    pub const LIST_CHAT_FILE_ROOTS: &str = "ListChatFileRoots";
+    /// Read-only browser; {chatId, cwd, path, rootSpaceId?}. cwd must still
+    /// be the chat's assigned checkout, and path is relative with no symlink
+    /// traversal. Every file RPC below takes the optional `rootSpaceId`: a
+    /// workspace's own chat names a granted project to address its folder
+    /// instead of the chat's own.
     pub const LIST_WORKSPACE_FILES: &str = "ListWorkspaceFiles";
     pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
     /// Replace the text of an EXISTING regular file; {chatId, cwd, path,
@@ -565,6 +574,7 @@ pub mod methods {
         MethodSpec::unary(POLL_GITHUB_LOGIN).forwardable(),
         MethodSpec::unary(CANCEL_GITHUB_LOGIN).forwardable(),
         MethodSpec::unary(SIGN_OUT_GITHUB).forwardable(),
+        MethodSpec::unary(LIST_CHAT_FILE_ROOTS).forwardable(),
         MethodSpec::unary(LIST_WORKSPACE_FILES).forwardable(),
         MethodSpec::unary(READ_WORKSPACE_FILE).forwardable(),
         MethodSpec::unary(WRITE_WORKSPACE_FILE).forwardable(),

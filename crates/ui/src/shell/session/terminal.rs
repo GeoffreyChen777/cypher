@@ -50,9 +50,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A bot's conversation has no terminal: its folder is empty and it
-        // runs no commands.
-        if self.slot_is_bot_chat(sid, cx) {
+        // A hidden bot thread has no terminal: it runs no commands. The
+        // workspace's own chat has one, in its folder.
+        if self.slot_is_hidden_bot_thread(sid, cx) {
             return;
         }
         let Some(slot) = self.tiles.slots.get(&sid) else {

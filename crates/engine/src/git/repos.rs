@@ -479,6 +479,20 @@ impl Repos {
         .flatten()
     }
 
+    /// `path` made canonical, when it is a directory. Resolved on a disposable
+    /// thread for the same reason as [`Repos::workspace_checkout`]: a
+    /// project folder may sit on a dead mount.
+    pub async fn canonical_dir(&self, path: &Path) -> Option<PathBuf> {
+        let path = path.to_path_buf();
+        disposable_worker("canonical-dir", move || {
+            std::fs::canonicalize(path)
+                .ok()
+                .filter(|path| path.is_dir())
+        })
+        .await
+        .flatten()
+    }
+
     /// Switch the checkout at `cwd` (a main folder OR a linked worktree) to
     /// `ref_name` — the t3code `switchRef` port: an existing local branch is
     /// checked out directly; a remote-only branch gets a local tracking

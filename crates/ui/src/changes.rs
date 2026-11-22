@@ -204,6 +204,11 @@ pub struct Changes {
     /// Pinned commit for a [`DiffScope::Commit`] pane (sha + subject drive
     /// the fetch and the surface-tab title).
     commit: Option<GitHistoryCommit>,
+    /// A commit pane in a workspace's own chat: the project it was opened in
+    /// (see [`Self::chat_row`]).
+    pinned_root: Option<cypher_proto::ChatFileRoot>,
+    /// The workspace chat's project picker in the header.
+    root_menu: Popup<()>,
     /// Pinned round for a [`DiffScope::Turn`] pane (its checkout and tree
     /// pair drive the fetch).
     turn: Option<Arc<TurnChanges>>,
@@ -570,6 +575,8 @@ impl Changes {
             history_fetch_button: None,
             history_events: None,
             commit: None,
+            pinned_root: None,
+            root_menu: Popup::default(),
             turn: None,
             focus_path: None,
             owner: format!("changes-{}", cx.entity_id()),
@@ -693,6 +700,9 @@ impl Changes {
         let mut changes = Self::new(state, comment_popup, cx);
         changes.scope = DiffScope::Commit;
         changes.commit = Some(commit);
+        // A workspace's own chat: the commit is in the project shown when
+        // it was opened, whatever the picker shows later.
+        changes.pinned_root = changes.state.read(cx).git_root().cloned();
         changes
     }
 
@@ -710,6 +720,20 @@ impl Changes {
         changes.turn = Some(turn);
         changes.focus_path = path;
         changes
+    }
+
+    /// The chat as this pane sees it: a session as it is; a workspace's own
+    /// chat at its Git root (a commit pane keeps the project it was opened
+    /// in). `None` with no chat, or a workspace chat without a checkout.
+    pub(crate) fn chat_row<'a>(
+        &self,
+        state: &'a AppState,
+    ) -> Option<std::borrow::Cow<'a, cypher_proto::Chat>> {
+        if let Some(root) = &self.pinned_root {
+            let chat = state.selected_chat_row()?;
+            return Some(std::borrow::Cow::Owned(state.chat_at_root(chat, root)));
+        }
+        state.git_chat_row()
     }
 
     /// Whether this pane is pinned to `turn`'s round.

@@ -60,6 +60,9 @@ impl Shell {
         if self.board.panel.as_ref() == Some(&item) {
             return self.close_panel(cx);
         }
+        // The right side shows one thing: the chat's dock shuts.
+        self.board.side = BoardSide::Panel;
+        self.close_board_dock(cx);
         if self.board.panel.is_none() {
             let from = self.eval_tween(self.board.panel_tween, 0.0);
             self.board.panel_tween = Some(WidthTween::new(from, self.panel_span()));
@@ -71,8 +74,9 @@ impl Shell {
         cx.notify();
     }
 
-    /// The chat header's button: shut the panel, or open it on what it
-    /// last showed (the Needs you page when that is nothing).
+    /// Shut the panel, or open it on what it last showed (the Needs you
+    /// page when that is nothing); the chat's side panel button
+    /// ([`Shell::toggle_board_side`]).
     pub(in crate::shell) fn toggle_panel(&mut self, cx: &mut Context<Self>) {
         if self.board.panel.is_some() {
             return self.close_panel(cx);

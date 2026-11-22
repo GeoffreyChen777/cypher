@@ -1205,7 +1205,10 @@ itself.
 them: buttons, each an icon and a short label, wrapping; with none, the area isn't drawn. A
 shortcut is a request the owner
 makes often; a click sends it into the workspace chat as if they had typed it (their draft
-stays). A request may hold `{input}`, and a click then asks for that text first. Nobody
+stays). A request may hold `{input}`, and a click then asks for that text first; it is
+optional, and left empty the blank drops out with the spaces around it ("from branch
+{input} to main." sends "from branch to main."; punctuation a leading blank leaves behind
+goes too). Nobody
 builds shortcuts by hand: the owner asks the agent in the workspace chat ("make this a
 button", "rename the Fix button"), and it keeps them with `save_shortcut`, `delete_shortcut`
 and `list_shortcuts`, and offers one when the owner keeps asking the same kind of thing. A
@@ -1241,15 +1244,20 @@ the panel shut none does. A click on a card's header folds the card to that one 
 
 **The chat** is the bot conversation: the owner instructs the bot here. Besides their
 exchange it holds only notices: a plan's compact card, a saved routine's and a result
-notice's (§6.8), each one row or little more, each opening the detail panel. Progress never shows here. It has
-no terminal and no session dock.
+notice's (§6.8), each one row or little more, each opening the detail panel. Progress never shows here. Like
+a session it has a tile's rail in its top-right corner: a terminal in the workspace's folder, and the session
+dock with Files and Git over the workspace's folder and each project it is granted on its host (a picker in
+the surface's header switches; see [Files › Workspace chats](../features/files.md#workspace-chats)). A file
+reference in a reply opens there, in the project it resolves in. The workspace's hidden threads have neither.
 
 **The detail panel** slides in from the window's right edge and the chat narrows to make
 room. Its left edge drags to resize it (340 to 760px, never squeezing the chat below
 380px); a double click restores 420px, and the width is saved with the UI settings. It shows one item in full with its actions, and opening
 another row replaces its content; the opened row stays highlighted in the sidebar. The
-button at the right end of the chat's header opens and closes it (Esc closes it too): it
-opens on what the panel last showed, or on Needs you. An item is one card under its
+right side is for details, one at a time: the panel and the chat's dock never show
+together, and opening either shuts the other. The rail's side panel button stands for
+both: it shuts whichever is open (Esc closes the panel too), else opens the one shown
+last, the panel on what it last showed or on Needs you. An item is one card under its
 title; the panel has no close button of its own.
 
 **A session opens live in the panel.** A session the workspace runs in a project (a
@@ -1446,8 +1454,8 @@ app has the desktop's whole surface, laid out for a phone.
   (bot-marked threads, the sessions a workspace started and memory passes) are never
   listed among sessions, nor offered by `@` mentions.
 - **The workspace** opens on its chat: the session screen with the workspace's avatar
-  and name, its shortcuts as chips above the composer (a `{input}` blank asks first;
-  long press moves or deletes), an amber "N need you" pill in the status row, the
+  and name, its shortcuts as chips above the composer (a `{input}` blank asks first,
+  for optional text; long press moves or deletes), an amber "N need you" pill in the status row, the
   quiet off-line ("Atlas is paused" with Resume, "<device> is offline"), and the start
   screen with suggested questions while the chat is empty. The chat only announces, as
   on the desktop: a plan's compact card (Details, Reject, Approve, then the decision),
@@ -1508,6 +1516,7 @@ Each method is one constant plus one `SPECS` entry in `cypher_rpc::methods`.
 | `CreateBotInvite` | unary, forwardable | P4 (built) | Runs on the bot's host: `{botId}` → `{inviteId, code, expiresAt}`; publishes the room first. The code is shown once. |
 | `RedeemBotInvite` | unary, forwardable | P4 (built) | Runs on the bot's host: `{botId, code}` → the new `BotConnection`. |
 | `Mutate revokeBotInvite`, `updateBotConnection`, `revokeBotConnection`, `reviewBotExchange` | unary | P4 (built) | Owner fields on the rows (`revokeRequestedAt`, `replyMode`, `scope`, `review`); the host acts on them. |
+| `ListChatFileRoots` + `rootSpaceId` | unary, forwardable | built (engine) | The workspace chat's Files and Changes panels: its private folder plus each project its scope grants on the host; see [Files › Workspace chats](../features/files.md#workspace-chats). |
 
 As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is no
 `BotAsk` stream, and exchanges and reviews ride `WatchBotRecords` and `Mutate`.

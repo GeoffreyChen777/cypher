@@ -30,6 +30,8 @@ pub mod links;
 mod menu;
 mod ops;
 mod preview;
+pub mod root_picker;
+pub mod roots;
 mod tree;
 pub mod web_view;
 
@@ -112,15 +114,23 @@ pub enum FilesEvent {
 }
 
 /// The request context a Files surface is bound to — the selected chat's
-/// checkout on its host device. Re-read per request (like the diff pane)
-/// so the engine's own "chat device or checkout changed" guard is the only
-/// thing that can go stale.
+/// checkout on its host device (a workspace's own chat: the root its
+/// picker shows). Re-read per request (like the diff pane) so the engine's
+/// own "chat device or checkout changed" guard is the only thing that can
+/// go stale.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesContext {
     pub chat_id: String,
+    /// The chat's own folder: every request carries it (the stale check).
     pub cwd: String,
     /// The host device when it is not the connected engine's own.
     pub target: Option<String>,
+    /// A workspace's own chat showing a granted project: that project
+    /// (sent as `rootSpaceId`). `None`: the chat's own folder.
+    pub root_space_id: Option<String>,
+    /// The folder paths are relative to: `cwd` for a session; the shown
+    /// root's canonical folder for a workspace's own chat.
+    pub root: String,
 }
 
 impl FilesContext {
@@ -129,14 +139,24 @@ impl FilesContext {
         params.insert("chatId".into(), self.chat_id.clone().into());
         params.insert("cwd".into(), self.cwd.clone().into());
         params.insert("path".into(), path.to_string().into());
+        self.address(&mut params);
+        params
+    }
+
+    /// Aim a request at this context's host and root (every file RPC and
+    /// `SearchFiles` with `chatId`).
+    pub(crate) fn address(&self, params: &mut serde_json::Map<String, serde_json::Value>) {
         if let Some(target) = &self.target {
             params.insert("targetDeviceId".into(), target.clone().into());
         }
-        params
+        if let Some(space_id) = &self.root_space_id {
+            params.insert("rootSpaceId".into(), space_id.clone().into());
+        }
     }
 }
 
-/// Resolve the Files context from app state. Pure over the state's rows.
+/// Resolve the Files context from app state. Pure over the state's rows
+/// (and, for a workspace's own chat, its listed roots).
 pub fn context_for(state: &AppState) -> Result<FilesContext, &'static str> {
     let chat = state
         .selected_chat_row()
@@ -145,16 +165,89 @@ pub fn context_for(state: &AppState) -> Result<FilesContext, &'static str> {
         .cwd
         .clone()
         .ok_or("This session has no project folder.")?;
+    let target = (state.local_device_id.as_deref() != Some(chat.device_id.as_str()))
+        .then(|| chat.device_id.clone());
+    if state.workspace_chat_selected() {
+        if state.file_roots() == crate::state::FileRoots::Loading {
+            return Err("Loading…");
+        }
+        let root = state
+            .files_root()
+            .ok_or("This workspace has no folder to browse.")?;
+        return Ok(context_at(chat, cwd, target, root));
+    }
     if chat.space_id.is_none() {
         return Err("This session is not attached to a project.");
     }
-    let target = (state.local_device_id.as_deref() != Some(chat.device_id.as_str()))
-        .then(|| chat.device_id.clone());
     Ok(FilesContext {
+        chat_id: chat.id.clone(),
+        root: cwd.clone(),
+        cwd,
+        target,
+        root_space_id: None,
+    })
+}
+
+fn context_at(
+    chat: &cypher_proto::Chat,
+    cwd: String,
+    target: Option<String>,
+    root: &cypher_proto::ChatFileRoot,
+) -> FilesContext {
+    FilesContext {
         chat_id: chat.id.clone(),
         cwd,
         target,
+        root_space_id: root.space_id.clone(),
+        root: root.path.clone(),
+    }
+}
+
+/// Where a chat's file references may be looked up, in the order to try:
+/// a session's checkout alone; a workspace's own chat's folder, then each
+/// granted project ([`roots::candidates`]). `Err` says why there is none.
+pub fn link_contexts(state: &AppState) -> Result<LinkContexts, &'static str> {
+    if !state.workspace_chat_selected() {
+        return context_for(state).map(|context| LinkContexts {
+            roots: Vec::new(),
+            contexts: vec![context],
+        });
+    }
+    let chat = state
+        .selected_chat_row()
+        .ok_or("Open a session to browse its files.")?;
+    let cwd = chat
+        .cwd
+        .clone()
+        .ok_or("This workspace has no folder to browse.")?;
+    let target = (state.local_device_id.as_deref() != Some(chat.device_id.as_str()))
+        .then(|| chat.device_id.clone());
+    let crate::state::FileRoots::Ready(list) = state.file_roots() else {
+        return Err("Loading…");
+    };
+    Ok(LinkContexts {
+        roots: list.to_vec(),
+        contexts: list
+            .iter()
+            .map(|root| context_at(chat, cwd.clone(), target.clone(), root))
+            .collect(),
     })
+}
+
+/// [`link_contexts`]: one context per root, in lookup order.
+#[derive(Debug, Clone)]
+pub struct LinkContexts {
+    /// A workspace's own chat: its roots, matching `contexts`. Empty for a
+    /// session, whose paths stay relative to its checkout.
+    pub roots: Vec<cypher_proto::ChatFileRoot>,
+    pub contexts: Vec<FilesContext>,
+}
+
+impl LinkContexts {
+    /// Several roots: references travel as absolute paths.
+    pub fn multi_root(&self) -> bool {
+        !self.roots.is_empty()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -266,6 +359,8 @@ pub struct FilesPanel {
     edit: Option<InlineEdit>,
     clipboard: Option<ops::FileClipboard>,
     menu: Popup<menu::MenuState>,
+    /// A workspace's own chat: the project picker in the header.
+    root_menu: Popup<()>,
     confirm: Option<menu::DeleteConfirm>,
     status: Option<Status>,
     status_seq: u64,
@@ -339,6 +434,7 @@ impl FilesPanel {
             edit: None,
             clipboard: None,
             menu: Popup::default(),
+            root_menu: Popup::default(),
             confirm: None,
             status: None,
             status_seq: 0,
@@ -1699,9 +1795,7 @@ impl FilesPanel {
         let mut params = serde_json::Map::new();
         params.insert("chatId".into(), context.chat_id.clone().into());
         params.insert("query".into(), query.clone().into());
-        if let Some(target) = &context.target {
-            params.insert("targetDeviceId".into(), target.clone().into());
-        }
+        context.address(&mut params);
         self.filter.task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(120))
@@ -1856,7 +1950,16 @@ impl FilesPanel {
         let Some(chat) = state.selected_chat_row() else {
             return;
         };
-        let diff = crate::changes::resolve_diff(&self.diffs, chat);
+        // A workspace's own chat: the shown root's checkout.
+        let at_root = state
+            .workspace_chat_selected()
+            .then(|| {
+                state
+                    .files_root()
+                    .map(|root| state.chat_at_root(chat, root))
+            })
+            .flatten();
+        let diff = crate::changes::resolve_diff(&self.diffs, at_root.as_ref().unwrap_or(chat));
         let checksum = diff.map(|d| d.checksum.clone());
         if checksum == self.diff_checksum {
             return;
@@ -1944,6 +2047,29 @@ impl FilesPanel {
         // No "Files" title (user request) — the row names the open file
         // only.
         let path_label: SharedString = selected.clone().unwrap_or_default().into();
+        // A workspace's own chat with more than one folder: which one.
+        let picker = {
+            let state = self.state.read(cx);
+            match (state.file_roots(), state.files_root()) {
+                (crate::state::FileRoots::Ready(list), Some(shown)) if list.len() > 1 => {
+                    Some((list.to_vec(), shown.clone()))
+                }
+                _ => None,
+            }
+        }
+        .map(|(choices, shown)| {
+            let mounted = root_picker::mounted(&self.root_menu);
+            root_picker::render(
+                "files-root-picker",
+                &choices,
+                &shown,
+                &self.state.clone(),
+                |this: &mut Self| &mut this.root_menu,
+                mounted,
+                &theme,
+                cx,
+            )
+        });
 
         let mut row = div()
             .size_full()
@@ -1960,6 +2086,7 @@ impl FilesPanel {
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_tree(cx))),
             )
+            .children(picker)
             .when(tree_shown && self.context.is_some(), |el| {
                 el.child(
                     small_icon_button("files-new-file", icons::DOCUMENT_ADD, &theme, false)
@@ -2869,6 +2996,33 @@ pub(crate) fn rpc_message(err: &RpcError) -> SharedString {
     }
 }
 
+/// Whether `path` (relative to the context's root, not `""`) names an
+/// entry there: its folder's listing has it. A listing cut short counts as
+/// a yes (it may be past the cut), a failed one as a no.
+pub(crate) async fn entry_exists(
+    engine: &EngineHandle,
+    context: &FilesContext,
+    path: &str,
+    cx: &mut gpui::AsyncApp,
+) -> bool {
+    let (parent, name) = match path.rsplit_once('/') {
+        Some((parent, name)) => (parent, name),
+        None => ("", path),
+    };
+    let listing = call_with_retry(
+        engine,
+        methods::LIST_WORKSPACE_FILES,
+        serde_json::Value::Object(context.params(parent)),
+        cx,
+    )
+    .await
+    .ok()
+    .and_then(|value| serde_json::from_value::<WorkspaceDirectory>(value).ok());
+    listing.is_some_and(|listing| {
+        listing.truncated || listing.entries.iter().any(|entry| entry.name == name)
+    })
+}
+
 /// One retry over a cold relay dial to the host device (the file mention
 /// picker's exact courtesy), and a short wait when the host's file workers
 /// are all busy.
@@ -3019,6 +3173,115 @@ mod tests {
         chat.cwd = None;
         state.chats[0] = chat;
         assert!(context_for(&state).is_err());
+    }
+
+    /// A workspace's own chat, in its folder, granted "api" (a checkout)
+    /// and "web" (plain folder), as the engine lists them.
+    fn workspace_state() -> AppState {
+        let mut state = AppState::new();
+        state.bots = vec![crate::test_fixtures::bot()];
+        state.chats.push(cypher_proto::Chat {
+            id: "bot-chat".into(),
+            device_id: "dev-2".into(),
+            cwd: Some("/data/bots/b".into()),
+            bot: Some(cypher_proto::BotChat::owner("b")),
+            ..crate::test_fixtures::chat()
+        });
+        state.selected_chat = Some("bot-chat".into());
+        state.local_device_id = Some("dev-1".into());
+        state
+    }
+
+    fn root(space: Option<&str>, name: &str, path: &str) -> cypher_proto::ChatFileRoot {
+        cypher_proto::ChatFileRoot {
+            space_id: space.map(str::to_owned),
+            name: name.into(),
+            path: path.into(),
+            checkout_id: (space == Some("api")).then(|| "co-api".to_string()),
+        }
+    }
+
+    #[test]
+    fn a_workspace_chat_browses_its_picked_root() {
+        let mut state = workspace_state();
+        // Its roots on their way: no context yet (not the session refusal).
+        assert_eq!(context_for(&state), Err("Loading…"));
+        state.set_file_roots_for_test(vec![
+            root(None, "Bot", "/private/data/bots/b"),
+            root(Some("api"), "api", "/src/api"),
+            root(Some("web"), "web", "/src/web"),
+        ]);
+        // The first granted project by default; every request carries the
+        // chat's own cwd and names the project.
+        let context = context_for(&state).unwrap();
+        assert_eq!(context.root_space_id.as_deref(), Some("api"));
+        assert_eq!(context.root, "/src/api");
+        let params = context.params("src/lib.rs");
+        assert_eq!(params["cwd"], "/data/bots/b");
+        assert_eq!(params["rootSpaceId"], "api");
+        assert_eq!(params["targetDeviceId"], "dev-2");
+        // The workspace's own folder: no rootSpaceId.
+        state.chat_roots_pick_for_test(None);
+        let context = context_for(&state).unwrap();
+        assert_eq!(context.root, "/private/data/bots/b");
+        assert!(!context.params("notes.md").contains_key("rootSpaceId"));
+        // Git never shows the plain folder: the pick's checkout, else the
+        // first one.
+        assert_eq!(state.git_root().unwrap().name, "api");
+        state.chat_roots_pick_for_test(Some("web"));
+        assert_eq!(context_for(&state).unwrap().root, "/src/web");
+        assert_eq!(state.git_root().unwrap().name, "api");
+        let git = state.git_chat_row().unwrap();
+        assert_eq!(git.cwd.as_deref(), Some("/src/api"));
+        assert_eq!(git.checkout_id.as_deref(), Some("co-api"));
+        assert_eq!(git.space_id.as_deref(), Some("api"));
+        // References look in every root, the chat's folder first.
+        let links = link_contexts(&state).unwrap();
+        assert!(links.multi_root());
+        let roots: Vec<_> = links
+            .contexts
+            .iter()
+            .map(|c| c.root_space_id.as_deref())
+            .collect();
+        assert_eq!(roots, vec![None, Some("api"), Some("web")]);
+    }
+
+    #[test]
+    fn an_older_engine_shows_the_workspace_folder_without_a_picker() {
+        let mut state = workspace_state();
+        let fallback =
+            crate::files::roots::fallback_roots(state.selected_chat_row().unwrap(), "Bot");
+        state.set_file_roots_for_test(fallback);
+        let context = context_for(&state).unwrap();
+        assert_eq!(context.root_space_id, None);
+        assert_eq!(context.root, "/data/bots/b");
+        // One root: the picker has nothing to offer; no checkout for Git.
+        assert!(
+            matches!(state.file_roots(), crate::state::FileRoots::Ready(list) if list.len() == 1)
+        );
+        assert!(state.git_root().is_none());
+        assert!(state.git_chat_row().is_none());
+    }
+
+    #[test]
+    fn a_session_keeps_its_single_checkout() {
+        let mut state = AppState::new();
+        state.chats.push(cypher_proto::Chat {
+            id: "c1".into(),
+            cwd: Some("/work/repo".into()),
+            space_id: Some("s1".into()),
+            ..crate::test_fixtures::chat()
+        });
+        state.selected_chat = Some("c1".into());
+        assert_eq!(state.file_roots(), crate::state::FileRoots::None);
+        let links = link_contexts(&state).unwrap();
+        assert!(!links.multi_root());
+        assert_eq!(links.contexts[0].root, "/work/repo");
+        assert!(!links.contexts[0].params("a").contains_key("rootSpaceId"));
+        assert!(matches!(
+            state.git_chat_row(),
+            Some(std::borrow::Cow::Borrowed(_))
+        ));
     }
 
     #[test]

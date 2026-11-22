@@ -2371,3 +2371,251 @@ fn needs_you_counts_records_and_worker_questions_across_bots() {
     );
     assert_eq!(bots::started_by_mark(&state, "plain"), None);
 }
+
+// ---- The workspace chat's dock (docs/features/files.md "Workspace chats") ----
+
+use crate::shell::bots::PanelItem;
+use crate::shell::session::SlotId;
+
+/// A windowed shell on the Botboard showing workspace "bob", whose chat
+/// runs in its folder and is granted projects "api" and "web" (as the
+/// engine lists them); returns the board slot.
+fn workspace_board(
+    cx: &mut gpui::TestAppContext,
+) -> (Entity<Shell>, &mut gpui::VisualTestContext, SlotId) {
+    let ui = tempfile::tempdir().unwrap().keep();
+    cx.update(|cx| {
+        gpui_tokio::init(cx);
+        cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
+        crate::widgets::text_input::init(cx);
+        crate::terminal::panel::init(cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    let boot = EngineBootConfig {
+        data_dir: ui.clone(),
+        ipc_socket: cypher_env::ipc_socket(&ui).unwrap(),
+        edge_url: "http://127.0.0.1:1".into(),
+        edge_token: None,
+        org_id: None,
+        workos_client_id: None,
+        default_harness: cypher_proto::HarnessId::Mock,
+    };
+    let (shell, vcx) = cx.add_window_view({
+        let state = state.clone();
+        move |_, cx| Shell::new(state, boot, ui, cx)
+    });
+    state.update(vcx, |s, cx| {
+        s.connection = ConnectionStatus::Ready;
+        s.workspace_scope = Some(WorkspaceScope::Local);
+        s.auth = Some(AuthState::SignedOut);
+        s.local_device_id = Some("dev".into());
+        s.apply_bots(vec![test_bot("bob")]);
+        s.apply_chats(vec![
+            test_chat("a", false),
+            cypher_proto::Chat {
+                cwd: Some("/data/bots/bob".into()),
+                ..test_bot_chat("bob")
+            },
+        ]);
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    shell.update(vcx, |shell, cx| {
+        shell.pages.setup_dismissed = true;
+        shell.open_chat("bob-chat".into(), cx);
+    });
+    vcx.run_until_parked();
+    let sid = shell.read_with(vcx, |shell, _| shell.board.slot.unwrap());
+    let root = |space: Option<&str>, name: &str, path: &str| cypher_proto::ChatFileRoot {
+        space_id: space.map(str::to_owned),
+        name: name.into(),
+        path: path.into(),
+        checkout_id: space.map(|id| format!("co-{id}")),
+    };
+    let slot_state = shell.read_with(vcx, |shell, _| shell.tiles.slots[&sid].state.clone());
+    slot_state.update(vcx, |s, cx| {
+        assert_eq!(s.file_roots(), crate::state::FileRoots::Loading);
+        s.set_file_roots_for_test(vec![
+            root(None, "BOB", "/data/bots/bob"),
+            root(Some("api"), "api", "/src/api"),
+            root(Some("web"), "web", "/src/web"),
+        ]);
+        cx.notify();
+    });
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    (shell, vcx, sid)
+}
+
+fn board_side(
+    shell: &Entity<Shell>,
+    sid: SlotId,
+    cx: &mut gpui::VisualTestContext,
+) -> (bool, bool) {
+    shell.read_with(cx, |shell, _| {
+        (
+            shell.tiles.slots[&sid].dock.open,
+            shell.board.panel.is_some(),
+        )
+    })
+}
+
+fn open_link(shell: &Entity<Shell>, sid: SlotId, url: &str, cx: &mut gpui::VisualTestContext) {
+    let link = crate::files::links::parse(url).unwrap();
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| shell.open_file_link(sid, link, window, cx));
+    });
+    cx.run_until_parked();
+}
+
+fn shown_root(
+    shell: &Entity<Shell>,
+    sid: SlotId,
+    cx: &mut gpui::VisualTestContext,
+) -> Option<String> {
+    shell.read_with(cx, |shell, cx| {
+        crate::files::context_for(shell.tiles.slots[&sid].state.read(cx))
+            .unwrap()
+            .root_space_id
+    })
+}
+
+#[gpui::test]
+fn the_workspace_chat_has_a_dock_and_a_terminal(cx: &mut gpui::TestAppContext) {
+    let (shell, vcx, sid) = workspace_board(cx);
+    shell.read_with(vcx, |shell, cx| {
+        assert!(!shell.slot_is_hidden_bot_thread(sid, cx));
+        let slot = &shell.tiles.slots[&sid];
+        assert!(shell.files_available(slot, cx));
+        assert!(
+            shell.slot_git_detected(slot, cx),
+            "its projects are checkouts"
+        );
+    });
+    shell.update(vcx, |shell, cx| shell.toggle_dock(sid, cx));
+    assert_eq!(board_side(&shell, sid, vcx), (true, false));
+    vcx.update(|window, cx| {
+        shell.update(cx, |shell, cx| shell.toggle_terminal(sid, window, cx));
+    });
+    shell.read_with(vcx, |shell, _| {
+        assert!(shell.tiles.slots[&sid].terminal_open);
+    });
+    // The board renders its chat with the rail and the open docks.
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_dock_and_the_detail_panel_take_turns_on_the_right(cx: &mut gpui::TestAppContext) {
+    let (shell, vcx, sid) = workspace_board(cx);
+    shell.update(vcx, |shell, cx| shell.open_panel(PanelItem::NeedsYou, cx));
+    assert_eq!(board_side(&shell, sid, vcx), (false, true));
+    // The dock opening shuts the panel…
+    shell.update(vcx, |shell, cx| shell.toggle_dock(sid, cx));
+    assert_eq!(board_side(&shell, sid, vcx), (true, false));
+    // …and the panel opening shuts the dock.
+    shell.update(vcx, |shell, cx| shell.open_panel(PanelItem::Activity, cx));
+    assert_eq!(board_side(&shell, sid, vcx), (false, true));
+    // The rail's side panel button: shut what is open, then reopen it.
+    shell.update(vcx, |shell, cx| shell.toggle_board_side(sid, cx));
+    assert_eq!(board_side(&shell, sid, vcx), (false, false));
+    shell.update(vcx, |shell, cx| shell.toggle_board_side(sid, cx));
+    assert_eq!(board_side(&shell, sid, vcx), (false, true));
+    shell.read_with(vcx, |shell, _| {
+        assert_eq!(shell.board.panel, Some(PanelItem::Activity));
+    });
+    // A file reference opens Files in the dock, and the panel shuts.
+    open_link(&shell, sid, "/src/web/app/page.tsx:12", vcx);
+    assert_eq!(board_side(&shell, sid, vcx), (true, false));
+    // The button shuts the dock, and brings the dock (with its Files tab)
+    // back.
+    shell.update(vcx, |shell, cx| shell.toggle_board_side(sid, cx));
+    assert_eq!(board_side(&shell, sid, vcx), (false, false));
+    shell.update(vcx, |shell, cx| shell.toggle_board_side(sid, cx));
+    assert_eq!(board_side(&shell, sid, vcx), (true, false));
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_reference_opens_in_the_root_it_resolves_in(cx: &mut gpui::TestAppContext) {
+    use dock::DockSurface;
+    let (shell, vcx, sid) = workspace_board(cx);
+    // Nothing opened yet: Files shows the first granted project.
+    assert_eq!(shown_root(&shell, sid, vcx).as_deref(), Some("api"));
+    // An absolute path inside a project opens there, and Files and Git
+    // follow that project from then on.
+    open_link(&shell, sid, "/src/web/app/page.tsx:12", vcx);
+    assert_eq!(shown_root(&shell, sid, vcx).as_deref(), Some("web"));
+    shell.read_with(vcx, |shell, cx| {
+        let slot = &shell.tiles.slots[&sid];
+        assert!(slot.dock.open);
+        assert!(matches!(slot.dock.active, DockSurface::Files(_)));
+        let state = slot.state.read(cx);
+        let git = state.git_chat_row().unwrap();
+        assert_eq!(git.cwd.as_deref(), Some("/src/web"));
+        assert_eq!(git.checkout_id.as_deref(), Some("co-web"));
+    });
+    // Inside the workspace's own folder: that folder.
+    open_link(&shell, sid, "/data/bots/bob/notes.md", vcx);
+    assert_eq!(shown_root(&shell, sid, vcx), None);
+    // Git stays on a checkout (the folder is none).
+    shell.read_with(vcx, |shell, cx| {
+        let state = shell.tiles.slots[&sid].state.read(cx);
+        assert_eq!(
+            state.git_chat_row().unwrap().cwd.as_deref(),
+            Some("/src/api")
+        );
+    });
+    // Outside every root: never in Files; the pick stays.
+    open_link(&shell, sid, "/src/website/a.rs", vcx);
+    open_link(&shell, sid, "/no/such/folder/hosts", vcx);
+    assert_eq!(shown_root(&shell, sid, vcx), None);
+    let files_tabs = shell.read_with(vcx, |shell, _| shell.tiles.slots[&sid].files.len());
+    assert_eq!(files_tabs, 1, "one Files tab, reused");
+    // A relative path tries the workspace's folder first (with no engine
+    // to ask, it opens there).
+    open_link(&shell, sid, "/src/api/lib.rs", vcx);
+    assert_eq!(shown_root(&shell, sid, vcx).as_deref(), Some("api"));
+    open_link(&shell, sid, "src/lib.rs", vcx);
+    assert_eq!(shown_root(&shell, sid, vcx), None);
+}
+
+#[gpui::test]
+fn git_names_its_project_whenever_the_chat_has_several_roots(cx: &mut gpui::TestAppContext) {
+    let (shell, vcx, sid) = workspace_board(cx);
+    let slot_state = shell.read_with(vcx, |shell, _| shell.tiles.slots[&sid].state.clone());
+    let root = |space: Option<&str>, git: bool| cypher_proto::ChatFileRoot {
+        space_id: space.map(str::to_owned),
+        name: space.unwrap_or("BOB").into(),
+        path: format!("/src/{}", space.unwrap_or("bob")),
+        checkout_id: git.then(|| format!("co-{}", space.unwrap_or("bob"))),
+    };
+    let names = |choice: Option<(Vec<cypher_proto::ChatFileRoot>, cypher_proto::ChatFileRoot)>| {
+        choice.map(|(choices, shown)| {
+            let names: Vec<String> = choices.into_iter().map(|root| root.name).collect();
+            (names, shown.name)
+        })
+    };
+    // Two checkouts: a menu of both.
+    let two = slot_state.read_with(vcx, |s, _| names(s.git_root_choice()));
+    assert_eq!(two, Some((vec!["api".into(), "web".into()], "api".into())));
+    // One checkout among several roots, with Files on the other project:
+    // Git still names the checkout it shows (a label, one choice).
+    slot_state.update(vcx, |s, _| {
+        s.set_file_roots_for_test(vec![
+            root(None, false),
+            root(Some("api"), true),
+            root(Some("web"), false),
+        ]);
+        s.chat_roots_pick_for_test(Some("web"));
+        assert_eq!(s.files_root().map(|r| r.name.as_str()), Some("web"));
+    });
+    let one = slot_state.read_with(vcx, |s, _| names(s.git_root_choice()));
+    assert_eq!(one, Some((vec!["api".into()], "api".into())));
+    // The workspace's folder alone: nothing to name.
+    slot_state.update(vcx, |s, _| {
+        s.set_file_roots_for_test(vec![root(None, false)])
+    });
+    assert_eq!(slot_state.read_with(vcx, |s, _| s.git_root_choice()), None);
+}
