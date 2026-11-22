@@ -1266,7 +1266,8 @@ export class Permissions {
         carried: [...(command.envValues ?? []), ...(wrapped ? command.words.slice(0, command.words.length - words.length) : [])],
         wrappers: wrapped?.wrappers ?? [],
         cwd: here,
-        inert: isInert(words) || this.harmlessFilter(words, here),
+        // A system shell whose script the reader read (`bash -c '…'`, `bash <<'EOF'`) only runs the commands that follow it.
+        inert: isInert(words) || this.harmlessFilter(words, here) || (command.script === true && this.systemProgram(words[0], here)),
       });
       if (!moves(command)) continue;
       const [program, target, ...rest] = command.words;

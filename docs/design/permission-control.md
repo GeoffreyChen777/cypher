@@ -481,6 +481,13 @@ rules (`commands.ts`, in `permissions.json`'s `commands`, a project's
     of their own (like a subshell; a `cd` there leaves the directory unknown). For any other
     program its known text is the command's `input` (shown to the model); an unquoted body
     with `$` or `\` is known only when it runs (`inputUnknown`).
+  - `bash -c '…'`, `sh -c`, `zsh -c`, `bash -lc`, through wrappers that only run the shell
+    (`env A=1`, `nohup`, `time`, `nice`, `timeout N`, `command`): a `-c` script whose text
+    is known is read as the shell's commands (a shell of its own, like a heredoc script; at
+    most 4 shells deep, a `cd` two shells down leaves the directory unknown), and a system
+    shell whose script was read is then only a wrapper (`inert`), so `bash -c 'L'` acts on
+    and decides as `L` does, the floor included. A script known only when it runs stays the
+    shell's own unreadable line, for the model.
   - `A=1 B=2 cmd` keeps the values for the command (`envValues`); `env [-u X] [A=1] cmd` is
     read through as before (`unwrap`). An assignment that changes how programs run
     (`PATH=…`, `LD_*`, `GIT_*`, …) no longer makes the line opaque: the program is known
@@ -996,6 +1003,16 @@ session entries `cypher-permissions.created` from before the ledger are still re
 The chat's own workspace roots and the temp directories count as its own anyway
 (`disposable`), and so does the branch checked out in a workspace root, which is the work
 Cypher gave the chat (`workspaceBranches`, never a default branch).
+
+The other way round (`risk.ts` `assessCommand`, 2026-11-22): a catalogue destroyer or
+stopper whose target the ledger doesn't hold, nor a lifecycle follow-up of it, is a danger
+whatever else would call it local — `xcrun simctl delete`, `docker`/`podman rm`, `stop` or
+`kill`, `gh repo delete`, `gh release delete`, `gh pr close`, `npm unpublish`, `multipass
+delete` — because what it destroys may be another party's; it then needs the owner's
+consent (§7.3.2, §7.3.7) and is never remembered. Kinds whose owner is told by where they
+are keep their own rules (`TOLD_BY_PLACE`: paths and worktrees in the chat's folders, the
+branch and tags of its checkout, processes carrying its marker). An echoed "creator"
+mints nothing (§ above), so it changes none of this.
 
 What that makes local work instead of a danger (`risk.ts` `facts.created`): a command
 whose every destroy or stop target (catalogue) is a follow-up of the ledger (§7.3.6) — a

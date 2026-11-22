@@ -154,6 +154,8 @@ export interface ParseOptions {
 const MAX_EXPANDED = 256;
 /** At most this many words a for-loop is expanded over. */
 const MAX_ITERATIONS = 64;
+/** How many shells' scripts deep the evaluator reads (`bash -c` inside `bash -c` …). */
+const MAX_SCRIPT_DEPTH = 4;
 /** Shells whose input is a script. */
 const SCRIPT_SHELLS = /^(sh|bash|zsh|dash|ksh)$/;
 /** Options of a shell reading its script from its input (no `-c`, no arguments). */
@@ -178,11 +180,13 @@ interface Variables {
   calling: string[];
   /** How many commands loops and calls have added (bounded by [`MAX_EXPANDED`]). */
   budget: { used: number };
+  /** How many shells' scripts deep this is (`bash -c '… bash -c …'`). */
+  depth: number;
 }
 
 /** A copy of the variables for a shell, loop iteration or call of its own; functions and the budget are shared. */
 function forkVariables(vars: Variables, values = new Map(vars.values)): Variables {
-  return { values, poisoned: vars.poisoned, expanded: vars.expanded, functions: vars.functions, calling: vars.calling, budget: vars.budget };
+  return { values, poisoned: vars.poisoned, expanded: vars.expanded, functions: vars.functions, calling: vars.calling, budget: vars.budget, depth: vars.depth };
 }
 
 /**
@@ -224,7 +228,7 @@ function readLine(line: string, home: string, options: ParseOptions, cwd: string
     // `$HOME` is the home folder `~` stands for, until the line changes it.
     const values = new Map<string, string | undefined>([["HOME", home]]);
     if (cwd !== undefined) values.set("PWD", cwd);
-    const vars: Variables = { values, poisoned: false, expanded: new Set(), functions: new Map(), calling: [], budget: { used: 0 } };
+    const vars: Variables = { values, poisoned: false, expanded: new Set(), functions: new Map(), calling: [], budget: { used: 0 }, depth: 0 };
     read(line, home, options, commands, false, vars, { next: 1 });
     return { kind: "simple", commands, expands: [...vars.expanded] };
   } catch (error) {
@@ -402,23 +406,34 @@ function read(
     }
     command.input = text;
     if (!scriptShell(command.words)) return;
-    const inner: Variables = { values: new Map([["HOME", home]]), poisoned: false, expanded: vars.expanded, functions: new Map(), calling: [], budget: vars.budget };
+    if (!runScript(command, text)) command.inputUnknown = true;
+  };
+
+  /**
+   * A shell runs `text` as its script (its input, or `-c`): its commands are
+   * read as a shell of their own, after it (like a subshell; inside one, the
+   * same, and then scoped: a `cd` there leaves the directory unknown).
+   * Returns whether they could be read.
+   */
+  const runScript = (command: SimpleCommand, text: string): boolean => {
+    if (vars.depth >= MAX_SCRIPT_DEPTH) return false;
+    // What the shell inherits: the exported `HOME` and `PWD`, as this line knows them.
+    const values = new Map<string, string | undefined>([["HOME", vars.poisoned ? undefined : vars.values.get("HOME")]]);
+    if (!vars.poisoned && vars.values.has("PWD")) values.set("PWD", vars.values.get("PWD"));
+    const inner: Variables = { values, poisoned: false, expanded: vars.expanded, functions: new Map(), calling: [], budget: vars.budget, depth: vars.depth + 1 };
     const commands: SimpleCommand[] = [];
     try {
-      // A shell of its own, like a subshell; inside one, the same (its commands are scoped: a `cd` there leaves the directory unknown).
       read(text, home, options, commands, false, inner, subshells, subshell ?? subshells.next++);
     } catch (error) {
       if (!(error instanceof Opaque)) throw error;
-      command.inputUnknown = true;
-      return;
+      return false;
     }
-    if (!spend(commands.length)) {
-      command.inputUnknown = true;
-      return;
-    }
+    if (!spend(commands.length)) return false;
     command.script = true;
     const at = out.indexOf(command);
-    out.splice(at < 0 ? out.length : at + 1, 0, ...commands.map((inside) => apart(inside, command.loop)));
+    const apartToo = command.scoped || subshell !== undefined;
+    out.splice(at < 0 ? out.length : at + 1, 0, ...commands.map((inside) => ({ ...inside, scoped: inside.scoped || apartToo, loop: inside.loop || command.loop, topLevel: false })));
+    return true;
   };
 
   const resetWord = () => {
@@ -686,6 +701,9 @@ function read(
       // The heredocs this command opened are its input; those of a command that isn't one are nobody's.
       for (const heredoc of heredocs) if (heredoc.owner === undefined) heredoc.owner = pushed ?? null;
       if (hereString !== undefined && pushed) feed(pushed, hereString ?? undefined);
+      // `bash -c '…'` (through wrappers that only run it): a literal script is read as the shell's commands.
+      const script = pushed && programRuns ? dashC(pushed.words, options) : undefined;
+      if (script !== undefined && pushed) runScript(pushed, script);
     }
     hereString = undefined;
     hiddenProgram = false;
@@ -1067,6 +1085,67 @@ function read(
   endCommand("end");
   if (heredocs.length) throw new Opaque("an unterminated heredoc");
   if (blocks.length) throw new Opaque(`an unfinished \`${{ if: "if", loop: "loop", case: "case", group: "{" }[blocks.at(-1)!]}\``);
+}
+
+/** Options of `env`, `nice`, `timeout` that take a value; `env` options that do more than set the environment. */
+const WRAPPER_VALUES: Readonly<Record<string, readonly string[]>> = { env: ["-u", "--unset"], nice: ["-n"], timeout: ["-s", "--signal", "-k", "--kill-after"] };
+const WRAPPER_REFUSES: Readonly<Record<string, RegExp>> = { env: /^(-S|--split-string|-C|--chdir|-P)/ };
+/** Wrappers that only run the command after them, and whether a duration comes first (`timeout 30 cmd`). */
+const RUNS_NEXT: Readonly<Record<string, { duration?: boolean }>> = { env: {}, nohup: {}, time: {}, nice: {}, timeout: { duration: true }, command: {} };
+
+/**
+ * The script of `sh -c '…'`, `bash -lc '…'`, `env A=1 bash -c '…'`: the
+ * shell's `-c` text, when every word up to it is known, the wrappers only run
+ * the shell, and the assignments in front of it change nothing about how
+ * programs run (`prefixAllowed`). Undefined otherwise.
+ */
+function dashC(words: readonly string[], options: ParseOptions): string | undefined {
+  let i = 0;
+  for (let guard = 0; guard < 8; guard++) {
+    const program = words[i];
+    if (program === undefined || program === UNKNOWN) return undefined;
+    const name = program.replace(/^.*\//, "");
+    const wrapper = RUNS_NEXT[name];
+    if (!wrapper) break;
+    i++;
+    if (name === "command" && /^-[vV]/.test(words[i] ?? "")) return undefined;
+    for (; i < words.length; i++) {
+      const word = words[i];
+      if (word === UNKNOWN) return undefined;
+      if (WRAPPER_REFUSES[name]?.test(word)) return undefined;
+      const assignment = name === "env" ? /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(word) : null;
+      if (assignment) {
+        if (!options.prefixAllowed?.(assignment[1])) return undefined;
+        continue;
+      }
+      if (!word.startsWith("-") || word === "-") break;
+      if (WRAPPER_VALUES[name]?.includes(word)) i++;
+    }
+    if (wrapper.duration) {
+      if (!/^\d+(\.\d+)?[smhd]?$/.test(words[i] ?? "")) return undefined;
+      i++;
+    }
+  }
+  const shell = words[i];
+  if (shell === undefined || !SCRIPT_SHELLS.test(shell.replace(/^.*\//, ""))) return undefined;
+  let dashed = false;
+  for (i++; i < words.length; i++) {
+    const word = words[i];
+    if (word === UNKNOWN) return undefined;
+    if (word === "-o" || word === "+o") {
+      if (!/^[a-z]+$/.test(words[++i] ?? "")) return undefined;
+      continue;
+    }
+    if (/^--(login|noprofile|norc|posix)$/.test(word)) continue;
+    if (/^[-+][eEuxvlnhBCTPc]+$/.test(word)) {
+      if (word.startsWith("-") && word.includes("c")) dashed = true;
+      continue;
+    }
+    break;
+  }
+  if (!dashed) return undefined;
+  const text = words[i];
+  return text === undefined || text === UNKNOWN ? undefined : text;
 }
 
 /** A shell that reads its script from its input: no `-c`, no script file, no arguments. */
