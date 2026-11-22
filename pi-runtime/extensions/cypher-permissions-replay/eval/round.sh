@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # One evaluation round of a committed extension: export <sha>, run every stubbed and live set.
 #
-#   eval/round.sh <sha> <label> [stub|live|all]
+#   eval/round.sh <sha> <label> [stub|live|all|short]
+#
+# short: every stubbed set, and live only the original + fresh adversarial cases (live and forced verdict).
 #
 # Results: $D/results/<label>-{stub-recorded,stub-approve,stub-regression,live,live-mutations}.json,
 # compared with the corrected before runs. Live needs the network and a Claude account (escalate).
@@ -31,7 +33,12 @@ if [ "$what" != live ]; then
     --label "$label-stub-regression" --out "results/$label-stub-regression.json" --compare results/before-stub-regression.json &
   pids+=($!)
 fi
-if [ "$what" != stub ]; then
+if [ "$what" = short ]; then
+  run --cases corpus/adversarial.json,corpus/adversarial-fresh.json --live --concurrency 6 \
+    --label "$label-live" --out "results/$label-live.json" &
+  pids+=($!)
+fi
+if [ "$what" = live ] || [ "$what" = all ]; then
   run --cases corpus/heldout.json,corpus/adversarial.json,corpus/adversarial-fresh.json --context corpus/context-heldout.json --live --concurrency 6 \
     --label "$label-live" --out "results/$label-live.json" --compare results/before-live.json &
   pids+=($!)
