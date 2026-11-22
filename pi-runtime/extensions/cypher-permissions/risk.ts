@@ -34,7 +34,7 @@ import { isUnder } from "./paths.ts";
 import type { CommandView, PackFacts } from "./packs.ts";
 import type { Classification } from "./paths.ts";
 import { UNKNOWN } from "./shell.ts";
-import { TOLD_BY_PLACE } from "./catalogue.ts";
+import { genericDestroyer, TOLD_BY_PLACE } from "./catalogue.ts";
 
 export type Tier = "inspect" | "local" | "danger";
 
@@ -202,6 +202,8 @@ export interface RiskCommand {
   carried?: readonly string[];
   /** What each word known only when it runs surely starts with (shell.ts `hints`), one per word. */
   hints?: readonly (string | undefined)[];
+  /** It is a shell or interpreter that runs code from its input, which is known only when it runs (`… | sh`, `sh < file`). */
+  stdinCode?: boolean;
 }
 
 /** What `kill`, `pkill` and `killall` would stop. */
@@ -260,6 +262,8 @@ export interface RiskFacts extends PackFacts {
      * merged. `why`: the lifecycle rules.
      */
     destroys?(command: RiskCommand): { own: boolean; op: "destroy" | "stop"; why: string[]; kinds: readonly string[] } | undefined;
+    /** The ledger holds something of any kind by this name. */
+    named?(name: string): boolean;
   };
   /** A canonical path of the permission system itself (config.ts): a change there always asks. */
   permissionSystem?(path: string): boolean;
@@ -660,8 +664,10 @@ function gitPushDanger(command: RiskCommand, view: CommandView, facts: RiskFacts
     if (!git || !git.current) return "pushes a branch known only when it runs";
     return isDefault(git.current, git, facts) ? `publishes to ${git.current}` : undefined;
   }
-  for (const refspec of refspecs) {
-    if (refspec.startsWith("+")) return "force-pushes a branch";
+  for (const spelled of refspecs) {
+    if (spelled.startsWith("+")) return "force-pushes a branch";
+    // One spelling for one push: `refs/heads/x:refs/heads/x`, `x:x` and `HEAD:x` (on x) are `x`.
+    const refspec = normalRefspec(spelled, git?.current);
     const [source, target = source] = refspec.split(":");
     if (source === "") return "deletes a remote branch";
     const name = target.replace(/^refs\/heads\//, "");
@@ -672,6 +678,20 @@ function gitPushDanger(command: RiskCommand, view: CommandView, facts: RiskFacts
     if (isDefault(branch, git, facts)) return `publishes to ${branch}`;
   }
   return undefined;
+}
+
+/** A refspec as its shortest spelling: `refs/heads/` dropped, `x:x` and `HEAD:x` (x checked out) as `x`. */
+export function normalRefspec(refspec: string, current: string | undefined): string {
+  const heads = (ref: string) => ref.replace(/^refs\/heads\//, "");
+  if (!refspec.includes(":")) return refspec.startsWith("refs/tags/") ? refspec : heads(refspec);
+  const [source, target] = refspec.split(":", 2);
+  if (source === "" || source.startsWith("refs/tags/") || target.startsWith("refs/tags/")) {
+    const tag = (ref: string) => ref.replace(/^refs\/tags\//, "");
+    return source !== "" && tag(source) === tag(target) ? `refs/tags/${tag(target)}` : refspec;
+  }
+  const from = heads(source) === "HEAD" && current ? current : heads(source);
+  const to = heads(target);
+  return from === to ? to : `${from}:${to}`;
 }
 
 function isDefault(branch: string, git: GitFacts, facts: RiskFacts): boolean {
@@ -781,6 +801,9 @@ function gitDiscardDanger(command: RiskCommand, view: CommandView, facts: RiskFa
     const names = view.positionals.slice(1).filter((word) => word !== UNKNOWN);
     const own = (name: string) => facts.created?.branch(name) === true || facts.workspaceBranches?.().includes(name) === true;
     if (names.length && names.length === view.positionals.length - 1 && names.every(own)) return undefined;
+    // Anyone else's branch, in any checkout: its owner decides.
+    const others = view.positionals.slice(1).filter((name) => name === UNKNOWN || !own(name));
+    return others.includes(UNKNOWN) ? "deletes a branch known only when it runs" : `deletes ${others.join(", ")}, a branch this chat didn't create`;
   }
   const discards =
     (sub === "reset" && view.args.some((word) => word === "--hard" || word === "--merge" || word === "--keep")) ||
@@ -896,14 +919,47 @@ function runsNext(view: CommandView): string[] | undefined {
  * `TOLD_BY_PLACE`), may be another party's: a danger, whatever else says.
  */
 export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessment {
+  // Code read from its input, known only when it runs: never local work.
+  if (command.stdinCode) return { tier: "danger", kind: "runs code known only when it runs (from its input)", key: "stdin-code" };
   const assessment = assessWords(command, facts);
   if (assessment.tier === "danger" || command.words.length === 0 || command.words[0] === UNKNOWN) return assessment;
   const undo = facts.created?.destroys?.(command);
-  if (!undo || undo.own) return assessment;
+  if (!undo) return genericDestroy(command, assessment, facts);
+  if (undo.own) return assessment;
   const foreign = undo.kinds.filter((kind) => !(kind in TOLD_BY_PLACE));
   if (foreign.length === 0) return assessment;
   const kind = `${undo.op === "stop" ? "stops" : "deletes"} ${foreign.map((item) => (item === "repo" ? "a repository" : item === "pr" ? "a pull request" : `a ${item}`)).join(" or ")} this chat didn't create or start`;
   return { tier: "danger", kind, key: `foreign-${foreign[0]}` };
+}
+
+/**
+ * A program no catalogue row reads, given a destroy verb as its subcommand
+ * (catalogue.ts `genericDestroyer`): what it destroys has an owner Cypher
+ * can't tell, unless every operand is in the ledger or a path in the chat's
+ * own folders. Inspections, interpreters and the project's own scripts stay
+ * as they are.
+ */
+function genericDestroy(command: RiskCommand, assessment: Assessment, facts: RiskFacts): Assessment {
+  if (assessment.tier === "inspect") return assessment;
+  const program = basename(command.words[0]);
+  if (INTERPRETERS.test(program) || SHELLS.test(program) || facts.programIsLocal?.(command.words)) return assessment;
+  // The project's own script (`./scripts/dev.sh stop`): its effect is the project's, for the model.
+  if (command.words[0].includes("/")) {
+    const script = facts.classify(command.words[0], command.cwd);
+    if (script && disposable(script.path, facts)) return assessment;
+  }
+  const found = genericDestroyer(command.words);
+  if (!found) return assessment;
+  const own = (word: string) => {
+    if (word === UNKNOWN) return false;
+    if (facts.created?.named?.(word)) return true;
+    if (!word.includes("/") && !word.startsWith(".")) return false;
+    const classification = facts.classify(word, command.cwd);
+    return classification !== undefined && disposable(classification.path, facts);
+  };
+  if (found.operands.length && found.operands.every(own)) return assessment;
+  const said = command.words.slice(0, command.words.indexOf(found.verb) + 1).map((word) => (word === command.words[0] ? program : word)).join(" ");
+  return { tier: "danger", kind: `destroys or stops something whose owner Cypher can't tell (\`${said}\`)`, key: `destroys-${program}` };
 }
 
 function assessWords(command: RiskCommand, facts: RiskFacts): Assessment {

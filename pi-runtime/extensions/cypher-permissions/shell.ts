@@ -182,11 +182,13 @@ interface Variables {
   budget: { used: number };
   /** How many shells' scripts deep this is (`bash -c '… bash -c …'`). */
   depth: number;
+  /** `evaluate`: aliases the line defined, by name (shared like functions). */
+  aliases?: Map<string, string>;
 }
 
 /** A copy of the variables for a shell, loop iteration or call of its own; functions and the budget are shared. */
 function forkVariables(vars: Variables, values = new Map(vars.values)): Variables {
-  return { values, poisoned: vars.poisoned, expanded: vars.expanded, functions: vars.functions, calling: vars.calling, budget: vars.budget, depth: vars.depth };
+  return { values, poisoned: vars.poisoned, expanded: vars.expanded, functions: vars.functions, calling: vars.calling, budget: vars.budget, depth: vars.depth, aliases: vars.aliases };
 }
 
 /**
@@ -671,7 +673,16 @@ function read(
         const commands = reread(word.slice(at + 1), forkVariables(vars));
         if (commands === undefined || !spend(commands.length)) throw new Opaque("an alias");
         for (const command of commands) out.push(apart(command, loop));
+        (vars.aliases ??= new Map()).set(word.slice(0, at), word.slice(at + 1));
       }
+    }
+    // A command named like an alias the line defined runs the alias's text with its words (when aliases expand).
+    const alias = evaluate && words.length > 0 && words[0] !== UNKNOWN ? vars.aliases?.get(words[0]) : undefined;
+    if (alias !== undefined) {
+      if (words.includes(UNKNOWN)) throw new Opaque("an alias given words known only when it runs");
+      const commands = reread(`${alias} ${words.slice(1).map((item) => `'${item.replaceAll("'", `'\\''`)}'`).join(" ")}`, forkVariables(vars));
+      if (commands === undefined || !spend(commands.length)) throw new Opaque("an alias");
+      for (const command of commands) out.push(apart(command, loop));
     }
     // A call of a function the line defined runs its body; the call's redirections stay its own.
     const fn = evaluate && words.length > 0 && words[0] !== UNKNOWN && vars.functions.has(words[0]);

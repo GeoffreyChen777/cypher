@@ -190,6 +190,11 @@ export class CreatedStore {
     return { ...destruction, own, why: own ? [...why] : [] };
   }
 
+  /** Whether the ledger holds something of any kind by this name (a destroyer no row reads names it so). */
+  named(name: string): boolean {
+    return this.ledger.all().some((entry) => (entry.action ?? "create") === "create" && (entry.name === name || entry.name.toLowerCase() === name.toLowerCase()));
+  }
+
   /** A canonical path this chat made, or one inside a directory it made. */
   has(path: string): boolean {
     return this.covers({ kind: "path", name: path }) || this.covers({ kind: "worktree", name: path });

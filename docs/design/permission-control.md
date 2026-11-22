@@ -1059,6 +1059,29 @@ are keep their own rules (`TOLD_BY_PLACE`: paths and worktrees in the chat's fol
 branch and tags of its checkout, processes carrying its marker). An echoed "creator"
 mints nothing (§ above), so it changes none of this.
 
+Destroyers no row reads (2026-11-22, round 3): any program whose first word or two after
+its options is a destroy verb (`catalogue.ts` `DESTROY_VERBS`: rm, rmi, delete, remove,
+destroy, erase, prune, purge, unregister…, uninstall, kill, stop, drop, wipe, …) and that no
+catalogue row covers — `docker network rm`, `podman pod rm`, `limactl delete`, `tart
+delete`, `VBoxManage unregistervm`, `utmctl delete`, `gh run delete` — "destroys or stops
+something whose owner Cypher can't tell": a danger, unless every operand is in the ledger
+(any kind, by name) or a path in the chat's own folders. Left as they were: inspections,
+interpreters and shells, the project's own scripts (a program in its folders), and verbs
+that act on the project (`PROJECT_VERBS`: `npm uninstall`, `cargo remove`, task runners
+like `make`, and git, which risk.ts reads by itself). `git branch -d/-D` of a branch that is
+neither in the ledger nor checked out in the chat's workspace is a danger in any checkout.
+
+A push's refspec counts by its short spelling (`risk.ts` `normalRefspec`):
+`refs/heads/x:refs/heads/x`, `x:x`, `refs/heads/x` and `HEAD:x` with x checked out are
+`x`, and `refs/tags/t:refs/tags/t` is `refs/tags/t`, for the tier and for the target the
+owner's words are checked against.
+
+Code a shell or interpreter reads from its input (`… | sh`, `printf … | bash`, `sh <
+file`, `cat x | python3`, an unquoted heredoc or here-string with `$`), when the reader can't
+read it, is a danger whose target can't be read (§7.3.7), never local work; so are `bash -c
+"$X"` and `eval "$X"`. An alias the line defines (`alias g=git; g push --force …`) is
+expanded where it is called.
+
 What that makes local work instead of a danger (`risk.ts` `facts.created`): a command
 whose every destroy or stop target (catalogue) is a follow-up of the ledger (§7.3.6) — a
 worktree, branch, simulator, container, file, repository or release it made, a process

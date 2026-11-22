@@ -569,6 +569,51 @@ export const TOLD_BY_PLACE: Readonly<Partial<Record<LedgerKind, string>>> = {
   process: "this chat's processes carry its marker (core.ts `ownsProcesses`)",
 };
 
+/**
+ * Subcommand verbs that destroy or stop something, for programs no row
+ * covers (`docker network rm`, `limactl delete`, `VBoxManage unregistervm`):
+ * what such a command destroys has an owner Cypher can't tell (risk.ts).
+ */
+export const DESTROY_VERBS =
+  /^(rm|rmi|rmdir|del|delete|remove|destroy|erase|prune|purge|unregister\w*|deregister|uninstall|kill|stop|drop|wipe|nuke|terminate|teardown|unpublish|yank|deprovision|decommission)$/i;
+
+/**
+ * Programs whose destroy verbs act on the project at hand (its dependencies,
+ * its tasks) or that risk.ts reads by itself: no generic reading for them.
+ */
+export const PROJECT_VERBS: Readonly<Record<string, RegExp>> = {
+  git: /.*/,
+  npm: /^(uninstall|remove|rm|r|un|unlink|prune)$/,
+  pnpm: /^(remove|rm|uninstall|un|prune)$/,
+  yarn: /^(remove)$/,
+  bun: /^(remove|rm)$/,
+  cargo: /^(remove|rm)$/,
+  uv: /^(remove)$/,
+  poetry: /^(remove)$/,
+  make: /.*/, just: /.*/, task: /.*/, rake: /.*/, ninja: /.*/,
+};
+
+/** A destroy verb as one of a command's first two words (after options), and the operands after it. */
+export function genericDestroyer(words: readonly string[]): { verb: string; operands: string[] } | undefined {
+  const program = basename(words[0] ?? "");
+  if (!program || program === UNKNOWN) return undefined;
+  const positionals: { word: string; at: number }[] = [];
+  for (let i = 1; i < words.length && positionals.length < 2; i++) {
+    const word = words[i];
+    if (word === UNKNOWN) break;
+    if (word.startsWith("-")) continue;
+    positionals.push({ word, at: i });
+  }
+  for (const [index, { word, at }] of positionals.entries()) {
+    // The second word only after a plain group name (`docker network rm`), never after a file or a script.
+    if (index === 1 && !/^[a-z][a-z0-9-]*$/i.test(positionals[0].word)) break;
+    if (!DESTROY_VERBS.test(word)) continue;
+    if (PROJECT_VERBS[program]?.test(word)) return undefined;
+    return { verb: word, operands: words.slice(at + 1).filter((item) => item === UNKNOWN || !item.startsWith("-")) };
+  }
+  return undefined;
+}
+
 /** What a command deletes or stops: per target, the entities it may be (any one of them). */
 export interface Destruction {
   op: "destroy" | "stop";

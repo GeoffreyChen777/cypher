@@ -47,7 +47,7 @@ import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs }
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
 import { benignEnv, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
-import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, redirectRisk, TIER_RANK } from "./risk.ts";
+import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, normalRefspec, redirectRisk, TIER_RANK } from "./risk.ts";
 import type { Assessment, GitFacts, KillTarget, ProcessFacts, RiskFacts, Tier } from "./risk.ts";
 import { INSPECT, inspectMatches, viewOf } from "./packs.ts";
 import { parseShell, UNKNOWN } from "./shell.ts";
@@ -345,6 +345,8 @@ export type CommandCheck =
 /** One command of a bash line, seen through its wrappers, with the directory it runs in (undefined: not known). */
 interface LineCommand extends SimpleCommand {
   cwd: string | undefined;
+  /** It runs code from its input that is known only when it runs (risk.ts). */
+  stdinCode?: boolean;
   inert: boolean;
   /** The wrappers that only run it (`nohup`, `timeout 30`). */
   wrappers: string[];
@@ -353,6 +355,15 @@ interface LineCommand extends SimpleCommand {
 }
 
 const DIRECTORY_BUILTINS: ReadonlySet<string> = new Set(["cd", "pushd", "popd"]);
+
+/** Shells and interpreters that run code from their input: no script, no `-c`/`-e`, only options (or `-`). */
+const CODE_READERS = /^(sh|bash|zsh|dash|ksh|fish|python\d*(\.\d+)?|node|deno|bun|ruby|perl|php|lua|osascript|tclsh|Rscript)$/;
+function readsCode(words: readonly string[]): boolean {
+  const program = words[0];
+  if (program === undefined || program === UNKNOWN || !CODE_READERS.test(basename(program))) return false;
+  const shell = /^(sh|bash|zsh|dash|ksh|fish)$/.test(basename(program));
+  return words.slice(1).every((word) => word === "-" || (word !== UNKNOWN && /^[-+][A-Za-z]+$/.test(word) && !(shell ? /^-[A-Za-z]*c/ : /^-[A-Za-z]*[ce]/).test(word)) || /^--(login|noprofile|norc|posix)$/.test(word));
+}
 
 /** Variables bash itself reads: a line that assigns one changes how what follows runs. */
 const SHELL_VARIABLES =
@@ -1245,7 +1256,7 @@ export class Permissions {
     // A subshell starts where the line's shell is, and its `cd` stays in it.
     let outside: string | undefined = cwd;
     let group: number | undefined;
-    for (const command of commands) {
+    for (const [index, command] of commands.entries()) {
       if (command.subshell !== group) {
         // Entering one from the line's shell, or leaving one (for the line, or the next subshell).
         if (group === undefined) outside = here;
@@ -1268,6 +1279,8 @@ export class Permissions {
         cwd: here,
         // A system shell whose script the reader read (`bash -c '…'`, `bash <<'EOF'`) only runs the commands that follow it.
         inert: isInert(words) || this.harmlessFilter(words, here) || (command.script === true && this.systemProgram(words[0], here)),
+        // A shell or interpreter reading code from its input, when the reader couldn't read that code.
+        ...(command.script !== true && readsCode(words) && (command.reads.length > 0 || command.inputUnknown === true || commands[index - 1]?.joint === "|") ? { stdinCode: true } : {}),
       });
       if (!moves(command)) continue;
       const [program, target, ...rest] = command.words;
@@ -1858,10 +1871,29 @@ export class Permissions {
         const fromWrites = danger && redirectRisk(item, facts)?.tier === "danger";
         const wordsDanger = danger && (!fromWrites || (!item.inert && assessCommand({ ...item, writes: [] }, facts).tier === "danger"));
         const writes = fromWrites ? item.writes.map((path) => (path === UNKNOWN ? UNKNOWN : (this.classify(path, item.cwd ?? this.cwd).path ?? path))) : [];
-        return { words: item.words, cwd: item.cwd, danger: wordsDanger, ...(writes.length ? { writes } : {}) };
+        return { words: this.shortRefspecs(item.words, item.cwd), cwd: item.cwd, danger: wordsDanger, ...(writes.length ? { writes } : {}) };
       }),
       this.targetFacts(),
     );
+  }
+
+  /** A `git push`'s refspecs in their short spelling (risk.ts `normalRefspec`), so every spelling names the same target. */
+  private shortRefspecs(words: readonly string[], cwd: string | undefined): readonly string[] {
+    if (basename(words[0] ?? "") !== "git") return words;
+    const at = words.indexOf("push");
+    if (at < 0) return words;
+    let remote = false;
+    const current = cwd === undefined ? undefined : this.gitAt(cwd)?.current;
+    return words.map((word, index) => {
+      if (index <= at || word === UNKNOWN || word.startsWith("-")) return word;
+      if (!remote) {
+        remote = true;
+        return word;
+      }
+      const forced = word.startsWith("+");
+      const short = normalRefspec(forced ? word.slice(1) : word, current);
+      return forced ? `+${short}` : short;
+    });
   }
 
   private targetFacts(): TargetFacts {
@@ -2046,6 +2078,7 @@ export class Permissions {
         has: (path) => this.created.has(path),
         worktree: (path) => this.created.worktree(path),
         branch: (name) => this.created.branch(name),
+        named: (name) => this.created.named(name),
         destroys: (command) => {
           const found = this.created.destroys({ ...command, cwd: command.cwd }, this.catalogueFacts());
           return found ? { own: found.own, op: found.op, why: found.why, kinds: found.kinds } : undefined;
