@@ -892,6 +892,22 @@ function ordinaryWord(word: string): boolean {
 }
 const LEXICON_WORD = new RegExp(`^(?:${allWords().source})$`, "iu");
 
+/**
+ * A name a role marker marks ("into develop", "from feat-a") that reads as a
+ * ref, not prose: ref-shaped (no spaces, no capitals), no word of the table
+ * and no part that is one ("chart-side"), and either a `/`, `_` or digit, a
+ * conventional branch name, or a `-` that ends its phrase (not an
+ * adjective before a noun: "read-only mode").
+ */
+function markedRef(name: string, after: string): boolean {
+  if (!/^[a-z0-9][a-z0-9._/-]*$/.test(name) || ordinaryWord(name) || REMOTE_NAMES.test(name)) return false;
+  if (/[/_\d]/.test(name) || BRANCHY.test(name)) return true;
+  if (!name.includes("-") || name.split("-").some((part) => part.length >= 3 && ordinaryWord(part))) return false;
+  const next = after.trim().split(/\s+/)[0] ?? "";
+  const ends = next === "" || /^[,.;:!?，。；！？、)]/.test(after.trimStart()) || listWords("baseBefore").test(next) || listWords("headBefore").test(next) || ordinaryWord(next.replace(/[^\p{L}\p{N}-]+$/u, ""));
+  return ends;
+}
+
 /** Branch names that are branches whatever the repository has. */
 const BRANCHY = /^(main|master|develop|development|dev|trunk|staging)$/i;
 const VERSIONISH = /^v?\d+(?:\.\d+)*$/;
@@ -956,7 +972,7 @@ export function namedAttributes(text: string, context: EntityContext, isBranch: 
         continue;
       }
     }
-    if (exists || coded || (role !== undefined && name.includes("/"))) out.branches.push({ name: ref, ...(role ? { role } : {}) });
+    if (exists || coded || (role !== undefined && markedRef(ref, after))) out.branches.push({ name: ref, ...(role ? { role } : {}) });
   }
   return out;
 }

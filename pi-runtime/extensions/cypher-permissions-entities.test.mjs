@@ -388,7 +388,13 @@ test("lexicon: words in a script no row covers ask, and say why", () => {
   assert.match(later.reason, /Thai script/);
 });
 
-const branchName = () => `${pick(["fix", "feat", "release", "hotfix", "cypher"])}${pick(["/", "-"])}${word()}-${Math.floor(rand() * 100)}`;
+const branchName = () =>
+  pick([
+    () => `${pick(["fix", "feat", "hotfix", "cypher"])}${pick(["/", "-"])}${word()}-${Math.floor(rand() * 100)}`,
+    // Bare names a role marker marks: no slash, no digit.
+    () => `${pick(["feat", "fix", "hotfix", "topic"])}-${pick(["a", "b", "x", "badge", "relay"])}`,
+    () => pick(["develop", "dev", "staging", "trunk"]),
+  ])();
 const repoName = () => `${pick(["acme", "Owner", "me"])}/${pick(["app", "web", "infra"])}${Math.floor(rand() * 10)}`;
 
 test("attributes (property): a pull request whose base, head or repository differs from the one the consent names never passes", () => {
@@ -397,7 +403,9 @@ test("attributes (property): a pull request whose base, head or repository diffe
     const [head, base, otherBase, otherHead] = [branchName(), branchName(), branchName(), branchName()];
     const repo = repoName().toLowerCase();
     const other = `${pick(["x", "y", "z"])}corp/${pick(["lib", "api"])}`;
-    const known = new Set([head, base, otherBase, otherHead]);
+    if (new Set([head, base, otherBase, otherHead]).size < 4) continue;
+    // Bare names are not known to the repository: only the role marker makes them branches.
+    const known = new Set([head, base, otherBase, otherHead].filter((name) => /[/\d]/.test(name)));
     const f = { git: () => ({ current: head, defaults: ["main"], isBranch: (name) => known.has(name) }), tagExists: () => false, readFile: () => undefined };
     const ef = { originRepo: () => repo, release: () => ({}), home: "/home/me" };
     const read = lineTargets([{ words: ["gh", "pr", "create", "--base", base, "--head", head, "-R", repo, "--title", "x"], cwd: "/w/app", danger: true }], f);
@@ -421,7 +429,7 @@ test("attributes (property): a pull request whose base, head or repository diffe
       checked++;
     }
   }
-  assert.equal(checked, 900);
+  assert.ok(checked >= 600, `${checked}`);
 });
 
 test("repositories (property): qualifying, unqualifying or URL-ifying a target in the current repository changes nothing", () => {
