@@ -69,9 +69,12 @@ struct MermaidPalette: Hashable, Sendable {
             "warning": hex(over(canvas, Theme.warning)),
             "success": hex(over(canvas, Theme.success)),
         ]
+        // The fifth series is the violet inline code used to read in; inline
+        // code is neutral now, the chart keeps its hue.
+        let violet = Theme.adaptive(light: oklch(0.491, 0.241, 292.581), dark: oklch(0.811, 0.111, 293.571))
         let series = [
             Theme.accent, Theme.success, Theme.warning, Theme.statusWorking,
-            Theme.inlineCodeText, Theme.danger,
+            violet, Theme.danger,
         ].map { hex(over(canvas, $0)) }
         return MermaidPalette(dark: dark, roles: roles, series: series)
     }

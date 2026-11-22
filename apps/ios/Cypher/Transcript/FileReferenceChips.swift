@@ -1,8 +1,8 @@
 // File references and file links in transcript text (desktop
 // transcript/code_ref.rs, files/links.rs): a reference in inline code shows
 // as a chip — a file glyph, the file name and muted lines on a faint neutral
-// wash with a hairline outline, never the inline-code color — and
-// a tap on a chip or a file link opens the file in the session's Files sheet
+// wash with a hairline outline, told from plain inline code by its shape,
+// not by color — and a tap on a chip or a file link opens the file in the session's Files sheet
 // at its lines. A long press shows the cited lines from the checkout as it is
 // now, with Open and Copy.
 
@@ -93,7 +93,7 @@ extension NSAttributedString.Key {
 /// A file reference chip (desktop markdown/render.rs `ChipStyle`): the file
 /// glyph, the name in medium-weight code type and the muted lines, on a
 /// faint neutral wash with a hairline outline, so a reference stands out
-/// from the prose around it without the inline-code color.
+/// from the prose and from plain inline code by its shape, not by color.
 ///
 /// The text holds the chip's padding — its leading glue the left padding,
 /// the glyph and the gap to the name, a kern after its last character the
@@ -110,9 +110,9 @@ enum FileReferenceChip {
     /// `INLINE_CODE_MARGIN`). Copies as nothing.
     static let margin = "\u{2009}"
 
-    /// The name's and the lines' size, in em of the prose: code type a
-    /// little smaller than the prose, as the chip mock has it.
-    nonisolated static let nameEm: CGFloat = 0.84
+    /// The name's and the lines' size, in em of the prose: the one code
+    /// scale inline code is set at too (`Theme.codeScale`).
+    nonisolated static let nameEm: CGFloat = Theme.codeScale
     /// The file glyph's side, in em of the prose (render.rs `CHIP_GLYPH_EM`).
     nonisolated static let glyphEm: CGFloat = 0.86
     /// The box's height, in em of the prose: 17 pt on 14 pt body text, a

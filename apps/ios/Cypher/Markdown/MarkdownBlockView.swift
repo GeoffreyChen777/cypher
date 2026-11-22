@@ -15,7 +15,8 @@ enum MD {
     static let codeLineHeight: CGFloat = 18
     static let codePaddingX: CGFloat = 12
     static let codePaddingY: CGFloat = 10
-    static let inlineCodeRadius: CGFloat = 4.5
+    /// The inline-code box's corner radius (composer chips share it).
+    static let inlineCodeRadius: CGFloat = 5
 
     static func headingMetrics(_ level: Int) -> (size: CGFloat, line: CGFloat) {
         switch level {

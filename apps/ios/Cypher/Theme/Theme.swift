@@ -56,11 +56,16 @@ enum Theme {
     /// Claude brand orange — kept even on the mono surface.
     static let claudeBrand = Color(red: 0xD9 / 255.0, green: 0x77 / 255.0, blue: 0x57 / 255.0)
 
-    // ---- paint: markdown inline code (violet family) ----
-    static let inlineCodeText = adaptive(light: oklch(0.491, 0.241, 292.581), dark: oklch(0.811, 0.111, 293.571))
+    // ---- paint: markdown inline code (neutral) ----
+    /// Inline code is set apart by its type and its box, not by color: it
+    /// reads in the body ink, on a neutral ink wash — black on light, white
+    /// on dark (desktop theme.rs inline code). Syntax colors belong to code
+    /// blocks alone.
+    static let inlineCodeText = text
+    static let inlineCodeWashLight: CGFloat = 0.06
+    static let inlineCodeWashDark: CGFloat = 0.08
     static let inlineCodeWash = adaptive(
-        light: oklch(0.541, 0.281, 293.009).opacity(0.08),
-        dark: oklch(0.702, 0.183, 293.541).opacity(0.12))
+        light: .black.opacity(inlineCodeWashLight), dark: .white.opacity(inlineCodeWashDark))
 
     // ---- paint: syntax tokens (soft, paint-only) ----
     static let tokenKeyword = adaptive(light: oklch(0.49, 0.16, 20.0), dark: oklch(0.709, 0.129, 20.0))
@@ -79,6 +84,11 @@ enum Theme {
     }
 
     // ---- numbers drive layout (pt) ----
+    /// Code in prose — inline code and file reference names — is set this
+    /// much smaller than the prose around it, one scale for both (desktop
+    /// theme.rs `CODE_SCALE`). Code blocks keep their own size
+    /// (`MD.codeTextSize`).
+    static let codeScale: CGFloat = 0.86
     static let bubbleRadius: CGFloat = 16
     static let panelRadius: CGFloat = 10
 }

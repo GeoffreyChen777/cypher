@@ -202,7 +202,9 @@ final class FileReferenceTests: XCTestCase {
         let string = text.string as NSString
         let name = string.range(of: "a.rs")
         let font = try XCTUnwrap(text.attribute(.font, at: name.location, effectiveRange: nil) as? UIFont)
-        XCTAssertEqual(font.pointSize, MD.textSize * 0.84, accuracy: 0.001)
+        // The one code scale, as inline code.
+        XCTAssertEqual(FileReferenceChip.nameEm, Theme.codeScale)
+        XCTAssertEqual(font.pointSize, MD.textSize * 0.86, accuracy: 0.001)
         XCTAssertTrue(font.fontName.hasPrefix("GeistMono"), font.fontName)
         let variation = CTFontCopyVariation(font as CTFont) as? [Int: Double]
         XCTAssertEqual(variation?[Theme.monoWeightAxis], 500)

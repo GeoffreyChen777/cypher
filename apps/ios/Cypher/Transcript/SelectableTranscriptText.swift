@@ -100,7 +100,7 @@ enum TranscriptTextStyle {
             }
             var font =
                 run.style.code
-                ? Theme.monoUI(size - 1.5)
+                ? Theme.monoUI(size * Theme.codeScale)
                 : Theme.sansUI(size, weight: run.style.bold ? .semibold : weight)
             if run.style.italic,
                 let descriptor = font.fontDescriptor.withSymbolicTraits(
@@ -118,7 +118,13 @@ enum TranscriptTextStyle {
                 attributes[.link] = url
                 attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
             }
+            let start = result.length
             result.append(NSAttributedString(string: run.text, attributes: attributes))
+            if run.style.code {
+                InlineCodeBox.addRoom(
+                    result, code: NSRange(location: start, length: result.length - start),
+                    afterProse: index > 0 && !runs[index - 1].style.code)
+            }
         }
         let paragraph = NSMutableParagraphStyle()
         paragraph.minimumLineHeight = lineHeight
@@ -188,13 +194,13 @@ enum TranscriptTextStyle {
         }
     }
 
-    /// Thinking's quieter tone: body text takes the muted color; inline code
-    /// and links keep theirs.
+    /// Thinking's quieter tone: body text and inline code (which reads in
+    /// the body ink) take the muted color; links keep theirs.
     static func muted(_ text: NSAttributedString) -> NSAttributedString {
         let result = NSMutableAttributedString(attributedString: text)
         var plain: [NSRange] = []
         result.enumerateAttributes(in: NSRange(location: 0, length: result.length)) { attributes, range, _ in
-            if attributes[.cypherInlineCode] == nil, attributes[.link] == nil { plain.append(range) }
+            if attributes[.link] == nil { plain.append(range) }
         }
         let color = UIColor(Theme.textMuted)
         for range in plain { result.addAttribute(.foregroundColor, value: color, range: range) }
@@ -412,22 +418,7 @@ final class TranscriptTextLayoutManager: NSLayoutManager {
             let characters = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
             FileReferenceChip.paint(
                 self, storage: storage, container: container, characters: characters, origin: origin)
-            storage.enumerateAttribute(.cypherInlineCode, in: characters) { value, range, _ in
-                guard let color = value as? UIColor else { return }
-                let glyphs = self.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
-                self.enumerateEnclosingRects(
-                    forGlyphRange: glyphs,
-                    withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
-                    in: container
-                ) { rect, _ in
-                    // The native text view's glyph bounds place this wash
-                    // slightly above the visible ink; nudge it down.
-                    let rect = rect.offsetBy(dx: origin.x, dy: origin.y + 2.5)
-                        .insetBy(dx: -2, dy: 2)
-                    color.setFill()
-                    UIBezierPath(roundedRect: rect, cornerRadius: MD.inlineCodeRadius).fill()
-                }
-            }
+            InlineCodeBox.paint(self, storage: storage, container: container, characters: characters, origin: origin)
         }
         super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
     }
