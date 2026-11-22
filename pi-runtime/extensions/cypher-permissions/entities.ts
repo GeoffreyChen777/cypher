@@ -165,7 +165,7 @@ export function canonical(entity: Entity, context: EntityContext = {}): Entity {
       if (qualified) out.repo ??= qualified[1].toLowerCase();
       const number = qualified?.[2] ?? /(?:^|\/pull\/|\/merge_requests\/|^#|^!)(\d+)$/.exec(out.name)?.[1] ?? (/^\d+$/.test(out.name) ? out.name : undefined);
       if (number) out.name = number;
-      if (/\/pull\/\d+/.test(entity.name)) out.repo ??= repoOf(entity.name);
+      if (/\/(?:pull|merge_requests)\/\d+/.test(entity.name)) out.repo ??= repoOf(entity.name);
       out.repo ??= context.currentRepo;
       const fact = number
         ? context.prs?.find((pr) => pr.number === number && (!pr.repo || !out.repo || repoOf(pr.repo) === out.repo))
@@ -287,8 +287,9 @@ function relate(a: Entity, b: Entity): Relation {
     }
     if (a.kind === "remote") {
       if (b.kind !== "branch") return IN_REPO.has(b.kind) && a.repo && b.repo ? (a.repo === b.repo ? "contains" : "unrelated") : IN_REPO.has(b.kind) ? "unknown" : "unrelated";
-      if (b.remote === a.name) return "contains";
-      return a.repo && b.repo ? (a.repo === b.repo ? "contains" : "unrelated") : "unknown";
+      // The repositories decide when both are known; else the remote's name.
+      if (a.repo && b.repo) return a.repo === b.repo ? "contains" : "unrelated";
+      return b.remote === a.name ? "contains" : "unknown";
     }
     return flip(relate(b, a));
   }
@@ -307,7 +308,12 @@ function relate(a: Entity, b: Entity): Relation {
       if (b.kind === "pr") {
         const repos = inRepos(a, b);
         if (repos) return repos;
-        if (a.name && b.name) return a.name === b.name ? "same" : "unrelated";
+        if (a.name && b.name) {
+          if (a.name !== b.name) return "unrelated";
+          // One number with contradicting branches: one of the facts is wrong.
+          const clash = (x?: string, y?: string) => x !== undefined && y !== undefined && x !== y;
+          return clash(a.head, b.head) || clash(a.base, b.base) ? "unknown" : "same";
+        }
         if (!a.name && !b.name && a.head && b.head) {
           // A new pull request by its branches: one that leaves the base unsaid holds every base.
           if (a.head !== b.head) return "unrelated";

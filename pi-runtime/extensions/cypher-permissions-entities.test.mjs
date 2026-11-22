@@ -22,7 +22,7 @@ function prng(seed) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-const rand = prng(20261122);
+const rand = prng(Number(process.env.PERMISSIONS_SEED ?? 20261122));
 const pick = (list) => list[Math.floor(rand() * list.length)];
 const word = () => pick(["fix", "badge", "relay", "main", "dev", "x", "feature", "ios", "cypher", "gamma", "web"]) + (rand() < 0.5 ? "" : `-${pick(["a", "b", "2", "cluster", "links"])}`);
 const ctx = { currentRepo: "me/app", remotes: { origin: "me/app", upstream: "other/app" }, cwd: "/w/app", home: "/home/me", simulators: [{ udid: "11111111-2222-3333-4444-555555555555", name: "iPhone Test" }] };
@@ -123,10 +123,11 @@ test("entities (property): same is symmetric and transitive, contains antisymmet
     const [a, b, c] = [pick(pool), pick(pool), pick(pool)];
     const ab = relation(a, b, ctx);
     const bc = relation(b, c, ctx);
-    if (ab === "same" && bc === "same") assert.equal(relation(a, c, ctx), "same", `${JSON.stringify([a, b, c])}`);
+    // Transitive, or unknown where one side knows less (a pull request without its head): never a contradiction.
+    if (ab === "same" && bc === "same") assert.ok(["same", "unknown"].includes(relation(a, c, ctx)), `${JSON.stringify([a, b, c])}`);
     if ((ab === "contains" || ab === "same") && (bc === "contains" || bc === "same") && (ab === "contains" || bc === "contains")) {
       chains++;
-      assert.equal(relation(a, c, ctx), "contains", `${JSON.stringify([a, b, c])}`);
+      assert.ok(["contains", "unknown"].includes(relation(a, c, ctx)), `${JSON.stringify([a, b, c])}`);
     }
   }
   assert.ok(chains > 20, `the generator makes containment chains (${chains})`);
@@ -314,4 +315,158 @@ test("consent: the judge sees each kind, and names the one it relies on", () => 
   assert.deepEqual([verdict.quote, verdict.source, verdict.targets], ["merge PR 52", "reply", [{ kind: "pr", value: "52" }]]);
   assert.equal(parseVerdict('{"decision":"approve","reason":"r","userQuote":"merge PR 52"}').quote, "merge PR 52", "the old field still reads");
   assert.ok(ENTITY_KINDS.includes("simulator"));
+});
+
+// --- Round 2: languages, attributes, qualified names -------------------------------
+
+import { LANGUAGES, uncoveredScript } from "./cypher-permissions/lexicon.ts";
+
+const bare = (word) => word.replace(/\*$/, "");
+const UNSPACED_LANGS = new Set(["ja", "ko"]);
+const merge52 = () => targetsOf([["gh", "pr", "merge", "52", "--merge"]]);
+const claim52 = (quote, source) => ({ quote, ...(source ? { source } : {}), targets: [{ kind: "pr", value: "52" }] });
+
+test("lexicon: every language's own merge words ask for a merge; its negations and retractions take it back", () => {
+  let languages = 0;
+  for (const language of LANGUAGES) {
+    const verbs = (language.actions.merge ?? []).map(bare).filter((word) => word.length >= 2);
+    if (!verbs.length) continue;
+    languages++;
+    for (const verb of verbs) {
+      const text = UNSPACED_LANGS.has(language.code) ? `PR #52 ${verb}` : `${verb} PR #52`;
+      const got = checkExplicit(claim52(text), merge52(), words({ text, source: "typed" }), [], explicitFacts);
+      assert.equal(got.ok, true, `${language.code} "${text}": ${got.reason}`);
+      // A later retraction, in the same language, about it.
+      for (const back of language.retract.map(bare)) {
+        const later = UNSPACED_LANGS.has(language.code) || language.code === "zh" ? `PR #52 ${back}` : `${back} PR #52`;
+        const after = checkExplicit(claim52(text), merge52(), words({ text, source: "typed" }, { text: later, source: "typed" }), [], explicitFacts);
+        assert.equal(after.ok, false, `${language.code} later "${later}"`);
+      }
+    }
+    // The message's own "don't", next to the verb.
+    for (const not of language.negate.map(bare)) {
+      const verb = bare(language.actions.merge[0]);
+      const text = UNSPACED_LANGS.has(language.code) ? `PR #52 ${verb}${not}` : `${not} ${verb} PR #52`;
+      const got = checkExplicit(claim52(text), merge52(), words({ text, source: "typed" }), [], explicitFacts);
+      assert.equal(got.ok, false, `${language.code} "${text}" says not to`);
+    }
+  }
+  assert.ok(languages >= 10, `languages with merge words (${languages})`);
+});
+
+test("lexicon: a reply's quote counts from the proposal; found only in the reply it is typed words, checked as such", () => {
+  const read = targetsOf([["gh", "pr", "merge", "52", "--merge"]]);
+  const proposal = "The fix is in. Next I'd merge PR #52.";
+  const agrees = checkExplicit(claim52("merge PR #52", "reply"), read, words({ text: "ok", source: "reply", proposal }), [], explicitFacts);
+  assert.deepEqual([agrees.ok, agrees.quoteSource], [true, "reply"], agrees.reason);
+  for (const language of LANGUAGES) {
+    for (const back of language.retract.map(bare)) {
+      const reply = `${back} merge PR #52`;
+      // The quote sits in the reply's own words: typed, so its own "wait"/"not yet" counts.
+      const got = checkExplicit(claim52("merge PR #52", "reply"), read, words({ text: reply, source: "reply", proposal: "Tests pass." }), [], explicitFacts);
+      assert.equal(got.ok, false, `${language.code} "${reply}": ${got.reason}`);
+      const typed = checkExplicit(claim52("merge PR #52"), read, words({ text: reply, source: "reply", proposal: "Tests pass." }), [], explicitFacts);
+      assert.equal(typed.ok, false, `${language.code} "${reply}" as typed`);
+      // Agreeing to the proposal with a "wait": no.
+      const waits = checkExplicit(claim52("merge PR #52", "reply"), read, words({ text: back, source: "reply", proposal }), [], explicitFacts);
+      assert.equal(waits.ok, false, `${language.code} reply "${back}"`);
+    }
+  }
+  const plain = checkExplicit(claim52("merge PR #52", "reply"), read, words({ text: "merge PR #52", source: "reply", proposal: "Tests pass." }), [], explicitFacts);
+  assert.deepEqual([plain.ok, plain.quoteSource], [true, "typed"], plain.reason);
+});
+
+test("lexicon: words in a script no row covers ask, and say why", () => {
+  assert.equal(uncoveredScript("merge PR 52 please"), undefined);
+  assert.equal(uncoveredScript("合并 PR 52，マージ，병합，слей"), undefined);
+  assert.equal(uncoveredScript("ادمج PR 52"), "Arabic");
+  const read = merge52();
+  const arabic = checkExplicit(claim52("ادمج merge PR #52"), read, words({ text: "ادمج merge PR #52", source: "typed" }), [], explicitFacts);
+  assert.match(arabic.reason, /Arabic script/);
+  const later = checkExplicit(claim52("merge PR #52"), read, words({ text: "merge PR #52", source: "typed" }, { text: "รอก่อน PR #52", source: "typed" }), [], explicitFacts);
+  assert.match(later.reason, /Thai script/);
+});
+
+const branchName = () => `${pick(["fix", "feat", "release", "hotfix", "cypher"])}${pick(["/", "-"])}${word()}-${Math.floor(rand() * 100)}`;
+const repoName = () => `${pick(["acme", "Owner", "me"])}/${pick(["app", "web", "infra"])}${Math.floor(rand() * 10)}`;
+
+test("attributes (property): a pull request whose base, head or repository differs from the one the consent names never passes", () => {
+  let checked = 0;
+  for (let i = 0; i < 300; i++) {
+    const [head, base, otherBase, otherHead] = [branchName(), branchName(), branchName(), branchName()];
+    const repo = repoName().toLowerCase();
+    const other = `${pick(["x", "y", "z"])}corp/${pick(["lib", "api"])}`;
+    const known = new Set([head, base, otherBase, otherHead]);
+    const f = { git: () => ({ current: head, defaults: ["main"], isBranch: (name) => known.has(name) }), tagExists: () => false, readFile: () => undefined };
+    const ef = { originRepo: () => repo, release: () => ({}), home: "/home/me" };
+    const read = lineTargets([{ words: ["gh", "pr", "create", "--base", base, "--head", head, "-R", repo, "--title", "x"], cwd: "/w/app", danger: true }], f);
+    const languages = LANGUAGES.filter((language) => language.actions.create?.length && (language.baseBefore?.length || language.baseAfter?.length) && (language.headBefore?.length || language.headAfter?.length));
+    const language = pick(languages);
+    const verb = bare(language.actions.create[0]);
+    const say = (from, into, inRepo) => {
+      // A repository named as one: by the language's word for it, or by its URL.
+      const noun = language.nouns.repo?.[0] ? bare(language.nouns.repo[0]) : undefined;
+      const where = inRepo ? (noun && rand() < 0.7 ? ` ${noun} ${inRepo}` : ` https://github.com/${inRepo}`) : "";
+      if (language.baseAfter?.length) return `PR${where} ${from}${language.headAfter[0]} ${into}${language.baseAfter[0]} ${verb}`;
+      return `${verb} PR${where} ${language.headBefore[0]} ${from} ${language.baseBefore[0]} ${into}`;
+    };
+    const claim = (text) => ({ quote: text, targets: [{ kind: "pr", value: `${head} → ${base}` }] });
+    const right = say(head, base, rand() < 0.5 ? repo : undefined);
+    const ok = checkExplicit(claim(right), read, words({ text: right, source: pick(["typed", "plan", "card"]) }), [], ef);
+    assert.equal(ok.ok, true, `${language.code} "${right}": ${ok.reason}`);
+    for (const wrong of [say(head, otherBase), say(otherHead, base), say(head, base, other)]) {
+      const got = checkExplicit(claim(wrong), read, words({ text: wrong, source: pick(["typed", "plan", "card"]) }), [], ef);
+      assert.equal(got.ok, false, `${language.code} "${wrong}" for ${head} → ${base} in ${repo}`);
+      checked++;
+    }
+  }
+  assert.equal(checked, 900);
+});
+
+test("repositories (property): qualifying, unqualifying or URL-ifying a target in the current repository changes nothing", () => {
+  const owner = pick(["GeoffreyChen777", "Owner", "acme"]);
+  const name = pick(["cypher", "app"]);
+  const cases = (s) => [s, s.toLowerCase(), s.toUpperCase(), s.replace(/./g, (c) => (rand() < 0.5 ? c.toUpperCase() : c.toLowerCase()))];
+  const origins = [`https://github.com/${owner}/${name}.git`, `git@github.com:${owner}/${name}.git`, `${owner}/${name}`, `${owner.toLowerCase()}/${name}`];
+  for (let i = 0; i < 200; i++) {
+    const n = String(1 + Math.floor(rand() * 400));
+    const qualified = pick(cases(`${owner}/${name}`));
+    const ef = { originRepo: () => pick(origins), release: () => ({}), home: "/home/me" };
+    const line = pick([
+      ["gh", "pr", "merge", n, "--merge"],
+      ["gh", "pr", "merge", n, "--repo", qualified, "--merge"],
+      ["gh", "pr", "merge", `https://github.com/${qualified}/pull/${n}`, "--squash"],
+      ["glab", "mr", "merge", n, "-R", qualified],
+    ]);
+    const read = targetsOf([line]);
+    const claimValue = pick([n, `#${n}`, `${qualified}#${n}`, `https://github.com/${qualified}/pull/${n}`]);
+    const consent = pick([`merge PR #${n}`, `merge ${pick(cases(`${owner}/${name}`))}#${n}`, `merge https://github.com/${qualified}/pull/${n}`, `PR ${n} 没问题合并`]);
+    const got = checkExplicit({ quote: consent, targets: [{ kind: "pr", value: claimValue }] }, read, words({ text: consent, source: "typed" }), [], ef);
+    assert.equal(got.ok, true, `${line.join(" ")} / ${claimValue} / "${consent}": ${got.reason}`);
+    // The same in another repository: never.
+    const elsewhere = targetsOf([["gh", "pr", "merge", n, "--repo", "other/elsewhere", "--merge"]]);
+    assert.equal(checkExplicit({ quote: consent, targets: [{ kind: "pr", value: claimValue }] }, elsewhere, words({ text: consent, source: "typed" }), [], ef).ok, false, `other repo, "${consent}"`);
+  }
+  // Branches and tags too.
+  const ef = { originRepo: () => `https://github.com/${owner}/${name}`, release: () => ({}), home: "/home/me" };
+  for (const value of ["fix-x", "origin/fix-x", "refs/heads/fix-x"]) {
+    const read = targetsOf([["git", "push", "origin", "fix-x"]]);
+    assert.equal(checkExplicit({ quote: "push fix-x to origin", targets: [{ kind: "branch", value }] }, read, words({ text: "push fix-x to origin", source: "typed" }), [], ef).ok, true, value);
+  }
+  for (const repo of [undefined, `${owner}/${name}`, `${owner.toUpperCase()}/${name}`]) {
+    const read = targetsOf([["gh", "release", "create", "v1.2.3", ...(repo ? ["--repo", repo] : []), "--notes", "x"]]);
+    const got = checkExplicit({ quote: "release v1.2.3", targets: [{ kind: "tag", value: "v1.2.3" }] }, read, words({ text: "release v1.2.3", source: "typed" }), [], ef);
+    assert.equal(got.ok, true, `${repo}: ${got.reason}`);
+  }
+});
+
+test("tools: glab merge requests read like gh pull requests", () => {
+  const create = targetsOf([["glab", "mr", "create", "--target-branch", "release/2.0", "--source-branch", "fix-x", "--title", "t"]]);
+  assert.deepEqual(create.targets.map((t) => [t.kind, t.action, t.head, t.base]), [["pr", "create", "fix-x", "release/2.0"]]);
+  const merge = targetsOf([["glab", "mr", "merge", "https://gitlab.com/me/app/-/merge_requests/9"]]);
+  assert.deepEqual(merge.targets.map((t) => [t.value, t.repo]), [["9", "me/app"]]);
+  const words1 = words({ text: "open an MR from fix-x into release/2.0", source: "typed" });
+  assert.equal(checkExplicit({ quote: "open an MR from fix-x into release/2.0", targets: [{ kind: "pr", value: "fix-x → release/2.0" }] }, create, words1, [], explicitFacts).ok, true);
+  const intoMain = targetsOf([["glab", "mr", "create", "-b", "main", "-s", "fix-x", "-t", "t"]]);
+  assert.equal(checkExplicit({ quote: "open an MR from fix-x into release/2.0", targets: [{ kind: "branch", value: "main" }] }, intoMain, words1, [], explicitFacts).ok, false, "another base");
 });

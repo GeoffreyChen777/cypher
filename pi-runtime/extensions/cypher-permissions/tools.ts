@@ -78,7 +78,7 @@ const VALUE_OPTIONS: Readonly<Record<string, readonly string[]>> = {
     "--add-reviewer", "--remove-reviewer", "--add-assignee", "--remove-assignee", "--add-project", "--remove-project", "--hostname", "-q", "--jq",
     "--json", "-e", "-d", "--description", "-h", "--homepage", "--source", "--remote", "-g", "--gitignore", "--license",
   ],
-  glab: ["-R", "--repo", "-b", "--target-branch", "-s", "--source-branch", "-t", "--title", "-d", "--description", "-l", "--label", "-a", "--assignee", "-m", "--milestone", "-n", "--name", "-N", "--notes", "-r", "--ref"],
+  glab: ["-R", "--repo", "-b", "--target-branch", "-s", "--source-branch", "-H", "--head", "--target-project", "-r", "--reviewer", "-t", "--title", "-d", "--description", "-l", "--label", "-a", "--assignee", "-m", "--milestone", "-n", "--name", "-N", "--notes", "-r", "--ref"],
   docker: ["-f", "--filter", "--format", "-t", "--time", "-s", "--signal", "--context", "-H", "--host", "--platform"],
   podman: ["-f", "--filter", "--format", "-t", "--time", "-s", "--signal", "--connection", "--platform"],
   kubectl: ["-n", "--namespace", "--context", "--cluster", "-f", "--filename", "-l", "--selector", "-o", "--output", "--replicas", "--grace-period", "--timeout", "-c", "--container", "--kubeconfig"],
@@ -108,7 +108,7 @@ export const TOOLS: readonly ToolRow[] = [
   { programs: ["gh"], sub: ["repo", "rename"], action: "rename", operands: ["repo"], loose: true, options: PR_OPTIONS, needs: "it renames the current repository, which the line doesn't name" },
   { programs: ["gh"], sub: ["repo", "archive"], action: "archive", operands: ["repo"], loose: true, options: PR_OPTIONS, needs: "it archives the current repository, which the line doesn't name" },
   // GitLab.
-  { programs: ["glab"], sub: ["mr", "create"], action: "create", implicit: "pr", loose: true, options: { ...PR_OPTIONS, "-b": { field: "base" }, "--target-branch": { field: "base" }, "-s": { field: "head" }, "--source-branch": { field: "head" } } },
+  { programs: ["glab"], sub: ["mr", "create"], action: "create", implicit: "pr", loose: true, options: { ...PR_OPTIONS, "-b": { field: "base" }, "--target-branch": { field: "base" }, "-s": { field: "head" }, "--source-branch": { field: "head" }, "-H": { kind: "repo" }, "--head": { kind: "repo" } } },
   ...(["merge", "close", "note", "approve", "update", "reopen"] as const).map((sub): ToolRow => ({
     programs: ["glab"], sub: ["mr", sub], action: sub === "note" ? "comment" : sub === "approve" ? "review" : sub === "update" ? "edit" : (sub as Action), operands: ["pr"], loose: true, needs: "it acts on the current branch's merge request, whose number the line doesn't name", options: PR_OPTIONS,
   })),
