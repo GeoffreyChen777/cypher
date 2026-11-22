@@ -14,8 +14,9 @@ final class TranscriptBuilderCache {
     /// The memory cards `builtRows` was built with.
     private var cachedCards: Set<String> = []
     private var builtRows: [TranscriptRow] = []
-    /// The toggle pins `cachedRows` was folded for; nil forces a refold.
-    private var foldedFor: [String: Bool]?
+    /// The toggle pins and revealed work runs `cachedRows` was folded for;
+    /// nil forces a refold.
+    private var foldedFor: Folds?
     private var cachedRows: [TranscriptRow] = []
     private var prewarming = false
     /// The conversation's rounds, for the turn scrubber — rebuilt with the
@@ -24,15 +25,23 @@ final class TranscriptBuilderCache {
     /// Round index by the id of the row that starts it.
     private(set) var roundIndex: [String: Int] = [:]
 
+    /// What the reader's taps fold and unfold in the built rows.
+    private struct Folds: Equatable {
+        var pins: [String: Bool]
+        var revealedRuns: Set<String>
+    }
+
     /// Rows for the store's current `revision`, with the closed toggles
-    /// (`togglePins` over each toggle's default) folded away. Rows only
-    /// change when the doc or the pins do — gate on both and hand back the
-    /// same array.
+    /// (`togglePins` over each toggle's default) folded away and each open
+    /// work run capped to its last tool calls (`revealedRuns`: the runs the
+    /// reader unfolded, by activity row id). Rows only change when the doc
+    /// or the reader's folds do — gate on both and hand back the same array.
     func rows(
         revision: UInt64,
         entries: [MessageEntry],
         pendingSends: [PendingSend],
         togglePins: [String: Bool],
+        revealedRuns: Set<String> = [],
         memoryCards: Set<String> = []
     ) -> [TranscriptRow] {
         if cachedRevision != revision || cachedCards != memoryCards {
@@ -43,9 +52,11 @@ final class TranscriptBuilderCache {
             cachedCards = memoryCards
             foldedFor = nil
         }
-        if foldedFor == togglePins { return cachedRows }
-        cachedRows = TranscriptRowBuilder.foldClosedToggles(builtRows, pins: togglePins)
-        foldedFor = togglePins
+        let folds = Folds(pins: togglePins, revealedRuns: revealedRuns)
+        if foldedFor == folds { return cachedRows }
+        cachedRows = TranscriptRowBuilder.capWorkRuns(
+            TranscriptRowBuilder.foldClosedToggles(builtRows, pins: togglePins), revealed: revealedRuns)
+        foldedFor = folds
         let rounds = TranscriptRound.rounds(in: cachedRows)
         if rounds != self.rounds {
             self.rounds = rounds
