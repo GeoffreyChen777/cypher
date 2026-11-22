@@ -50,7 +50,7 @@ const { values: args } = parseArgs({
 const { query } = await import(args.sdk);
 const context = args.context ? JSON.parse(readFileSync(args.context, "utf8")) : {};
 const only = args.only ? new Set(args.only.split(",").map((id) => Number(id.trim()))) : undefined;
-const productionTimeoutMs = 20_000;
+const productionTimeoutMs = 60_000;
 
 // What claude-bridge sets for every Claude Code child (cc-child.ts CC_CHILD_ENV), without the parent session's markers.
 const PARENT_SESSION_VARS = ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_PID", "CLAUDE_EFFORT", "TRACEPARENT", "CLAUDE_CODE_INVOKED_SKILLS", "CLAUDE_ENV_FILE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"];

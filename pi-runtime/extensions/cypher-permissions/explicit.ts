@@ -43,6 +43,8 @@ import { homedir } from "node:os";
 import { remoteOperand, sshHostIndex } from "./commands.ts";
 import { canonical, claimEntity, describeEntity, identifies, namesOf } from "./entities.ts";
 import type { Entity, EntityContext, EntityKind, PullRequestFact } from "./entities.ts";
+import { antecedentsFor } from "./lifecycle.ts";
+import type { LedgerEntity } from "./ledger.ts";
 import type { GitFacts } from "./risk.ts";
 import { UNKNOWN } from "./shell.ts";
 import { readTool } from "./tools.ts";
@@ -610,6 +612,10 @@ export interface ExplicitFacts {
   originRepo(dir: string): string | undefined;
   /** A tag's commit is on the remote's default branch, and its files hold `version`. Undefined: can't tell. */
   release(dir: string, commit: string, version: string): { onDefault?: boolean; hasVersion?: boolean };
+  /** The pull requests whose head is `branch`, in the repository at `dir` (lifecycle.ts follow-ups). */
+  pullRequestsWithHead?(dir: string | undefined, branch: string): readonly PullRequestFact[];
+  /** The branch checked out in a worktree. */
+  worktreeBranch?(path: string): string | undefined;
 }
 
 type Entry = { type?: string; message?: { role?: string; content?: unknown; toolCallId?: unknown; isError?: unknown } };
@@ -835,6 +841,8 @@ export interface ExplicitResult {
   targets: string[];
   /** Which checks passed: `quote` (the owner's words), `target` (the command's and the owner's), `current` (not taken back since). */
   passed: ("quote" | "target" | "current")[];
+  /** Targets the consent covers as a standard follow-up of what it asks for (lifecycle.ts), with why. */
+  followUps?: string[];
 }
 
 /**
@@ -887,10 +895,13 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
   if ((message.source === "reply" || message.source === "answer") && retracts(message.text, targets)) {
     return result(["quote"], `your answer was "${message.text.trim().slice(0, 140)}"`, source);
   }
-  // Every target must be what the owner's consent asks for.
+  // Every target must be what the owner's consent asks for, or a standard follow-up of it (lifecycle.ts).
+  const followUps: string[] = [];
   for (const target of targets) {
     const why = uncovered(target, said, opened, facts, context);
-    if (why) return result(["quote"], why, source);
+    const follow = why ? consentedFollowUp(target, said, opened, facts, context) : undefined;
+    if (why && !follow) return result(["quote"], why, source);
+    if (follow) followUps.push(follow);
     // "open a PR, don't merge it" asks for no merge, though it says the word.
     if (forbids(said, target)) return result(["quote"], `your message says not to (${describeTarget(target)})`, source);
   }
@@ -906,5 +917,36 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
       targets.some((target) => mentions(text, target.value) || (about !== undefined && concerns(about, target)));
     if (!carriesOn) return result(["quote", "target"], `you've written since ("${short}"), so that request may be about earlier work`, source);
   }
-  return result(["quote", "target", "current"], undefined, source);
+  return result(["quote", "target", "current"], undefined, { ...source, ...(followUps.length ? { followUps } : {}) });
+}
+
+/**
+ * A target the consent doesn't name, that is a standard follow-up of an
+ * action it does ask for (lifecycle.ts): "merge #52" covers deleting #52's
+ * head branch, here and on the remote, and the worktree it is checked out
+ * in. The antecedent is checked against the consent exactly as a target
+ * would be. Returns why it is covered, or undefined.
+ */
+function consentedFollowUp(target: Target, said: string, opened: readonly PullRequestFact[], facts: ExplicitFacts, context: EntityContext): string | undefined {
+  const known = new Map<string, PullRequestFact>();
+  const prsWithHead = (branch: string): LedgerEntity[] => {
+    for (const pr of [...opened.filter((item) => item.head === branch), ...(facts.pullRequestsWithHead?.(target.dir, branch) ?? [])]) known.set(pr.number, pr);
+    return [...known.values()].filter((pr) => pr.head === branch).map((pr) => ({ kind: "pr", name: pr.number, head: pr.head, ...(pr.repo ? { repo: pr.repo } : {}) }));
+  };
+  const acted: LedgerEntity | undefined =
+    target.kind === "branch" ? { kind: "branch", name: target.value, ...(target.remote ? { remote: target.remote } : {}) } : target.entity.kind === "worktree" ? { kind: "worktree", name: target.entity.name } : undefined;
+  if (!acted) return undefined;
+  // Another remote or repository than the consent's stays the owner's to name.
+  if (target.remote && target.remote !== "origin" && !mentions(said, target.remote)) return undefined;
+  const origin = target.dir ? facts.originRepo(target.dir) : undefined;
+  if (target.repo && origin && target.repo !== origin && !mentions(said, target.repo)) return undefined;
+  for (const { rule, antecedent } of antecedentsFor({ action: target.action, entity: acted }, { prsWithHead, worktreeBranch: facts.worktreeBranch })) {
+    const pr = known.get(antecedent.entity.name);
+    const entity: Entity = { kind: "pr", name: antecedent.entity.name, ...(pr?.head ? { head: pr.head } : {}), ...(pr?.base ? { base: pr.base } : {}), ...(pr?.repo ? { repo: pr.repo } : {}) };
+    const before: Target = { kind: "pr", value: entity.name, action: antecedent.action, entity, ...(pr?.repo ? { repo: pr.repo } : {}), ...(target.dir ? { dir: target.dir } : {}) };
+    if (uncovered(before, said, opened, facts, context) === undefined && !forbids(said, before)) {
+      return `${describeTarget(target)}: ${rule.why} (${describeTarget(before)})`;
+    }
+  }
+  return undefined;
 }

@@ -570,3 +570,65 @@ test("lifecycle: a merged pull request's head branch and worktree are follow-ups
   assert.equal(followUpOf(remote, [pushed], { created: () => false }), undefined);
   assert.ok(followUpOf(remote, [pushed], { created: () => true }));
 });
+
+import { checkExplicit, lineTargets } from "./cypher-permissions/explicit.ts";
+
+test("lifecycle: the owner's consent to merge a pull request covers its follow-ups, and nothing else", () => {
+  const targetFacts = { git: () => ({ current: "main", defaults: ["main"], isBranch: () => true }), tagExists: () => false, readFile: () => undefined };
+  const read = (line) => lineTargets(line.map((words) => ({ words, cwd: "/w/app", danger: true })), targetFacts);
+  const prs = { "feat/x": [{ number: "52", head: "feat/x", base: "main" }] };
+  const facts = { originRepo: () => "me/app", release: () => ({}), home: "/home/me", pullRequestsWithHead: (_dir, branch) => prs[branch] ?? [], worktreeBranch: (path) => (path.endsWith("/x-tree") ? "feat/x" : undefined) };
+  const owner = (text) => ({ messages: [{ text, source: "typed" }], agentWritten: false });
+  const claim = (value, kind = "branch") => ({ quote: "merge PR 52", source: "typed", targets: [{ kind, value }] });
+  // Deleting the merged pull request's head branch, on the remote and here, and its worktree.
+  const remote = checkExplicit(claim("feat/x"), read([["git", "push", "origin", "--delete", "feat/x"]]), owner("merge PR 52"), [], facts);
+  assert.equal(remote.ok, true, remote.reason);
+  assert.match(remote.followUps[0], /merged pull request's head branch/);
+  // (`git branch -D` in another checkout: tools.ts has no row for it, so the explicit check can't read it; a merge
+  // this chat ran covers it through the ledger instead, above.)
+  const tree = checkExplicit(claim("/w/x-tree", "worktree"), read([["git", "worktree", "remove", "/w/x-tree"]]), owner("merge PR 52"), [], facts);
+  assert.equal(tree.ok, true, tree.reason);
+  // Not another branch; not when the consent was for something else, or said to keep it.
+  assert.equal(checkExplicit(claim("feat/y"), read([["git", "push", "origin", "--delete", "feat/y"]]), owner("merge PR 52"), [], facts).ok, false);
+  assert.equal(checkExplicit({ ...claim("feat/x"), quote: "review PR 52" }, read([["git", "push", "origin", "--delete", "feat/x"]]), owner("review PR 52"), [], facts).ok, false);
+  const kept = checkExplicit({ ...claim("feat/x"), quote: "merge PR 52 but don't delete the branch" }, read([["git", "push", "origin", "--delete", "feat/x"]]), owner("merge PR 52 but don't delete the branch"), [], facts);
+  assert.equal(kept.ok, false);
+});
+
+test("judge: 60 s per attempt and one retry; the ledger's follow-ups reach it, labelled trusted", async () => {
+  assert.equal(defaultConfig().judge.timeoutMs, 60_000);
+  const { permissions } = engineIn(workspace);
+  permissions.config.judge.timeoutMs = 20;
+  const prompts = [];
+  let calls = 0;
+  const context = (complete) => ({
+    asked: [],
+    cwd: workspace,
+    hasUI: true,
+    ui: { async select(title) { context.last = title; return "Deny"; }, notify() {} },
+    branch: () => [{ type: "message", message: { role: "user", content: "clean up" } }],
+    complete,
+    abort() {},
+  });
+  // The first attempt times out, the retry answers.
+  const flaky = context(async (_system, prompt, signal) => {
+    prompts.push(prompt);
+    calls++;
+    if (calls === 1) return new Promise((resolve) => signal.addEventListener("abort", () => resolve(undefined)));
+    return '{"decision":"approve","reason":"its own"}';
+  });
+  const place = join(ihome, "Developer", "judge-made");
+  const plan = permissions.planCreated(`mkdir -p ${place}`, workspace);
+  mkdirSync(place, { recursive: true });
+  permissions.settleCreated(plan, { exitCode: 0 });
+  const result = await permissions.requestEscalation(`rm -rf ${place}`, { label: "clean up" }, flaky);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(calls, 2);
+  assert.match(prompts[1], /## What this task did itself \(trusted: Cypher's ledger/);
+  assert.match(prompts[1], /what this task created it may clean up/);
+  // Both attempts silent: one timeout for the pause count, and the user is asked.
+  const silent = context((_system, _prompt, signal) => new Promise((resolve) => signal.addEventListener("abort", () => resolve(undefined))));
+  const asked = await permissions.requestEscalation("git merge feature", { label: "x" }, silent);
+  assert.equal(asked.ok, false);
+  assert.equal(permissions.judgePaused(), undefined, "two attempts of one request count once");
+});

@@ -2035,7 +2035,8 @@ test("the judge prompt: checking requested dev work serves the request; a too-br
   assert.match(JUDGE_SYSTEM_PROMPT, /read-only checks of processes and apps: ps, lsof, pgrep, sample, top, vmmap, lsappinfo info/);
   assert.match(JUDGE_SYSTEM_PROMPT, /In a plan's background session, the brief's steps count as the user's request/);
   assert.match(JUDGE_SYSTEM_PROMPT, /None of that covers writing to, deleting in or restarting the installed app/);
-  assert.match(JUDGE_SYSTEM_PROMPT, /What the task made itself is not a danger/);
+  assert.match(JUDGE_SYSTEM_PROMPT, /What the task did itself is not a danger/);
+  assert.match(JUDGE_SYSTEM_PROMPT, /standard follow-ups count as asked for/);
   assert.match(JUDGE_SYSTEM_PROMPT, /Two things always ask the user, so you never see them/);
   const prompt = judgePrompt({ capability: "escalate", paths: [], zone: "outside the sandbox", command: "lsappinfo info 1", level: "standard", workspaceRoots: ["/w"], remembers: ["lsappinfo …"], userMessages: ["check the badge"], recentToolCalls: [] });
   assert.match(prompt, /If this command is fine but those are too broad, answer "approve-once"/);

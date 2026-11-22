@@ -20,6 +20,7 @@ import type { CatalogueFacts } from "./catalogue.ts";
 import { ledgerFile } from "./ledger.ts";
 import type { LedgerEntity } from "./ledger.ts";
 import type { LifecycleFacts } from "./lifecycle.ts";
+import type { PullRequestFact } from "./entities.ts";
 import type { Capability, LevelName, PermissionsConfig } from "./config.ts";
 import {
   anchorDirectories,
@@ -325,6 +326,9 @@ function processPlace(pid: number): { program?: string; cwd?: string } {
   program ??= run("ps", ["-o", "comm=", "-p", String(pid)])?.trim();
   return { program: program && isAbsolute(program) ? program : undefined, cwd };
 }
+
+/** How often the reviewing model is asked before its silence or failure goes to the user: once, and one retry. */
+const JUDGE_ATTEMPTS = 2;
 
 const ESCALATE_HINT =
   "If the command needs what the sandbox withholds (files outside the project folders, credentials, keys, the keychain, other processes, system services), run it again with `escalate`: a reviewing model or the user decides whether it runs outside the sandbox.";
@@ -883,29 +887,35 @@ export class Permissions {
     if (paused) return { decision: "ask-user", once: false, reason: paused, state: "paused" };
     const { userMessages, recentToolCalls } = conversationContext(ctx.branch());
     const judgeRequest: JudgeRequest = { ...request, level: this.level, workspaceRoots: this.roots, userMessages, recentToolCalls, ownerWords: this.ownerWords };
-    const controller = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, this.config.judge.timeoutMs);
-    const onAbort = () => controller.abort();
-    ctx.signal?.addEventListener("abort", onAbort, { once: true });
+    // One attempt, then one retry when it timed out or failed for a reason other than signing in.
     let text: string | undefined;
     let failure: string | undefined;
-    try {
-      text = await ctx.complete(JUDGE_SYSTEM_PROMPT, judgePrompt(judgeRequest), controller.signal);
-    } catch (error) {
-      text = undefined;
-      failure = error instanceof Error ? error.message.trim() : undefined;
-    } finally {
-      clearTimeout(timer);
-      ctx.signal?.removeEventListener("abort", onAbort);
+    let timedOut = false;
+    for (let attempt = 0; attempt < JUDGE_ATTEMPTS; attempt++) {
+      const controller = new AbortController();
+      timedOut = false;
+      failure = undefined;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, this.config.judge.timeoutMs);
+      const onAbort = () => controller.abort();
+      ctx.signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        text = await ctx.complete(JUDGE_SYSTEM_PROMPT, judgePrompt(judgeRequest), controller.signal);
+      } catch (error) {
+        text = undefined;
+        failure = error instanceof Error ? error.message.trim() : undefined;
+      } finally {
+        clearTimeout(timer);
+        ctx.signal?.removeEventListener("abort", onAbort);
+      }
+      if (text !== undefined || ctx.signal?.aborted || (failure && AUTH_FAILURE.test(failure))) break;
     }
     if (text === undefined) {
       if (timedOut) {
         this.noteReview("timeout");
-        return { decision: "ask-user", once: false, reason: `The reviewing model did not answer within ${Math.round(this.config.judge.timeoutMs / 1000)} seconds.`, state: "unavailable" };
+        return { decision: "ask-user", once: false, reason: `The reviewing model did not answer within ${Math.round(this.config.judge.timeoutMs / 1000)} seconds, twice.`, state: "unavailable" };
       }
       const short = failure && failure.length > 200 ? `${failure.slice(0, 200)}…` : failure;
       if (failure && AUTH_FAILURE.test(failure)) this.noteReview("auth", short);
@@ -1709,7 +1719,7 @@ export class Permissions {
             tierReason: line.kind,
             remembers: memo.map((pattern) => describePattern(pattern.match)),
             ...(targets && "targets" in targets ? { targets: targets.targets.map((target) => describeTarget(target)) } : {}),
-            created: this.createdSummary(),
+            created: this.createdSummary(line),
           },
           ctx,
         );
@@ -1851,7 +1861,45 @@ export class Permissions {
   }
 
   private explicitFacts(): ExplicitFacts {
-    return { originRepo: (dir) => this.originRepo(dir), release: (dir, commit, version) => this.releaseFacts(dir, commit, version) };
+    return {
+      originRepo: (dir) => this.originRepo(dir),
+      release: (dir, commit, version) => this.releaseFacts(dir, commit, version),
+      pullRequestsWithHead: (dir, branch) => this.pullRequestsWithHead(dir, branch),
+      worktreeBranch: (path) => this.catalogueFacts().worktreeBranch?.(path),
+    };
+  }
+
+  /** Pull requests by head branch, as gh last said (per directory and branch). */
+  private readonly prsByHead = new Map<string, PullRequestFact[]>();
+
+  /** The pull requests whose head is `branch`: the ledger's, and gh's for the repository at `dir`. */
+  private pullRequestsWithHead(dir: string | undefined, branch: string): PullRequestFact[] {
+    const own = this.created.ledger
+      .all()
+      .filter((entry) => entry.kind === "pr" && entry.head === branch)
+      .map((entry): PullRequestFact => ({ number: entry.name, head: branch, ...(entry.repo ? { repo: entry.repo.toLowerCase() } : {}) }));
+    // gh only where origin is a hosted repository it can ask.
+    if (branch === UNKNOWN || branch.startsWith("-") || this.originRepo(dir ?? this.cwd) === undefined) return own;
+    const key = `${dir ?? this.cwd}\0${branch}`;
+    if (!this.prsByHead.has(key)) {
+      const result = spawnSync("gh", ["pr", "list", "--head", branch, "--state", "all", "--limit", "5", "--json", "number,headRefName,baseRefName"], {
+        cwd: dir ?? this.cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 8000,
+      });
+      let listed: PullRequestFact[] = [];
+      try {
+        const parsed = result.status === 0 ? (JSON.parse(result.stdout) as { number?: unknown; headRefName?: unknown; baseRefName?: unknown }[]) : [];
+        listed = parsed
+          .filter((item) => typeof item.number === "number" && item.headRefName === branch)
+          .map((item) => ({ number: String(item.number), head: branch, ...(typeof item.baseRefName === "string" ? { base: item.baseRefName } : {}) }));
+      } catch {
+        listed = [];
+      }
+      this.prsByHead.set(key, listed);
+    }
+    return [...own, ...(this.prsByHead.get(key) ?? [])];
   }
 
   /** A tag of that name exists in the repository at `dir`. */
@@ -2143,14 +2191,55 @@ export class Permissions {
   }
 
   /** What this task made, for the reviewing model's prompt (newest last, bounded). */
-  private createdSummary(): string[] {
-    const made = this.created.all();
-    const lines = [
-      ...made.worktrees.map((path) => `the worktree ${displayPath(path, this.home)}`),
-      ...made.branches.map((name) => `the branch ${name}`),
-      ...made.paths.map((path) => displayPath(path, this.home)),
-    ];
-    return lines.slice(-24);
+  /** A ledger entity, in words. */
+  private describeLedger(entity: LedgerEntity & { action?: string }): string {
+    const where = entity.remote ? ` on ${entity.remote}` : "";
+    switch (entity.kind) {
+      case "path":
+        return displayPath(entity.name, this.home);
+      case "worktree":
+        return `the worktree ${displayPath(entity.name, this.home)}`;
+      case "pr":
+        return `${entity.action === "merge" ? "the merged " : ""}pull request #${entity.name}${entity.repo && !entity.repo.startsWith("/") ? ` of ${entity.repo}` : ""}${entity.head ? ` (head ${entity.head})` : ""}`;
+      default:
+        return `${entity.action === "start" ? "the started " : "the "}${entity.kind} ${entity.name}${where}`;
+    }
+  }
+
+  /**
+   * What the ledger says, for the reviewing model: first how this line's
+   * targets follow from what this chat did (lifecycle.ts), then the rest,
+   * newest first. Cypher recorded it from the results of the chat's own
+   * commands; the agent can't write it.
+   */
+  private createdSummary(line?: LineAssessment): string[] {
+    const lines: string[] = [];
+    if (line?.parsed.kind === "simple") {
+      const facts = this.catalogueFacts();
+      for (const command of line.commands) {
+        let found;
+        try {
+          found = this.created.destroys(command, facts);
+        } catch {
+          found = undefined;
+        }
+        if (!found) continue;
+        for (const alternatives of found.targets) {
+          for (const entity of alternatives) {
+            const follow = this.created.followUp(found.op === "stop" ? "stop" : "delete", entity, facts);
+            if (!follow) continue;
+            const by = (follow.antecedent.entity as { by?: string }).by;
+            lines.push(`\`${command.words.join(" ").slice(0, 160)}\` ${found.op === "stop" ? "stops" : "removes"} ${this.describeLedger(entity)}: ${follow.rule.why}; this chat did ${this.describeLedger(follow.antecedent.entity)}${by ? ` (\`${by.slice(0, 120)}\`)` : ""}`);
+            break;
+          }
+        }
+      }
+    }
+    for (const entry of [...this.created.ledger.all()].reverse()) {
+      if (lines.length >= 30) break;
+      lines.push(this.describeLedger(entry));
+    }
+    return [...new Set(lines)];
   }
 
   /** The data directory a process says it uses (`CYPHER_DATA_DIR`), canonical; undefined when it names none. */

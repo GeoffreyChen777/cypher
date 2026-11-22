@@ -442,7 +442,8 @@ export function defaultConfig(agentDir?: string): PermissionsConfig {
     defaultLevel: "standard",
     levels: structuredClone(DEFAULT_LEVELS),
     approval: { ...DEFAULT_APPROVAL },
-    judge: { model: null, timeoutMs: 20_000 },
+    // Per attempt; core.ts asks once more when it times out (`JUDGE_ATTEMPTS`).
+    judge: { model: null, timeoutMs: 60_000 },
     ask: { timeoutMs: null },
     sensitive: [...DEFAULT_SENSITIVE],
     protected: [...DEFAULT_PROTECTED],
