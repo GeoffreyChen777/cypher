@@ -21,7 +21,8 @@ if [ ! -d "$ext" ]; then
   git -C "$repo" rev-parse "$sha" > "$D/$label/COMMIT"
 fi
 cd "$D"
-run() { node "$EVAL/run.mjs" --extensions "$ext" --owner-words full "$@" > /dev/null; }
+# CYPHER_EVAL_RUN_ARGS: more run.mjs options for every run (e.g. --consent-claim).
+run() { node "$EVAL/run.mjs" --extensions "$ext" --owner-words full ${CYPHER_EVAL_RUN_ARGS:-} "$@" > /dev/null; }
 pids=()
 if [ "$what" != live ]; then
   for stub in recorded approve; do
