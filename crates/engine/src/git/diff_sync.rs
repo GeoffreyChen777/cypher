@@ -177,7 +177,11 @@ impl CheckoutDiffSync {
         };
         let task = tokio::spawn(diff_sync_task(
             Arc::downgrade(&sync.inner),
-            workspace.watch_chats(),
+            Inputs {
+                chats: workspace.watch_chats(),
+                bots: workspace.watch_bots(),
+                spaces: workspace.watch_spaces(),
+            },
             sync.inner.cancel.clone(),
         ));
         *lock(&sync.inner.supervisor) = Some(task);
@@ -369,6 +373,24 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
             .1
             .push(chat);
     }
+    // The projects a workspace hosted here grants are watched too, chat or
+    // not: its own chat's Changes panel opens them (`ListChatFileRoots`).
+    // They carry no chat rows, so nothing is stamped for them.
+    for path in workspace_project_folders(inner) {
+        let identity = match resolved.get(&path) {
+            Some(identity) => identity.clone(),
+            None => {
+                let identity = resolve_identity(inner, &path, fresh).await;
+                resolved.insert(path.clone(), identity.clone());
+                identity
+            }
+        };
+        if let Some(identity) = identity {
+            groups
+                .entry(identity.id.clone())
+                .or_insert_with(|| (identity, Vec::new()));
+        }
+    }
 
     // Do not tear down an entry after one transiently incomplete chat watch.
     let removed: Vec<String> = {
@@ -417,6 +439,38 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
             None => add_entry(inner, identity, chats),
         }
     }
+}
+
+/// The git projects granted to the workspaces this device hosts, on this
+/// device (see [`crate::bots::granted_local_spaces`]), deduplicated.
+fn workspace_project_folders(inner: &DiffSyncInner) -> Vec<String> {
+    let Ok(bots) = inner.workspace.read_bots() else {
+        return Vec::new();
+    };
+    let mut bots = bots
+        .into_iter()
+        .filter(|bot| bot.host_device_id == inner.device_id)
+        .peekable();
+    if bots.peek().is_none() {
+        return Vec::new();
+    }
+    let spaces: Vec<_> = inner
+        .workspace
+        .read_spaces()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|space| space.git_detected)
+        .collect();
+    let mut folders = Vec::new();
+    for bot in bots {
+        for space in crate::bots::granted_local_spaces(&bot, spaces.clone(), &inner.device_id) {
+            let path = crate::git::repos::expand_home(&space.path);
+            if !folders.contains(&path) {
+                folders.push(path);
+            }
+        }
+    }
+    folders
 }
 
 /// True if `root`'s directory tree exceeds [`MAX_WATCH_DIRS`] — the signal that
@@ -647,16 +701,28 @@ fn publish_watch(inner: &Arc<DiffSyncInner>) {
     publish_watch_with(inner, None);
 }
 
+/// What the watched set follows: this device's chats, and the workspaces
+/// and projects that decide which granted projects are watched beside them.
+struct Inputs {
+    chats: watch::Receiver<Vec<Chat>>,
+    bots: watch::Receiver<Vec<cypher_proto::Bot>>,
+    spaces: watch::Receiver<Vec<cypher_proto::Space>>,
+}
+
 /// Chat-watch follower + repair tick. Holds only weak handles so dropping the
 /// service tears the loop down; the token ends it eagerly on shutdown.
-async fn diff_sync_task(
-    inner: Weak<DiffSyncInner>,
-    mut chats_rx: watch::Receiver<Vec<Chat>>,
-    cancel: CancellationToken,
-) {
+async fn diff_sync_task(inner: Weak<DiffSyncInner>, inputs: Inputs, cancel: CancellationToken) {
+    let Inputs {
+        chats: mut chats_rx,
+        mut bots,
+        mut spaces,
+    } = inputs;
     let mut repair = tokio::time::interval(REPAIR_INTERVAL);
     repair.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     repair.tick().await; // consume the immediate first tick
+    // A closed bots/spaces watch only stops that trigger; chats end the loop.
+    let mut bots_open = true;
+    let mut spaces_open = true;
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
@@ -666,6 +732,20 @@ async fn diff_sync_task(
                 }
                 let Some(inner) = inner.upgrade() else { break };
                 let chats = chats_rx.borrow_and_update().clone();
+                reconcile(&inner, chats, false).await;
+            }
+            changed = bots.changed(), if bots_open => {
+                bots_open = changed.is_ok();
+                bots.borrow_and_update();
+                let Some(inner) = inner.upgrade() else { break };
+                let chats = chats_rx.borrow().clone();
+                reconcile(&inner, chats, false).await;
+            }
+            changed = spaces.changed(), if spaces_open => {
+                spaces_open = changed.is_ok();
+                spaces.borrow_and_update();
+                let Some(inner) = inner.upgrade() else { break };
+                let chats = chats_rx.borrow().clone();
                 reconcile(&inner, chats, false).await;
             }
             _ = repair.tick() => {

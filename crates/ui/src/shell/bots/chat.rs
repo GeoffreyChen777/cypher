@@ -1,7 +1,12 @@
 //! A bot's conversation on the Botboard: the start screen a new bot opens
-//! on. Its other differences live where they apply (the card's header wears the bot's
-//! avatar, the slot has no terminal and no dock, the composer asks "Ask
-//! <bot>…", the transcript names bot tool calls).
+//! on. Its other differences live where they apply (the card's header wears
+//! the bot's avatar, the composer asks "Ask <bot>…", the transcript names
+//! bot tool calls). The workspace's own chat has a session's rail, dock and
+//! terminal: Files and Git over its folder and each project it is granted
+//! ([`crate::files::roots`]), the terminal in its folder. Its rail's side
+//! panel button also stands for the board's detail panel: the right side
+//! shows one of them at a time ([`super::column`]). A hidden thread (a
+//! plan's, a routine's, a peer's) has neither.
 
 use super::super::session::SlotId;
 use super::*;
@@ -42,21 +47,24 @@ impl Shell {
         slot.state.read(cx).bot_for_chat(chat_id).cloned()
     }
 
-    /// Whether the slot shows a bot's conversation (true even once the bot
-    /// row is gone: the chat stays a bot chat). A project routine's session
-    /// is not one: it is an ordinary coding session the workspace owns.
-    pub(in crate::shell) fn slot_is_bot_chat(&self, sid: SlotId, cx: &App) -> bool {
+    /// Whether the slot shows a bot thread with no folder to show and no
+    /// commands to run: any bot conversation but a workspace's own chat
+    /// (true even once the bot row is gone: the chat stays a bot chat). A
+    /// project routine's session is not one: it is an ordinary coding
+    /// session the workspace owns.
+    pub(in crate::shell) fn slot_is_hidden_bot_thread(&self, sid: SlotId, cx: &App) -> bool {
         let Some(slot) = self.tiles.slots.get(&sid) else {
             return false;
         };
         let Some(chat_id) = slot.tab.chat_id() else {
             return false;
         };
-        slot.state
-            .read(cx)
-            .chats
-            .iter()
-            .any(|c| c.id == chat_id && c.bot.as_ref().is_some_and(|marker| marker.is_bot_thread()))
+        let state = slot.state.read(cx);
+        state.chats.iter().any(|c| {
+            c.id == chat_id
+                && c.bot.as_ref().is_some_and(|marker| marker.is_bot_thread())
+                && !crate::files::roots::is_workspace_chat(c, &state.bots)
+        })
     }
 
     /// Whether the slot's bot conversation has nothing in it yet: the start

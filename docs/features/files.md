@@ -106,3 +106,71 @@ Mutations run on two workers of their own, so a long copy never holds up
 listings. Copies and deletes get 120 s; everything else keeps the 8 s
 deadline. Older engines answer `unknown method`, which the surface reports as
 needing an update.
+
+### Workspace chats
+
+A workspace's own chat (the owner's `Main` thread, `BotChat::is_owner_chat`)
+has more than one folder: its private folder (`<store>/bots/<bot id>`, the
+default root) and the folder of each project its scope grants (`ProjectGrant`
+All or Selected) on the workspace's host device. Engine side, as built:
+
+- **`ListChatFileRoots {chatId}`** (forwardable; send it to the chat's host
+  with `targetDeviceId`, like every file RPC) answers `[ChatFileRoot]`:
+  `{spaceId?, name, path, checkoutId?}`. The first entry is the default root
+  (`spaceId` absent; `name` is the workspace's name, or the project's for a
+  session). Then the granted projects on the host, sorted by name: `spaceId`,
+  the project's display name, its canonical `path` on the host, and its
+  `checkoutId` when the project is a known git checkout. A session lists its
+  own checkout only; a hidden workspace thread (plans, routines, peer answers,
+  memory passes) lists nothing. A project whose folder is missing or does not
+  answer within 2 s is left out. Older engines answer `unknown method`: fall
+  back to the default root.
+- **`rootSpaceId`**, optional on every file RPC above and on `SearchFiles`
+  (with `chatId`): address that project's folder instead of the chat's own.
+  `cwd` stays the chat's own `cwd` (the same stale-context check). Without it
+  nothing changes. The engine refuses it for any chat but a workspace's own
+  chat hosted on this device, for a project the scope does not grant or that
+  does not exist (one message for both: "project is not available to this
+  workspace"), and for a granted project on another device ("project is on
+  another device; open it from a session there"). There is no path-shaped
+  root: only a space id. Inside the root the usual rules hold unchanged
+  (relative paths, no link followed, `.git` unavailable).
+- **Git** is path-addressed already: `GetCheckoutDiff`, `GetCheckoutFileDiffText`,
+  `ListGitHistory`, `ListBranches` and `ListRefs` take the root's `path` as their
+  `cwd`/`repoPath`. `WatchCheckoutDiffs` now also follows every git project
+  granted to a workspace hosted on the device, whether or not a session lives
+  in it, and picks up scope edits as they land; match a root to its diff by
+  `checkoutId`, else by `cwd == path`.
+- Projects on another device are not offered: a workspace works directly only
+  on its host's projects (as Pi's workspace roots, [§10.2](../design/agent-bots.md#102-direct-work-owner-threads-with-work-directly))
+  and reaches the others through sessions.
+
+Desktop side (`crates/ui`: `files/roots.rs`, `state/file_roots.rs`,
+`files/root_picker.rs`):
+
+- The chat's tile (the Botboard's chat card) lists its roots when it shows the
+  chat, and again when the grant or the host's projects change. An empty
+  answer, an error or an older engine leaves the workspace's folder alone.
+- **Files** and **Git** show one root at a time. A picker at the start of the
+  surface's header lists the roots (the workspace's folder with the workspace
+  glyph, projects with a folder) and appears only when the chat has more than
+  one root; Git lists only checkouts (a `checkoutId`, or a project found to
+  have git), and with a single checkout its header names it without a menu,
+  so Git never shows a project other than Files' without saying so. Files
+  and Git follow one pick per chat: the root the owner picked or last opened
+  a reference in, else the first granted project, else the workspace's folder.
+  Git on a pick that is no checkout shows the first checkout. A commit opened
+  from History stays on its project.
+- **References** (code-reference chips and file links in replies): a relative
+  path is tried in the workspace's folder first, then each granted project in
+  list order (the chips also search every root for paths ending in it, and
+  list several matches, each under its project's name); an absolute path only
+  opens inside the root it lies in (the innermost one when roots nest). It
+  opens in Files at that root and line, and that root becomes the pick. A
+  relative link found nowhere opens in the workspace's folder (which then says
+  it is missing); a path outside every root never opens in Files: one on this
+  device is revealed in Finder.
+- Git's Branch scope names a project root's branch `HEAD` (the chat row
+  carries no branch for it). Git offers no Latest turn scope: the engine
+  records a turn's start tree in the chat's own folder only, never in a
+  granted project. The terminal runs in the workspace's folder.

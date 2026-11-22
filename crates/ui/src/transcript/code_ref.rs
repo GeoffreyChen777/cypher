@@ -29,7 +29,7 @@ use gpui::{
     Window, div, point, prelude::*, px,
 };
 
-use crate::files::{FilesContext, links};
+use crate::files::{FilesContext, LinkContexts, links, roots};
 use crate::kit::icons::{self, icon};
 use crate::kit::motion;
 use crate::kit::popover;
@@ -463,12 +463,29 @@ impl Transcript {
                 return resolved.resolution.clone();
             }
         }
-        let context = crate::files::context_for(self.state.read(cx));
+        let contexts = crate::files::link_contexts(self.state.read(cx));
         let engine = self.state.read(cx).engine().cloned();
-        let (context, engine) = match (context, engine) {
-            (Ok(context), Some(engine)) if context.chat_id == key.chat_id => (context, engine),
+        let (contexts, engine) = match (contexts, engine) {
+            (Ok(contexts), Some(engine))
+                if contexts
+                    .contexts
+                    .first()
+                    .is_some_and(|context| context.chat_id == key.chat_id) =>
+            {
+                (contexts, engine)
+            }
             (Err(message), _) => {
-                return self.settle_resolution(key.clone(), Resolution::Failed(message.into()));
+                let resolution =
+                    self.settle_resolution(key.clone(), Resolution::Failed(message.into()));
+                // A workspace chat's roots still on their way: the next
+                // hover asks again rather than keep the miss.
+                if self.state.read(cx).file_roots() == crate::state::FileRoots::Loading
+                    && let Some(resolved) = self.code_refs.resolutions.get_mut(key)
+                    && let Some(stale) = Instant::now().checked_sub(FRESH_FOR * 2)
+                {
+                    resolved.at = stale;
+                }
+                return resolution;
             }
             _ => {
                 return self.settle_resolution(
@@ -479,7 +496,7 @@ impl Transcript {
         };
         let task_key = key.clone();
         let task = cx.spawn_in(window, async move |this, cx| {
-            let (resolution, read) = resolve(&engine, &context, &task_key.path, cx).await;
+            let (resolution, read) = resolve(&engine, &contexts, &task_key.path, cx).await;
             finish_resolution(this, task_key, resolution, read, cx);
         });
         self.code_refs.resolutions.insert(
@@ -512,10 +529,13 @@ impl Transcript {
         {
             return;
         }
-        let Ok(context) = crate::files::context_for(self.state.read(cx)) else {
+        let Ok(contexts) = crate::files::link_contexts(self.state.read(cx)) else {
             return;
         };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let Some((context, relative, _)) = locate(&contexts, &path) else {
             return;
         };
         if context.chat_id != chat_id {
@@ -523,7 +543,7 @@ impl Transcript {
         }
         let task_key = file_key.clone();
         let task = cx.spawn(async move |this, cx| {
-            let read = read_file(&engine, &context, &path, cx).await;
+            let read = read_file(&engine, &context, &relative, cx).await;
             this.update(cx, |this, cx| {
                 this.store_code_ref_file(task_key, read);
                 cx.notify();
@@ -641,11 +661,13 @@ impl Transcript {
             }
         };
 
-        let shown_path = match &resolution {
+        let open_path = match &resolution {
             Resolution::Found(path) => path.clone(),
             _ => target.key.path.clone(),
         };
-        let header = self.code_ref_header(&shown_path, code_ref, &resolution, &theme, cx);
+        let shown_path = self.code_ref_shown(&open_path, cx);
+        let header =
+            self.code_ref_header(&shown_path, &open_path, code_ref, &resolution, &theme, cx);
         let footer = div()
             .h(px(FOOTER_HEIGHT))
             .px(px(10.0))
@@ -733,9 +755,22 @@ impl Transcript {
         )
     }
 
+    /// How a resolved path reads on the card: as it is for a session; with
+    /// its project's name first in a workspace's own chat.
+    fn code_ref_shown(&self, path: &str, cx: &App) -> String {
+        match crate::files::link_contexts(self.state.read(cx)) {
+            Ok(contexts) if contexts.multi_root() => locate(&contexts, path)
+                .map(|(_, _, shown)| shown)
+                .unwrap_or_else(|| path.to_owned()),
+            _ => path.to_owned(),
+        }
+    }
+
+    /// `path` is what the card shows, `open_path` what Copy and Open use.
     fn code_ref_header(
         &mut self,
         path: &str,
+        open_path: &str,
         code_ref: &CodeRef,
         resolution: &Resolution,
         theme: &Theme,
@@ -750,7 +785,7 @@ impl Transcript {
             Some((first, _)) => format!("L{first}"),
             None => String::new(),
         };
-        let reference = format!("{path}{}", code_ref.line_suffix());
+        let reference = format!("{open_path}{}", code_ref.line_suffix());
         let found = matches!(resolution, Resolution::Found(_));
         let copied = self.code_refs.copied;
         div()
@@ -816,7 +851,7 @@ impl Transcript {
                     })),
             )
             .when(found && self.link_handler.is_some(), |el| {
-                let path = path.to_owned();
+                let path = open_path.to_owned();
                 let lines = code_ref.lines;
                 el.child(
                     card_button(theme, "code-ref-open")
@@ -974,6 +1009,7 @@ impl Transcript {
             )
             .children(paths.iter().enumerate().map(|(ix, path)| {
                 let open = path.clone();
+                let shown = self.code_ref_shown(path, cx);
                 div()
                     .id(("code-ref-choice", ix))
                     .px(px(6.0))
@@ -993,7 +1029,7 @@ impl Transcript {
                                 this.open_code_ref(open.clone(), lines, window, cx);
                             }))
                     })
-                    .child(path.clone())
+                    .child(shown)
             }))
             .into_any_element()
     }
@@ -1035,11 +1071,73 @@ fn finish_resolution(
     .ok();
 }
 
+/// Where an open path (a resolution's [`Resolution::Found`]) is read: the
+/// context of its root, the path in that root, and how it reads to the
+/// owner. A session's paths are its checkout's; a workspace chat's are
+/// absolute, inside one of its roots.
+fn locate(contexts: &LinkContexts, path: &str) -> Option<(FilesContext, String, String)> {
+    if !contexts.multi_root() {
+        let context = contexts.contexts.first()?.clone();
+        return Some((context, path.to_owned(), path.to_owned()));
+    }
+    let (root, relative) = roots::containing(&contexts.roots, path)?;
+    let ix = contexts.roots.iter().position(|r| std::ptr::eq(r, root))?;
+    Some((
+        contexts.contexts.get(ix)?.clone(),
+        relative.clone(),
+        roots::display(root, &relative),
+    ))
+}
+
+/// Where to read a reference first, in order: (index into the contexts,
+/// the path in that root, the resolved path it would be). A session reads
+/// it at its checkout; a workspace's own chat at each root it may be in
+/// ([`roots::candidates`]). `Err`: it is outside, nothing to read.
+fn lookup_order(
+    contexts: &LinkContexts,
+    path: &str,
+) -> Result<Vec<(usize, String, String)>, Resolution> {
+    if contexts.multi_root() {
+        let found = roots::candidates(&contexts.roots, path);
+        if found.is_empty() && path.starts_with('/') {
+            let outside = links::resolve(path, "/").map_or_else(|o| o, |r| format!("/{r}"));
+            return Err(Resolution::Outside(outside));
+        }
+        return Ok(found
+            .into_iter()
+            .map(|(ix, relative)| {
+                let open = roots::join(&contexts.roots[ix], &relative);
+                (ix, relative, open)
+            })
+            .collect());
+    }
+    let Some(context) = contexts.contexts.first() else {
+        return Err(Resolution::Missing);
+    };
+    match links::resolve(path, &context.root) {
+        Ok(relative) => Ok(vec![(0, relative.clone(), relative)]),
+        Err(outside) => Err(Resolution::Outside(outside)),
+    }
+}
+
+/// The files of a search that end in `wanted` (whole path components).
+fn ending_in(wanted: &str, matches: Vec<FileSearchMatch>) -> Vec<String> {
+    let tail = format!("/{wanted}");
+    matches
+        .into_iter()
+        .filter(|hit| !hit.is_dir && (hit.path == wanted || hit.path.ends_with(&tail)))
+        .map(|hit| hit.path)
+        .collect()
+}
+
 /// Resolve `path` in the checkout: read it from the root, else search for
-/// files ending in it. A successful read comes back with the resolution.
+/// files ending in it. A workspace's own chat tries its folder first, then
+/// each granted project (an absolute path only in the root it lies in),
+/// and searches them all; its resolved paths are absolute
+/// ([`roots::join`]). A successful read comes back with the resolution.
 async fn resolve(
     engine: &EngineHandle,
-    context: &FilesContext,
+    contexts: &LinkContexts,
     path: &str,
     cx: &mut AsyncWindowContext,
 ) -> (
@@ -1049,65 +1147,82 @@ async fn resolve(
     if path.starts_with('~') {
         return (Resolution::Outside(path.to_owned()), None);
     }
-    let direct = match links::resolve(path, &context.cwd) {
-        Ok(relative) if relative.is_empty() => return (Resolution::Missing, None),
-        Ok(relative) => relative,
-        Err(outside) => return (Resolution::Outside(outside), None),
+    let tries = match lookup_order(contexts, path) {
+        Ok(tries) => tries,
+        Err(resolution) => return (resolution, None),
     };
-    match read_content(engine, context, &direct, cx).await {
-        Ok(content) => {
-            let snapshot = snapshot(&direct, content, cx).await;
-            return (
-                Resolution::Found(direct.clone()),
-                Some((direct, Ok(snapshot))),
-            );
+    let mut searched = Vec::new();
+    for (ix, relative, open) in &tries {
+        let Some(context) = contexts.contexts.get(*ix) else {
+            continue;
+        };
+        if relative.is_empty() {
+            continue;
         }
-        // The device itself is out of reach: a search would fail the same.
-        Err(err @ (RpcError::Transport(_) | RpcError::Closed | RpcError::UnknownMethod(_))) => {
-            return (Resolution::Failed(crate::files::rpc_message(&err)), None);
+        match read_content(engine, context, relative, cx).await {
+            Ok(content) => {
+                let snapshot = snapshot(relative, content, cx).await;
+                return (
+                    Resolution::Found(open.clone()),
+                    Some((open.clone(), Ok(snapshot))),
+                );
+            }
+            // The device itself is out of reach: a search would fail the same.
+            Err(err @ (RpcError::Transport(_) | RpcError::Closed | RpcError::UnknownMethod(_))) => {
+                return (Resolution::Failed(crate::files::rpc_message(&err)), None);
+            }
+            Err(_) => searched.push(open.clone()),
         }
-        // An absolute path inside the checkout means exactly that file.
-        Err(_) if path.starts_with('/') => return (Resolution::Missing, None),
-        Err(_) => {}
+    }
+    // An absolute path inside the checkout means exactly that file.
+    if path.starts_with('/') || tries.iter().all(|(_, relative, _)| relative.is_empty()) {
+        return (Resolution::Missing, None);
     }
     let wanted = path.trim_start_matches("./").trim_start_matches("../");
-    let mut params = serde_json::Map::new();
-    params.insert("chatId".into(), context.chat_id.clone().into());
-    params.insert("query".into(), wanted.into());
-    if let Some(target) = &context.target {
-        params.insert("targetDeviceId".into(), target.clone().into());
+    let mut found: Vec<(&FilesContext, String, String)> = Vec::new();
+    for (ix, context) in contexts.contexts.iter().enumerate() {
+        let mut params = serde_json::Map::new();
+        params.insert("chatId".into(), context.chat_id.clone().into());
+        params.insert("query".into(), wanted.into());
+        context.address(&mut params);
+        let matches = crate::files::call_with_retry(
+            engine,
+            methods::SEARCH_FILES,
+            serde_json::Value::Object(params),
+            cx,
+        )
+        .await
+        .and_then(|value| {
+            serde_json::from_value::<Vec<FileSearchMatch>>(value)
+                .map_err(|e| RpcError::Failed(e.to_string()))
+        });
+        let matches = match matches {
+            Ok(matches) => matches,
+            // One project out of reach must not hide another's match.
+            Err(_) if contexts.multi_root() => continue,
+            Err(err) => return (Resolution::Failed(crate::files::rpc_message(&err)), None),
+        };
+        for hit in ending_in(wanted, matches) {
+            let open = match contexts.roots.get(ix) {
+                Some(root) => roots::join(root, &hit),
+                None => hit.clone(),
+            };
+            if !searched.contains(&open) && !found.iter().any(|(_, _, seen)| *seen == open) {
+                found.push((context, hit, open));
+            }
+        }
     }
-    let matches = crate::files::call_with_retry(
-        engine,
-        methods::SEARCH_FILES,
-        serde_json::Value::Object(params),
-        cx,
-    )
-    .await
-    .and_then(|value| {
-        serde_json::from_value::<Vec<FileSearchMatch>>(value)
-            .map_err(|e| RpcError::Failed(e.to_string()))
-    });
-    let matches = match matches {
-        Ok(matches) => matches,
-        Err(err) => return (Resolution::Failed(crate::files::rpc_message(&err)), None),
-    };
-    let tail = format!("/{wanted}");
-    let mut found: Vec<String> = matches
-        .into_iter()
-        .filter(|hit| !hit.is_dir)
-        .map(|hit| hit.path)
-        .filter(|hit| (hit == wanted || hit.ends_with(&tail)) && *hit != direct)
-        .collect();
-    found.dedup();
     match found.len() {
         0 => (Resolution::Missing, None),
         1 => {
-            let path = found.remove(0);
-            let read = read_file(engine, context, &path, cx).await;
-            (Resolution::Found(path.clone()), Some((path, read)))
+            let (context, relative, open) = found.remove(0);
+            let read = read_file(engine, context, &relative, cx).await;
+            (Resolution::Found(open.clone()), Some((open, read)))
         }
-        _ => (Resolution::Ambiguous(found), None),
+        _ => (
+            Resolution::Ambiguous(found.into_iter().map(|(_, _, open)| open).collect()),
+            None,
+        ),
     }
 }
 
@@ -1121,9 +1236,7 @@ async fn read_content(
     params.insert("chatId".into(), context.chat_id.clone().into());
     params.insert("cwd".into(), context.cwd.clone().into());
     params.insert("path".into(), path.into());
-    if let Some(target) = &context.target {
-        params.insert("targetDeviceId".into(), target.clone().into());
-    }
+    context.address(&mut params);
     crate::files::call_with_retry(
         engine,
         methods::READ_WORKSPACE_FILE,
@@ -1254,6 +1367,114 @@ mod tests {
         assert_eq!(long.band, Some((3, MAX_EXCERPT_LINES - 1)));
         // Past the end: nothing to show.
         assert_eq!(excerpt(50, Some((51, 51))), None);
+    }
+
+    fn contexts(multi: bool) -> LinkContexts {
+        let root = |space: Option<&str>, name: &str, path: &str| cypher_proto::ChatFileRoot {
+            space_id: space.map(str::to_owned),
+            name: name.into(),
+            path: path.into(),
+            checkout_id: None,
+        };
+        let context = |root: &cypher_proto::ChatFileRoot| FilesContext {
+            chat_id: "c".into(),
+            cwd: "/data/bots/b".into(),
+            target: None,
+            root_space_id: root.space_id.clone(),
+            root: root.path.clone(),
+        };
+        let roots = if multi {
+            vec![
+                root(None, "Bot", "/data/bots/b"),
+                root(Some("api"), "api", "/src/api"),
+                root(Some("web"), "web", "/src/web"),
+            ]
+        } else {
+            vec![root(None, "repo", "/work/repo")]
+        };
+        LinkContexts {
+            contexts: roots.iter().map(context).collect(),
+            roots: if multi { roots } else { Vec::new() },
+        }
+    }
+
+    #[test]
+    fn a_session_reads_references_at_its_checkout() {
+        let session = contexts(false);
+        assert_eq!(
+            lookup_order(&session, "src/a.rs"),
+            Ok(vec![(0, "src/a.rs".into(), "src/a.rs".into())])
+        );
+        assert_eq!(
+            lookup_order(&session, "/work/repo/src/a.rs"),
+            Ok(vec![(0, "src/a.rs".into(), "src/a.rs".into())])
+        );
+        assert_eq!(
+            lookup_order(&session, "/etc/hosts"),
+            Err(Resolution::Outside("/etc/hosts".into()))
+        );
+    }
+
+    #[test]
+    fn a_workspace_chat_reads_references_in_its_folder_then_each_project() {
+        let workspace = contexts(true);
+        assert_eq!(
+            lookup_order(&workspace, "src/a.rs"),
+            Ok(vec![
+                (0, "src/a.rs".into(), "/data/bots/b/src/a.rs".into()),
+                (1, "src/a.rs".into(), "/src/api/src/a.rs".into()),
+                (2, "src/a.rs".into(), "/src/web/src/a.rs".into()),
+            ])
+        );
+        // Absolute: only the root it lies in, and nothing outside them.
+        assert_eq!(
+            lookup_order(&workspace, "/src/web/app/page.tsx"),
+            Ok(vec![(
+                2,
+                "app/page.tsx".into(),
+                "/src/web/app/page.tsx".into()
+            )])
+        );
+        assert_eq!(
+            lookup_order(&workspace, "/src/../etc/hosts"),
+            Err(Resolution::Outside("/etc/hosts".into()))
+        );
+        // Each resolved path reads back to its root, under its name.
+        let (context, relative, shown) = locate(&workspace, "/src/api/src/a.rs").unwrap();
+        assert_eq!(context.root_space_id.as_deref(), Some("api"));
+        assert_eq!(
+            (relative.as_str(), shown.as_str()),
+            ("src/a.rs", "api/src/a.rs")
+        );
+        assert!(locate(&workspace, "/etc/hosts").is_none());
+        // A session's stays relative.
+        let (_, relative, shown) = locate(&contexts(false), "src/a.rs").unwrap();
+        assert_eq!(
+            (relative.as_str(), shown.as_str()),
+            ("src/a.rs", "src/a.rs")
+        );
+    }
+
+    #[test]
+    fn a_search_keeps_files_ending_in_the_reference() {
+        let hit = |path: &str, is_dir: bool| FileSearchMatch {
+            path: path.into(),
+            is_dir,
+        };
+        let hits = vec![
+            hit("core/context.py", false),
+            hit("lib/core/context.py", false),
+            hit("mycore/context.py", false),
+            hit("core/context.py.bak", false),
+            hit("x/core/context.py", true),
+        ];
+        assert_eq!(
+            ending_in("core/context.py", hits),
+            vec![
+                "core/context.py".to_string(),
+                "lib/core/context.py".to_string()
+            ]
+        );
     }
 
     #[test]

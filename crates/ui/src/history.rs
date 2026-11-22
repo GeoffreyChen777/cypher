@@ -524,7 +524,7 @@ impl GitHistory {
 
     fn context(&self, cx: &App) -> Option<(String, String, Option<String>)> {
         let state = self.state.read(cx);
-        let chat = state.selected_chat_row()?;
+        let chat = state.git_chat_row()?;
         let cwd = chat.cwd.clone()?;
         let target = (state.local_device_id.as_deref() != Some(chat.device_id.as_str()))
             .then(|| chat.device_id.clone());
@@ -635,7 +635,7 @@ impl GitHistory {
     fn current_branch(&self, cx: &App) -> Option<String> {
         self.state
             .read(cx)
-            .selected_chat_row()
+            .git_chat_row()
             .and_then(|chat| chat.branch.clone())
     }
 

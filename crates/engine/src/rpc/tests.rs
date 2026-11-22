@@ -39,6 +39,8 @@ fn engine_identity_is_not_forwardable() {
     assert!(forwardable(methods::START_GITHUB_LOGIN));
     assert!(forwardable(methods::POLL_GITHUB_LOGIN));
     assert!(forwardable(methods::SIGN_OUT_GITHUB));
+    assert!(forwardable(methods::LIST_CHAT_FILE_ROOTS));
+    assert!(!is_stream_method(methods::LIST_CHAT_FILE_ROOTS));
     assert!(forwardable(methods::LIST_WORKSPACE_FILES));
     assert!(forwardable(methods::READ_WORKSPACE_FILE));
     assert!(forwardable(methods::WRITE_WORKSPACE_FILE));

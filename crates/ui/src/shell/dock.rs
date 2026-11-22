@@ -442,16 +442,23 @@ impl Shell {
     }
 
     /// Does the slot's space folder have git? Owner-stamped and synced —
-    /// gates the Git surface rows with zero RPCs.
-    fn slot_git_detected(&self, slot: &SessionSlot, cx: &App) -> bool {
-        slot.state.read(cx).selected_space_git()
+    /// gates the Git surface rows with zero RPCs. A workspace's own chat:
+    /// is one of its roots a checkout?
+    pub(super) fn slot_git_detected(&self, slot: &SessionSlot, cx: &App) -> bool {
+        let state = slot.state.read(cx);
+        if state.workspace_chat_selected() {
+            return !state.git_roots().is_empty();
+        }
+        state.selected_space_git()
     }
 
     /// Files is only meaningful for a session bound to a project checkout
-    /// (the engine resolves paths against the chat's verified cwd).
-    fn files_available(&self, slot: &SessionSlot, cx: &App) -> bool {
+    /// (the engine resolves paths against the chat's verified cwd), or a
+    /// workspace's own chat (its folder and granted projects).
+    pub(super) fn files_available(&self, slot: &SessionSlot, cx: &App) -> bool {
         let state = slot.state.read(cx);
-        state.selected_chat.is_some() && crate::files::context_for(state).is_ok()
+        state.selected_chat.is_some()
+            && (state.workspace_chat_selected() || crate::files::context_for(state).is_ok())
     }
 
     // ---- open / close ----
@@ -463,9 +470,11 @@ impl Shell {
         let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };
-        // Never on the new-session canvas (nothing to host yet) nor a bot's
-        // conversation (no checkout); closing stays possible.
-        if !slot.dock.open && (slot.tab.chat_id().is_none() || self.slot_is_bot_chat(sid, cx)) {
+        // Never on the new-session canvas (nothing to host yet) nor a hidden
+        // bot thread (no folder); closing stays possible.
+        if !slot.dock.open
+            && (slot.tab.chat_id().is_none() || self.slot_is_hidden_bot_thread(sid, cx))
+        {
             return;
         }
         let from = self.dock_width_now(slot);
@@ -475,6 +484,12 @@ impl Shell {
             DockSurface::Diff(id) => slot.diffs.get(&id).cloned(),
             _ => None,
         };
+        // The Botboard's right side shows one thing: the chat's dock opening
+        // shuts the detail panel.
+        if open && self.board.slot == Some(sid) {
+            self.board.side = super::bots::BoardSide::Dock;
+            self.close_panel(cx);
+        }
         if let Some(slot) = self.tiles.slots.get_mut(&sid) {
             slot.dock.open = open;
             if !open {
@@ -555,7 +570,11 @@ impl Shell {
 
     /// The dock's surface tabs in the STORED (drag-reorderable) order —
     /// `(surface, title)`; entries whose backing entity is gone are skipped.
-    fn dock_surface_rows(&self, slot: &SessionSlot, cx: &App) -> Vec<(DockSurface, SharedString)> {
+    pub(super) fn dock_surface_rows(
+        &self,
+        slot: &SessionSlot,
+        cx: &App,
+    ) -> Vec<(DockSurface, SharedString)> {
         slot.dock
             .surfaces
             .iter()
@@ -843,7 +862,8 @@ impl Shell {
     /// A reply's file link: the file opens in the session's Files tab (the
     /// active one, else the first, else a new one), at its line. A path
     /// outside the checkout can't show there; one on this device is
-    /// revealed in the system file manager instead.
+    /// revealed in the system file manager instead. A workspace's own chat
+    /// looks in each of its roots ([`Self::open_workspace_file_link`]).
     pub(in crate::shell) fn open_file_link(
         &mut self,
         sid: SlotId,
@@ -854,6 +874,9 @@ impl Shell {
         let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };
+        if slot.state.read(cx).workspace_chat_selected() {
+            return self.open_workspace_file_link(sid, link, window, cx);
+        }
         let context = crate::files::context_for(slot.state.read(cx));
         let resolved = match &context {
             Ok(context) => crate::files::links::resolve(&link.path, &context.cwd),
@@ -863,13 +886,103 @@ impl Shell {
             Ok(path) => path,
             Err(outside) => {
                 let here = context.as_ref().is_ok_and(|c| c.target.is_none());
-                let path = std::path::Path::new(&outside);
-                if (here || context.is_err()) && path.is_absolute() && path.exists() {
-                    cx.reveal_path(path);
-                }
+                reveal_if_here(&outside, here || context.is_err(), cx);
                 return;
             }
         };
+        self.show_in_files(sid, path, &link, window, cx);
+    }
+
+    /// A workspace's own chat's file link: an absolute path opens in the
+    /// root it lies in; a relative one in the first root that has it — the
+    /// chat's folder, then each granted project — else in the chat's
+    /// folder (which then says it is missing). The root becomes the one
+    /// Files and Git show. A path outside every root never opens in Files:
+    /// one on this device is revealed instead.
+    fn open_workspace_file_link(
+        &mut self,
+        sid: SlotId,
+        link: crate::files::links::FileLink,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
+            return;
+        };
+        let state = slot.state.read(cx);
+        let here = state
+            .selected_chat_row()
+            .is_some_and(|chat| state.local_device_id.as_deref() == Some(chat.device_id.as_str()));
+        let engine = state.engine().cloned();
+        let Ok(contexts) = crate::files::link_contexts(state) else {
+            // The roots are on their way: an absolute path can still be
+            // revealed.
+            reveal_if_here(&link.path, here, cx);
+            return;
+        };
+        let candidates = crate::files::roots::candidates(&contexts.roots, &link.path);
+        let Some((ix, relative)) = candidates.first().cloned() else {
+            reveal_if_here(&link.path, here, cx);
+            return;
+        };
+        let fallback = (contexts.roots[ix].space_id.clone(), relative);
+        let (Some(engine), true) = (engine, candidates.len() > 1) else {
+            let (root, relative) = fallback;
+            return self.show_in_files_at(sid, root, relative, &link, window, cx);
+        };
+        let tries: Vec<_> = candidates
+            .into_iter()
+            .map(|(ix, relative)| {
+                let root = contexts.roots[ix].space_id.clone();
+                (contexts.contexts[ix].clone(), root, relative)
+            })
+            .collect();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut found = None;
+            for (context, root, relative) in &tries {
+                if !relative.is_empty()
+                    && crate::files::entry_exists(&engine, context, relative, cx).await
+                {
+                    found = Some((root.clone(), relative.clone()));
+                    break;
+                }
+            }
+            let (root, relative) = found.unwrap_or(fallback);
+            this.update_in(cx, |this, window, cx| {
+                this.show_in_files_at(sid, root, relative, &link, window, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Show `path` of root `root` in the slot's Files: that root becomes
+    /// the one the workspace chat's Files and Git show.
+    fn show_in_files_at(
+        &mut self,
+        sid: SlotId,
+        root: crate::files::roots::RootId,
+        path: String,
+        link: &crate::files::links::FileLink,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.tiles.slots.get(&sid).map(|slot| slot.state.clone()) else {
+            return;
+        };
+        state.update(cx, |state, cx| state.pick_file_root(root, cx));
+        self.show_in_files(sid, path, link, window, cx);
+    }
+
+    /// Open `path` (relative to the Files root) in the slot's Files tab.
+    fn show_in_files(
+        &mut self,
+        sid: SlotId,
+        path: String,
+        link: &crate::files::links::FileLink,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.ensure_dock_open(sid, cx);
         let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
@@ -1017,11 +1130,12 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         // The focused tile's rail floats over the dock's top-right corner;
         // the surfaces' header buttons step left of it.
-        let header_right = if self.workspace.focused_tab() == Some(&slot.tab) {
-            RAIL_WIDTH
-        } else {
-            8.0
-        };
+        let header_right =
+            if self.workspace.focused_tab() == Some(&slot.tab) || self.board.slot == Some(sid) {
+                RAIL_WIDTH
+            } else {
+                8.0
+            };
         let content: AnyElement = if slot.dock.open {
             match active {
                 DockSurface::Diff(id) if slot.diffs.contains_key(&id) => {
@@ -1469,11 +1583,14 @@ impl Shell {
         };
         let rows = self.dock_surface_rows(slot, cx);
         let dock_open = slot.dock.open;
-        // A bot's conversation has no checkout to show and no terminal (its
-        // settings open from the access note over its composer).
-        let bot_chat = self.slot_is_bot_chat(sid, cx);
+        // A hidden bot thread has no folder to show and no terminal.
+        let bot_chat = self.slot_is_hidden_bot_thread(sid, cx);
         // No dock on the new-session canvas (nothing to host yet).
         let has_dock = slot.tab.chat_id().is_some() && !bot_chat;
+        // The Botboard's chat: its side panel button stands for the right
+        // side, the board's detail panel included.
+        let board = self.board.slot == Some(sid);
+        let side_open = dock_open || (board && self.board.panel.is_some());
         let terminal_open = slot.terminal_open;
         let group = self.workspace.find(&slot.tab).map(|(group, _)| group);
         let zoomed = group.is_some() && self.workspace.zoomed() == group;
@@ -1513,7 +1630,7 @@ impl Shell {
             None => current,
         };
         let mut available = Vec::new();
-        // A bot's conversation has no terminal.
+        // A hidden bot thread has no terminal.
         if !bot_chat {
             available.push(RailItem::Terminal);
         }
@@ -1545,7 +1662,8 @@ impl Shell {
         let tone = RailTone { on, off, hover };
         let state = RailActions {
             terminal_open,
-            dock_open,
+            dock_open: side_open,
+            board,
             group,
             zoomed,
         };
@@ -2064,7 +2182,11 @@ fn rail_plus_menu(
 #[derive(Clone, Copy)]
 struct RailActions {
     terminal_open: bool,
+    /// The side panel button's state: the dock open (on the Botboard, or
+    /// the board's detail panel).
     dock_open: bool,
+    /// The Botboard's chat (its side panel button toggles the right side).
+    board: bool,
     group: Option<crate::workspace::GroupId>,
     zoomed: bool,
 }
@@ -2082,6 +2204,7 @@ fn rail_action_button(
     let RailActions {
         terminal_open,
         dock_open,
+        board,
         group,
         zoomed,
     } = state;
@@ -2101,7 +2224,13 @@ fn rail_action_button(
             dock_open,
             "Side panel",
             tone,
-            cx.listener(move |this, _, _, cx| this.toggle_dock(sid, cx)),
+            cx.listener(move |this, _, _, cx| {
+                if board {
+                    this.toggle_board_side(sid, cx);
+                } else {
+                    this.toggle_dock(sid, cx);
+                }
+            }),
         )
         .into_any_element(),
         (RailItem::Split, Some(group)) => rail_button(
@@ -2182,6 +2311,15 @@ fn rail_button(
                     el.group_hover(id, move |s| s.text_color(tone.hover))
                 }),
         )
+}
+
+/// A link Files can't show: an existing absolute path on this device is
+/// revealed in the system file manager; anything else does nothing.
+fn reveal_if_here(path: &str, here: bool, cx: &mut App) {
+    let path = std::path::Path::new(path);
+    if here && path.is_absolute() && path.exists() {
+        cx.reveal_path(path);
+    }
 }
 
 #[cfg(test)]

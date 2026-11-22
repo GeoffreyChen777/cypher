@@ -137,7 +137,7 @@ impl Changes {
     /// and the pane sits on "Preparing diff…" forever (user report).
     fn desired_target(&self, cx: &App) -> Option<String> {
         let state = self.state.read(cx);
-        let device = state.selected_chat_row()?.device_id.clone();
+        let device = self.chat_row(state)?.device_id.clone();
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
@@ -230,8 +230,8 @@ impl Changes {
 
     fn resolved(&self, cx: &App) -> Option<CheckoutDiff> {
         let state = self.state.read(cx);
-        let chat = state.selected_chat_row()?;
-        resolve_diff(&self.diffs, chat).cloned()
+        let chat = self.chat_row(state)?;
+        resolve_diff(&self.diffs, &chat).cloned()
     }
 
     /// The checkout root the scoped RPCs address: the watch-resolved diff's
@@ -240,7 +240,7 @@ impl Changes {
         if let Some(diff) = self.resolved(cx) {
             return Some(diff.cwd);
         }
-        self.state.read(cx).selected_chat_row()?.cwd.clone()
+        self.chat_row(self.state.read(cx))?.cwd.clone()
     }
 
     /// The diff the pane currently displays: the watch stream for the working
@@ -326,9 +326,7 @@ impl Changes {
                             .is_some_and(|base| changes.branches.contains(base));
                         if !keep {
                             let current = changes
-                                .state
-                                .read(cx)
-                                .selected_chat_row()
+                                .chat_row(changes.state.read(cx))
                                 .and_then(|chat| chat.branch.clone());
                             changes.base_ref =
                                 default_base_ref(&changes.branches, current.as_deref());
@@ -360,9 +358,7 @@ impl Changes {
             return;
         }
         let Some(chat_id) = self
-            .state
-            .read(cx)
-            .selected_chat_row()
+            .chat_row(self.state.read(cx))
             .map(|chat| chat.id.clone())
         else {
             return;
@@ -1008,9 +1004,7 @@ impl Changes {
         let engine = self.state.read(cx).engine().cloned();
         let target = self.desired_target(cx);
         let chat_id = self
-            .state
-            .read(cx)
-            .selected_chat_row()
+            .chat_row(self.state.read(cx))
             .map(|chat| chat.id.clone());
         let mode = self.scope.mode().to_string();
         let base_ref = self.base_ref.clone();
