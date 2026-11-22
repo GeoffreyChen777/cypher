@@ -58,9 +58,12 @@ Narrow panes show one at a time.
 - **File links** in a reply (Markdown links to `src/a.rs#L12`, `a.rs:12`,
   `file:///…`) open the file in the session's Files tab, at the line.
 - **File references** in inline code (`` `core/context.py:146-160` ``,
-  `` `file.py:128` ``, `` `src/lib.rs` ``) show as chips: a file glyph, the
-  file name and muted lines. They sit in the prose without a background (and
-  without the inline-code color); the pointer brings up a light wash.
+  `` `file.py:128` ``, `` `src/lib.rs` ``) show as chips: a grey file glyph,
+  the file name in medium-weight code type and muted lines, on a faint neutral
+  wash with a hairline outline (never the inline-code color), so a reference
+  stands out from the prose around it. Under the pointer the wash and outline
+  deepen. A chip that no longer fits its line moves to the next one whole;
+  only one wider than the line breaks, a box per line.
   A span counts when it is one path-shaped token naming a file and either
   cites lines or has a folder; bare names without lines, globs, placeholders
   (`rank_<n>.pt`) and URLs stay code. Copying a chip copies the reference as

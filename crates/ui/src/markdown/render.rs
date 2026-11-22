@@ -817,7 +817,8 @@ pub struct FlatText {
 pub type CopySources = std::sync::Arc<[(Range<usize>, String)]>;
 
 /// One file-reference chip in a flat text: its whole range (the
-/// [`code_ref::ICON_GLUE`] first, then the label) and what it cites.
+/// [`code_ref::ICON_GLUE`] first, then the label, then
+/// [`code_ref::CHIP_TAIL`]) and what it cites.
 #[derive(Clone, Debug)]
 pub struct RefSpan {
     pub range: Range<usize>,
@@ -827,6 +828,12 @@ pub struct RefSpan {
 impl RefSpan {
     fn glue(&self) -> Range<usize> {
         self.range.start..self.range.start + code_ref::ICON_GLUE.len()
+    }
+
+    /// The glue and the label: what the chip's box is measured from (its
+    /// right padding is [`CHIP_PAD_RIGHT`] past the label, inside the tail).
+    fn boxed(&self) -> Range<usize> {
+        self.range.start..self.range.end - code_ref::CHIP_TAIL.len()
     }
 }
 
@@ -963,6 +970,7 @@ pub fn runs_text(runs: &[InlineRun]) -> String {
         if let Some((_, label)) = chip {
             text.push_str(code_ref::ICON_GLUE);
             text.push_str(&label);
+            text.push_str(code_ref::CHIP_TAIL);
         } else if run.style.math.is_some() {
             text.push(math::NBSP);
         } else {
@@ -1125,29 +1133,32 @@ fn flatten_runs_math(
         }
         if let Some((code_ref, label)) = chip {
             // The chip: glyph glue, the short label in the code font, its
-            // line suffix muted. It copies as the reference as written.
+            // line suffix muted, the tail. It copies as the reference as
+            // written. The glue and tail are spaces: their fonts only set
+            // the room they leave for the glyph and the padding.
             let start = text.len();
+            let style = ChipStyle::new(theme, 0.0);
             let mut f = theme.mono();
-            f.weight = if run.style.bold && base_weight.0 < FontWeight::SEMIBOLD.0 {
-                FontWeight::SEMIBOLD
-            } else {
-                base_weight
-            };
+            f.weight = chip_weight(base_weight, run.style.bold);
+            let mut sans = font(theme.font_sans.clone());
+            sans.weight = f.weight;
             let suffix = code_ref.line_suffix();
             let name = label.strip_suffix(suffix.as_str()).unwrap_or(&label);
             let parts = [
-                (code_ref::ICON_GLUE, theme.text),
-                (name, theme.text),
-                (&label[name.len()..], theme.text_muted),
+                (code_ref::ICON_GLUE_MONO, &f, style.name),
+                (code_ref::ICON_GLUE_SANS, &sans, style.name),
+                (name, &f, style.name),
+                (&label[name.len()..], &f, style.suffix),
+                (code_ref::CHIP_TAIL, &sans, style.name),
             ];
-            for (part, color) in parts {
+            for (part, part_font, color) in parts {
                 if part.is_empty() {
                     continue;
                 }
                 text.push_str(part);
                 out.push(TextRun {
                     len: part.len(),
-                    font: f.clone(),
+                    font: part_font.clone(),
                     color,
                     background_color: None,
                     underline: None,
@@ -1448,23 +1459,23 @@ fn flat_text_element(
                 }
             }
             if !chips.is_empty() {
-                let hovered = hovered_chip(scope, &underlay_key);
+                let scale = window.scale_factor();
                 for (chip_ix, chip) in chips.iter().enumerate() {
-                    let colors = ChipColors::new(&chip_theme, hovered == Some(chip_ix));
-                    if let Some((fill, border)) = colors.wash {
-                        let inset_y = inset_for(chip.range.start);
-                        for rect in range_rects(&layout, &chip.range, INLINE_CODE_PAD_X, inset_y) {
-                            window.paint_quad(quad(
-                                rect,
-                                px(INLINE_CODE_RADIUS),
-                                fill,
-                                px(1.0),
-                                border,
-                                BorderStyle::default(),
-                            ));
-                        }
+                    let t = crate::kit::motion::hover_t(&chip_fade_key(&underlay_key, chip_ix));
+                    let style = ChipStyle::new(&chip_theme, t);
+                    let inset_y = inset_for(chip.range.start);
+                    let lines = range_rects(&layout, &chip.boxed(), 0.0, inset_y);
+                    for rect in chip_boxes(&lines, scale) {
+                        window.paint_quad(quad(
+                            rect,
+                            px(CHIP_RADIUS),
+                            style.wash,
+                            px(1.0),
+                            style.hairline,
+                            BorderStyle::default(),
+                        ));
                     }
-                    paint_chip_glyph(window, cx, &layout, chip, colors.glyph);
+                    paint_chip_glyph(window, cx, &layout, chip, style.glyph);
                 }
             }
             // Under the selection wash below: a drag over a hit must still
@@ -1512,34 +1523,111 @@ fn flat_text_element(
         .into_any_element()
 }
 
-/// A chip's paint: bare text and glyph at rest, so a paragraph of
-/// references reads as prose; under the pointer (the chip opens its preview
-/// then) a quiet neutral wash with a hairline edge, and the glyph comes up
-/// to the text color. Never the inline-code green or the accent, so file
-/// references read apart from identifiers without shouting.
-struct ChipColors {
-    /// `(fill, border)`, hovered only.
-    wash: Option<(Hsla, Hsla)>,
-    glyph: Hsla,
+/// File-reference chip geometry, in px at any text size: the box's corner
+/// radius, its edge to the file glyph's box on the left, and the label's end
+/// to its edge on the right. The box is as tall as an inline-code wash
+/// ([`INLINE_CODE_HEIGHT_EM`]), so a chip never changes the line height.
+pub const CHIP_RADIUS: f32 = 6.0;
+pub const CHIP_PAD_LEFT: f32 = 5.0;
+pub const CHIP_PAD_RIGHT: f32 = 6.0;
+/// Where a chip that is wider than its line breaks: the padding on the
+/// broken edges of its line fragments.
+const CHIP_PAD_WRAP: f32 = 3.0;
+/// The file glyph's side, in em of the chip's text.
+const CHIP_GLYPH_EM: f32 = 0.86;
+
+/// Chip ink alphas `(rest, hover)`: the same numbers on both themes, black
+/// ink on light and white ink on dark. Exact alphas, not [`Theme::ink`] /
+/// [`Theme::hairline`], whose light-theme scaling would move them.
+const CHIP_WASH_ALPHA: (f32, f32) = (0.03, 0.06);
+const CHIP_HAIRLINE_ALPHA: (f32, f32) = (0.08, 0.15);
+
+/// A chip's paint, at hover progress `t` (0 at rest, 1 hovered; the
+/// pointer's hover fades between them, see [`chip_fade_key`]): a quiet
+/// neutral wash with a hairline edge that deepens under the pointer, the
+/// name in the body ink, the glyph and the line suffix muted. Never the
+/// inline-code green or the accent, so file references read apart from
+/// identifiers without shouting.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ChipStyle {
+    pub wash: Hsla,
+    pub hairline: Hsla,
+    pub glyph: Hsla,
+    pub name: Hsla,
+    pub suffix: Hsla,
 }
 
-impl ChipColors {
-    fn new(theme: &Theme, hovered: bool) -> Self {
-        if hovered {
-            Self {
-                wash: Some((theme.ink(0.06), theme.hairline(0.10))),
-                glyph: theme.text,
+impl ChipStyle {
+    pub fn new(theme: &Theme, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        let ink = |(rest, hover): (f32, f32)| {
+            let alpha = crate::kit::motion::lerp(rest, hover, t);
+            match theme.appearance {
+                crate::kit::theme::Appearance::Dark => gpui::hsla(0.0, 0.0, 1.0, alpha),
+                crate::kit::theme::Appearance::Light => gpui::hsla(0.0, 0.0, 0.0, alpha),
             }
-        } else {
-            Self {
-                wash: None,
-                glyph: theme.text_muted,
-            }
+        };
+        Self {
+            wash: ink(CHIP_WASH_ALPHA),
+            hairline: ink(CHIP_HAIRLINE_ALPHA),
+            glyph: theme.text_muted,
+            name: theme.text,
+            suffix: theme.text_muted,
         }
     }
 }
 
-/// The file glyph over a chip's leading glue, centered in the glue's box.
+/// A chip label's weight: medium in prose, semibold in bold text, never
+/// lighter than the block's own (a heading's).
+pub(crate) fn chip_weight(base: FontWeight, bold: bool) -> FontWeight {
+    let floor = if bold {
+        FontWeight::SEMIBOLD
+    } else {
+        FontWeight::MEDIUM
+    };
+    if base.0 < floor.0 { floor } else { base }
+}
+
+/// The hover-fade key of a text element's `chip_ix`-th chip.
+fn chip_fade_key(key: &str, chip_ix: usize) -> String {
+    format!("chip:{key}#{chip_ix}")
+}
+
+/// A chip's boxes from the line rects of its glue and label
+/// ([`RefSpan::boxed`], one rect per visual line): rects on the same line
+/// merge into one, the last line's box runs [`CHIP_PAD_RIGHT`] past the
+/// label, and edges where the chip breaks across lines get
+/// [`CHIP_PAD_WRAP`]. The glue already holds the left padding. Edges snap to
+/// device pixels (`scale` per px) so the hairline stays crisp.
+pub(crate) fn chip_boxes(lines: &[Bounds<gpui::Pixels>], scale: f32) -> Vec<Bounds<gpui::Pixels>> {
+    let mut rows: Vec<Bounds<gpui::Pixels>> = Vec::with_capacity(lines.len());
+    for rect in lines {
+        match rows.last_mut() {
+            Some(row) if row.top() == rect.top() => *row = row.union(rect),
+            _ => rows.push(*rect),
+        }
+    }
+    let last = rows.len().saturating_sub(1);
+    let snap = |v: gpui::Pixels| px((f32::from(v) * scale).round() / scale);
+    rows.iter()
+        .enumerate()
+        .map(|(ix, row)| {
+            let left = row.left() - px(if ix == 0 { 0.0 } else { CHIP_PAD_WRAP });
+            let right = row.right()
+                + px(if ix == last {
+                    CHIP_PAD_RIGHT
+                } else {
+                    CHIP_PAD_WRAP
+                });
+            let (left, right) = (snap(left), snap(right));
+            let (top, bottom) = (snap(row.top()), snap(row.bottom()));
+            Bounds::new(point(left, top), size(right - left, bottom - top))
+        })
+        .collect()
+}
+
+/// The file glyph over a chip's leading glue, [`CHIP_PAD_LEFT`] in from the
+/// chip's edge and centered on the line.
 fn paint_chip_glyph(
     window: &mut Window,
     cx: &mut gpui::App,
@@ -1556,10 +1644,15 @@ fn paint_chip_glyph(
     let font_size = layout
         .line_layout_for_index(chip.range.start)
         .map_or(13.0, |line| f32::from(line.unwrapped_layout.font_size));
-    let side = (font_size * 0.86).min(f32::from(rect.size.width)).round();
+    let room = f32::from(rect.size.width) - CHIP_PAD_LEFT;
+    let side = (font_size * CHIP_GLYPH_EM).min(room).max(0.0).round();
+    let scale = window.scale_factor();
+    let snap = |v: f32| (v * scale).round() / scale;
     let origin = point(
-        rect.left() + (rect.size.width - px(side)) / 2.0 - px(1.0),
-        rect.top() + (rect.size.height - px(side)) / 2.0,
+        px(snap(f32::from(rect.left()) + CHIP_PAD_LEFT)),
+        px(snap(
+            f32::from(rect.top()) + (f32::from(rect.size.height) - side) / 2.0,
+        )),
     );
     let _ = window.paint_svg(
         Bounds::new(origin, size(px(side), px(side))),
@@ -1578,6 +1671,24 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+/// Move the hovered chip to `next` (`None`: no chip), fading the chip it
+/// leaves back to rest and the one it enters up to its hover paint.
+fn set_hovered_chip(
+    next: Option<(super::selection::SelectionScope, std::sync::Arc<str>, usize)>,
+    reduced: bool,
+) {
+    let previous = HOVERED_CHIP.with(|hovered| hovered.replace(next.clone()));
+    if previous == next {
+        return;
+    }
+    if let Some((_, key, chip_ix)) = previous {
+        crate::kit::motion::set_hover(&chip_fade_key(&key, chip_ix), false, reduced);
+    }
+    if let Some((_, key, chip_ix)) = next {
+        crate::kit::motion::set_hover(&chip_fade_key(&key, chip_ix), true, reduced);
+    }
+}
+
 fn hovered_chip(scope: super::selection::SelectionScope, key: &str) -> Option<usize> {
     HOVERED_CHIP.with(|hovered| match &*hovered.borrow() {
         Some((s, k, ix)) if *s == scope && k.as_ref() == key => Some(*ix),
@@ -1592,7 +1703,7 @@ fn chip_hover(
     chip: &RefSpan,
     layout: &gpui::TextLayout,
 ) -> CodeRefHover {
-    let anchor = range_rects(layout, &chip.range, INLINE_CODE_PAD_X, 0.0)
+    let anchor = chip_hit_rects(layout, chip, 1.0)
         .into_iter()
         .next()
         .unwrap_or_default();
@@ -1624,7 +1735,7 @@ fn chip_hover_overlay(
             hit_chips
                 .iter()
                 .map(|chip| {
-                    range_rects(&hit_layout, &chip.range, INLINE_CODE_PAD_X, 0.0)
+                    chip_hit_rects(&hit_layout, chip, window.scale_factor())
                         .into_iter()
                         .map(|rect| window.insert_hitbox(rect, gpui::HitboxBehavior::Normal))
                         .collect::<Vec<_>>()
@@ -1647,11 +1758,10 @@ fn chip_hover_overlay(
                 if over == current {
                     return;
                 }
+                let reduced = crate::kit::motion::reduced_motion(cx);
                 match over {
                     Some(chip_ix) => {
-                        HOVERED_CHIP.with(|hovered| {
-                            *hovered.borrow_mut() = Some((scope, key.clone(), chip_ix));
-                        });
+                        set_hovered_chip(Some((scope, key.clone(), chip_ix)), reduced);
                         let hover = chip_hover(&key, &row_key, chip_ix, &chips[chip_ix], &layout);
                         (ui.on_hover)(Some(hover), window, cx);
                     }
@@ -1659,7 +1769,7 @@ fn chip_hover_overlay(
                     // move straight onto another element's chip is that
                     // element's enter.
                     None => {
-                        HOVERED_CHIP.with(|hovered| hovered.borrow_mut().take());
+                        set_hovered_chip(None, reduced);
                         (ui.on_hover)(None, window, cx);
                     }
                 }
@@ -1673,13 +1783,26 @@ fn chip_hover_overlay(
 
 /// Forget the hovered chip of `scope` — the surface's preview closed over
 /// it, or it scrolled away under a still pointer.
-pub fn clear_chip_hover(scope: super::selection::SelectionScope) {
-    HOVERED_CHIP.with(|hovered| {
-        let mut hovered = hovered.borrow_mut();
-        if hovered.as_ref().is_some_and(|(s, _, _)| *s == scope) {
-            *hovered = None;
-        }
+pub fn clear_chip_hover(scope: super::selection::SelectionScope, reduced: bool) {
+    let held = HOVERED_CHIP.with(|hovered| {
+        hovered
+            .borrow()
+            .as_ref()
+            .is_some_and(|(s, _, _)| *s == scope)
     });
+    if held {
+        set_hovered_chip(None, reduced);
+    }
+}
+
+/// Where a chip takes the pointer: its boxes ([`chip_boxes`]) at the full
+/// line height, so the gap above and below the outline still hovers.
+fn chip_hit_rects(
+    layout: &gpui::TextLayout,
+    chip: &RefSpan,
+    scale: f32,
+) -> Vec<Bounds<gpui::Pixels>> {
+    chip_boxes(&range_rects(layout, &chip.boxed(), 0.0, 0.0), scale)
 }
 
 /// Paint one formula over its glue. Inline math sits on the text baseline

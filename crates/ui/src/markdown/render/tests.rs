@@ -427,6 +427,7 @@ fn file_references_flatten_to_chips_that_copy_as_written() {
     // Find counts over the same text the chips render.
     assert_eq!(runs_text(&runs), flat.text.as_ref());
     let glue = crate::markdown::code_ref::ICON_GLUE;
+    let tail = crate::markdown::code_ref::CHIP_TAIL;
     let shown: Vec<&str> = flat
         .refs
         .iter()
@@ -435,9 +436,14 @@ fn file_references_flatten_to_chips_that_copy_as_written() {
     assert_eq!(
         shown,
         [
-            format!("{glue}file.py:69-73"),
-            format!("{glue}file.py:128-131"),
+            format!("{glue}file.py:69-73{tail}"),
+            format!("{glue}file.py:128-131{tail}"),
         ]
+    );
+    // The box is measured from the glue and the label, not the tail.
+    assert_eq!(
+        &flat.text[flat.refs[0].boxed()],
+        format!("{glue}file.py:69-73")
     );
     // Identifiers stay inline code; chips are not code washes.
     assert_eq!(flat.code_ranges.len(), 1);
@@ -1077,4 +1083,201 @@ fn display_formulas_cut_a_paragraph_into_rows() {
         runs: runs.to_vec(),
     };
     assert_eq!(count_block_matches(&block, "s"), 2);
+}
+
+fn chip_runs() -> Vec<InlineRun> {
+    vec![
+        InlineRun {
+            text: "see ".into(),
+            style: InlineStyle::default(),
+        },
+        InlineRun {
+            text: "crates/ui/src/markdown/render.rs:1126-1140".into(),
+            style: InlineStyle {
+                code: true,
+                ..Default::default()
+            },
+        },
+        InlineRun {
+            text: ", then ".into(),
+            style: InlineStyle::default(),
+        },
+        InlineRun {
+            text: "apps/cypher/Cargo.toml".into(),
+            style: InlineStyle {
+                code: true,
+                bold: true,
+                ..Default::default()
+            },
+        },
+    ]
+}
+
+/// The run covering byte `ix` of a flat text.
+fn run_at(flat: &FlatText, ix: usize) -> &TextRun {
+    let mut start = 0;
+    flat.runs
+        .iter()
+        .find(|run| {
+            start += run.len;
+            ix < start
+        })
+        .unwrap()
+}
+
+#[test]
+fn chips_set_the_name_in_medium_code_and_the_line_suffix_muted() {
+    for theme in [Theme::light(), Theme::dark()] {
+        let flat = flatten_runs_math(&chip_runs(), &theme, FontWeight::NORMAL, None, true);
+        assert_eq!(flat.refs.len(), 2);
+        let chip = &flat.refs[0];
+        let text = &flat.text[chip.range.clone()];
+        let name_at = chip.range.start + text.find("render.rs").unwrap();
+        let suffix_at = chip.range.start + text.find(":1126").unwrap();
+        let name = run_at(&flat, name_at);
+        assert_eq!(name.font.family, theme.font_mono);
+        assert_eq!(name.font.weight, FontWeight::MEDIUM);
+        assert_eq!(name.color, theme.text);
+        let suffix = run_at(&flat, suffix_at);
+        assert_eq!(suffix.font.family, theme.font_mono);
+        assert_eq!(suffix.font.weight, FontWeight::MEDIUM);
+        assert_eq!(suffix.color, theme.text_muted);
+        // The glue's last space and the tail are prose-font spaces.
+        let sans_glue = chip.range.start + code_ref::ICON_GLUE_MONO.len();
+        assert_eq!(run_at(&flat, sans_glue).font.family, theme.font_sans);
+        assert_eq!(
+            run_at(&flat, chip.range.end - 1).font.family,
+            theme.font_sans
+        );
+        // A chip in bold text is semibold.
+        let bold = run_at(&flat, flat.refs[1].range.start + code_ref::ICON_GLUE.len());
+        assert_eq!(bold.font.weight, FontWeight::SEMIBOLD);
+        // Find counts over the same text.
+        assert_eq!(runs_text(&chip_runs()), flat.text.as_ref());
+    }
+}
+
+#[test]
+fn chip_weight_is_medium_semibold_in_bold_and_never_lighter_than_the_block() {
+    assert_eq!(chip_weight(FontWeight::NORMAL, false), FontWeight::MEDIUM);
+    assert_eq!(chip_weight(FontWeight::NORMAL, true), FontWeight::SEMIBOLD);
+    assert_eq!(chip_weight(FontWeight::MEDIUM, true), FontWeight::SEMIBOLD);
+    // A heading's own weight wins.
+    assert_eq!(
+        chip_weight(FontWeight::SEMIBOLD, false),
+        FontWeight::SEMIBOLD
+    );
+    assert_eq!(chip_weight(FontWeight::BOLD, true), FontWeight::BOLD);
+}
+
+#[test]
+fn chip_glue_and_tail_hold_no_line_break_opportunity() {
+    // gpui's wrapper may break between two non-word characters; the
+    // combining grapheme joiner (a word character) between the spaces
+    // keeps a chip whole.
+    assert_eq!(
+        format!("{}{}", code_ref::ICON_GLUE_MONO, code_ref::ICON_GLUE_SANS),
+        code_ref::ICON_GLUE
+    );
+    let is_word = |c: char| c.is_ascii_alphanumeric() || ('\u{300}'..='\u{36f}').contains(&c);
+    for glue in [code_ref::ICON_GLUE, code_ref::CHIP_TAIL] {
+        let chars: Vec<char> = glue.chars().collect();
+        assert!(
+            chars
+                .windows(2)
+                .all(|pair| is_word(pair[0]) || is_word(pair[1]))
+        );
+        assert!(chars.iter().all(|c| *c == '\u{a0}' || *c == '\u{34f}'));
+    }
+}
+
+/// `(r, g, b, a)` of a colour in 0..=255.
+fn rgba8(color: Hsla) -> (u8, u8, u8, u8) {
+    let c = gpui::Rgba::from(color);
+    let byte = |v: f32| (v * 255.0).round() as u8;
+    (byte(c.r), byte(c.g), byte(c.b), byte(c.a))
+}
+
+#[test]
+fn chip_style_is_neutral_ink_that_deepens_on_hover() {
+    let light = Theme::light();
+    let rest = ChipStyle::new(&light, 0.0);
+    assert_eq!(rgba8(rest.wash), (0, 0, 0, 0x08));
+    assert_eq!(rgba8(rest.hairline), (0, 0, 0, 0x14));
+    let hover = ChipStyle::new(&light, 1.0);
+    assert_eq!(rgba8(hover.wash), (0, 0, 0, 0x0f));
+    assert_eq!(rgba8(hover.hairline), (0, 0, 0, 0x26));
+    for style in [rest, hover] {
+        assert_eq!(style.name, light.text);
+        assert_eq!(style.glyph, light.text_muted);
+        assert_eq!(style.suffix, light.text_muted);
+    }
+
+    let dark = Theme::dark();
+    let rest = ChipStyle::new(&dark, 0.0);
+    assert_eq!(rgba8(rest.wash), (255, 255, 255, 0x08));
+    assert_eq!(rgba8(rest.hairline), (255, 255, 255, 0x14));
+    let hover = ChipStyle::new(&dark, 1.0);
+    assert_eq!(rgba8(hover.wash), (255, 255, 255, 0x0f));
+    assert_eq!(rgba8(hover.hairline), (255, 255, 255, 0x26));
+    assert_eq!(hover.name, dark.text);
+    assert_eq!(hover.glyph, dark.text_muted);
+
+    // Mid-fade sits between the two; progress outside 0..1 clamps.
+    let mid = ChipStyle::new(&dark, 0.5);
+    assert!((mid.wash.a - 0.045).abs() < 1e-6);
+    assert!((mid.hairline.a - 0.115).abs() < 1e-6);
+    assert_eq!(ChipStyle::new(&dark, 3.0), hover);
+    assert_eq!(ChipStyle::new(&dark, -1.0), rest);
+}
+
+fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<gpui::Pixels> {
+    Bounds::new(point(px(x), px(y)), size(px(w), px(h)))
+}
+
+#[test]
+fn a_chip_on_one_line_is_one_box_padded_past_its_label() {
+    let boxes = chip_boxes(&[rect(10.0, 2.0, 80.0, 18.0)], 2.0);
+    assert_eq!(boxes, [rect(10.0, 2.0, 80.0 + CHIP_PAD_RIGHT, 18.0)]);
+    // Rects on one line (a range gpui reports in pieces) merge.
+    let boxes = chip_boxes(
+        &[rect(10.0, 2.0, 30.0, 18.0), rect(40.0, 2.0, 50.0, 18.0)],
+        2.0,
+    );
+    assert_eq!(boxes, [rect(10.0, 2.0, 80.0 + CHIP_PAD_RIGHT, 18.0)]);
+    assert!(chip_boxes(&[], 2.0).is_empty());
+}
+
+#[test]
+fn a_wrapped_chip_is_one_box_per_line_with_light_padding_at_the_break() {
+    let boxes = chip_boxes(
+        &[rect(300.0, 2.0, 40.0, 18.0), rect(0.0, 24.0, 30.0, 18.0)],
+        2.0,
+    );
+    assert_eq!(
+        boxes,
+        [
+            rect(300.0, 2.0, 40.0 + CHIP_PAD_WRAP, 18.0),
+            rect(
+                -CHIP_PAD_WRAP,
+                24.0,
+                30.0 + CHIP_PAD_WRAP + CHIP_PAD_RIGHT,
+                18.0
+            ),
+        ]
+    );
+}
+
+#[test]
+fn chip_boxes_snap_to_device_pixels() {
+    // 2x: edges land on half-px; 1x: on whole px.
+    let lines = [rect(10.3, 2.2, 80.1, 17.6)];
+    let [snapped] = chip_boxes(&lines, 2.0)[..] else {
+        panic!("one box");
+    };
+    assert_eq!(snapped, rect(10.5, 2.0, 86.0, 18.0));
+    let [snapped] = chip_boxes(&lines, 1.0)[..] else {
+        panic!("one box");
+    };
+    assert_eq!(snapped, rect(10.0, 2.0, 86.0, 18.0));
 }
