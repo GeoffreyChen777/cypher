@@ -102,6 +102,7 @@ impl gpui::Element for EditorElement {
                     background_color: None,
                     underline: None,
                     strikethrough: None,
+                    font_size: None,
                 };
                 let shaped = window
                     .text_system()

@@ -104,10 +104,25 @@ pub fn labels(refs: &[&CodeRef]) -> Vec<String> {
         .collect()
 }
 
-/// Glue before a chip's label, painted over with a file glyph: two no-break
-/// spaces in the code font (about one em), so the chip's width — and the
-/// line breaking around it — is settled by the text layout alone.
-pub const ICON_GLUE: &str = "\u{a0}\u{a0}";
+/// Glue before a chip's label, painted over with a file glyph and the
+/// chip's left padding: [`ICON_GLUE_MONO`] in the code font, then
+/// [`ICON_GLUE_SANS`] in the prose font (about 1.45 em), so the chip's width —
+/// and the line breaking around it — is settled by the text layout alone.
+///
+/// A combining grapheme joiner (U+034F, invisible, no advance) sits between
+/// the no-break spaces: the line wrapper may break between two non-word
+/// characters, and the joiner counts as a word character, so a chip that no
+/// longer fits moves to the next line whole instead of leaving a space of
+/// its glue behind.
+pub const ICON_GLUE: &str = "\u{a0}\u{34f}\u{a0}\u{34f}\u{a0}";
+/// The part of [`ICON_GLUE`] set in the code font (two of its 0.6 em spaces).
+pub const ICON_GLUE_MONO: &str = "\u{a0}\u{34f}\u{a0}\u{34f}";
+/// The rest of [`ICON_GLUE`], set in the prose font (a 0.25 em space).
+pub const ICON_GLUE_SANS: &str = "\u{a0}";
+/// After a chip's label, in the prose font (about 0.5 em): room for the
+/// chip's right padding inside its own text, so the outline never runs into
+/// the punctuation that follows. Joined like [`ICON_GLUE`].
+pub const CHIP_TAIL: &str = "\u{a0}\u{34f}\u{a0}";
 
 /// Every chip-shown reference in a tree, in document order — the context a
 /// bare `file.py:12` is read in (the agent wrote its full path elsewhere in

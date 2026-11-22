@@ -56,9 +56,24 @@ enum Theme {
     /// Claude brand orange — kept even on the mono surface.
     static let claudeBrand = Color(red: 0xD9 / 255.0, green: 0x77 / 255.0, blue: 0x57 / 255.0)
 
-    // ---- paint: markdown inline code (violet family) ----
-    static let inlineCodeText = adaptive(light: oklch(0.491, 0.241, 292.581), dark: oklch(0.811, 0.111, 293.571))
+    // ---- paint: markdown inline code (neutral) ----
+    /// Inline code is set apart by its type and its box, not by color: it
+    /// reads in the body ink, on a neutral ink wash — black on light, white
+    /// on dark (desktop theme.rs inline code). Syntax colors belong to code
+    /// blocks alone.
+    static let inlineCodeText = text
+    static let inlineCodeWashLight: CGFloat = 0.06
+    static let inlineCodeWashDark: CGFloat = 0.08
     static let inlineCodeWash = adaptive(
+        light: .black.opacity(inlineCodeWashLight), dark: .white.opacity(inlineCodeWashDark))
+
+    // ---- paint: mention chips (violet family) ----
+    /// Mention chips — in the composer and in sent prompts — keep the violet
+    /// inline code used to read in, as the desktop's mention chips keep
+    /// theirs (theme.rs `code_text`/`code_wash`): only markdown inline code
+    /// went neutral.
+    static let mentionText = adaptive(light: oklch(0.491, 0.241, 292.581), dark: oklch(0.811, 0.111, 293.571))
+    static let mentionWash = adaptive(
         light: oklch(0.541, 0.281, 293.009).opacity(0.08),
         dark: oklch(0.702, 0.183, 293.541).opacity(0.12))
 
@@ -79,6 +94,11 @@ enum Theme {
     }
 
     // ---- numbers drive layout (pt) ----
+    /// Code in prose — inline code and file reference names — is set this
+    /// much smaller than the prose around it, one scale for both (desktop
+    /// theme.rs `CODE_SCALE`). Code blocks keep their own size
+    /// (`MD.codeTextSize`).
+    static let codeScale: CGFloat = 0.86
     static let bubbleRadius: CGFloat = 16
     static let panelRadius: CGFloat = 10
 }
@@ -130,9 +150,12 @@ extension Theme {
     /// … as a default-on many-to-one `liga` whose glyph is one cell wide but
     /// inks two cells to its left, so `a === b` paints the bars over the text
     /// before it and the rest of the line slides two cells back.
-    static func monoUI(_ size: CGFloat) -> UIFont {
+    ///
+    /// The bundled Geist Mono is a variable font: a `weight` other than
+    /// regular sets its `wght` axis (medium 500, semibold 600, bold 700).
+    static func monoUI(_ size: CGFloat, weight: UIFont.Weight = .regular) -> UIFont {
         guard let font = UIFont(name: fontMonoName, size: size) else {
-            return .monospacedSystemFont(ofSize: size, weight: .regular)
+            return .monospacedSystemFont(ofSize: size, weight: weight)
         }
         let off = ["liga", "calt", "dlig"].map {
             [
@@ -140,7 +163,25 @@ extension Theme {
                 kCTFontOpenTypeFeatureValue as UIFontDescriptor.FeatureKey: 0,
             ] as [UIFontDescriptor.FeatureKey: Any]
         }
-        return UIFont(descriptor: font.fontDescriptor.addingAttributes([.featureSettings: off]), size: size)
+        var attributes: [UIFontDescriptor.AttributeName: Any] = [.featureSettings: off]
+        if let wght = monoAxisWeight(weight) {
+            attributes[UIFontDescriptor.AttributeName(rawValue: kCTFontVariationAttribute as String)] = [
+                monoWeightAxis: wght
+            ]
+        }
+        return UIFont(descriptor: font.fontDescriptor.addingAttributes(attributes), size: size)
+    }
+
+    /// The `wght` axis tag, as CoreText keys a variation.
+    static let monoWeightAxis = 0x7767_6874
+
+    /// A weight's `wght` axis value; nil for regular and lighter (the
+    /// font's default).
+    static func monoAxisWeight(_ weight: UIFont.Weight) -> Int? {
+        if weight.rawValue >= UIFont.Weight.bold.rawValue { return 700 }
+        if weight.rawValue >= UIFont.Weight.semibold.rawValue { return 600 }
+        if weight.rawValue >= UIFont.Weight.medium.rawValue { return 500 }
+        return nil
     }
 }
 

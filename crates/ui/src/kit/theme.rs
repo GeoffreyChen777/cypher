@@ -282,6 +282,15 @@ fn git_graph_tone(mut color: Hsla) -> Hsla {
     color
 }
 
+/// Code set inside prose — inline code and file-reference names — at this
+/// fraction of the surrounding text's size, as sized runs
+/// (`TextRun::font_size`), so it stays real text: it wraps, selects, finds,
+/// fades and copies like the prose around it. A monospace face reads larger
+/// than a proportional one at the same size; 0.86 evens them out. Prose and
+/// fenced code keep their own sizes ([`MarkdownMetrics`]). iOS uses the same
+/// scale.
+pub const CODE_SCALE: f32 = 0.86;
+
 /// Default markdown metrics, overridden only by a chat's scoped theme.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MarkdownMetrics {
@@ -444,9 +453,10 @@ pub struct Theme {
     pub danger_strong: Hsla,
 
     // ---- paint: code & diff ----
-    /// Inline-code and mention-chip text — emerald.
+    /// Mention-chip text — emerald. (Markdown inline code reads in the body
+    /// ink, see [`inline_code_text`].)
     pub code_text: Hsla,
-    /// Inline-code wash behind [`Self::code_text`].
+    /// Mention-chip wash behind [`Self::code_text`].
     pub code_wash: Hsla,
     /// Shared paint-only syntax palette.
     pub syntax: SyntaxPalette,
@@ -1179,13 +1189,28 @@ pub fn flatten(fg: Hsla, bg: Hsla) -> Hsla {
     hsla(h, s, l, 1.0)
 }
 
-/// Scoped inline-code tint. Defaults to emerald text and a translucent wash;
-/// overrides do not change the shared tokens used by mention chips.
+/// Inline-code wash alphas `(light, dark)`: black ink on light, white ink on
+/// dark. Exact alphas, not [`Theme::ink`], whose light-theme scaling would
+/// move them.
+pub const INLINE_CODE_WASH_ALPHA: (f32, f32) = (0.06, 0.08);
+
+/// Inline code's text: the body ink, so code reads apart from prose by its
+/// face and its wash, not by colour (syntax colours belong to fenced code).
+/// A chat's inline-code override wins. The emerald [`Theme::code_text`] stays
+/// for mention chips.
 pub fn inline_code_text(theme: &Theme) -> Hsla {
-    theme.inline_code_text.unwrap_or(theme.code_text)
+    theme.inline_code_text.unwrap_or(theme.text)
 }
+/// Inline code's wash: a neutral ink wash ([`INLINE_CODE_WASH_ALPHA`]) unless
+/// a chat overrides it. The emerald [`Theme::code_wash`] stays for mention
+/// chips.
 pub fn inline_code_wash(theme: &Theme) -> Hsla {
-    theme.inline_code_background.unwrap_or(theme.code_wash)
+    theme
+        .inline_code_background
+        .unwrap_or_else(|| match theme.appearance {
+            Appearance::Light => hsla(0.0, 0.0, 0.0, INLINE_CODE_WASH_ALPHA.0),
+            Appearance::Dark => hsla(0.0, 0.0, 1.0, INLINE_CODE_WASH_ALPHA.1),
+        })
 }
 /// Fenced code block fill: the chat override, else a plate that sits a step
 /// above the chat. On dark that is a faint white wash; on light the same ink

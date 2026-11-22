@@ -684,6 +684,7 @@ fn selectable_text(
         background_color: None,
         underline: None,
         strikethrough: None,
+        font_size: None,
     }]);
     let layout = styled.layout().clone();
     let sel_theme = theme.clone();

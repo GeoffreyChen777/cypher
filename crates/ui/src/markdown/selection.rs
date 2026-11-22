@@ -358,6 +358,17 @@ pub fn clear_if_owner(scope: SelectionScope, key: &str) -> bool {
     false
 }
 
+/// Whether `scope` holds selected text, live or settled. A link or chip
+/// asks on mouse-up: a press that dragged out a selection is not a click.
+/// (Every press begins afresh ([`begin`]), so an older selection never
+/// counts, and a press that has not moved has no spans yet.)
+pub fn has_selected_text(scope: SelectionScope) -> bool {
+    lock(state())
+        .get(&scope)
+        .and_then(|s| s.as_ref())
+        .is_some_and(|sel| sel.spans.iter().any(|s| !s.range.is_empty()))
+}
+
 /// The wash range for `key` this frame (empty ⇒ nothing to paint).
 pub fn wash_range(scope: SelectionScope, key: &str) -> Option<Range<usize>> {
     let guard = lock(state());
@@ -424,7 +435,11 @@ pub fn set_copy_sources(key: &str, text: &str, subs: Arc<[(Range<usize>, String)
 
 /// `text[range]` with every substituted range it touches copied as its
 /// source — whole, even when the selection only clips it.
-fn substitute(text: &str, range: &Range<usize>, subs: &[(Range<usize>, String)]) -> String {
+pub(crate) fn substitute(
+    text: &str,
+    range: &Range<usize>,
+    subs: &[(Range<usize>, String)],
+) -> String {
     let mut out = String::new();
     let mut at = range.start;
     for (sub, source) in subs {

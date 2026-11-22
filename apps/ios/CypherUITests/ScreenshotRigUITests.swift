@@ -9,7 +9,9 @@ import XCTest
 /// `home=;dark-chat=-route chat:chat-veil -appAppearance dark`. Words
 /// starting with `@` are gestures run in order once the screen has settled,
 /// not launch arguments: `@swipeUp`, `@swipeDown`, `@tap:<identifier>`,
-/// `@wait`.
+/// `@wait`, and `@drag:<x1>,<y1>,<x2>,<y2>,<hold>` — a touch held `hold`
+/// seconds at the first point, then dragged to the second, in points from
+/// the screen's top left: a hold of 1 selects text from there, 0.1 scrolls.
 final class ScreenshotRigUITests: XCTestCase {
     @MainActor
     func testWritesTheRequestedScreens() throws {
@@ -35,6 +37,13 @@ final class ScreenshotRigUITests: XCTestCase {
                     if gesture.hasPrefix("@tap:") {
                         let element = app.descendants(matching: .any)[String(gesture.dropFirst(5))].firstMatch
                         if element.waitForExistence(timeout: 5) { element.tap() }
+                    } else if gesture.hasPrefix("@drag:") {
+                        let v = gesture.dropFirst(6).split(separator: ",").compactMap { Double($0) }
+                        guard v.count == 5 else { continue }
+                        let origin = app.coordinate(withNormalizedOffset: .zero)
+                        origin.withOffset(CGVector(dx: v[0], dy: v[1])).press(
+                            forDuration: v[4], thenDragTo: origin.withOffset(CGVector(dx: v[2], dy: v[3])),
+                            withVelocity: v[4] < 0.5 ? .fast : 150, thenHoldForDuration: 0.6)
                     }
                 }
                 Thread.sleep(forTimeInterval: 1)

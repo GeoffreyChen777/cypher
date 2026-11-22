@@ -123,7 +123,8 @@ final class MentionsTests: XCTestCase {
             Mentions.inlineRuns(raw),
             [
                 InlineRun(text: "see ", style: .plain),
-                InlineRun(text: "\u{a0}@b.rs\u{a0}", style: InlineStyle(code: true)),
+                // Inline code marked as a mention, so it keeps its violet.
+                InlineRun(text: "\u{a0}@b.rs\u{a0}", style: InlineStyle(code: true, mention: true)),
                 InlineRun(text: " now", style: .plain),
             ])
         XCTAssertEqual(

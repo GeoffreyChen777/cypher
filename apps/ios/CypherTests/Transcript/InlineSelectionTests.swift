@@ -80,7 +80,8 @@ final class InlineSelectionTests: XCTestCase {
         XCTAssertEqual((attributed.attribute(.font, at: 0, effectiveRange: nil) as? UIFont)?.pointSize, MD.textSize)
         XCTAssertNotNil(attributed.attribute(.cypherInlineCode, at: 5, effectiveRange: nil))
         XCTAssertEqual(
-            (attributed.attribute(.font, at: 5, effectiveRange: nil) as? UIFont)?.pointSize, MD.textSize - 1.5)
+            (attributed.attribute(.font, at: 5, effectiveRange: nil) as? UIFont)?.pointSize ?? 0,
+            MD.textSize * Theme.codeScale, accuracy: 0.001)
         XCTAssertEqual(
             attributed.attribute(.link, at: 10, effectiveRange: nil) as? URL, URL(string: "https://example.com"))
         XCTAssertEqual(
