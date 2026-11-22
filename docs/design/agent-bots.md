@@ -412,6 +412,8 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
   slot) and sessions per plan (default 8), 8 sessions per step, 10 steps per plan, and
   the time limit (§6.6). The bot's `paused` flag keeps approved plans waiting and refuses
   new worktrees and sessions. Turn budgets are not built.
+- **Text limits.** The plan's text is capped to fit its registry row; moving long text into the
+  workspace chat's doc is designed in [plan-body.md](plan-body.md) (not built).
 - **The activity log** gets a `botActivity` row for each proposal, start, cancel, finish,
   failure, Stop, worktree, session started, answered, steered or stopped, and approval
   asked.
