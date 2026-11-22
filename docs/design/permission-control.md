@@ -913,14 +913,22 @@ the action (`create`, `delete`, `merge`, `push`, `publish`, `release`, `install`
 `erase`, `apply`, …), which operands carry which entity kinds (`rest` repeats the last),
 which options set entity fields (`-R` repo, `--base`/`--head`, `-n` namespace), and
 which options take a value (`VALUE_OPTIONS`). Rows cover gh (pr, release, repo), glab
-(mr, release), git (push, worktree remove), npm/pnpm/yarn/bun and cargo (publish,
+(mr, release), git (push, worktree remove, `branch -d/-D`, `tag -d`: a row may apply only
+when an option is given, `when`), npm/pnpm/yarn/bun and cargo (publish,
 unpublish, yank, installs), the system installers, docker/podman (push, rm, rmi, stop,
-kill), xcrun simctl (delete, erase, shutdown), kubectl (delete, scale, rollout), helm
+kill, `container rm/stop/kill`), xcrun simctl (delete, erase, shutdown), rm/rmdir/unlink/trash/shred,
+kill/pkill/killall, multipass (delete, stop), kubectl (delete, scale, rollout), helm
 (install, upgrade, uninstall, rollback), ssh/mosh/sftp, scp/rsync, curl/wget/xh. Shapes a
 table can't say are named `reader`s implemented in `explicit.ts` (`refspecs` for a push,
 `manifest` for a publish, `ssh`, `copy`, `urls`). A command no row covers asks, as
-before. `rm` and `kill` have no rows on purpose: what they may touch is provenance
-(created.ts) and process facts, not the owner naming a pid.
+before. `rm` and `kill` (2026-11-22) are read too, after provenance: what this task made or
+started is local work before the table is consulted (§7.3.3, the process marker), so the
+rows only let the owner's words cover the rest (a path or a pid they named). A test keeps
+the two tables in step: every catalogue row that destroys, stops or merges has a reading
+here of the same kind and action (`cypher-permissions-provenance.test.mjs`, with a list for
+any row deliberately left local-only, empty today). Three replay cases the model now sees
+because their targets became readable (#59, #121, #153) carry a stubbed "ask-user" verdict:
+none has the owner's words, so no danger can run.
 
 Coverage for kinds beyond §7.3.2's is generic: the consent must say the action (a word
 table per action, `ACTION_WORDS`) and name the entity (`namesOf`).

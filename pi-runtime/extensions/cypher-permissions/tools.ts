@@ -65,6 +65,8 @@ export interface ToolRow {
   reader?: "refspecs" | "manifest" | "ssh" | "copy" | "urls";
   /** Only the entity operands and options must be known before it runs (titles and bodies may not). */
   loose?: boolean;
+  /** The row applies only when one of these options is given (`git branch -D`, not `git branch new`). */
+  when?: readonly string[];
 }
 
 /** Per program: the options that take a value (so it is no operand). */
@@ -136,6 +138,8 @@ export const TOOLS: readonly ToolRow[] = [
     { programs: [program], sub: ["container", "rm"], action: "delete", operands: ["container"], rest: true, needs: "Cypher can't tell which containers it deletes" },
     { programs: [program], sub: ["stop"], action: "stop", operands: ["container"], rest: true, needs: "Cypher can't tell which containers it stops" },
     { programs: [program], sub: ["kill"], action: "stop", operands: ["container"], rest: true, needs: "Cypher can't tell which containers it stops" },
+    { programs: [program], sub: ["container", "stop"], action: "stop", operands: ["container"], rest: true, needs: "Cypher can't tell which containers it stops" },
+    { programs: [program], sub: ["container", "kill"], action: "stop", operands: ["container"], rest: true, needs: "Cypher can't tell which containers it stops" },
   ]),
   // Simulators.
   ...(["delete", "erase", "shutdown"] as const).map((sub): ToolRow => ({
@@ -150,10 +154,18 @@ export const TOOLS: readonly ToolRow[] = [
     programs: ["helm"], sub: [sub], action: sub === "uninstall" ? "delete" : "apply", operands: ["resource"], needs: "Cypher can't tell which release it acts on",
     options: { "-n": { field: "scope" }, "--namespace": { field: "scope" } },
   })),
-  // Checkouts. (Deleting files and stopping processes, `rm` and `kill`, stay
-  // out on purpose: what they act on is decided by provenance, created.ts and
-  // the process facts, not by the owner naming it.)
+  // Checkouts, branches and tags.
   { programs: ["git"], sub: ["worktree", "remove"], action: "delete", operands: ["worktree"], needs: "Cypher can't tell which worktree it removes" },
+  { programs: ["git"], sub: ["branch"], when: ["-d", "-D", "--delete"], action: "delete", operands: ["branch"], rest: true, needs: "Cypher can't tell which branches it deletes" },
+  { programs: ["git"], sub: ["tag"], when: ["-d", "--delete"], action: "delete", operands: ["tag"], rest: true, needs: "Cypher can't tell which tags it deletes" },
+  // Files and processes. What this task made or started is local work before
+  // this table is read (provenance: catalogue.ts, risk.ts `facts.created`, the
+  // process marker); the rest is a danger the owner has to name.
+  { programs: ["rm", "rmdir", "trash", "unlink", "shred"], sub: [], action: "delete", operands: ["path"], rest: true, needs: "Cypher can't tell which files it deletes" },
+  { programs: ["kill"], sub: [], action: "stop", operands: ["process"], rest: true, needs: "Cypher can't tell which processes it stops" },
+  { programs: ["pkill", "killall"], sub: [], action: "stop", operands: ["process"], rest: true, needs: "Cypher can't tell which processes it stops" },
+  // Machines.
+  ...(["delete", "stop"] as const).map((sub): ToolRow => ({ programs: ["multipass"], sub: [sub], action: sub, operands: ["host"], rest: true, needs: "Cypher can't tell which machines it acts on" })),
   // Other hosts.
   { programs: ["ssh", "mosh", "sftp"], sub: [], action: "reach", reader: "ssh" },
   { programs: ["scp", "rsync"], sub: [], action: "reach", reader: "copy" },
@@ -229,7 +241,8 @@ export function readTool(words: readonly string[]): ToolRead | { unknown: string
   const rows = ROWS_BY_PROGRAM.get(program);
   if (!rows) return undefined;
   const args = splitArgs(words.slice(1), VALUE_OPTIONS[program] ?? []);
-  const row = rows.find((candidate) => candidate.sub.every((word, index) => args.positionals[index] === word));
+  const given = (names: readonly string[]) => names.some((name) => args.options.has(name) || (/^-[A-Za-z]$/.test(name) && [...args.options.keys()].some((option) => /^-[A-Za-z]+$/.test(option) && option.includes(name[1]))));
+  const row = rows.find((candidate) => candidate.sub.every((word, index) => args.positionals[index] === word) && (!candidate.when || given(candidate.when)));
   if (!row) {
     if (args.positionals.slice(0, 2).includes(UNKNOWN)) return { unknown: `what \`${program}\` does is known only when it runs` };
     return undefined;

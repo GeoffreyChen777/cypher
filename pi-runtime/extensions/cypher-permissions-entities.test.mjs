@@ -171,7 +171,7 @@ test("entities (property): a path outside a folder is never in it; unrelated nev
 // --- The tool table -------------------------------------------------------------------
 
 test("tools (property): every row's generated command line reads back as its entities", () => {
-  const values = { pr: () => String(1 + Math.floor(rand() * 500)), release: () => `v${Math.floor(rand() * 9)}.${Math.floor(rand() * 9)}.0`, repo: () => `${word()}/${word()}`, package: () => word(), image: () => `ghcr.io/${word()}:${Math.floor(rand() * 9)}`, container: word, simulator: () => pick(["11111111-2222-3333-4444-555555555555", "iPhone 15"]), resource: word, worktree: () => `/w/${word()}`, path: () => `/w/${word()}` };
+  const values = { pr: () => String(1 + Math.floor(rand() * 500)), release: () => `v${Math.floor(rand() * 9)}.${Math.floor(rand() * 9)}.0`, repo: () => `${word()}/${word()}`, package: () => word(), image: () => `ghcr.io/${word()}:${Math.floor(rand() * 9)}`, container: word, simulator: () => pick(["11111111-2222-3333-4444-555555555555", "iPhone 15"]), resource: word, worktree: () => `/w/${word()}`, path: () => `/w/${word()}`, branch: () => `feat/${word()}`, tag: () => `v${Math.floor(rand() * 9)}.1.0`, process: () => String(100 + Math.floor(rand() * 90000)), host: word };
   let rows = 0;
   for (const row of TOOLS) {
     if (row.reader || !row.operands?.length) continue;
@@ -182,7 +182,7 @@ test("tools (property): every row's generated command line reads back as its ent
       const typed = row.typed ? ["deployment"] : [];
       const flags = rand() < 0.5 ? ["--yes"] : [];
       const program = pick(row.programs);
-      const words = [program, ...row.sub, ...flags, ...typed, ...names];
+      const words = [program, ...row.sub, ...(row.when ? [row.when[0]] : []), ...flags, ...typed, ...names];
       const read = readTool(words);
       assert.ok(read && !("unknown" in read), `${words.join(" ")}: ${JSON.stringify(read)}`);
       assert.equal(read.action, row.action);
@@ -190,7 +190,7 @@ test("tools (property): every row's generated command line reads back as its ent
       assert.ok(read.entities.every((e, index) => e.kind === row.operands[Math.min(index, row.operands.length - 1)]));
     }
     // An operand known only when it runs: never read as one.
-    const unknown = readTool([row.programs[0], ...row.sub, UNKNOWN]);
+    const unknown = readTool([row.programs[0], ...row.sub, ...(row.when ? [row.when[0]] : []), UNKNOWN]);
     assert.ok(unknown === undefined || "unknown" in unknown || unknown.entities.every((e) => e.name !== UNKNOWN));
   }
   assert.ok(rows > 30, `rows with operands (${rows})`);
