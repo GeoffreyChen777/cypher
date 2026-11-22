@@ -626,7 +626,8 @@ When several paths are requested together, the strictest mode wins.
   anything that carries data off the machine. The prompt also lists what this task made
   (§7.3.3), so the model never has to take the agent's word for it.
 - **Output**: `{"decision": "approve" | "approve-once" | "ask-user", "reason"}`, and for
-  an approved danger `"userQuote"` and `"target": {"kind", "value"}` (§7.3.2). Two
+  an approved danger `"consent": {"source", "quote"}` (the older `"userQuote"` still
+  reads) and `"target": {"kind", "value"}` (§7.3.2, §7.3.4). Two
   outcomes follow: `approve` or `approve-once` runs the call, `ask-user` puts it to the
   user with the reason. `approve-once` runs the call and keeps nothing: the answer when
   the call is fine but the patterns an approval would keep for the chat are too broad
@@ -733,8 +734,8 @@ dialog, when:
    none. The message holding the quote must not say not to either: "open a PR, don't
    merge it" and "pr 给 main，先别合并" ask for no merge, though they say the word.
 
-A host is named by its name, its first label (`web` for `web.example.com`) or what its
-alias starts with (`gamma` for `gamma-cluster`).
+A host is named by its name or a host family holding it (`web` for `web.example.com`,
+`gamma` for `gamma-cluster`): entity relations, §7.3.5.
 
 Still asked, whatever the model says: the always-ask floor (§7.3.1), checked first; a
 target known only when the line runs (`git push origin $BRANCH`, `gh pr merge $(…)`, a
@@ -750,8 +751,8 @@ and the dialog's Review row says why a quoted request wasn't confirmed.
 
 **Only the owner's words count.** The engine passes them in `CYPHER_OWNER_WORDS`, an
 environment variable the harness sets when it spawns Pi (`crates/harness/src/pi/spawn.rs`,
-beside `CYPHER_PERMISSION_LEVEL`): JSON `{"messages": [{"text", "source": "typed" |
-"plan"}], "agentWritten"}`, at most ten messages of 2,000 characters, 12,000 in all. A
+beside `CYPHER_PERMISSION_LEVEL`): JSON `{"messages": [{"text", "source", "question"?, "proposal"?, "at"?}], "agentWritten"}`
+(sources and caps: §7.3.4). A
 running agent can't change its own process's environment. A Pi process outlives the turn
 it was started for, though: the owner's next message is routed into it, and is not in the
 environment it started with. So before it checks a danger the extension asks the engine
@@ -780,6 +781,121 @@ command ledger, not from Pi's conversation, where agents' messages sit as user m
 
 Without the variable (an older Cypher, or Pi started by hand), no danger runs on an
 explicit request.
+
+#### 7.3.4 Consent sources (2026-11-22)
+
+The owner: *"你的修复，包括权限部分代码一定要有泛化性，不要只针对几个case"* (fixes must
+generalize, not target a few cases). Typed messages are one way the owner says yes; the
+engine now passes every way it can vouch for, each tagged, as one list
+(`crates/engine/src/host/doc_host/owner_words.rs`):
+
+```
+OwnerWord { text: string; source: "typed" | "plan" | "answer" | "card" | "reply";
+            question?: string;  // answer: the question as shown (header, question, "Options: a | b")
+            proposal?: string;  // reply: the agent message it answers (its latest part)
+            at?: number }       // epoch ms the owner said it, when known
+```
+
+- `typed`, `plan`: as in §7.3.2.
+- `answer`: the owner's answer to a question an agent asked (a `RespondInput` command the
+  owner issued and the host ran), `text` the option(s) picked (`; `-joined) or what they
+  wrote, `question` read from the transcript's input part for that request. A permission
+  dialog's answer ("Run once", "Allow") is no consent for anything else: input parts
+  carrying a `permission` prompt are left out, as are commands an agent issued.
+- `card`: the card of the approved plan (`BotWork::decision.approve`) a chat belongs to —
+  title, summary, steps with details — from the work record, never from a session's
+  brief. Only a plan's sessions and its thread get it.
+- `reply`: an owner message that directly follows an agent message in the transcript
+  (continuations joined), carrying that message's text as `proposal`. Only the entry
+  right before binds. A message is a reply only when it is short: at most
+  `REPLY_MAX_WEIGHT` (60) letters and digits after dropping spaces, punctuation and
+  symbols, a CJK character counting twice. No word list: whether "做", "按照建议" or "the
+  second one" agrees is the reviewing model's call; a longer message is `typed` and
+  stands on its own words.
+
+Caps: ten words besides the plan's instruction and card, a message 2,000 characters, a
+card 3,000, a proposal or question 1,200 (their *end*, which holds what was proposed or
+asked last), 12,000 characters in all with every field counted; the oldest go first.
+
+The extension (`explicit.ts`) treats every kind as one consent model. The judge's prompt
+lists each with its kind (a reply with the agent message above it, an answer with its
+question) and asks for `"consent": {"source", "quote"}`. The code then checks: the quote
+occurs in that kind's consent text (`consentText`: a reply's proposal with the reply; an
+answer's question with the option picked — options passed over are left out, so quoting
+one fails; a card's text); the target relation (§7.3.5) against what that consent names;
+and that no later owner word takes it back or moves on (§7.3.2 item 4; a later reply or
+answer whose proposal or question is about the same target carries on). Whether a reply
+agrees is the judge's call, not a phrase list's.
+
+Compatibility: an engine before this sends only `typed`/`plan`, which work as before; the
+new kinds simply never appear. This extension leaves out a word whose kind it doesn't
+know, and a `reply` without `proposal` reads as `typed`. Note the other direction: an
+extension before this (Runtime ≤ 1.5.2.4) reads every non-`plan` source as `typed`, so
+with a new engine it would take an answer's or card's text as typed words, without the
+question/option checks. Ship the engine and Runtime together (as for §7.3.2).
+
+#### 7.3.5 Target identity: entities and their relation (2026-11-22)
+
+Targets are compared as typed entities, never as strings (`cypher-permissions/
+entities.ts`). Kinds: `repo`, `remote`, `branch`, `pr`, `tag`, `release`, `path`,
+`worktree`, `process`, `simulator`, `host`, `package`, `container`, `image`, `resource`.
+One function decides `relation(a, b, context)`: `same` (symmetric, transitive),
+`contains` / `contained` (antisymmetric, transitive), `unrelated`, `unknown`. The
+`EntityContext` says what is known besides: the current repository (origin's), remote →
+repository, pull requests this chat knows (number, head, base: from `gh pr create`
+lines and their results), simulators by UDID and name, cwd and home. Covered:
+
+- a pull request *contains* its head branch (when its head is known, else `unknown`);
+  its base is `unrelated` on purpose, so naming `main` covers no pull request into main
+  (a model may still *identify* a new pull request by its base, `identifies`);
+- `owner/repo`-qualified ↔ bare names in the current repository are `same`; a bare
+  repository name contains every `owner/name` with that name, unless it is the current
+  repository's; a repository and a remote pointing at it contain their branches, pull
+  requests, tags and releases;
+- `origin/x` ↔ `x`, `refs/heads/x` ↔ `x`; another remote's branch is another branch;
+- a tag ↔ the release of that tag: `same`;
+- paths normalised (`~`, relative to cwd, `..`): a folder contains what is inside it; a
+  common prefix (`/w/app` vs `/w/application`) is no containment; a relative path with no
+  directory is `unknown`;
+- hosts without user, scheme, port: `a` contains `b` when `b` is `a` and a separator
+  (`.` after ≥3 characters, `-`/`_` after ≥4): `web` → `web.example.com`, `gamma` →
+  `gamma-cluster` → `gamma-cluster-1`;
+- a simulator's UDID ↔ its name when known; a package contains its versions; an image
+  without tag contains its tags.
+
+Consent holds when every acted-on entity is `same` as or `contained` in one the consent
+names (`covers`), or plainly implies (the pull request this chat opened; a release of the
+version; merging the pull request whose head the owner named, into a default or named
+base). What a text names is read as `namesOf(entity)`: the names whose mention names the
+entity or one holding it (a branch as `x` or `origin/x`, a path or its folder, `~/…`,
+cwd-relative, or its own or its folder's name; a host family; a package with or without
+version; …). The model's `target` must *identify* one of the line's entities (related at
+all), so "branch fix-x" names the pull request from fix-x.
+
+**The tool table** (`cypher-permissions/tools.ts`, `TOOLS`): per program and subcommand,
+the action (`create`, `delete`, `merge`, `push`, `publish`, `release`, `install`, `stop`,
+`erase`, `apply`, …), which operands carry which entity kinds (`rest` repeats the last),
+which options set entity fields (`-R` repo, `--base`/`--head`, `-n` namespace), and
+which options take a value (`VALUE_OPTIONS`). Rows cover gh (pr, release, repo), glab
+(mr, release), git (push, worktree remove), npm/pnpm/yarn/bun and cargo (publish,
+unpublish, yank, installs), the system installers, docker/podman (push, rm, rmi, stop,
+kill), xcrun simctl (delete, erase, shutdown), kubectl (delete, scale, rollout), helm
+(install, upgrade, uninstall, rollback), ssh/mosh/sftp, scp/rsync, curl/wget/xh. Shapes a
+table can't say are named `reader`s implemented in `explicit.ts` (`refspecs` for a push,
+`manifest` for a publish, `ssh`, `copy`, `urls`). A command no row covers asks, as
+before. `rm` and `kill` have no rows on purpose: what they may touch is provenance
+(created.ts) and process facts, not the owner naming a pid.
+
+Coverage for kinds beyond §7.3.2's is generic: the consent must say the action (a word
+table per action, `ACTION_WORDS`) and name the entity (`namesOf`).
+
+Tests: `cypher-permissions-entities.test.mjs` — unit tests, and seeded property tests
+over generated entity pairs (symmetry, antisymmetry, transitivity, qualification with the
+current repository changes nothing, a path outside a folder is never in it, unrelated
+never covers, every name `namesOf` gives covers), generated command lines for every table
+row reading back as their entities, and the consent sources (a reply binds its proposal,
+an answer's unpicked option fails, a card's branch identifies the pull request, a target
+nobody named never passes whatever the source).
 
 #### 7.3.3 What this task made (2026-11-18)
 
@@ -977,7 +1093,9 @@ Commands:
 | `cypher-permissions/risk.ts`, `packs.ts` | The risk classifier: an action's tier, the always-ask floor, what each program does |
 | `cypher-permissions/created.ts` | What this task made, read from the commands it ran: the facts a danger over its own leavings rests on (§7.3.3) |
 | `cypher-permissions/explicit.ts` | Explicit requests: the owner's words, what a dangerous line acts on, the quote, target and retraction checks (§7.3.2) |
-| `crates/engine/src/host/doc_host/owner_words.rs` | The owner's words from a chat's command ledger (`CYPHER_OWNER_WORDS`); `SessionCommandEntry::author` marks agents' messages |
+| `cypher-permissions/entities.ts` | Target identity: typed entities and `relation`/`covers`/`identifies`/`namesOf` (§7.3.5) |
+| `cypher-permissions/tools.ts` | The tool table: per program and subcommand, the action and which operands/options carry which entities (§7.3.5) |
+| `crates/engine/src/host/doc_host/owner_words.rs` | The owner's words from a chat's command ledger and transcript (`CYPHER_OWNER_WORDS`): typed, plan, answer, card, reply (§7.3.4); `SessionCommandEntry::author` marks agents' messages |
 | `cypher-permissions/audit.ts` | The audit log |
 | `cypher-permissions/shell.ts` | Reading a command line into every command it can run and the files it redirects, or opaque |
 | `cypher-permissions/commands.ts` | Command rules: patterns, validation, the banned programs, categories, resolving a program |
