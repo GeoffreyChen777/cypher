@@ -158,7 +158,10 @@ export function consentText(word: OwnerWord): string {
 export function citedIn(word: OwnerWord, wanted: string, quote = wanted): { source: ConsentSource; said: string } | undefined {
   if (word.source === "reply") {
     if (word.proposal && normalize(word.proposal).includes(wanted) && bareAssent(word.text, quote)) return { source: "reply", said: consentText(word) };
-    return normalize(word.text).includes(wanted) ? { source: "typed", said: word.text } : undefined;
+    // The reply's own words: typed, unless the part holding the quote is a question (a reply asking about the proposal asks for nothing).
+    if (!normalize(word.text).includes(wanted)) return undefined;
+    const asking = word.text.split(/(?<=[?？¿؟;՞፧⸮⁇⁈⁉꘏.!。！\n])/u).some((part) => normalize(part).includes(wanted) && QUESTION.test(part));
+    return asking ? undefined : { source: "typed", said: word.text };
   }
   const said = consentText(word);
   return normalize(said).includes(wanted) ? { source: word.source, said } : undefined;

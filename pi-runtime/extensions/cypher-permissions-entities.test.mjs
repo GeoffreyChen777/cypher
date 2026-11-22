@@ -539,6 +539,11 @@ test("replies (property): a reply binds to the proposal only as bare assent; que
       }
     }
   }
+  // A reply asking about the proposal in its own words asks for nothing, as a reply or as typed words.
+  for (const mark of ["?", "？", "¿", "؟"]) {
+    const asks = `${pick(["so", "and", "when"])} merge PR #12 ${pick(["now", "today", ""])}${mark}`;
+    for (const source of ["reply", "typed", undefined]) assert.equal(checkExplicit({ ...claim(), source }, read, words({ text: asks, source: "reply", proposal }), [], explicitFacts).ok, false, `${source} "${asks}"`);
+  }
   // Words with no assent at all never bind either.
   for (const text of ["thanks", "nice", "看看日志", "画面", "로그", "logs", "merci"]) assert.equal(reply(text).ok, false, text);
   assert.ok(checked > 1000, `${checked}`);
