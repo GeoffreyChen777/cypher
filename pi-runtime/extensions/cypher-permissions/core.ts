@@ -916,7 +916,7 @@ export class Permissions {
       reason: verdict.reason,
       state: verdict.decision === "approve" ? "approved" : "asked",
       audit: { judgeVerdict: verdict.kind },
-      ...(verdict.quote || verdict.targets ? { claim: { quote: verdict.quote, targets: verdict.targets } } : {}),
+      ...(verdict.quote || verdict.targets ? { claim: { quote: verdict.quote, ...(verdict.source ? { source: verdict.source } : {}), targets: verdict.targets } } : {}),
     };
   }
 

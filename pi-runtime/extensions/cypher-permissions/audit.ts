@@ -52,7 +52,8 @@ export interface AuditRecord {
     ok: boolean;
     reason?: string;
     quote?: string;
-    quoteSource?: "typed" | "plan";
+    /** Which consent: `typed`, `plan`, `card`, `answer` or `reply`. */
+    quoteSource?: "typed" | "plan" | "card" | "answer" | "reply";
     targets: string[];
     passed: string[];
   };

@@ -5,14 +5,21 @@
  * on; this module checks both, so the model's say-so is never enough:
  *
  * 1. The quote is the owner's: it occurs, as written (whitespace, case and
- *    full-width punctuation aside), in one of the owner's own messages. Only
- *    the words the engine passes through `CYPHER_OWNER_WORDS` count: what a
- *    person typed in this chat, and a plan's instruction from its record.
+ *    full-width punctuation aside), in one of the owner's consents. Only
+ *    what the engine passes through `CYPHER_OWNER_WORDS` counts, each
+ *    tagged by kind (`OwnerWord.source`): what a person typed in this chat,
+ *    a plan's instruction and an approved plan's card from its record, the
+ *    owner's answer to an agent's question (with the question; only the
+ *    option picked), and a short reply with the agent message it answers.
+ *    The model says which consent it relies on; the quote must be in that
+ *    one (`consentText`).
  *    Text an agent wrote (a plan's brief, an orchestrator's steering, a
  *    subagent's task, a peer's question) never does, even when it sits in
  *    the conversation as a user message. A bare "continue" or "ok" is too
  *    vague to ask for anything.
- * 2. The target is the command's: read from the line itself (the pull
+ * 2. The target is the command's: read from the line itself, by the tool
+ *    table (tools.ts) into entities compared by relation (entities.ts), not
+ *    by string (the pull
  *    request `gh pr merge 52` merges, the tag or branch `git push origin x`
  *    publishes, the package `npm publish` publishes, the host `curl` or
  *    `ssh` reaches), it must be what the model named, and what the owner's
@@ -31,9 +38,15 @@
 
 import { basename, isAbsolute, join, resolve } from "node:path";
 
+import { homedir } from "node:os";
+
 import { remoteOperand, sshHostIndex } from "./commands.ts";
+import { canonical, claimEntity, describeEntity, identifies, namesOf } from "./entities.ts";
+import type { Entity, EntityContext, EntityKind, PullRequestFact } from "./entities.ts";
 import type { GitFacts } from "./risk.ts";
 import { UNKNOWN } from "./shell.ts";
+import { readTool } from "./tools.ts";
+import type { ToolRead } from "./tools.ts";
 
 /** The variable the harness sets when it spawns Pi (`crates/harness/src/pi/spawn.rs`). */
 export const OWNER_WORDS_ENV = "CYPHER_OWNER_WORDS";
@@ -42,12 +55,33 @@ export const OWNER_WORDS_ENV = "CYPHER_OWNER_WORDS";
 const MAX_MESSAGES = 10;
 /** How much of one message counts. */
 const MAX_MESSAGE_CHARS = 4000;
+/** How much of a reply's proposal or an answer's question counts (their latest part). */
+const MAX_CONTEXT_CHARS = 2000;
 
-/** One message in the owner's own words. */
+/** Where an owner word comes from: every kind is a consent the engine vouches for. */
+export type ConsentSource = "typed" | "plan" | "answer" | "card" | "reply";
+const SOURCES: ReadonlySet<string> = new Set<ConsentSource>(["typed", "plan", "answer", "card", "reply"]);
+
+/**
+ * One consent in the owner's own words, as the engine passed it
+ * (`crates/engine/src/host/doc_host/owner_words.rs`):
+ * - `typed`: a message they typed in this chat;
+ * - `plan`: the instruction a plan carries out, from its record;
+ * - `card`: the card of the approved plan the chat belongs to (title,
+ *   summary, steps), from its record;
+ * - `answer`: their answer to a question an agent asked (`text`: the
+ *   option(s) they picked or what they wrote; `question`: the question as
+ *   shown, options last, after "Options: ");
+ * - `reply`: a short message right after an agent message (`proposal`: that
+ *   message, its latest part). Whether it agrees is the reviewing model's call.
+ */
 export interface OwnerWord {
   text: string;
-  /** Typed in this chat, or the instruction a plan carries out (from its record). */
-  source: "typed" | "plan";
+  source: ConsentSource;
+  question?: string;
+  proposal?: string;
+  /** Epoch millis, when known. */
+  at?: number;
 }
 
 /** What the engine knows the owner wrote: the only words that can ask for a danger. */
@@ -58,22 +92,68 @@ export interface OwnerWords {
   agentWritten: boolean;
 }
 
-/** The owner's words as the harness passed them; undefined when it passed none (an older Cypher, or no Cypher at all). */
+/**
+ * The owner's words as the harness passed them; undefined when it passed
+ * none (an older Cypher, or no Cypher at all). A word of a kind this
+ * extension doesn't know is left out: it can't be checked.
+ */
 export function parseOwnerWords(raw: string | undefined): OwnerWords | undefined {
   if (!raw) return undefined;
   try {
     const value = JSON.parse(raw) as { messages?: unknown; agentWritten?: unknown };
     if (!Array.isArray(value.messages)) return undefined;
     const messages: OwnerWord[] = [];
-    for (const item of value.messages as { text?: unknown; source?: unknown }[]) {
+    for (const item of value.messages as { text?: unknown; source?: unknown; question?: unknown; proposal?: unknown; at?: unknown }[]) {
       if (typeof item?.text !== "string" || !item.text.trim()) continue;
-      messages.push({ text: item.text.slice(0, MAX_MESSAGE_CHARS), source: item.source === "plan" ? "plan" : "typed" });
+      const source = item.source === undefined ? "typed" : item.source;
+      if (typeof source !== "string" || !SOURCES.has(source)) continue;
+      const word: OwnerWord = { text: item.text.slice(0, MAX_MESSAGE_CHARS), source: source as ConsentSource };
+      if (typeof item.question === "string" && item.question.trim()) word.question = item.question.slice(-MAX_CONTEXT_CHARS);
+      if (typeof item.proposal === "string" && item.proposal.trim()) word.proposal = item.proposal.slice(-MAX_CONTEXT_CHARS);
+      if (typeof item.at === "number" && Number.isFinite(item.at)) word.at = item.at;
+      // A reply answers a proposal; an answer, a question. Without it, it is what was typed.
+      if (word.source === "reply" && !word.proposal) word.source = "typed";
+      if (word.source === "answer" && !word.question) continue;
+      messages.push(word);
     }
     return { messages: messages.slice(-MAX_MESSAGES), agentWritten: value.agentWritten === true };
   } catch {
     return undefined;
   }
 }
+
+/** The options a question offered (after its last "Options: "). */
+function optionsOf(question: string): string[] {
+  const at = question.lastIndexOf("\nOptions: ");
+  return at < 0 ? [] : question.slice(at + "\nOptions: ".length).split(" | ").map((option) => option.trim()).filter(Boolean);
+}
+
+/**
+ * The text a consent says, for checking a quote and the target against:
+ * a reply's proposal with the reply; an answer's question with the choice,
+ * the options not picked left out (so a quote of one of them fails).
+ */
+export function consentText(word: OwnerWord): string {
+  if (word.source === "reply") return `${word.proposal ?? ""}\n${word.text}`;
+  if (word.source === "answer") {
+    const question = word.question ?? "";
+    const at = question.lastIndexOf("\nOptions: ");
+    const asked = at < 0 ? question : question.slice(0, at);
+    const picked = new Set(word.text.split(/;\s*/).map(normalize));
+    const kept = optionsOf(question).filter((option) => picked.has(normalize(option)));
+    return `${asked}\n${kept.join("\n")}\n${word.text}`;
+  }
+  return word.text;
+}
+
+/** How the dialog names each kind of consent. */
+const SOURCE_NAMES: Readonly<Record<ConsentSource, string>> = {
+  typed: "messages",
+  plan: "plan's instruction",
+  card: "approved plan's card",
+  answer: "answers to the agent's questions",
+  reply: "replies to the agent's proposals",
+};
 
 // --- Text ------------------------------------------------------------------------
 
@@ -134,8 +214,9 @@ function verbOf(target: Target): RegExp {
   if (target.kind === "pr") return target.action === "create" ? /open|create|make|file|raise|submit|send|开|提|建|发/i : (SAYS[target.action as keyof typeof SAYS] ?? SAYS.pr);
   if (target.kind === "branch") return target.action === "delete" ? SAYS.delete : SAYS.push;
   if (target.kind === "tag") return /release|publish|ship|tag|push|发布|发版|上线|标签|推/i;
-  if (target.kind === "package") return target.action === "install" ? SAYS.install : SAYS.publish;
-  return /deploy|ssh|connect|log ?in|run|登录|连接|部署|执行/i;
+  if (target.kind === "package") return target.action === "install" ? SAYS.install : target.action === "publish" ? SAYS.publish : (ACTION_WORDS[target.action] ?? SAYS.publish);
+  if (target.kind === "host") return /deploy|ssh|connect|log ?in|run|登录|连接|部署|执行/i;
+  return ACTION_WORDS[target.action] ?? /(?!)/;
 }
 
 /** Whether a sentence is about what a target's command does: it names the target, or its action. */
@@ -152,6 +233,8 @@ function concerns(text: string, target: Target): boolean {
       return SAYS.publish.test(text) || SAYS.install.test(text);
     case "host":
       return /server|host|machine|cluster|服务器|主机|集群/i.test(text);
+    default:
+      return KIND_WORDS[target.kind]?.test(text) ?? false;
   }
 }
 
@@ -190,11 +273,14 @@ const CONTINUES = /continue|go on|carry on|继续|接着/i;
 
 // --- Targets ---------------------------------------------------------------------
 
-export type TargetKind = "pr" | "branch" | "tag" | "package" | "host";
+/** A target's kind: an entity's (entities.ts), a release reading as the tag it publishes. */
+export type TargetKind = Exclude<EntityKind, "release">;
 
 /** What one dangerous command acts on, read from the line. */
 export interface Target {
   kind: TargetKind;
+  /** The same as an entity, for relations (entities.ts). */
+  entity: Entity;
   /** The pull request's number (or branch), the branch, the tag, `name@version`, the host. */
   value: string;
   /** What it does there: `merge`, `create`, `push`, `release`, `publish`, `install`, `reach`, `send`. */
@@ -256,37 +342,6 @@ function gitParts(words: readonly string[], cwd: string | undefined): { sub?: st
     else if (!word.startsWith("-")) break;
   }
   return { sub: words[i], rest: words.slice(i + 1), dir };
-}
-
-/** Options of `gh` that take a value (so the value is no positional). */
-const GH_VALUES = new Set([
-  "-R", "--repo", "-B", "--base", "-H", "--head", "-t", "--title", "-b", "--body", "-F", "--body-file", "-a", "--assignee", "-l", "--label",
-  "-m", "--milestone", "-r", "--reviewer", "-p", "--project", "-T", "--template", "--subject", "-A", "--author-email", "--match-head-commit",
-  "-n", "--notes", "--notes-file", "--target", "--notes-start-tag", "--discussion-category", "-c", "--comment", "--add-label", "--remove-label",
-  "--add-reviewer", "--remove-reviewer", "--add-assignee", "--remove-assignee", "--add-project", "--remove-project", "--hostname", "-q", "--jq",
-  "--json", "--template", "-e",
-]);
-
-function ghParts(args: readonly string[]): { positionals: string[]; options: Map<string, string> } {
-  const positionals: string[] = [];
-  const options = new Map<string, string>();
-  for (let i = 0; i < args.length; i++) {
-    const word = args[i];
-    if (word !== UNKNOWN && word.startsWith("-") && word !== "-") {
-      const eq = word.indexOf("=");
-      if (word.startsWith("--") && eq > 0) options.set(word.slice(0, eq), word.slice(eq + 1));
-      else if (GH_VALUES.has(word)) options.set(word, args[++i] ?? UNKNOWN);
-      else options.set(word, "");
-      continue;
-    }
-    positionals.push(word);
-  }
-  return { positionals, options };
-}
-
-function option(options: Map<string, string>, ...names: string[]): string | undefined {
-  for (const name of names) if (options.has(name)) return options.get(name);
-  return undefined;
 }
 
 /** `owner/name` from a GitHub URL or `-R` value (`host/owner/name` keeps the last two). */
@@ -352,81 +407,111 @@ export function lineTargets(commands: readonly TargetCommand[], facts: TargetFac
       }
       if (sub !== undefined && MOVES_HEAD.test(sub)) headMoved = true;
       if (!command.danger) continue;
-      if (sub !== "push") return { unknown: `Cypher can't tell what \`git ${sub ?? ""}\` acts on` };
+      if (sub !== "push") {
+        // Any other git command by the table (`git worktree remove x`), where `-C` took it.
+        const read = sub === undefined ? undefined : readTool(["git", sub, ...rest]);
+        if (read === undefined) return { unknown: `Cypher can't tell what \`git ${sub ?? ""}\` acts on` };
+        if ("unknown" in read) return read;
+        const found = toolTargets(read, ["git", sub!, ...rest], dir, facts);
+        if ("unknown" in found) return found;
+        targets.push(...found.targets);
+        continue;
+      }
       const read = pushTargets(rest, dir, created, branches, facts);
       if ("unknown" in read) return read;
       targets.push(...read.targets);
       continue;
     }
     if (!command.danger) continue;
-    if (words.includes(UNKNOWN) && !/^(gh)$/.test(program)) {
-      // Only gh's titles and bodies may be unknown: they change what is said, not where.
-      return { unknown: `\`${program}\` is given words known only when it runs` };
-    }
-    if (program === "gh") {
-      const read = ghTarget(words.slice(1), command.cwd, facts);
-      if ("unknown" in read) return read;
-      targets.push(read.target);
-      continue;
-    }
-    const install = installTargets(program, words.slice(1));
-    if (install) {
-      if (install.length === 0) return { unknown: `Cypher can't tell which packages \`${program}\` installs` };
-      targets.push(...install);
-      continue;
-    }
-    if (/^(npm|pnpm|yarn|bun|cargo)$/.test(program)) {
-      const args = words.slice(1).filter((word) => !word.startsWith("-"));
-      if (args[0] !== "publish") return { unknown: `Cypher can't tell what \`${program} ${args[0] ?? ""}\` acts on` };
-      const where = args[1] && program !== "cargo" ? args[1] : undefined;
-      const dir = where ? (isAbsolute(where) ? where : command.cwd && resolve(command.cwd, where)) : command.cwd;
+    const read = readTool(words);
+    if (read === undefined) return { unknown: `Cypher can't tell from your words what \`${program}\` acts on` };
+    if ("unknown" in read) return read;
+    const found = toolTargets(read, words, command.cwd, facts);
+    if ("unknown" in found) return found;
+    targets.push(...found.targets);
+  }
+  return { targets };
+}
+
+/** A target from an entity the table read, with what the command does to it. */
+function targetOf(entity: Entity, action: string, dir: string | undefined): Target {
+  const kind: TargetKind = entity.kind === "release" ? "tag" : entity.kind;
+  const base = { entity, action, ...(dir !== undefined ? { dir } : {}), ...(entity.repo ? { repo: repoName(entity.repo) ?? entity.repo.toLowerCase() } : {}) };
+  switch (entity.kind) {
+    case "pr":
+      return entity.name
+        ? { kind, value: entity.name, ...base }
+        : { kind, value: `${entity.head ?? "this branch"} → ${entity.base}`, ...base, base: entity.base, head: entity.head };
+    case "package":
+      return { kind, value: entity.version ? `${entity.name}@${entity.version}` : entity.name, ...base, name: entity.name.replace(/(?<=.)@[^/]*$/, ""), ...(entity.version ? { version: entity.version } : {}) };
+    case "host":
+      return { kind, value: entity.name.toLowerCase(), ...base };
+    default:
+      return { kind, value: entity.name, ...base };
+  }
+}
+
+/** The targets of one command the table covers: its entities, or what its reader reads. */
+function toolTargets(read: ToolRead, words: readonly string[], cwd: string | undefined, facts: TargetFacts): LineTargets {
+  const { row, program, action, args } = read;
+  switch (row.reader) {
+    case "manifest": {
+      const where = args.positionals[1] && program !== "cargo" && args.positionals[1] !== UNKNOWN ? args.positionals[1] : undefined;
+      const dir = where ? (isAbsolute(where) ? where : cwd && resolve(cwd, where)) : cwd;
       const pkg = dir ? packageOf(dir, program, facts) : undefined;
       if (!pkg) return { unknown: "Cypher can't read which package it publishes" };
-      targets.push({ kind: "package", value: `${pkg.name}@${pkg.version}`, action: "publish", name: pkg.name, version: pkg.version, dir });
-      continue;
+      const entity: Entity = { kind: "package", name: pkg.name, version: pkg.version };
+      return { targets: [{ kind: "package", value: `${pkg.name}@${pkg.version}`, action, entity, name: pkg.name, version: pkg.version, dir }] };
     }
-    if (/^(ssh|mosh|sftp)$/.test(program)) {
+    case "ssh": {
       const at = sshHostIndex(words);
       const host = at === undefined ? undefined : words[at];
       if (!host || host === UNKNOWN) return { unknown: "the host is known only when it runs" };
-      targets.push({ kind: "host", value: host.replace(/^[^@]*@/, "").toLowerCase(), action: "reach" });
-      continue;
+      return { targets: [targetOf({ kind: "host", name: host.replace(/^[^@]*@/, "").toLowerCase() }, action, cwd)] };
     }
-    if (/^(scp|rsync)$/.test(program)) {
+    case "copy": {
       const hosts = new Set(words.slice(1).map((word) => remoteOperand(word)?.host).filter((host): host is string => host !== undefined));
       if (hosts.size === 0) return { unknown: "Cypher can't tell which host it reaches" };
-      for (const host of hosts) targets.push({ kind: "host", value: host.toLowerCase(), action: "reach" });
-      continue;
+      return { targets: [...hosts].map((host) => targetOf({ kind: "host", name: host.toLowerCase() }, action, cwd)) };
     }
-    if (/^(curl|wget|http|https|xh)$/.test(program)) {
+    case "urls": {
       const hosts = new Set<string>();
       for (const word of words.slice(1)) {
         const url = /^(?:[a-z][\w+.-]*:\/\/)(?:[^@/]*@)?([^/:?#]+)/i.exec(word);
         if (url) hosts.add(url[1].toLowerCase());
       }
       if (hosts.size === 0) return { unknown: "Cypher can't tell which server it reaches" };
-      for (const host of hosts) targets.push({ kind: "host", value: host, action: "send" });
-      continue;
+      return { targets: [...hosts].map((host) => targetOf({ kind: "host", name: host }, action, cwd)) };
     }
-    return { unknown: `Cypher can't tell from your words what \`${program}\` acts on` };
+    case "refspecs":
+      return { unknown: `Cypher can't tell what \`${program} ${row.sub.join(" ")}\` acts on` };
+  }
+  const targets: Target[] = [];
+  for (const entity of read.entities) {
+    if (entity.kind === "pr" && !entity.name) {
+      // A new pull request: from the branch checked out into the default one, unless the line says.
+      const git = cwd === undefined ? undefined : facts.git(cwd);
+      entity.base ??= git?.defaults[0];
+      entity.head ??= git?.current;
+      if (entity.base === undefined) return { unknown: "the pull request's base is known only when it runs" };
+    }
+    if (entity.kind === "pr" && entity.name) {
+      const url = /\/pull\/(\d+)/.exec(entity.name);
+      if (url) {
+        entity.repo ??= repoName(entity.name);
+        entity.name = url[1];
+      } else entity.name = entity.name.replace(/^[#!]/, "");
+    }
+    if (entity.repo !== undefined) entity.repo = repoName(entity.repo) ?? entity.repo.toLowerCase();
+    const target = targetOf(entity, action, cwd);
+    if (entity.kind === "release") {
+      // The commit a release tags: `--target`, else the tag itself.
+      const commit = args.options.get("--target");
+      target.commit = commit && commit !== UNKNOWN ? commit : entity.name;
+    }
+    targets.push(target);
   }
   return { targets };
-}
-
-/** What an install for the whole machine installs (`brew install rg`, `npm i -g pnpm`): undefined when it is no install. */
-function installTargets(program: string, args: readonly string[]): Target[] | undefined {
-  const positionals = args.filter((word) => !word.startsWith("-"));
-  const verb = positionals[0];
-  const installs =
-    (/^(brew|port|pipx|gem|apt|apt-get|dnf|yum|pacman|snap)$/.test(program) && /^(install|reinstall|upgrade|-S)$/.test(verb ?? "")) ||
-    (/^(npm|pnpm|bun)$/.test(program) && /^(i|install|add)$/.test(verb ?? "")) ||
-    (program === "yarn" && verb === "global") ||
-    (/^(cargo|go|uv)$/.test(program) && verb === "install") ||
-    (/^pip3?$/.test(program) && verb === "install");
-  if (!installs) return undefined;
-  const names = positionals.slice(program === "yarn" || program === "uv" ? 2 : 1);
-  if (names.some((name) => name === UNKNOWN)) return [];
-  return names.map((name) => ({ kind: "package" as const, value: name, action: "install", name: name.replace(/(?<=.)@[^/]*$/, "") }));
 }
 
 function pushTargets(
@@ -462,7 +547,7 @@ function pushTargets(
     for (const refspec of positionals) {
       const name = refspec.replace(/^refs\/(heads|tags)\//, "");
       const tagged = refspec.startsWith("refs/tags/") || (dir !== undefined && facts.tagExists(dir, name));
-      targets.push({ kind: tagged ? "tag" : "branch", value: name, action: "delete", remote, dir });
+      targets.push({ kind: tagged ? "tag" : "branch", value: name, action: "delete", remote, dir, entity: { kind: tagged ? "tag" : "branch", name, ...(tagged ? {} : { remote }) } });
     }
     return { targets };
   }
@@ -471,52 +556,21 @@ function pushTargets(
     const name = dest.replace(/^refs\/(heads|tags)\//, "");
     const tagged = dest.startsWith("refs/tags/") || source.startsWith("refs/tags/");
     if (tagged || created.has(name)) {
-      targets.push({ kind: "tag", value: name, action: "push", remote, commit: created.has(name) ? created.get(name) : name, dir });
+      targets.push({ kind: "tag", value: name, action: "push", remote, commit: created.has(name) ? created.get(name) : name, dir, entity: { kind: "tag", name } });
       continue;
     }
     const branch = name === "HEAD" ? git?.current : name;
     if (branch && ((git && (git.isBranch(branch) || refspec.includes(":"))) || branches.has(branch))) {
-      targets.push({ kind: "branch", value: branch, action: "push", remote, dir });
+      targets.push({ kind: "branch", value: branch, action: "push", remote, dir, entity: { kind: "branch", name: branch, remote } });
       continue;
     }
     if (dir !== undefined && facts.tagExists(dir, name)) {
-      targets.push({ kind: "tag", value: name, action: "push", remote, commit: name, dir });
+      targets.push({ kind: "tag", value: name, action: "push", remote, commit: name, dir, entity: { kind: "tag", name } });
       continue;
     }
     return { unknown: `Cypher can't tell whether \`${name}\` is a branch or a tag` };
   }
   return { targets };
-}
-
-function ghTarget(args: readonly string[], cwd: string | undefined, facts: TargetFacts): { target: Target } | { unknown: string } {
-  const { positionals, options } = ghParts(args);
-  const [group, action, subject] = positionals;
-  const repoOption = option(options, "-R", "--repo");
-  if (repoOption === UNKNOWN) return { unknown: "the repository is known only when it runs" };
-  let repo = repoOption ? repoName(repoOption) : undefined;
-  if (group === UNKNOWN || action === UNKNOWN) return { unknown: "what gh does is known only when it runs" };
-  if (group === "pr" && action === "create") {
-    const git = cwd === undefined ? undefined : facts.git(cwd);
-    const base = option(options, "-B", "--base") ?? git?.defaults[0];
-    const head = option(options, "-H", "--head") ?? git?.current;
-    if (base === undefined || base === UNKNOWN) return { unknown: "the pull request's base is known only when it runs" };
-    if (head === UNKNOWN) return { unknown: "the pull request's branch is known only when it runs" };
-    return { target: { kind: "pr", value: `${head ?? "this branch"} → ${base}`, action: "create", base, head, repo, dir: cwd } };
-  }
-  if (group === "pr" && /^(merge|close|comment|review|edit|ready|reopen)$/.test(action ?? "")) {
-    if (subject === undefined) return { unknown: "it acts on the current branch's pull request, whose number the line doesn't name" };
-    if (subject === UNKNOWN) return { unknown: "the pull request is known only when it runs" };
-    const url = /\/pull\/(\d+)/.exec(subject);
-    if (url) repo ??= repoName(subject);
-    const number = url?.[1] ?? (/^#?\d+$/.test(subject) ? subject.replace("#", "") : undefined);
-    return { target: { kind: "pr", value: number ?? subject, action: action!, repo, dir: cwd } };
-  }
-  if (group === "release" && /^(create|edit|upload)$/.test(action ?? "")) {
-    if (subject === undefined || subject === UNKNOWN) return { unknown: "the release's tag is known only when it runs" };
-    const target = option(options, "--target");
-    return { target: { kind: "tag", value: subject, action: "release", repo, commit: target && target !== UNKNOWN ? target : subject, dir: cwd } };
-  }
-  return { unknown: `Cypher can't tell from your words what \`gh ${group ?? ""} ${action ?? ""}\` acts on` };
 }
 
 export function describeTarget(target: Target): string {
@@ -533,6 +587,8 @@ export function describeTarget(target: Target): string {
       return target.action === "install" ? `package ${target.value} (installed for the whole machine)` : `package ${target.value}`;
     case "host":
       return `host ${target.value}`;
+    default:
+      return `${describeEntity(target.entity)}${target.action ? ` (${target.action})` : ""}`;
   }
 }
 
@@ -541,11 +597,15 @@ export function describeTarget(target: Target): string {
 /** What the reviewing model claimed besides its decision. */
 export interface ExplicitClaim {
   quote?: string;
+  /** Which kind of consent the quote is from, when the model said. */
+  source?: string;
   targets?: { kind: string; value: string }[];
 }
 
 /** Facts the check needs beyond the line. */
 export interface ExplicitFacts {
+  /** The home directory, for `~` in paths (default: this user's). */
+  home?: string;
   /** The `owner/name` of the repository `origin` points at, in `dir`. */
   originRepo(dir: string): string | undefined;
   /** A tag's commit is on the remote's default branch, and its files hold `version`. Undefined: can't tell. */
@@ -555,15 +615,21 @@ export interface ExplicitFacts {
 type Entry = { type?: string; message?: { role?: string; content?: unknown; toolCallId?: unknown; isError?: unknown } };
 
 /** Pull requests this chat opened: a `gh pr create` whose result names exactly one. */
-export function openedPullRequests(entries: readonly Entry[]): { number: string; repo?: string }[] {
-  const creates = new Set<string>();
-  const opened: { number: string; repo?: string }[] = [];
+export function openedPullRequests(entries: readonly Entry[]): PullRequestFact[] {
+  const creates = new Map<string, { head?: string; base?: string }>();
+  const opened: PullRequestFact[] = [];
   for (const entry of entries) {
     const message = entry.type === "message" ? entry.message : undefined;
     if (!message) continue;
     if (message.role === "assistant" && Array.isArray(message.content)) {
       for (const part of message.content as { type?: string; id?: unknown; arguments?: { command?: unknown } }[]) {
-        if (part?.type === "toolCall" && typeof part.id === "string" && typeof part.arguments?.command === "string" && /\bgh\s+pr\s+create\b/.test(part.arguments.command)) creates.add(part.id);
+        if (part?.type === "toolCall" && typeof part.id === "string" && typeof part.arguments?.command === "string" && /\bgh\s+pr\s+create\b/.test(part.arguments.command)) {
+          // The branches, when the line says them (`-H x -B main`).
+          const line = part.arguments.command;
+          const head = /(?:^|\s)(?:-H|--head)(?:=|\s+)([\w./-]+)/.exec(line)?.[1];
+          const base = /(?:^|\s)(?:-B|--base)(?:=|\s+)([\w./-]+)/.exec(line)?.[1];
+          creates.set(part.id, { ...(head ? { head } : {}), ...(base ? { base } : {}) });
+        }
       }
     } else if (message.role === "toolResult" && typeof message.toolCallId === "string" && creates.has(message.toolCallId) && message.isError !== true) {
       const text = Array.isArray(message.content)
@@ -575,7 +641,7 @@ export function openedPullRequests(entries: readonly Entry[]): { number: string;
       for (const match of text.matchAll(/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g)) found.set(match[2], match[1].toLowerCase());
       if (found.size === 1) {
         const [[number, repo]] = [...found];
-        opened.push({ number, repo });
+        opened.push({ number, ...(repo ? { repo } : {}), ...creates.get(message.toolCallId) });
       }
     }
   }
@@ -634,8 +700,49 @@ const SAYS = {
   delete: /delete|remove|drop|prune|clean ?up|tidy|删除|删掉|删了|移除|清理|清除/i,
 };
 
+/** Words that ask for an action (tools.ts `Action`), in any of the kinds' commands. */
+const ACTION_WORDS: Readonly<Record<string, RegExp>> = {
+  create: /create|make|new|open|set ?up|add|init|建|创建|新建|开|做一个|弄一个/i,
+  delete: SAYS.delete,
+  merge: SAYS.merge,
+  close: SAYS.close,
+  comment: SAYS.comment,
+  review: SAYS.review,
+  edit: SAYS.edit,
+  ready: SAYS.ready,
+  reopen: SAYS.reopen,
+  push: SAYS.push,
+  publish: SAYS.publish,
+  release: SAYS.release,
+  unpublish: /unpublish|yank|withdraw|deprecate|撤回|下架|撤销|弃用/i,
+  install: SAYS.install,
+  stop: /stop|kill|shut ?down|halt|terminate|停止|停掉|关闭|关掉|杀/i,
+  erase: /erase|wipe|reset|clear|清空|重置|抹掉/i,
+  apply: /apply|deploy|scale|roll ?out|restart|upgrade|install|uninstall|roll ?back|部署|上线|扩容|缩容|重启|升级|回滚|卸载/i,
+  rename: /rename|重命名|改名/i,
+  archive: /archive|归档/i,
+};
+
+/** Words that name a kind of thing, for telling what a later "don't" is about. */
+const KIND_WORDS: Readonly<Record<string, RegExp>> = {
+  repo: /repo|repository|仓库/i,
+  remote: /remote|远程/i,
+  path: /file|folder|dir|directory|文件|目录/i,
+  worktree: /worktree|checkout|工作树/i,
+  process: /process|进程/i,
+  simulator: /simulator|device|模拟器|设备/i,
+  container: /container|容器/i,
+  image: /image|镜像/i,
+  resource: /deploy|service|pod|release|cluster|chart|资源|服务|集群/i,
+};
+
+/** The message names the entity, or one that holds it (entities.ts `namesOf`). */
+function namesEntity(message: string, entity: Entity, context: EntityContext): boolean {
+  return namesOf(entity, context).some((name) => mentions(message, name));
+}
+
 /** Why `message` (the owner's request) doesn't cover `target`; undefined when it does. */
-function uncovered(target: Target, message: string, opened: readonly { number: string; repo?: string }[], facts: ExplicitFacts): string | undefined {
+function uncovered(target: Target, message: string, opened: readonly PullRequestFact[], facts: ExplicitFacts, context: EntityContext): string | undefined {
   const origin = target.dir ? facts.originRepo(target.dir) : undefined;
   if (target.repo && origin && target.repo !== origin && !mentions(message, target.repo) && !mentions(message, target.repo.split("/")[1] ?? "")) {
     return `it reaches ${target.repo}, a repository your message doesn't name`;
@@ -652,6 +759,9 @@ function uncovered(target: Target, message: string, opened: readonly { number: s
       if (!verb || !verb.test(message)) return `your message doesn't ask to ${target.action} a pull request`;
       const named = namedPullRequests(message);
       if (named.size) return named.has(target.value) ? undefined : `your message names pull request ${[...named].map((n) => `#${n}`).join(", ")}, not #${target.value}`;
+      // Merging a pull request merges its head branch: "merge fix-x into main" names the pull request from fix-x.
+      const pr = canonical(target.entity, context);
+      if (target.action === "merge" && pr.head && namesEntity(message, { kind: "branch", name: pr.head, ...(pr.repo ? { repo: pr.repo } : {}) }, context) && (!pr.base || ["main", "master"].includes(pr.base) || mentions(message, pr.base))) return undefined;
       if (!SAYS.pr.test(message)) return `your message doesn't say which pull request (#${target.value})`;
       const ours = opened.filter((pr) => pr.number === target.value && (!pr.repo || !origin || pr.repo === origin) && (!target.repo || !pr.repo || pr.repo === target.repo));
       return ours.length ? undefined : `your message doesn't name pull request #${target.value}, and this chat didn't open it`;
@@ -687,41 +797,32 @@ function uncovered(target: Target, message: string, opened: readonly { number: s
       if (target.version && namedVersions(message).has(target.version)) return undefined;
       return `your message names neither ${target.name} nor version ${target.version}`;
     }
-    case "host": {
-      // By its name, its first label (`web` for `web.example.com`), or what its alias starts with (`gamma` for `gamma-cluster`).
-      const first = target.value.split(".")[0];
-      const lead = first.split(/[-_]/)[0];
-      const named = mentions(message, target.value) || (first.length >= 3 && mentions(message, first)) || (lead !== first && lead.length >= 4 && mentions(message, lead));
-      return named ? undefined : `it reaches ${target.value}, a host your message doesn't name`;
+    case "host":
+      // By its name, or one that holds it (`web` for `web.example.com`, `gamma` for `gamma-cluster`).
+      return namesEntity(message, target.entity, context) ? undefined : `it reaches ${target.value}, a host your message doesn't name`;
+    default: {
+      const verb = ACTION_WORDS[target.action];
+      if (!verb || !verb.test(message)) return `your message doesn't ask to ${target.action} ${describeEntity(target.entity)}`;
+      const here = target.dir ? { ...context, cwd: target.dir } : context;
+      return namesEntity(message, target.entity, here) ? undefined : `it acts on ${describeEntity(target.entity)}, which your message doesn't name`;
     }
   }
 }
 
-const KIND_ALIASES: Record<string, TargetKind | "repo"> = {
-  pr: "pr", "pull request": "pr", "pull-request": "pr", pullrequest: "pr", mr: "pr",
-  branch: "branch", ref: "branch",
-  tag: "tag", release: "tag", version: "tag",
-  package: "package", crate: "package", npm: "package",
-  host: "host", server: "host", url: "host", domain: "host",
-  repo: "repo", repository: "repo",
-};
-
-/** The model's target names one the command really acts on. */
-function sameTarget(claim: { kind: string; value: string }, target: Target, origin: string | undefined): boolean {
-  const kind = KIND_ALIASES[claim.kind.trim().toLowerCase()];
-  const value = claim.value.trim().toLowerCase().replace(/^refs\/(heads|tags)\//, "").replace(/^origin\//, "");
-  if (!kind || !value) return false;
-  if (kind === "repo") return [target.repo, origin].some((repo) => repo !== undefined && (repoName(value) ?? value) === repo);
-  if (target.kind === "pr") {
-    if (kind === "pr") {
-      if (target.action === "create") return [target.base, target.head, "new", target.value].some((name) => name !== undefined && value.replace(/^#/, "").includes(name.toLowerCase()));
-      return value.replace(/\D+/g, "") === target.value || value === target.value.toLowerCase();
-    }
-    return kind === "branch" && target.action === "create" && value === target.base?.toLowerCase();
-  }
-  if (target.kind === "package") return kind === "package" && [target.value, target.name, target.version].some((name) => name !== undefined && value === name.toLowerCase());
-  if (target.kind === "host") return kind === "host" && (value === target.value || value.replace(/^[a-z]+:\/\//, "").split(/[/:]/)[0] === target.value);
-  return kind === target.kind && value === target.value.toLowerCase();
+/** The model's target names one the command really acts on: the same entity, one holding it or held by it (entities.ts). */
+function sameTarget(claim: { kind: string; value: string }, target: Target, origin: string | undefined, context: EntityContext): boolean {
+  const kind = claim.kind.trim().toLowerCase();
+  const value = claim.value.trim().toLowerCase();
+  if (!value) return false;
+  // A repository: the one the command reaches, or the one it runs in.
+  if ((kind === "repo" || kind === "repository") && [target.repo, origin].some((repo) => repo !== undefined && (repoName(value) ?? value) === repo)) return true;
+  // A package by its version alone.
+  if (target.kind === "package" && /^(package|crate|npm)$/.test(kind) && [target.value, target.name, target.version].some((name) => name !== undefined && value === name.toLowerCase())) return true;
+  const entity = claimEntity(claim);
+  if (entity === undefined) return false;
+  if (identifies(entity, target.entity, context)) return true;
+  // "the PR main" or "the PR fix-x": a pull request by one of its branches.
+  return entity.kind === "pr" && !entity.name && entity.base === undefined && entity.head !== undefined && identifies({ kind: "branch", name: entity.head }, target.entity, context);
 }
 
 export interface ExplicitResult {
@@ -729,8 +830,8 @@ export interface ExplicitResult {
   /** Why it isn't, for the dialog and the audit. */
   reason?: string;
   quote?: string;
-  /** Where the quote was: the plan's instruction or a typed message. */
-  quoteSource?: "typed" | "plan";
+  /** Where the quote was: which consent (`typed`, `plan`, `card`, `answer`, `reply`). */
+  quoteSource?: ConsentSource;
   targets: string[];
   /** Which checks passed: `quote` (the owner's words), `target` (the command's and the owner's), `current` (not taken back since). */
   passed: ("quote" | "target" | "current")[];
@@ -758,37 +859,51 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
   const wanted = normalize(quote);
   if (VAGUE.has(wanted)) return result([], `"${quote}" doesn't say what to do`);
   if (weight(wanted) < MIN_QUOTE_WEIGHT) return result([], `"${quote}" is too short to ask for this`);
+  // The consent the model relies on: the latest owner word of its kind holding the quote.
+  const kind = claim.source && SOURCES.has(claim.source) ? (claim.source as ConsentSource) : undefined;
   let at = -1;
   owner.messages.forEach((message, index) => {
-    if (normalize(message.text).includes(wanted)) at = index;
+    if ((kind === undefined || message.source === kind) && normalize(consentText(message)).includes(wanted)) at = index;
   });
   if (at < 0) {
+    const other = kind !== undefined && owner.messages.some((message) => normalize(consentText(message)).includes(wanted));
+    if (other) return result([], `"${quote}" isn't in your ${SOURCE_NAMES[kind]}`);
     const elsewhere = userTexts(entries).some((text) => normalize(text).includes(wanted));
     return result([], elsewhere ? `"${quote}" is in the conversation but not in your own words (an agent's brief or steering, or a translation)` : `"${quote}" isn't in your messages`);
   }
   const message = owner.messages[at];
+  const said = consentText(message);
   const source = { quoteSource: message.source };
   // The model's target must be one the line acts on.
   const origin = targets.find((target) => target.dir)?.dir;
   const originRepo = origin ? facts.originRepo(origin) : undefined;
+  const opened = openedPullRequests(entries);
+  const context: EntityContext = { ...(originRepo ? { currentRepo: originRepo } : {}), prs: opened, ...(origin ? { cwd: origin } : {}), home: facts.home ?? homedir() };
   const claimed = claim.targets ?? [];
   if (claimed.length === 0) return result(["quote"], "the reviewing model named no target", source);
-  const strange = claimed.find((item) => !targets.some((target) => sameTarget(item, target, originRepo)));
+  const strange = claimed.find((item) => !targets.some((target) => sameTarget(item, target, originRepo, context)));
   if (strange) return result(["quote"], `the reviewing model named ${strange.kind} ${strange.value}, but the command acts on ${targets.map(describeTarget).join(", ")}`, source);
-  // Every target must be what the owner's message asks for.
-  const opened = openedPullRequests(entries);
+  // A reply or an answer that itself says to wait consents to nothing, whatever it answers.
+  if ((message.source === "reply" || message.source === "answer") && retracts(message.text, targets)) {
+    return result(["quote"], `your answer was "${message.text.trim().slice(0, 140)}"`, source);
+  }
+  // Every target must be what the owner's consent asks for.
   for (const target of targets) {
-    const why = uncovered(target, message.text, opened, facts);
+    const why = uncovered(target, said, opened, facts, context);
     if (why) return result(["quote"], why, source);
     // "open a PR, don't merge it" asks for no merge, though it says the word.
-    if (forbids(message.text, target)) return result(["quote"], `your message says not to (${describeTarget(target)})`, source);
+    if (forbids(said, target)) return result(["quote"], `your message says not to (${describeTarget(target)})`, source);
   }
   // Nothing since takes it back or moves on.
   for (const later of owner.messages.slice(at + 1)) {
     const text = later.text.trim();
     const short = text.length > 140 ? `${text.slice(0, 140)}…` : text;
     if (retracts(text, targets)) return result(["quote", "target"], `you wrote later: "${short}"`, source);
-    const carriesOn = (text.length <= 120 && (CONTINUATION.test(text.normalize("NFKC").trim()) || CONTINUES.test(text))) || targets.some((target) => mentions(text, target.value));
+    // A reply or an answer about the same thing carries on with it.
+    const about = later.source === "reply" ? later.proposal : later.source === "answer" ? later.question : undefined;
+    const carriesOn =
+      (text.length <= 120 && (CONTINUATION.test(text.normalize("NFKC").trim()) || CONTINUES.test(text))) ||
+      targets.some((target) => mentions(text, target.value) || (about !== undefined && concerns(about, target)));
     if (!carriesOn) return result(["quote", "target"], `you've written since ("${short}"), so that request may be about earlier work`, source);
   }
   return result(["quote", "target", "current"], undefined, source);
