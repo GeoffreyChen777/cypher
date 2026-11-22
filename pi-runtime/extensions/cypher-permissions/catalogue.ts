@@ -56,6 +56,7 @@ export type IdSource =
   | { from: "refspecs" };
 
 export interface CatalogueRow {
+  /** Program names (basename of the first word); `*`: any program, when no row names it. */
   programs: readonly string[];
   /** The subcommand path after the program's global options. */
   sub: readonly string[];
@@ -106,6 +107,10 @@ export const CATALOGUE: readonly CatalogueRow[] = [
   { programs: ["cp", "mv", "ditto", "ln"], sub: [], op: "create", kind: "path", id: { from: "last" }, values: ["-S", "--suffix"] },
   { programs: ["rsync"], sub: [], op: "create", kind: "path", id: { from: "last" }, values: ["-e", "--rsh", "--exclude", "--include", "--filter", "-f", "--rsync-path", "--exclude-from", "--include-from", "--files-from", "--log-file", "--partial-dir", "--temp-dir", "-T", "--backup-dir", "--suffix"] },
   { programs: ["mktemp"], sub: [], op: "create", kind: "path", id: { from: "output", pattern: /^(?<name>\/\S+)$/ }, values: ["-p", "--tmpdir", "--suffix", "-t"] },
+  // Files a program writes where an option or a subcommand says: confirmed only by being there after and not before.
+  { programs: ["*"], sub: [], op: "create", kind: "path", id: { from: "option", names: ["-o", "--output", "--out", "--output-file", "--output-document", "--out-file", "--outfile"] }, values: ["-o", "--output", "--out", "--output-file", "--output-document", "--out-file", "--outfile"] },
+  { programs: ["xcrun"], sub: ["simctl", "io"], op: "create", kind: "path", id: { from: "last" }, values: ["--type", "--display", "--mask", "--codec"] },
+  { programs: ["screencapture"], sub: [], op: "create", kind: "path", id: { from: "operands" }, values: ["-t", "-T", "-R", "-l", "-D", "-V", "-P"] },
   { programs: ["rm", "unlink", "trash", "shred"], sub: [], op: "destroy", kind: "path", id: { from: "operands" }, values: ["-n", "--iterations", "-s", "--size"] },
   { programs: ["rmdir"], sub: [], op: "destroy", kind: "path", id: { from: "operands" } },
   // git: checkouts, branches, tags, and the remote's refs.
@@ -307,12 +312,13 @@ export function rowsFor(command: CatalogueCommand): { row: CatalogueRow; args: A
   const read = readGlobals(command);
   if (!read) return [];
   const out: { row: CatalogueRow; args: Args; dir: string | undefined }[] = [];
-  const rows = CATALOGUE.filter((row) => row.programs.includes(read.program) && row.sub.every((part, index) => read.rest[index] === part));
-  // Of a program's rows, only the longest subcommand path applies (`docker container rm`, not `docker container`).
-  const longest = Math.max(-1, ...rows.map((row) => row.sub.length));
+  const named = CATALOGUE.filter((row) => row.programs.includes(read.program) && row.sub.every((part, index) => read.rest[index] === part));
+  // Of a program's rows, only the longest subcommand path applies (`docker container rm`, not `docker container`); rows for any program, always.
+  const longest = Math.max(-1, ...named.map((row) => row.sub.length));
+  const rows = [...named.filter((row) => row.sub.length === longest), ...CATALOGUE.filter((row) => row.programs.includes("*"))];
   for (const row of rows) {
-    if (row.sub.length !== longest) continue;
-    const args = splitArgs(read.rest.slice(row.sub.length), row.values ?? []);
+    // A row for any program reads all its words: the option may stand before a subcommand or after it.
+    const args = splitArgs(row.programs.includes("*") ? command.words.slice(1) : read.rest.slice(row.sub.length), row.values ?? []);
     if (row.requires && !hasOption(args, row.requires)) continue;
     if (row.forbids && hasOption(args, row.forbids)) continue;
     out.push({ row, args, dir: read.dir });

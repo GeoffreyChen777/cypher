@@ -943,7 +943,8 @@ never from what the model says.
 and subcommand, of which kind of entity it creates, destroys, stops, starts or merges, and
 where the entity's name comes from — an operand, an option's value, or the command's own
 output: `mkdir`/`install -d`/`touch`/`tee` operands, a copy's destination, `mktemp`'s
-printed path, `git worktree add` (worktree, path, `-b` branch), `git clone`'s directory,
+printed path, a screenshot's file (`simctl io … screenshot`, `screencapture`), any
+program's output option (`-o`/`--output`/`--out`…, a row for every program), `git worktree add` (worktree, path, `-b` branch), `git clone`'s directory,
 `git branch`/`checkout -b`/`switch -c`, `git tag`, `git push` refspecs (a remote branch,
 only when the local branch it pushes is the chat's), `gh repo create`/`gh pr create`/`gh
 release create` (the URL they print), `gh pr merge` (an antecedent for §7.3.6), `xcrun

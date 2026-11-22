@@ -124,7 +124,8 @@ function sampleName(kind, rng) {
 
 /** A command line that creates `name` by `row`, the output it prints, and what it leaves on the machine. */
 function creatorLine(row, name, rng) {
-  const words = [row.programs[rng.int(row.programs.length)], ...row.sub];
+  const program = row.programs[rng.int(row.programs.length)];
+  const words = [program === "*" ? rng.pick(["ffmpeg", "curl", "docker", "pandoc"]) : program, ...row.sub];
   if (row.requires) words.push(row.requires[0]);
   const id = row.id;
   let output = "";
