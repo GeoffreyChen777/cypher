@@ -344,10 +344,15 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
   writes it as proposed, with the bot chat and the tool call that draws its card (the
   `BotTool` RPC passes Pi's tool call id), the steps (ids 1 to n, at most 10, projects
   resolved within the scope) and the owner's newest message in the bot chat as the
-  instruction. Its answer tells the model to stop.
+  instruction. Its answer tells the model to stop. The steps' details share one budget,
+  4,000 characters across the plan (`PLAN_DETAILS_MAX`), however they split it: one step
+  may hold all of it. There is no cap per step.
 - **Who writes what.** Owner devices write only `decision` (`Mutate resolveBotPlan`) and
   `stopRequestedAt` (`Mutate stopBotWork`); the host writes the rest, always leaving those
-  two fields alone. Every text is clamped before it is written.
+  two fields alone. Every text is clamped before it is written, and the row as a whole
+  to `WORK_ROW_MAX` UTF-16 units of JSON (under the registry's 16 KiB per op): text
+  whose JSON runs long (escaped quotes, newlines, control characters) shortens the
+  result, then the longest detail, by what the row is over.
 - **The work host** (`bots/work/host.rs`) runs on the bot's host. It reconciles on every
   change of the bot records, bot rows and session rows, and every 5 seconds:
 
@@ -674,10 +679,17 @@ device. As built:
 The extension `crates/harness/src/pi/bot-tools.ts` is embedded in the engine binary like
 `engine-client.mjs` and loaded with `-e` into bot runs only, so bot tools never appear in
 other sessions and need no Runtime release. Each tool is one `BotTool` call (`{chatId,
-tool, args}` → `{text}`) over the agent socket, which answers it only for a workspace's own
+tool, args}` → `{text, isError?}`) over the agent socket, which answers it only for a workspace's own
 chat hosted on that device (a session's agent can't speak for a workspace); the engine resolves the bot and thread
 from the chat id, enforces scope, origin and capabilities, and formats the answer. Answers
-are plain text, bounded to 48 KiB.
+are plain text, bounded to 48 KiB. A refusal is an answer too, flagged `isError: true`: the
+extension returns it, in the engine's words, as an error result, and a call that fails on
+the way (the engine unreachable, a timeout) as "<label> failed: <reason>", so the chat
+draws a failed chip for either. `propose_plan`'s schema carries the engine's caps
+(`maxLength` on the title, summary, step titles and details, a detail's being the plan's
+whole details budget; `PLAN_LIMITS`, kept equal to
+`cypher_proto`'s by a harness test), so Pi refuses an over-long plan before the engine
+sees it.
 
 ### 10.1 Read tools (every origin; all six ship)
 
@@ -1074,7 +1086,10 @@ Built:
   footer with Details, Reject and Approve. Once decided the card is one row: Approved or
   Rejected, and Details. It never shows steps, progress or the result: Details opens the
   plan's page in the detail panel, which has them (and Edit, which rejects the plan and
-  starts the owner's reply asking for the change).
+  starts the owner's reply asking for the change). A refused call stays an ordinary chip,
+  marked failed: flagged an error, or, from builds before that flag, answered with anything
+  but the engine's acceptance (`The plan "<title>" (work <id>) is waiting…`). A call the
+  plan's record names (its answer lost to a timeout) is a card either way.
 - **Routine card:** a `save_routine` call that went through draws one row: the routine's
   name over "Routine · <schedule> · in <project>" and "Saved", read from the routine's
   record (found by the id the tool's answer gives, since the doc keeps a workspace

@@ -321,13 +321,15 @@ enum TranscriptRowBuilder {
     /// "{entryId}#{partId}" so the streaming tail re-parses O(delta + tail);
     /// `completed` memoizes settled parts so they parse exactly once.
     /// `memoryCards`: the `memory` calls (tool part ids) a held write was
-    /// made by, drawn as cards rather than chips.
+    /// made by, drawn as cards rather than chips; `planCalls`: the
+    /// `propose_plan` calls a plan was written for.
     static func rows(
         entries: [MessageEntry],
         pendingSends: [PendingSend],
         parsers: inout [String: IncrementalMarkdownParser],
         completed: inout [String: CompletedParse],
-        memoryCards: Set<String> = []
+        memoryCards: Set<String> = [],
+        planCalls: Set<String> = []
     ) -> [TranscriptRow] {
         var rows: [TranscriptRow] = []
         var live = Set<String>()
@@ -335,7 +337,7 @@ enum TranscriptRowBuilder {
             let first = rows.count
             rowsForEntry(
                 entry, into: &rows, parsers: &parsers,
-                completed: &completed, live: &live, memoryCards: memoryCards)
+                completed: &completed, live: &live, memoryCards: memoryCards, planCalls: planCalls)
             let settled = entry.role == .user || entry.status != .streaming
             for ix in first..<rows.count {
                 rows[ix].role = entry.role
@@ -405,13 +407,34 @@ enum TranscriptRowBuilder {
         return isBlock(previous) ? 6 : 0
     }
 
+    /// How the engine answers a `propose_plan` call it accepted (`The plan
+    /// "<title>" (work <id>) is waiting for your owner's approval…`, since
+    /// the tool shipped). Older builds answered a refusal as an ordinary
+    /// result (not flagged an error), so their transcripts tell a refused
+    /// call by its answer: anything else (bot_plan.rs `PLAN_MADE_PREFIX`).
+    static let planMadePrefix = "The plan \""
+
+    /// Whether a `propose_plan` call is drawn as a plan card: one with a
+    /// plan record, else one that did not fail. A refused call stays an
+    /// ordinary chip: flagged an error, or (from builds before that)
+    /// answered with anything but `planMadePrefix`. A twin of bot_plan.rs
+    /// `is_plan_call`.
+    static func isPlanCard(
+        callId: String, isError: Bool, resolved: Bool, output: String?, planCalls: Set<String>
+    ) -> Bool {
+        if planCalls.contains(callId) { return true }
+        let made = !resolved || (output.map { $0.drop(while: \.isWhitespace).hasPrefix(planMadePrefix) } ?? false)
+        return !isError && made
+    }
+
     private static func rowsForEntry(
         _ entry: MessageEntry,
         into rows: inout [TranscriptRow],
         parsers: inout [String: IncrementalMarkdownParser],
         completed: inout [String: CompletedParse],
         live: inout Set<String>,
-        memoryCards: Set<String>
+        memoryCards: Set<String>,
+        planCalls: Set<String>
     ) {
         let streaming = entry.status == .streaming
 
@@ -567,7 +590,11 @@ enum TranscriptRowBuilder {
                 // A workspace's plan and a held memory write are cards. A
                 // refused plan call stays a chip.
                 if let kind = call.botToolKind {
-                    if kind == .proposePlan, !isError {
+                    if kind == .proposePlan,
+                        isPlanCard(
+                            callId: partId, isError: isError, resolved: resolved,
+                            output: call.string(SavedRoutine.outputField), planCalls: planCalls)
+                    {
                         appendCard(
                             id: "\(entry.id)#\(partId)", version: fnv1a(partId) | (resolved ? 1 : 0),
                             kind: .botPlan(callId: partId, resolved: resolved), before: ix)
@@ -590,12 +617,15 @@ enum TranscriptRowBuilder {
                         continue
                     }
                 }
+                // A plan call that is a chip was refused, flagged or not (an
+                // older build's refusal reads as one too; rows.rs `tool_item`).
+                let failed = isError || call.botToolKind == .proposePlan
                 // Nothing is appended until the group flushes, so the run's
                 // rows start here.
                 openRun(partId)
                 pendingTools.append(
                     ToolItem(
-                        id: partId, call: call, isError: isError, resolved: resolved,
+                        id: partId, call: call, isError: failed, resolved: resolved,
                         permission: fold.permission(id: partId, call: call, isError: isError, resolved: resolved),
                         blockedFirst: fold.retries.contains(partId)))
                 if ix == lastPartIx { flushTools(lastIx: ix) }

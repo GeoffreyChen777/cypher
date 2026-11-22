@@ -77,6 +77,8 @@ struct TranscriptView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// A workspace chat's held memory writes, by tool call: drawn as cards.
     @Environment(\.transcriptMemoryCards) private var memoryCards
+    /// Its `propose_plan` calls that made a plan: cards whatever they answered.
+    @Environment(\.transcriptPlanCalls) private var planCalls
 
     var body: some View {
         // The parse cache lives on the store (one per session, prewarmed
@@ -503,7 +505,7 @@ struct TranscriptView: View {
         store.transcriptCache.rows(
             revision: store.revision, entries: store.entries,
             pendingSends: store.pendingSends, togglePins: togglePins, revealedRuns: toolOverflow,
-            memoryCards: memoryCards)
+            memoryCards: memoryCards, planCalls: planCalls)
     }
 
     /// Index of the first shown row: the first of `shownFrom`'s entry, or 0

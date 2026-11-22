@@ -729,14 +729,20 @@ pub(super) fn user_entry_is_slash_command(entry: &SessionMessageEntry) -> bool {
     crate::composer::slash_command_label(&text).is_some()
 }
 
-/// [`entry_rows`] with no memory cards.
+/// [`entry_rows`] with no memory cards and no plan records.
 #[cfg(test)]
 pub fn rows_for_entry(
     entry: &SessionMessageEntry,
     pending: bool,
     parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
 ) -> Vec<Row> {
-    entry_rows(entry, pending, &Default::default(), parse)
+    entry_rows(
+        entry,
+        pending,
+        &Default::default(),
+        &Default::default(),
+        parse,
+    )
 }
 
 /// Build the block rows of one (already continuation-joined) entry.
@@ -744,11 +750,13 @@ pub fn rows_for_entry(
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
 /// incremental parsers for live parts and a cache for complete ones; tests pass
 /// a plain `parse_full`. `memory_cards` names the `memory` calls drawn as
-/// cards rather than chips.
+/// cards rather than chips, `plan_calls` the `propose_plan` calls that made
+/// a plan.
 pub(super) fn entry_rows(
     entry: &SessionMessageEntry,
     pending: bool,
     memory_cards: &super::memory_card::MemoryCards,
+    plan_calls: &super::bot_plan::PlanCalls,
     parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
 ) -> Vec<Row> {
     if entry.role == MessageRole::User {
@@ -793,7 +801,7 @@ pub(super) fn entry_rows(
         }
         // A plan is a card of its own, not a chip in a group, and so is a
         // held memory write.
-        let card = super::bot_plan::is_plan_call(part)
+        let card = super::bot_plan::is_plan_call(part, plan_calls)
             || super::bot_plan::saved_routine(part).is_some()
             || super::memory_card::is_card_call(part, memory_cards);
         if !card && let Some((part_id, item)) = tool_item(part, &fold) {
@@ -1178,7 +1186,11 @@ fn tool_item(part: &MessagePart, fold: &PermissionFold) -> Option<(String, ToolI
         part_id.clone(),
         ToolItem {
             call: call.clone(),
-            is_error: *is_error,
+            // A plan call that is a chip was refused, flagged or not (an
+            // older build's refusal reads as one too).
+            is_error: *is_error
+                || cypher_proto::view::bot_tool_kind(call)
+                    == Some(cypher_proto::view::BotToolKind::ProposePlan),
             resolved: *resolved,
             detail: tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
                 .map(Arc::new),

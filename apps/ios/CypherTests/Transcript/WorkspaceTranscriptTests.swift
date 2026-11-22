@@ -205,7 +205,9 @@ final class WorkspaceTranscriptTests: XCTestCase {
             "a",
             parts: [
                 .tool(id: "r1", call: call("read_session"), isError: false, resolved: true),
-                .tool(id: "plan", call: call("propose_plan"), isError: false, resolved: true),
+                .tool(
+                    id: "plan", call: call("propose_plan", [SavedRoutine.outputField: "The plan \"Fix\" is waiting."]),
+                    isError: false, resolved: true),
                 .tool(id: "held", call: call("memory"), isError: false, resolved: true),
                 .tool(id: "plain", call: call("memory"), isError: false, resolved: true),
                 .tool(id: "refused", call: call("propose_plan"), isError: true, resolved: true),
@@ -248,6 +250,68 @@ final class WorkspaceTranscriptTests: XCTestCase {
         XCTAssertEqual(memory, ["held"], "a write nobody held stays a chip")
         XCTAssertEqual(notices, ["p"], "a notice is one card, named by its entry")
         XCTAssertEqual(prose, 1, "its text is not drawn; an unknown source is plain text")
+    }
+
+    /// A refused call from a build that answered it as an ordinary result:
+    /// told by its answer, it stays a chip, so only the plan that was made
+    /// is a card. A call with a plan record is a card whatever it answered.
+    /// The same table as bot_plan.rs `a_refused_plan_call_stays_a_chip`.
+    func testARefusedPlanCallStaysAChip() {
+        let refusal = "Step 1's detail has 1735 characters; a step's detail holds at most 1500."
+        let made = "The plan \"Fix\" (work w) is waiting for your owner's approval in a card."
+        func card(_ id: String, _ isError: Bool, _ resolved: Bool, _ output: String?, _ plans: Set<String> = [])
+            -> Bool
+        {
+            TranscriptRowBuilder.isPlanCard(
+                callId: id, isError: isError, resolved: resolved, output: output, planCalls: plans)
+        }
+        XCTAssertFalse(card("old", false, true, refusal))
+        XCTAssertFalse(card("old", false, true, nil), "no answer is no plan")
+        XCTAssertFalse(card("new", true, true, refusal))
+        XCTAssertFalse(card("new", true, true, made), "flagged: never a card without its record")
+        XCTAssertFalse(card("lost", true, true, "Propose a plan failed: Engine IPC request timed out"))
+        XCTAssertTrue(card("made", false, true, made))
+        XCTAssertTrue(card("made", false, true, "\n  " + made))
+        XCTAssertTrue(card("live", false, false, nil), "still running: the card waits for its record")
+        XCTAssertFalse(
+            card("quoted", false, true, "Not proposed: The plan \"x\""), "only an answer that starts with it")
+        // The engine wrote the plan, but its answer was lost (the call timed
+        // out): the record makes it the card.
+        let timedOut = "Propose a plan failed: Engine IPC request timed out"
+        XCTAssertTrue(card("call-1", true, true, timedOut, ["call-1"]))
+        XCTAssertTrue(card("call-1", false, true, "Proposed.", ["call-1"]))
+        XCTAssertFalse(card("call-2", false, true, refusal, ["call-1"]))
+        XCTAssertTrue(DemoDataset.standard().botRecords.planCallIds.contains("call-plan-flaky"))
+
+        // In a chat: the refused call and its retry are one chip and one card.
+        func plan(_ output: String) -> RenderToolCall {
+            var plan = call("propose_plan", ["title": "Fix rounding"])
+            plan.fields[SavedRoutine.outputField] = output
+            return plan
+        }
+        let entry = MessageEntry.fixture(
+            "a",
+            parts: [
+                .tool(id: "refused", call: plan(refusal), isError: false, resolved: true),
+                .tool(id: "call-1", call: plan(made), isError: false, resolved: true),
+            ])
+        func kinds(_ plans: Set<String>) -> [String] {
+            var parsers: [String: IncrementalMarkdownParser] = [:]
+            var completed: [String: CompletedParse] = [:]
+            return TranscriptRowBuilder.rows(
+                entries: [entry], pendingSends: [], parsers: &parsers, completed: &completed, planCalls: plans
+            ).compactMap { row -> String? in
+                switch row.kind {
+                case .botPlan(let id, _): "plan \(id)"
+                // The refused call reads as failed, flagged or not.
+                case .toolGroup(let tools, _):
+                    "group " + tools.map { $0.isError ? "failed" : "ok" }.joined(separator: " ")
+                default: nil
+                }
+            }
+        }
+        XCTAssertEqual(kinds([]), ["group failed", "plan call-1"])
+        XCTAssertEqual(kinds(["call-1"]), ["group failed", "plan call-1"])
     }
 
     func testMemoryCardsShowHeldThenDecidedWrites() throws {
