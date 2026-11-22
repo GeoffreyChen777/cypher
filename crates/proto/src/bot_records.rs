@@ -1178,10 +1178,59 @@ impl BotShortcut {
         self.request.contains(SHORTCUT_INPUT)
     }
 
-    /// The request a click sends, with `input` in every blank.
+    /// The request a click sends, with `input` in every blank. Left empty,
+    /// the blanks are dropped and the text around each tidied (see
+    /// [`join_over_blank`]); the rest of the request stays as written.
     pub fn request_with(&self, input: &str) -> String {
-        self.request.replace(SHORTCUT_INPUT, input.trim())
+        let input = input.trim();
+        if !input.is_empty() || !self.wants_input() {
+            return self.request.replace(SHORTCUT_INPUT, input);
+        }
+        let mut pieces = self.request.split(SHORTCUT_INPUT);
+        let mut out = pieces.next().unwrap_or_default().to_string();
+        for piece in pieces {
+            join_over_blank(&mut out, piece);
+        }
+        out.trim().to_string()
     }
+}
+
+/// Punctuation that sits against the word before it.
+const SHORTCUT_TIGHT: [char; 12] = [
+    ',', '.', ':', ';', '!', '?', '，', '。', '：', '；', '！', '？',
+];
+
+/// Append `next` to `out` where an empty blank was: the spaces and tabs
+/// on both sides become one space (none before [`SHORTCUT_TIGHT`]
+/// punctuation or at a line's edge, none when neither side had any); a
+/// blank that started the text or a line, or followed punctuation, takes
+/// the punctuation after it along ("{input}, please review" → "please
+/// review"); a blank alone on its line takes the line. Line breaks
+/// elsewhere stay.
+fn join_over_blank(out: &mut String, next: &str) {
+    let gap = |c: char| c == ' ' || c == '\t';
+    let kept = out.trim_end_matches(gap).len();
+    let spaced = kept < out.len() || next.starts_with(gap);
+    out.truncate(kept);
+    let mut next = next.trim_start_matches(gap);
+    if out.is_empty() || out.ends_with('\n') || out.ends_with(SHORTCUT_TIGHT) {
+        next = next
+            .trim_start_matches(SHORTCUT_TIGHT)
+            .trim_start_matches(gap);
+    }
+    if out.ends_with('\n') && next.starts_with('\n') {
+        next = &next[1..];
+    }
+    if spaced
+        && !out.is_empty()
+        && !out.ends_with('\n')
+        && !next.is_empty()
+        && !next.starts_with('\n')
+        && !next.starts_with(SHORTCUT_TIGHT)
+    {
+        out.push(' ');
+    }
+    out.push_str(next);
 }
 
 // ── activity log (§4.4) ─────────────────────────────────────────────────────
@@ -2137,5 +2186,52 @@ mod tests {
             .map(|s| s.id.as_str())
             .collect();
         assert_eq!(ids, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn an_empty_blank_drops_out_and_the_text_around_it_closes_up() {
+        let with = |request: &str, input: &str| {
+            let s: BotShortcut = serde_json::from_value(serde_json::json!({
+                "id": "s", "botId": "b", "label": "x", "request": request,
+                "createdAt": 1, "updatedAt": 1,
+            }))
+            .unwrap();
+            s.request_with(input)
+        };
+        let cases = [
+            (
+                "Create a PR from branch {input} to main.",
+                "",
+                "Create a PR from branch to main.",
+            ),
+            ("Fix the tests. {input}", "  ", "Fix the tests."),
+            // A leading blank takes its orphaned punctuation with it.
+            ("{input}, please review", "", "please review"),
+            ("Review the branch {input}.", "", "Review the branch."),
+            ("Check {input} , then {input}  ship", "", "Check, then ship"),
+            ("Before, {input}, after", "", "Before, after"),
+            ("Fix it:\t{input}\nThen ship.", "", "Fix it:\nThen ship."),
+            // A blank alone on its line takes the line; other lines stay.
+            (
+                "Line one\n{input}\nLine two\n\nLine  three",
+                "",
+                "Line one\nLine two\n\nLine  three",
+            ),
+            ("Explain{input}simply", "", "Explainsimply"),
+            ("请修复{input}，然后测试", "", "请修复，然后测试"),
+            ("{input}", "", ""),
+            // Without a blank, or with text, nothing is tidied.
+            ("  What's  stuck?  ", "", "  What's  stuck?  "),
+            (
+                "Create a PR from branch {input} to main.",
+                " dev ",
+                "Create a PR from branch dev to main.",
+            ),
+            ("{input}, please review", "This", "This, please review"),
+            ("Fix  {input} ,then", "x", "Fix  x ,then"),
+        ];
+        for (request, input, sent) in cases {
+            assert_eq!(with(request, input), sent, "{request:?} + {input:?}");
+        }
     }
 }
