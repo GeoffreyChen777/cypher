@@ -1080,7 +1080,10 @@ Built:
   footer with Details, Reject and Approve. Once decided the card is one row: Approved or
   Rejected, and Details. It never shows steps, progress or the result: Details opens the
   plan's page in the detail panel, which has them (and Edit, which rejects the plan and
-  starts the owner's reply asking for the change).
+  starts the owner's reply asking for the change). A refused call stays an ordinary chip,
+  marked failed: flagged an error, or, from builds before that flag, answered with anything
+  but the engine's acceptance (`The plan "<title>" (work <id>) is waiting…`). A call the
+  plan's record names (its answer lost to a timeout) is a card either way.
 - **Routine card:** a `save_routine` call that went through draws one row: the routine's
   name over "Routine · <schedule> · in <project>" and "Saved", read from the routine's
   record (found by the id the tool's answer gives, since the doc keeps a workspace

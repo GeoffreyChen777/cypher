@@ -857,8 +857,11 @@ final class SessionStore {
                 fields[key] = value
             }
             // A saved routine's card reads the routine from the call's answer
-            // (the doc keeps a tool's first lines, not its input).
-            if tag == "unknown", callMap["name"]?.stringValue == "save_routine",
+            // (the doc keeps a tool's first lines, not its input), and a plan
+            // call's answer tells a refused one (an older build's, not
+            // flagged an error) from the plan's card.
+            if tag == "unknown", let name = callMap["name"]?.stringValue,
+                ["save_routine", "propose_plan"].contains(name),
                 let output = m["output"]?.stringValue
             {
                 fields[SavedRoutine.outputField] = output

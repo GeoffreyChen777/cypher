@@ -553,6 +553,7 @@ struct SessionView: View {
             boardSheet: $boardSheet, botSettings: $botSettings, deletingBot: $deletingBot,
             showMemorySettings: $showMemorySettings,
             memoryCards: chat?.isBotChat == true ? model.botRecords.memoryCardIds : [],
+            planCalls: chat?.isBotChat == true ? model.botRecords.planCallIds : [],
             openChat: { openChat($0) },
             openPage: workspaceBot.map { bot in { page in openBoard(page, botId: bot.id) } },
             openRoute: { openRoute($0) },

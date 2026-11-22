@@ -17,6 +17,8 @@ extension EnvironmentValues {
     @Entry var seedComposer: ((String) -> Void)? = nil
     /// The `memory` calls (tool part ids) drawn as held-write cards.
     @Entry var transcriptMemoryCards: Set<String> = []
+    /// The `propose_plan` calls (tool part ids) a plan was written for.
+    @Entry var transcriptPlanCalls: Set<String> = []
 }
 
 /// In-app session links: `cypher://session/<chat id>` in a reply (a
@@ -70,6 +72,12 @@ extension BotRecords {
             if let decision = store.decidedForCall(toolCallId) { return .decided(saved: decision.saved) }
         }
         return nil
+    }
+
+    /// The `propose_plan` calls a plan was written for: cards whatever the
+    /// call answered (bot_plan.rs `PlanCalls`).
+    var planCallIds: Set<String> {
+        Set(work.compactMap(\.toolCallId))
     }
 
     /// The plan behind a `propose_plan` call: by the call's id, else the

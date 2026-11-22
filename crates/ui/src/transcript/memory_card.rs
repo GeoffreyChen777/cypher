@@ -664,7 +664,7 @@ mod tests {
         };
         let cards = MemoryCards::of(&records());
         let mut parse = |_: &str, text: &str| Arc::new(parse_full(text));
-        let kinds: Vec<&str> = entry_rows(&entry, false, &cards, &mut parse)
+        let kinds: Vec<&str> = entry_rows(&entry, false, &cards, &Default::default(), &mut parse)
             .iter()
             .map(|row| match &row.kind {
                 RowKind::ToolGroup { .. } => "group",

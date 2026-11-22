@@ -13,6 +13,7 @@ final class TranscriptBuilderCache {
     private var cachedRevision: UInt64?
     /// The memory cards `builtRows` was built with.
     private var cachedCards: Set<String> = []
+    private var cachedPlans: Set<String> = []
     private var builtRows: [TranscriptRow] = []
     /// The toggle pins and revealed work runs `cachedRows` was folded for;
     /// nil forces a refold.
@@ -42,14 +43,16 @@ final class TranscriptBuilderCache {
         pendingSends: [PendingSend],
         togglePins: [String: Bool],
         revealedRuns: Set<String> = [],
-        memoryCards: Set<String> = []
+        memoryCards: Set<String> = [],
+        planCalls: Set<String> = []
     ) -> [TranscriptRow] {
-        if cachedRevision != revision || cachedCards != memoryCards {
+        if cachedRevision != revision || cachedCards != memoryCards || cachedPlans != planCalls {
             builtRows = TranscriptRowBuilder.rows(
                 entries: entries, pendingSends: pendingSends,
-                parsers: &parsers, completed: &completed, memoryCards: memoryCards)
+                parsers: &parsers, completed: &completed, memoryCards: memoryCards, planCalls: planCalls)
             cachedRevision = revision
             cachedCards = memoryCards
+            cachedPlans = planCalls
             foldedFor = nil
         }
         let folds = Folds(pins: togglePins, revealedRuns: revealedRuns)

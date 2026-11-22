@@ -12,6 +12,8 @@
 //! record written before the call id was known). The row's version carries
 //! a hash of the chat's plans ([`plans_key`]), so a decision redraws it.
 
+use std::collections::HashSet;
+
 use super::*;
 use cypher_proto::{BotRecords, BotWork, WorkState};
 
@@ -197,15 +199,77 @@ pub(super) fn call_title(call: &ToolCall) -> String {
     }
 }
 
-/// Whether a tool part is a successful `propose_plan` call (a refused one
-/// stays an ordinary chip).
-pub(super) fn is_plan_call(part: &MessagePart) -> bool {
-    matches!(
-        part,
-        MessagePart::Tool { call, is_error: false, .. }
-            if cypher_proto::view::bot_tool_kind(call)
-                == Some(cypher_proto::view::BotToolKind::ProposePlan)
-    )
+/// How the engine answers a `propose_plan` call it accepted (`The plan
+/// "<title>" (work <id>) is waiting for your owner's approval…`, since the
+/// tool shipped). Older builds answered a refusal as an ordinary result
+/// (not flagged an error), so their transcripts tell a refused call by its
+/// answer: anything else.
+pub(super) const PLAN_MADE_PREFIX: &str = "The plan \"";
+
+/// The `propose_plan` calls a plan record was written for, by call id: such
+/// a call is a card whatever its answer said.
+#[derive(Debug, Default)]
+pub struct PlanCalls {
+    ids: HashSet<String>,
+}
+
+impl PlanCalls {
+    pub(super) fn of(records: &BotRecords) -> Self {
+        Self {
+            ids: records
+                .work
+                .iter()
+                .filter_map(|work| work.tool_call_id.clone())
+                .collect(),
+        }
+    }
+
+    /// A hash of `entry`'s calls that have a plan, for its row cache: a
+    /// record that arrives later turns its call into a card.
+    pub(super) fn entry_key(&self, entry: &SessionMessageEntry) -> u64 {
+        if self.ids.is_empty() {
+            return 0;
+        }
+        entry
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Tool { id, .. } if self.ids.contains(id) => Some(fnv1a(id.as_bytes())),
+                _ => None,
+            })
+            .fold(0, |acc, h| acc.rotate_left(7) ^ h)
+    }
+}
+
+/// Whether a tool part is drawn as a plan card: a `propose_plan` call with
+/// a plan record, else one that did not fail. A refused call stays an
+/// ordinary chip: flagged an error, or (from builds before that) answered
+/// with anything but [`PLAN_MADE_PREFIX`]. A twin of iOS
+/// `TranscriptRowBuilder.isPlanCard`.
+pub(super) fn is_plan_call(part: &MessagePart, plans: &PlanCalls) -> bool {
+    let MessagePart::Tool {
+        id,
+        call,
+        is_error,
+        resolved,
+        output,
+        ..
+    } = part
+    else {
+        return false;
+    };
+    if cypher_proto::view::bot_tool_kind(call) != Some(cypher_proto::view::BotToolKind::ProposePlan)
+    {
+        return false;
+    }
+    if plans.ids.contains(id) {
+        return true;
+    }
+    let made = !*resolved
+        || output
+            .as_deref()
+            .is_some_and(|text| text.trim_start().starts_with(PLAN_MADE_PREFIX));
+    !is_error && made
 }
 
 /// The routine a tool part saved: `Some` for a `save_routine` call that went
@@ -910,7 +974,7 @@ mod tests {
             },
             is_error,
             resolved: true,
-            output: None,
+            output: Some("The plan \"Fix invoice rounding\" (work w) is waiting.".into()),
             progress: None,
             diff: None,
             output_ref: None,
@@ -943,6 +1007,124 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, ["group", "plan", "group"]);
+    }
+
+    /// A refused call from a build that answered it as an ordinary result:
+    /// told by its answer, it stays a chip, so only the plan that was made
+    /// is a card. A call with a plan record is a card whatever it answered.
+    /// The same table as iOS `testARefusedPlanCallStaysAChip`.
+    #[test]
+    fn a_refused_plan_call_stays_a_chip() {
+        let tool =
+            |id: &str, is_error: bool, resolved: bool, output: Option<&str>| MessagePart::Tool {
+                id: id.into(),
+                call: ToolCall::Unknown {
+                    name: "propose_plan".into(),
+                    input: Some(serde_json::json!({ "title": "Fix invoice rounding" })),
+                },
+                is_error,
+                resolved,
+                output: output.map(String::from),
+                progress: None,
+                diff: None,
+                output_ref: None,
+                output_bytes: None,
+                diff_ref: None,
+                diff_stats: None,
+                permission: None,
+            };
+        let card =
+            |id: &str, is_error: bool, resolved: bool, output: Option<&str>, plans: &PlanCalls| {
+                is_plan_call(&tool(id, is_error, resolved, output), plans)
+            };
+        let refusal = "Step 1's detail has 1735 characters; a step's detail holds at most 1500.";
+        let made = "The plan \"Fix\" (work w) is waiting for your owner's approval in a card.";
+        let none = PlanCalls::default();
+        assert!(!card("old", false, true, Some(refusal), &none));
+        assert!(
+            !card("old", false, true, None, &none),
+            "no answer is no plan"
+        );
+        assert!(!card("new", true, true, Some(refusal), &none));
+        assert!(
+            !card("new", true, true, Some(made), &none),
+            "flagged: never a card without its record"
+        );
+        assert!(!card(
+            "lost",
+            true,
+            true,
+            Some("Propose a plan failed: Engine IPC request timed out"),
+            &none
+        ));
+        assert!(card("made", false, true, Some(made), &none));
+        assert!(card(
+            "made",
+            false,
+            true,
+            Some(&format!("\n  {made}")),
+            &none
+        ));
+        assert!(
+            card("live", false, false, None, &none),
+            "still running: the card waits for its record"
+        );
+        assert!(
+            !card(
+                "quoted",
+                false,
+                true,
+                Some("Not proposed: The plan \"x\""),
+                &none
+            ),
+            "only an answer that starts with it"
+        );
+
+        // The engine wrote the plan, but its answer was lost (the call
+        // timed out): the record makes it the card.
+        let records = BotRecords {
+            work: vec![work(WorkState::Proposed, vec![step(StepState::Pending)])],
+            ..Default::default()
+        };
+        let plans = PlanCalls::of(&records);
+        let timed_out = "Propose a plan failed: Engine IPC request timed out";
+        assert!(card("call-1", true, true, Some(timed_out), &plans));
+        assert!(card("call-1", false, true, Some("Proposed."), &plans));
+        assert!(!card("call-2", false, true, Some(refusal), &plans));
+
+        // In a chat: the refused call and its retry are one chip and one card.
+        let entry = SessionMessageEntry {
+            role: MessageRole::Assistant,
+            parts: vec![
+                tool("refused", false, true, Some(refusal)),
+                tool("call-1", false, true, Some(made)),
+            ],
+            ..crate::test_fixtures::entry()
+        };
+        let mut parse = |_: &str, text: &str| Arc::new(parse_full(text));
+        let kinds = |plans: &PlanCalls, parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>| {
+            entry_rows(&entry, false, &Default::default(), plans, parse)
+                .iter()
+                .map(|row| match &row.kind {
+                    // The refused call reads as failed, flagged or not.
+                    RowKind::ToolGroup { tools, .. } => format!(
+                        "group {}",
+                        tools
+                            .iter()
+                            .map(|t| if t.is_error { "failed" } else { "ok" })
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                    RowKind::BotPlan { call_id, .. } => format!("plan {call_id}"),
+                    _ => "other".to_owned(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kinds(&none, &mut parse), ["group failed", "plan call-1"]);
+        assert_eq!(kinds(&plans, &mut parse), ["group failed", "plan call-1"]);
+        // A record arriving changes the entry's row-cache key.
+        assert_eq!(none.entry_key(&entry), 0);
+        assert_ne!(plans.entry_key(&entry), 0);
     }
 
     #[test]
