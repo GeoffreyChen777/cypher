@@ -60,7 +60,9 @@ enum TranscriptTextStyle {
                     result.append(FileReferenceChip.margin(proseAttributes))
                 }
                 result.append(
-                    FileReferenceChip.string(raw: run.text, reference: reference, label: labels[chips], size: size))
+                    FileReferenceChip.string(
+                        raw: run.text, reference: reference, label: labels[chips], size: size,
+                        weight: FileReferenceChip.weight(base: weight, bold: run.style.bold), index: chips))
                 if index + 1 < runs.count, !runs[index + 1].style.code {
                     result.append(FileReferenceChip.margin(proseAttributes))
                 }
@@ -392,12 +394,23 @@ enum TranscriptTextStyle {
     }
 }
 
-/// Preserve the rounded inline-code wash without a second text overlay.
+/// Preserve the rounded inline-code wash and file reference chips without a
+/// second text overlay.
 final class TranscriptTextLayoutManager: NSLayoutManager {
+    override init() {
+        super.init()
+        delegate = FileReferenceChipLineBreaks.shared
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        delegate = FileReferenceChipLineBreaks.shared
+    }
+
     override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: CGPoint) {
         if let storage = textStorage, let container = textContainers.first {
             let characters = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
-            FileReferenceChip.paintGlyphs(
+            FileReferenceChip.paint(
                 self, storage: storage, container: container, characters: characters, origin: origin)
             storage.enumerateAttribute(.cypherInlineCode, in: characters) { value, range, _ in
                 guard let color = value as? UIColor else { return }
@@ -430,7 +443,7 @@ final class TranscriptTextMeasurer {
     static let shared = TranscriptTextMeasurer()
 
     private let storage = NSTextStorage()
-    private let layout = NSLayoutManager()
+    private let layout = TranscriptTextLayoutManager()
     private let container = NSTextContainer(size: .zero)
     /// How many layouts it has run (tests).
     private(set) var layouts = 0
@@ -502,8 +515,8 @@ struct SelectableTranscriptText: UIViewRepresentable {
         view.backgroundColor = .clear
         view.textContainerInset = .zero
         view.dataDetectorTypes = []
-        // Links carry their own look (underlined text; a chip's glyph, name
-        // and muted lines), so the view adds none.
+        // Links carry their own look (underlined text; a chip's box, glyph,
+        // name and muted lines), so the view adds none.
         view.linkTextAttributes = [:]
         view.tintColor = UIColor(Theme.accent)
         // Repaint custom inline-code backgrounds as well as glyphs on a live

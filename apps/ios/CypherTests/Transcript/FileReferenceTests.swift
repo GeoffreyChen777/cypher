@@ -172,6 +172,162 @@ final class FileReferenceTests: XCTestCase {
         XCTAssertTrue(text.isEqual(to: TranscriptTextStyle.inline(runs)))
     }
 
+    /// The desktop's chip at rest (render.rs `ChipStyle`): exact ink alphas,
+    /// black on light and white on dark.
+    func testChipPaintIsNeutralInkAtExactAlphas() {
+        for (style, white) in [(UIUserInterfaceStyle.light, CGFloat(0)), (.dark, 1)] {
+            let traits = UITraitCollection(userInterfaceStyle: style)
+            for (color, alpha) in [(FileReferenceChip.wash, 0.03), (FileReferenceChip.hairline, 0.08)] {
+                var w: CGFloat = -1
+                var a: CGFloat = -1
+                XCTAssertTrue(color.resolvedColor(with: traits).getWhite(&w, alpha: &a))
+                XCTAssertEqual(w, white, accuracy: 0.0001)
+                XCTAssertEqual(a, CGFloat(alpha), accuracy: 0.0001)
+            }
+        }
+        XCTAssertEqual(FileReferenceChip.radius, 6)
+        XCTAssertEqual(FileReferenceChip.padLeft, 5)
+        XCTAssertEqual(FileReferenceChip.padRight, 6)
+    }
+
+    @MainActor
+    func testChipNameIsMediumCodeTypeAndTheLinesMuted() throws {
+        let runs = [
+            InlineRun(text: "See ", style: .plain),
+            InlineRun(text: "src/a.rs:3-9", style: InlineStyle(code: true)),
+            InlineRun(text: " and ", style: .plain),
+            InlineRun(text: "src/b.rs", style: InlineStyle(bold: true, code: true)),
+        ]
+        let text = TranscriptTextStyle.inline(runs)
+        let string = text.string as NSString
+        let name = string.range(of: "a.rs")
+        let font = try XCTUnwrap(text.attribute(.font, at: name.location, effectiveRange: nil) as? UIFont)
+        XCTAssertEqual(font.pointSize, MD.textSize * 0.84, accuracy: 0.001)
+        XCTAssertTrue(font.fontName.hasPrefix("GeistMono"), font.fontName)
+        let variation = CTFontCopyVariation(font as CTFont) as? [Int: Double]
+        XCTAssertEqual(variation?[Theme.monoWeightAxis], 500)
+        XCTAssertEqual(
+            text.attribute(.foregroundColor, at: name.location, effectiveRange: nil) as? UIColor, UIColor(Theme.text))
+        let lines = string.range(of: ":3-9")
+        XCTAssertEqual(text.attribute(.font, at: lines.location, effectiveRange: nil) as? UIFont, font)
+        XCTAssertEqual(
+            text.attribute(.foregroundColor, at: lines.location, effectiveRange: nil) as? UIColor,
+            UIColor(Theme.textMuted))
+        // The right padding rides on the label's last character.
+        XCTAssertEqual(
+            text.attribute(.kern, at: lines.location + lines.length - 1, effectiveRange: nil) as? CGFloat,
+            FileReferenceChip.padRight)
+        // In bold text, semibold.
+        let bold = try XCTUnwrap(
+            text.attribute(.font, at: string.range(of: "b.rs").location, effectiveRange: nil) as? UIFont)
+        XCTAssertEqual((CTFontCopyVariation(bold as CTFont) as? [Int: Double])?[Theme.monoWeightAxis], 600)
+        // Two chips, told apart.
+        XCTAssertEqual(text.attribute(.cypherFileChip, at: name.location, effectiveRange: nil) as? Int, 0)
+        XCTAssertEqual(
+            text.attribute(.cypherFileChip, at: string.range(of: "b.rs").location, effectiveRange: nil) as? Int, 1)
+    }
+
+    /// Lays `text` out as a transcript text view does, `width` wide (the
+    /// layout manager holds its storage weakly: keep the storage).
+    private func layOut(
+        _ text: NSAttributedString, width: CGFloat
+    ) -> (NSTextStorage, NSLayoutManager, NSTextContainer) {
+        let storage = NSTextStorage(attributedString: text)
+        let layout = TranscriptTextLayoutManager()
+        let container = NSTextContainer(size: CGSize(width: width, height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        layout.addTextContainer(container)
+        storage.addLayoutManager(layout)
+        layout.ensureLayout(for: container)
+        return (storage, layout, container)
+    }
+
+    private func chipRanges(_ text: NSAttributedString) -> [NSRange] {
+        var ranges: [NSRange] = []
+        text.enumerateAttribute(.cypherFileChip, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+            if value != nil { ranges.append(range) }
+        }
+        return ranges
+    }
+
+    @MainActor
+    func testAChipBoxHoldsItsPaddingInsideItsLine() throws {
+        let text = TranscriptTextStyle.inline([
+            InlineRun(text: "The greeting lives in ", style: .plain),
+            InlineRun(text: "Sources/Example.swift:20", style: InlineStyle(code: true)),
+            InlineRun(text: ", see.", style: .plain),
+        ])
+        let (storage, layout, container) = layOut(text, width: 1_000)
+        let chip = try XCTUnwrap(chipRanges(text).first)
+        let boxes = FileReferenceChip.boxes(layout, storage: storage, container: container, chip: chip)
+        XCTAssertEqual(boxes.count, 1)
+        let box = try XCTUnwrap(boxes.first)
+        XCTAssertEqual(box.height, 17)
+        let line = layout.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil)
+        XCTAssertEqual(line.height, MD.lineHeight, "a chip never changes the line height")
+        XCTAssertGreaterThanOrEqual(box.minY, line.minY)
+        XCTAssertLessThanOrEqual(box.maxY, line.maxY)
+        let font = try XCTUnwrap(storage.attribute(.font, at: chip.location, effectiveRange: nil) as? UIFont)
+        // Centered on the name's cap height.
+        let baseline = line.minY + layout.location(forGlyphAt: layout.glyphIndexForCharacter(at: chip.location)).y
+        XCTAssertEqual(box.midY, baseline - font.capHeight / 2, accuracy: 0.5)
+        // Left padding, glyph and gap before the name; the right padding
+        // after the label.
+        let advance = NSAttributedString(string: "x", attributes: [.font: font]).size().width
+        let label = CGFloat("Example.swift:20".count) * advance
+        let glue = FileReferenceChip.padLeft + FileReferenceChip.glyphSide(MD.textSize) + FileReferenceChip.glyphGap
+        XCTAssertEqual(box.width, glue + label + FileReferenceChip.padRight, accuracy: 0.01)
+        let name = (text.string as NSString).range(of: "Example")
+        let nameX = layout.location(forGlyphAt: layout.glyphIndexForCharacter(at: name.location)).x
+        XCTAssertEqual(nameX - box.minX, glue, accuracy: 0.01)
+    }
+
+    @MainActor
+    func testAChipThatNoLongerFitsMovesToTheNextLineWhole() throws {
+        let text = TranscriptTextStyle.inline([
+            InlineRun(text: "Read it in ", style: .plain),
+            InlineRun(text: "src/a/lib.rs:41", style: InlineStyle(code: true)),
+            InlineRun(text: " and ", style: .plain),
+            InlineRun(text: "src/b/lib.rs:7", style: InlineStyle(code: true)),
+            InlineRun(text: " then.", style: .plain),
+        ])
+        let string = text.string as NSString
+        // Labels `a/lib.rs:41`, `b/lib.rs:7`: a word break after a `/` would
+        // split one. Cut the line inside the second chip, past its `/`.
+        let slash = string.range(of: "b/")
+        let (probeStorage, probe, _) = layOut(text, width: 10_000)
+        let cut = withExtendedLifetime(probeStorage) {
+            probe.location(forGlyphAt: probe.glyphIndexForCharacter(at: slash.location + 3)).x
+        }
+        let (storage, layout, container) = layOut(text, width: cut)
+        let chip = chipRanges(text)[1]
+        let boxes = FileReferenceChip.boxes(layout, storage: storage, container: container, chip: chip)
+        XCTAssertEqual(boxes.count, 1, "the chip moved to the next line whole")
+        XCTAssertEqual(boxes.first?.minX ?? -1, 0, accuracy: 0.01)
+    }
+
+    @MainActor
+    func testAChipWiderThanItsLineGetsABoxPerLineInsideTheView() throws {
+        let text = TranscriptTextStyle.inline([
+            InlineRun(text: "Long: ", style: .plain),
+            InlineRun(
+                text: "src/a_rather_long_generated_preview_fixture_name.swift:120-148",
+                style: InlineStyle(code: true)),
+            InlineRun(text: " done.", style: .plain),
+        ])
+        let width: CGFloat = 200
+        let (storage, layout, container) = layOut(text, width: width)
+        let chip = try XCTUnwrap(chipRanges(text).first)
+        let boxes = FileReferenceChip.boxes(layout, storage: storage, container: container, chip: chip)
+        XCTAssertGreaterThan(boxes.count, 1)
+        for box in boxes {
+            XCTAssertGreaterThanOrEqual(box.minX, 0)
+            XCTAssertLessThanOrEqual(box.maxX, width)
+            XCTAssertEqual(box.height, 17)
+        }
+        XCTAssertEqual(Set(boxes.map(\.minY)).count, boxes.count, "one box per line")
+    }
+
     @MainActor
     func testFileLinksGetAURLTheTextViewKeeps() throws {
         let text = TranscriptTextStyle.inline([

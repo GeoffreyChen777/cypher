@@ -32,9 +32,12 @@ filesystem or the project's main checkout if the chat uses a worktree.
 ## From the chat
 
 - **File references** in a reply's inline code (`` `core/context.py:146-160` ``,
-  `` `src/lib.rs` ``) show as chips — a file glyph, the file name and muted
-  lines — detected by the desktop's rules
-  ([Files → From the chat](files.md#from-the-chat)). Copying a selection
+  `` `src/lib.rs` ``) show as chips — a grey file glyph, the file name in
+  medium-weight code type and muted lines, on a faint neutral wash with a
+  hairline outline, as on the desktop — detected by the desktop's rules
+  ([Files → From the chat](files.md#from-the-chat)). A chip that no longer
+  fits its line moves to the next one whole. A chip has no pressed look of
+  its own (the desktop deepens it under the pointer). Copying a selection
   holds the reference as written.
 - **File links** (Markdown links to `src/a.rs#L12`, `a.rs:12-20`,
   `file://…`, `cypher-file:`) and chips open the Files sheet on the file with the cited

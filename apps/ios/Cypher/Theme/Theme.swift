@@ -130,9 +130,12 @@ extension Theme {
     /// … as a default-on many-to-one `liga` whose glyph is one cell wide but
     /// inks two cells to its left, so `a === b` paints the bars over the text
     /// before it and the rest of the line slides two cells back.
-    static func monoUI(_ size: CGFloat) -> UIFont {
+    ///
+    /// The bundled Geist Mono is a variable font: a `weight` other than
+    /// regular sets its `wght` axis (medium 500, semibold 600, bold 700).
+    static func monoUI(_ size: CGFloat, weight: UIFont.Weight = .regular) -> UIFont {
         guard let font = UIFont(name: fontMonoName, size: size) else {
-            return .monospacedSystemFont(ofSize: size, weight: .regular)
+            return .monospacedSystemFont(ofSize: size, weight: weight)
         }
         let off = ["liga", "calt", "dlig"].map {
             [
@@ -140,7 +143,25 @@ extension Theme {
                 kCTFontOpenTypeFeatureValue as UIFontDescriptor.FeatureKey: 0,
             ] as [UIFontDescriptor.FeatureKey: Any]
         }
-        return UIFont(descriptor: font.fontDescriptor.addingAttributes([.featureSettings: off]), size: size)
+        var attributes: [UIFontDescriptor.AttributeName: Any] = [.featureSettings: off]
+        if let wght = monoAxisWeight(weight) {
+            attributes[UIFontDescriptor.AttributeName(rawValue: kCTFontVariationAttribute as String)] = [
+                monoWeightAxis: wght
+            ]
+        }
+        return UIFont(descriptor: font.fontDescriptor.addingAttributes(attributes), size: size)
+    }
+
+    /// The `wght` axis tag, as CoreText keys a variation.
+    static let monoWeightAxis = 0x7767_6874
+
+    /// A weight's `wght` axis value; nil for regular and lighter (the
+    /// font's default).
+    static func monoAxisWeight(_ weight: UIFont.Weight) -> Int? {
+        if weight.rawValue >= UIFont.Weight.bold.rawValue { return 700 }
+        if weight.rawValue >= UIFont.Weight.semibold.rawValue { return 600 }
+        if weight.rawValue >= UIFont.Weight.medium.rawValue { return 500 }
+        return nil
     }
 }
 

@@ -924,7 +924,7 @@ final class DemoDataset {
         +let enabled = true
         ```
 
-        The diagram in `notes/diagram.svg` hasn't changed.
+        The diagram in `notes/diagram.svg` hasn't changed; `message` and `enabled` are the only names touched, and **the build checks `Sources/Example.swift:44-45`**. The previews also read `Sources/Previews/a_rather_long_generated_preview_fixture_name.swift:120-148`.
         """#
 
     /// The mock harness's [mock:explainer] replies
