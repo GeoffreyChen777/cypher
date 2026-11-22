@@ -503,39 +503,47 @@ test("attributes (property): ordinary words from every language around a consent
   }
 });
 
-test("replies (property): a reply binds to the proposal only as bare assent; questions, other targets or actions, and deferrals never do", () => {
+test("replies (property): an unmarked reply binds iff the judge says it assents; a marked one never binds", () => {
   const read = targetsOf([["gh", "pr", "merge", "12", "--merge"]]);
   const proposal = "Checks are green. Next I'd merge PR #12.";
   const claim = (source = "reply") => ({ quote: "merge PR #12", source, targets: [{ kind: "pr", value: "12" }] });
-  const reply = (text) => checkExplicit(claim(), read, words({ text, source: "reply", proposal }), [], explicitFacts);
+  const reply = (text, source = "reply") => checkExplicit(claim(source), read, words({ text, source: "reply", proposal }), [], explicitFacts);
+  // Unmarked replies: generated from every row's carry-on and filler words, and from words of no table at all.
+  const unmarked = [...new Set([...LANGUAGES.flatMap((row) => [...row.carryOn, ...row.filler]).map(bare), "按照建议", "go ahead with that", "sounds good, do it", "thanks, looks good", "zzz qux"])]
+    .filter((text) => !/[?？¿؟]/.test(text));
+  let bound = 0;
+  for (const text of unmarked) {
+    const marked = /\d/.test(text);
+    const got = reply(text);
+    if (got.ok) bound++;
+    // Binds only when the judge says it assents, never otherwise.
+    assert.equal(reply(text, "reply-unconfirmed").ok, false, `"${text}" unconfirmed`);
+    if (!marked && got.ok === false) assert.match(got.reason ?? "", /doesn't plainly agree|says not|wrote later|answer was/, `"${text}": ${got.reason}`);
+  }
+  assert.ok(bound > unmarked.length / 2, `most unmarked replies bind on the judge's word (${bound}/${unmarked.length})`);
+  for (const text of ["按照建议", "go ahead with that", "sounds good, do it"]) assert.equal(reply(text).ok, true, text);
+  // Marked replies never bind, whatever the judge says.
   let checked = 0;
-  for (const language of LANGUAGES) {
-    const yes = (language.assent ?? []).map(bare);
-    assert.ok(yes.length, `${language.code} has assent words`);
-    for (const word of yes) {
-      if (/^(do|go|mach|faz|faça|vai|pode|yap|делай|сделай|rób|zrób)$/i.test(word)) continue;
-      const got = reply(word);
-      assert.equal(got.ok, true, `${language.code} "${word}": ${got.reason}`);
-      // Unconfirmed by the model: no.
-      assert.equal(checkExplicit(claim("reply-unconfirmed"), read, words({ text: word, source: "reply", proposal }), [], explicitFacts).ok, false);
-      for (const mark of ["?", "？", "¿", "؟"]) {
-        assert.equal(reply(`${word}${mark}`).ok, false, `${language.code} "${word}${mark}"`);
-        checked++;
-      }
-      for (const other of ["#13", "fix-other", "v2.0", "PR 13"]) {
-        assert.equal(reply(`${word} ${other}`).ok, false, `${language.code} "${word} ${other}"`);
-        checked++;
-      }
-    }
-    const word = yes[0];
-    for (const defer of LANGUAGES.flatMap((row) => row.defer ?? []).map(bare)) {
-      assert.equal(reply(`${word} ${defer}`).ok, false, `${language.code} "${word} ${defer}"`);
+  const bases = ["ok", "好", "はい", "네", "ja", "oui", "sí", "sim", "sì", "да", pick(unmarked)];
+  for (const base of bases) {
+    for (const mark of ["?", "？", "¿", "؟"]) {
+      assert.equal(reply(`${base}${mark}`).ok, false, `"${base}${mark}"`);
       checked++;
     }
-    for (const action of ["delete", "release", "close", "push"]) {
-      for (const verb of (language.actions[action] ?? []).map(bare).filter((v) => v.length >= 2)) {
-        assert.equal(reply(`${word} ${verb}`).ok, false, `${language.code} "${word} ${verb}"`);
-        checked++;
+    for (const other of ["#13", "fix-other", "v2.0", "PR 13"]) {
+      assert.equal(reply(`${base} ${other}`).ok, false, `"${base} ${other}"`);
+      checked++;
+    }
+    for (const defer of LANGUAGES.flatMap((row) => [...(row.defer ?? []), ...row.retract, ...row.negate]).map(bare)) {
+      assert.equal(reply(`${base} ${defer}`).ok, false, `"${base} ${defer}"`);
+      checked++;
+    }
+    for (const language of LANGUAGES) {
+      for (const action of ["delete", "release", "close", "push"]) {
+        for (const verb of (language.actions[action] ?? []).map(bare).filter((v) => v.length >= 2)) {
+          assert.equal(reply(`${base} ${verb}`).ok, false, `${language.code} "${base} ${verb}"`);
+          checked++;
+        }
       }
     }
   }
@@ -544,7 +552,5 @@ test("replies (property): a reply binds to the proposal only as bare assent; que
     const asks = `${pick(["so", "and", "when"])} merge PR #12 ${pick(["now", "today", ""])}${mark}`;
     for (const source of ["reply", "typed", undefined]) assert.equal(checkExplicit({ ...claim(), source }, read, words({ text: asks, source: "reply", proposal }), [], explicitFacts).ok, false, `${source} "${asks}"`);
   }
-  // Words with no assent at all never bind either.
-  for (const text of ["thanks", "nice", "看看日志", "画面", "로그", "logs", "merci"]) assert.equal(reply(text).ok, false, text);
   assert.ok(checked > 1000, `${checked}`);
 });

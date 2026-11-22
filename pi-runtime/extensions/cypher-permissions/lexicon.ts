@@ -38,8 +38,6 @@ export interface Language {
   filler: readonly string[];
   /** Prefers something else or defers it ("rather", "instead", "later", "for now", "tomorrow"). Counted with `retract`. */
   defer?: readonly string[];
-  /** Plainly agrees to what was proposed ("yes", "do it", "go ahead"): a reply binds to a proposal only with one. */
-  assent?: readonly string[];
   /** Mark the branch a pull request goes into: before it (`into main`) or after it (`mainに`). */
   baseBefore?: readonly string[];
   baseAfter?: readonly string[];
@@ -560,7 +558,7 @@ export const LANGUAGES: readonly Language[] = [
   },
 ];
 
-/** Preference and deferral, and plain assent, per language (merged into the rows below). */
+/** Preference and deferral, per language (merged into the rows below). */
 const DEFER: Readonly<Record<string, readonly string[]>> = {
   en: ["rather", "instead", "later", "for now", "for the moment", "tomorrow", "next week", "some other time", "another time", "leave it", "leave that", "let it be", "postpon*", "defer*", "delay*", "prefer*", "better to", "better not", "not today", "eventually", "on hold", "hold off"],
   zh: ["还是", "宁可", "不如", "改天", "明天", "以后", "晚点", "稍后", "先放着", "先留着", "留着", "放着", "推迟", "延后", "回头再", "暂时", "先不急", "过几天", "下周"],
@@ -576,24 +574,8 @@ const DEFER: Readonly<Record<string, readonly string[]>> = {
   pl: ["raczej", "lepiej", "zamiast", "później", "jutro", "na razie", "zostaw", "odłóż", "przełóż", "wolę"],
   tr: ["yerine", "sonra", "yarın", "şimdilik", "bırak", "ertele*", "tercih"],
 };
-const ASSENT: Readonly<Record<string, readonly string[]>> = {
-  en: ["yes", "yep", "yeah", "yup", "ok", "okay", "sure", "do it", "go ahead", "go for it", "please do", "proceed", "agreed", "agree", "approve*", "let's do it", "let's go", "confirm*", "as suggested", "as proposed", "as you said", "do that", "go", "y"],
-  zh: ["好", "好的", "行", "可以", "同意", "没问题", "嗯", "对", "是的", "做", "做吧", "去做", "照做", "按照", "按你说的", "就这么办", "就这样", "批准", "确认"],
-  ja: ["はい", "うん", "お願い", "どうぞ", "進めて", "やって", "了解", "オッケー", "それで", "提案通り", "そうして", "承認"],
-  ko: ["네", "응", "예", "좋아", "그래", "진행", "해줘", "해 줘", "해주세요", "해 주세요", "오케이", "알겠", "승인"],
-  de: ["ja", "jawohl", "ok", "okay", "mach", "mach das", "mach es", "los", "leg los", "einverstanden", "gerne", "klar", "passt", "genehmigt", "bitte"],
-  fr: ["oui", "ok", "d'accord", "vas-y", "allez-y", "fais-le", "faites-le", "bien sûr", "volontiers", "ça marche", "go", "approuvé"],
-  es: ["sí", "si", "ok", "vale", "dale", "hazlo", "adelante", "claro", "de acuerdo", "procede", "aprobado"],
-  pt: ["sim", "ok", "pode", "faça", "faz", "manda", "vai", "beleza", "claro", "de acordo", "aprovado"],
-  it: ["sì", "si", "ok", "va bene", "vai", "fallo", "procedi", "certo", "d'accordo", "approvato"],
-  ru: ["да", "ок", "ok", "давай", "делай", "сделай", "валяй", "согласен", "согласна", "конечно", "вперёд", "вперед", "одобряю"],
-  nl: ["ja", "ok", "doe maar", "ga je gang", "prima", "akkoord"],
-  pl: ["tak", "ok", "dobra", "zrób", "rób", "śmiało", "zgoda"],
-  tr: ["evet", "tamam", "olur", "yap", "onaylıyorum"],
-};
 for (const language of LANGUAGES as Language[]) {
   (language as { defer?: readonly string[] }).defer = DEFER[language.code] ?? [];
-  (language as { assent?: readonly string[] }).assent = ASSENT[language.code] ?? [];
 }
 
 // --- Compiled --------------------------------------------------------------------
@@ -631,8 +613,10 @@ function cached(key: string, make: () => RegExp): RegExp {
 }
 
 /** Words, in any language of the table, that ask for an action. */
-export function actionWords(action: string): RegExp {
-  return cached(`action:${action}`, () => compile(all((language) => language.actions, action as ActionKey)));
+export function actionWords(action: string, distinct = false): RegExp {
+  // `distinct`: only words that can't be part of another word: a single CJK character ("建" in "建议") is left out.
+  const keep = (word: string) => !distinct || SPACED.test(word) || [...word.replace(/\*$/, "")].length >= 2;
+  return cached(`action:${action}:${distinct}`, () => compile(all((language) => language.actions, action as ActionKey).filter(keep)));
 }
 
 /** Words, in any language, that name a kind of thing. */
@@ -640,7 +624,7 @@ export function nounWords(noun: string): RegExp {
   return cached(`noun:${noun}`, () => compile(all((language) => language.nouns, noun as NounKey)));
 }
 
-type ListKey = "negate" | "retract" | "defer" | "assent" | "remind" | "carryOn" | "filler" | "baseBefore" | "baseAfter" | "headBefore" | "headAfter";
+type ListKey = "negate" | "retract" | "defer" | "remind" | "carryOn" | "filler" | "baseBefore" | "baseAfter" | "headBefore" | "headAfter";
 
 /** One list of every language, as one regex (`g` for scanning). */
 export function listWords(key: ListKey, global = false): RegExp {

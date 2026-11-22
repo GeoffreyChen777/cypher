@@ -173,25 +173,22 @@ const QUESTION = /[?？¿؟;՞፧⸮⁇⁈⁉꘏]/u;
 const OWN_NAME = /[\p{L}\p{N}_]*(?:[#!]\d+|\d[\p{L}\p{N}._/-]*|[\p{L}\p{N}]+[/_-][\p{L}\p{N}._/-]+)/gu;
 
 /**
- * Whether a reply is bare assent to the proposal it answers, so it may bind
- * to it: it says a plain yes in some language of the table (lexicon.ts
- * `assent`), and nothing more that could change what it agrees to — no
- * question mark of any script, no negation, wait, preference or deferral,
- * no action verb the quoted proposal doesn't have, no name (a number, a
- * `#12`, a `fix-x`) the quote doesn't hold. Anything else is the owner's
- * own words, checked as typed. Whether a bare yes agrees is still the
- * reviewing model's call (`assents`).
+ * Whether a reply may bind to the proposal it answers: nothing in it could
+ * change what it agrees to — no question mark of any script, no negation,
+ * wait, preference or deferral, no action verb the quoted proposal doesn't
+ * have, no name (a number, a `#12`, a `fix-x`) the quote doesn't hold. This
+ * only narrows: whether the reply agrees at all is the reviewing model's
+ * call on the text (`assents`), never a list of yes-words. Anything else is
+ * the owner's own words, checked as typed.
  */
 export function bareAssent(reply: string, quote: string): boolean {
   const text = reply.normalize("NFKC");
   if (QUESTION.test(text)) return false;
   if (listWords("negate").test(text) || listWords("retract").test(text)) return false;
-  const assent = listWords("assent", true);
-  if (!listWords("assent").test(text)) return false;
-  const rest = text.replace(assent, " ");
+  const rest = text;
   const quoted = normalize(quote);
   for (const name of rest.match(OWN_NAME) ?? []) if (!quoted.includes(normalize(name))) return false;
-  for (const action of ACTIONS) if (actionWords(action).test(rest) && !actionWords(action).test(quote)) return false;
+  for (const action of ACTIONS) if (actionWords(action, true).test(rest) && !actionWords(action).test(quote)) return false;
   return true;
 }
 

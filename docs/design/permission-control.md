@@ -975,18 +975,27 @@ a Latin- or Cyrillic-script language without a row (Swedish, Czech, …) can't b
 from one that has one, so its "wait" is not recognised; such a later message still
 makes a request stale unless it names the target.
 
-**A reply binds only as bare assent** (round 3). A reply binds to the agent's proposal
-only when (`bareAssent`) it holds a plain yes from the table's `assent` class, and no
+**A reply binds only when nothing in it narrows it away** (round 3). The code never
+decides that a reply agrees — no yes-word list, per the plan ("affirmative detection is
+generic and language-independent, and the judge decides on the text"). It only rules
+replies *out*: a reply binds to the agent's proposal only when (`bareAssent`) it has no
 question mark of any script (`? ？ ¿ ؟ …`), no negation, wait, preference or deferral
 (the table's `defer` class: rather/instead/later/for now/tomorrow/leave it… per
 language, counted with retractions everywhere), no action verb the quoted proposal
-doesn't have, and no name of its own (a number, `#13`, `fix-x`) the quote doesn't hold.
-Otherwise the reply is the owner's own words, checked as `typed`. The judge must also
-say so: `"consent": {"source": "reply", …, "assents": true}`; without it the verdict's
-source reads `reply-unconfirmed` and a reply consent is refused. Residual: a judge that
-is fully fooled can still bind a bare yes ("ok", "做") to the proposal right before it,
-which is the design (the owner said yes to that message); what that proposal names is
-still checked as a target like any consent's.
+doesn't have (single CJK characters left out of this check, since they sit inside other
+words: 建 in 建议), and no name of its own (a number, `#13`, `fix-x`) the quote doesn't
+hold. Otherwise the reply is the owner's own words, checked as `typed`; a question in
+those words asks for nothing. Then the judge must say it agrees: `"consent": {"source":
+"reply", …, "assents": true}`; without it the verdict's source reads `reply-unconfirmed`
+and a reply consent is refused.
+
+Residual: a fully fooled judge can bind any *unmarked* reply to the proposal right
+before it — including unmarked non-assent such as "thanks, looks good", or an unrelated
+request with no question mark and no verb or name from the table ("show the logs" in a
+language whose verb isn't in the table). What that proposal names is still checked as a
+target like any consent's, and only the proposal right before the reply counts.
+Deferral/negation coverage is the table's 13 languages; a row-less Latin- or
+Cyrillic-script language's "later" isn't caught.
 
 **Attributes are entities, not prose** (round 3). A name counts as a branch only when the
 repository has it and it is no word of the table nor a remote name, when this chat's
