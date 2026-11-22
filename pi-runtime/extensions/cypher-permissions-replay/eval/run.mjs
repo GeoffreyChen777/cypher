@@ -30,6 +30,8 @@ const { values: args } = parseArgs({
     cases: { type: "string" },
     stub: { type: "string", default: "recorded" },
     live: { type: "boolean", default: false },
+    // The stub names its consent as the newer judge prompt asks ({source, quote, assents: true}).
+    "consent-claim": { type: "boolean", default: false },
     "owner-words": { type: "string", default: "full" },
     context: { type: "string" },
     concurrency: { type: "string", default: "6" },
@@ -88,7 +90,7 @@ if (args.live) {
     return used?.startsWith("claude-bridge/") ? used.slice("claude-bridge/".length) : args.model;
   } });
 }
-const stubbed = stubModel(args.stub);
+const stubbed = stubModel(args.stub, { consent: args["consent-claim"] });
 
 /**
  * The context file keeps the last 40 messages before the call, which in a long turn holds no
@@ -187,6 +189,7 @@ const summary = {
   extensions,
   files,
   model: live ? `live (${args.model} unless the chat ran another claude-bridge model)` : `stub:${args.stub}`,
+  consentClaim: args["consent-claim"],
   ownerWords: args["owner-words"],
   ...(args.sample ? { sample: Number(args.sample), seed: args.seed } : {}),
   totals: count(rows, (r) => r.outcome ?? "error"),

@@ -43,7 +43,20 @@ function latestQuote(item) {
  * - "approve": every case approved, with a quote and target claim (an over-eager model: the code's bar alone).
  * An approval without a quote/target gets the latest owner word and the eval's own claim.
  */
-export function stubModel(mode) {
+/**
+ * With `consent`, an approving stub also names its consent the way the newer judge prompt asks
+ * (`consent: {source, quote, assents}`), the strongest fooled model: the source of the owner word
+ * holding the quote (or `reply` when only a reply's proposal holds it), and `assents: true`.
+ */
+function consentFor(item, quote) {
+  if (!quote) return undefined;
+  const words = item.owner?.messages ?? [];
+  const holder = [...words].reverse().find((word) => word.text?.includes(quote)) ?? [...words].reverse().find((word) => word.proposal?.includes(quote));
+  const source = holder ? (holder.text?.includes(quote) && holder.source !== "reply" ? holder.source : "reply") : "typed";
+  return { source, quote, assents: true };
+}
+
+export function stubModel(mode, { consent = false } = {}) {
   return async (_system, _prompt, _signal, item) => {
     let verdict = item.verdict;
     if (mode === "approve" && !item.adversarial) verdict = { decision: "approve", reason: "stub: an over-eager model approves everything" };
@@ -53,6 +66,10 @@ export function stubModel(mode) {
       out.userQuote = verdict.userQuote ?? latestQuote(item);
       const target = verdict.target ?? claimTargets(item.command)[0];
       if (target) out.target = target;
+      if (consent) {
+        const named = consentFor(item, out.userQuote);
+        if (named) out.consent = named;
+      }
     }
     return JSON.stringify(out);
   };
