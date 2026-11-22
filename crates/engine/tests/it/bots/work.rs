@@ -965,6 +965,31 @@ async fn a_plan_is_refused_rather_than_cut() {
         rig.core.workspace.read_bot_records().work.is_empty(),
         "a refused plan writes nothing"
     );
+    // A refusal is flagged, so the extension answers it as an error result
+    // (and the chat draws no plan card for it); an answer is not.
+    let raw = |steps: serde_json::Value| {
+        let client = rig.client();
+        let chat_id = bot.chat_id.clone();
+        async move {
+            client
+                .call(
+                    cypher_rpc::methods::BOT_TOOL,
+                    serde_json::json!({
+                        "chatId": chat_id, "tool": "propose_plan",
+                        "args": { "title": "Long plan", "steps": steps },
+                    }),
+                )
+                .await
+                .expect("BotTool answers")
+        }
+    };
+    let refused = raw(serde_json::json!([{ "title": "t".repeat(161) }])).await;
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert_eq!(
+        refused["text"].as_str(),
+        Some(long_title.as_str()),
+        "the model reads the same words"
+    );
 
     // At the caps it is stored whole, and the brief carries every character.
     rig.core
@@ -974,11 +999,16 @@ async fn a_plan_is_refused_rather_than_cut() {
         .write_user_message("m-long", &"词".repeat(1_600), 1_000)
         .unwrap();
     let detail = format!("{}END", "设".repeat(1_497));
-    let kept = propose(serde_json::json!([
+    let kept = raw(serde_json::json!([
         { "title": "a", "project": "sp-billing", "detail": detail },
     ]))
     .await;
+    assert!(kept.get("isError").is_none(), "{kept}");
+    let kept = kept["text"].as_str().expect("text").to_owned();
     assert!(kept.contains("waiting for your owner's approval"), "{kept}");
+    // Chats tell an accepted call from an older build's unflagged refusal by
+    // these words (bot_plan.rs `PLAN_MADE_PREFIX`, iOS `planMadePrefix`).
+    assert!(kept.starts_with("The plan \"Long plan\" (work "), "{kept}");
     // The owner's own message can't be refused; the model is told it was cut.
     assert!(
         kept.contains(

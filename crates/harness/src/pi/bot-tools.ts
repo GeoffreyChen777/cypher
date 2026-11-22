@@ -29,12 +29,15 @@ function engine(): Promise<EngineClient> {
   return connecting;
 }
 
+/** The engine's answer; `isError` when it refused the call or the call failed. */
+type Answer = { text: string; isError: boolean };
+
 async function botTool(
   tool: string,
   args: unknown,
   timeoutMs = CALL_TIMEOUT_MS,
   toolCallId?: string,
-): Promise<string> {
+): Promise<Answer> {
   const client = await engine();
   try {
     const reply = await client.call(
@@ -42,7 +45,10 @@ async function botTool(
       { chatId: process.env.CYPHER_CHAT_ID, tool, args, toolCallId },
       { timeoutMs },
     );
-    return typeof reply?.text === "string" ? reply.text : JSON.stringify(reply);
+    return {
+      text: typeof reply?.text === "string" ? reply.text : JSON.stringify(reply),
+      isError: reply?.isError === true,
+    };
   } catch (error) {
     // A dropped socket is redialed on the next call.
     if (error instanceof Error && error.message.startsWith("Engine IPC")) connecting = undefined;
@@ -53,6 +59,35 @@ async function botTool(
 function text(value: string) {
   return { content: [{ type: "text" as const, text: value }], details: undefined };
 }
+
+/**
+ * A call the engine refused (its words, as they are) or that failed (the
+ * tool's label and "failed:"): Pi records the result as an error
+ * (`isError`), so the chat draws a failed chip, never a plan card for a plan
+ * that was not made.
+ */
+function failure(value: string) {
+  return { ...text(value), isError: true as const };
+}
+
+/**
+ * The plan caps the engine enforces (cypher_proto `bot_records.rs`; a
+ * harness test checks they agree). In the schema too, so the model fits
+ * them the first time; the engine still refuses what goes over.
+ */
+export const PLAN_LIMITS = {
+  TITLE_MAX: 120,
+  DETAIL_MAX: 400,
+  STEP_TITLE_MAX: 160,
+  STEP_DETAIL_MAX: 1_500,
+  PLAN_DETAILS_MAX: 4_000,
+  PLAN_STEPS_MAX: 10,
+  PLAN_TIME_LIMIT_MIN_MINUTES: 15,
+  PLAN_TIME_LIMIT_MAX_MINUTES: 4_320,
+} as const;
+const L = PLAN_LIMITS;
+/** A cap as the descriptions write it: 1,500. */
+const n = (value: number) => String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 
 // A session's model, thinking level and GPT Fast mode; what is left out
 // follows the default the description names.
@@ -160,23 +195,23 @@ const TOOLS: ToolDef[] = [
     description:
       "Propose a plan for work that takes more than a couple of steps or touches another device. It shows your owner a plan card to approve; once approved, a background session carries it out and reports back here. That session reads only the plan and your owner's last message, not this conversation, so the steps' details must carry whatever else it needs. Text over a limit is refused, never cut. Set time_limit_minutes, a coordinator or a step's session only when your owner asked for it (\"give it 8 hours\", \"use Opus with high thinking for the fix\"); otherwise the workspace's settings apply. After proposing, stop and wait: end your turn.",
     parameters: Type.Object({
-      title: Type.String({ description: "Short title of the task, at most 120 characters" }),
-      summary: Type.Optional(Type.String({ description: "One or two sentences, at most 400 characters: the approach and how the steps depend on each other" })),
+      title: Type.String({ maxLength: L.TITLE_MAX, description: `Short title of the task, at most ${L.TITLE_MAX} characters` }),
+      summary: Type.Optional(Type.String({ maxLength: L.DETAIL_MAX, description: `One or two sentences, at most ${L.DETAIL_MAX} characters: the approach and how the steps depend on each other` })),
       steps: Type.Array(
         Type.Object({
-          title: Type.String({ description: "What this step does, at most 160 characters" }),
+          title: Type.String({ maxLength: L.STEP_TITLE_MAX, description: `What this step does, at most ${L.STEP_TITLE_MAX} characters` }),
           project: Type.Optional(Type.String({ description: "Project id or name it works in" })),
-          detail: Type.Optional(Type.String({ description: "How: directly or in a session, worktree, how it gets another step's change (path, pushed branch, version), and the constraints and decisions from this conversation the step depends on. At most 1,500 characters a step and 4,000 across the plan" })),
+          detail: Type.Optional(Type.String({ maxLength: L.STEP_DETAIL_MAX, description: `How: directly or in a session, worktree, how it gets another step's change (path, pushed branch, version), and the constraints and decisions from this conversation the step depends on. At most ${n(L.STEP_DETAIL_MAX)} characters a step and ${n(L.PLAN_DETAILS_MAX)} across the plan` })),
           session: Type.Optional(
             Type.Object(choiceFields("the workspace's choice for sessions"), {
               description: "The model, thinking level and Fast mode of the sessions this step starts",
             }),
           ),
         }),
-        { minItems: 1, maxItems: 10 },
+        { minItems: 1, maxItems: L.PLAN_STEPS_MAX },
       ),
       time_limit_minutes: Type.Optional(
-        Type.Integer({ minimum: 15, maximum: 4320, description: "How long the plan may run once approved, in minutes, 15 to 4320 (72 hours); then it is stopped with its sessions. Default: the workspace's limit" }),
+        Type.Integer({ minimum: L.PLAN_TIME_LIMIT_MIN_MINUTES, maximum: L.PLAN_TIME_LIMIT_MAX_MINUTES, description: `How long the plan may run once approved, in minutes, ${L.PLAN_TIME_LIMIT_MIN_MINUTES} to ${L.PLAN_TIME_LIMIT_MAX_MINUTES} (${L.PLAN_TIME_LIMIT_MAX_MINUTES / 60} hours); then it is stopped with its sessions. Default: the workspace's limit` }),
       ),
       coordinator: Type.Optional(
         Type.Object(choiceFields("this chat's"), {
@@ -506,7 +541,7 @@ function workDirectly(pi: ExtensionAPI): void {
         { tool: event.toolName, command: field("command"), path: field("path") ?? field("file_path") },
         GATE_TIMEOUT_MS,
       );
-      return verdict === "allow" ? undefined : { block: true, reason: verdict };
+      return verdict.text === "allow" && !verdict.isError ? undefined : { block: true, reason: verdict.text };
     } catch (error) {
       return {
         block: true,
@@ -526,9 +561,10 @@ export default function cypherBotTools(pi: ExtensionAPI): void {
       ...tool,
       execute: async (id: string, params: unknown) => {
         try {
-          return text(await botTool(tool.name, params ?? {}, tool.timeoutMs, id));
+          const answer = await botTool(tool.name, params ?? {}, tool.timeoutMs, id);
+          return answer.isError ? failure(answer.text) : text(answer.text);
         } catch (error) {
-          return text(`${tool.label} failed: ${error instanceof Error ? error.message : String(error)}`);
+          return failure(`${tool.label} failed: ${error instanceof Error ? error.message : String(error)}`);
         }
       },
     } as any);

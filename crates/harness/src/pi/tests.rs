@@ -826,3 +826,44 @@ fn a_tool_result_carries_how_permission_control_treated_it() {
         "only a line that starts with it"
     );
 }
+
+/// The plan caps the bot tools' schema offers the model are the ones the
+/// engine enforces (`bot-tools.ts` `PLAN_LIMITS`; its own test checks the
+/// schema reads them).
+#[test]
+fn bot_tools_plan_limits_match_the_engines() {
+    let source = include_str!("bot-tools.ts");
+    let start = source
+        .find("export const PLAN_LIMITS = {")
+        .expect("bot-tools.ts declares PLAN_LIMITS");
+    let block = &source[start..];
+    let block = &block[..block.find("} as const;").expect("PLAN_LIMITS ends")];
+    let declared: std::collections::BTreeMap<&str, usize> = block
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.trim().trim_end_matches(',').split_once(": ")?;
+            Some((name, value.replace('_', "").parse().expect("a number")))
+        })
+        .collect();
+    use cypher_proto as p;
+    let engine: std::collections::BTreeMap<&str, usize> = [
+        ("TITLE_MAX", p::TITLE_MAX),
+        ("DETAIL_MAX", p::DETAIL_MAX),
+        ("STEP_TITLE_MAX", p::STEP_TITLE_MAX),
+        ("STEP_DETAIL_MAX", p::STEP_DETAIL_MAX),
+        ("PLAN_DETAILS_MAX", p::PLAN_DETAILS_MAX),
+        ("PLAN_STEPS_MAX", p::PLAN_STEPS_MAX),
+        (
+            "PLAN_TIME_LIMIT_MIN_MINUTES",
+            p::PLAN_TIME_LIMIT_MIN_MINUTES as usize,
+        ),
+        (
+            "PLAN_TIME_LIMIT_MAX_MINUTES",
+            p::PLAN_TIME_LIMIT_MAX_MINUTES as usize,
+        ),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(declared, engine);
+}

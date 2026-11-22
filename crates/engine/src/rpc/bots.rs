@@ -20,8 +20,11 @@ pub(super) fn create_bot(rpc: &EngineRpc, params: serde_json::Value) -> Result<R
     RpcReply::value(&bot)
 }
 
-/// A refusal is still an answer the model should read, so tool failures
-/// come back as text; only a malformed call is an RPC error.
+/// `{text}`, or `{text, isError: true}` for a refusal or failure: still an
+/// answer the model should read, so it comes back as text, flagged so the
+/// bot tools extension returns it as an error result (the chat draws a
+/// failed chip, not the plan card a refused `propose_plan` would get). Only
+/// a malformed call is an RPC error.
 pub(super) async fn bot_tool(
     rpc: &EngineRpc,
     params: serde_json::Value,
@@ -39,11 +42,12 @@ pub(super) async fn bot_tool(
             object.insert(crate::bots::TOOL_CALL_ID_ARG.into(), id.into());
         }
     }
-    let text = match rpc.bots()?.tool(&p.chat_id, &p.tool, args).await {
-        Ok(text) => text,
-        Err(err) => err.to_string(),
-    };
-    RpcReply::value(&serde_json::json!({ "text": text }))
+    match rpc.bots()?.tool(&p.chat_id, &p.tool, args).await {
+        Ok(text) => RpcReply::value(&serde_json::json!({ "text": text })),
+        Err(err) => {
+            RpcReply::value(&serde_json::json!({ "text": err.to_string(), "isError": true }))
+        }
+    }
 }
 
 #[derive(Deserialize)]

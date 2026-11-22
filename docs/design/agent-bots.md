@@ -674,10 +674,16 @@ device. As built:
 The extension `crates/harness/src/pi/bot-tools.ts` is embedded in the engine binary like
 `engine-client.mjs` and loaded with `-e` into bot runs only, so bot tools never appear in
 other sessions and need no Runtime release. Each tool is one `BotTool` call (`{chatId,
-tool, args}` → `{text}`) over the agent socket, which answers it only for a workspace's own
+tool, args}` → `{text, isError?}`) over the agent socket, which answers it only for a workspace's own
 chat hosted on that device (a session's agent can't speak for a workspace); the engine resolves the bot and thread
 from the chat id, enforces scope, origin and capabilities, and formats the answer. Answers
-are plain text, bounded to 48 KiB.
+are plain text, bounded to 48 KiB. A refusal is an answer too, flagged `isError: true`: the
+extension returns it, in the engine's words, as an error result, and a call that fails on
+the way (the engine unreachable, a timeout) as "<label> failed: <reason>", so the chat
+draws a failed chip for either. `propose_plan`'s schema carries the engine's caps
+(`maxLength` on the title, summary, step titles and details; `PLAN_LIMITS`, kept equal to
+`cypher_proto`'s by a harness test), so Pi refuses an over-long plan before the engine
+sees it.
 
 ### 10.1 Read tools (every origin; all six ship)
 
