@@ -1,24 +1,33 @@
 #!/usr/bin/env node
-// Before/after tables from run.mjs results, as Markdown (sanitized: case ids, reasons and
-// clipped, already-sanitized commands only).
+// Tables over several evaluated versions ("sides") from run.mjs results, as Markdown
+// (sanitized: case ids, reasons and clipped, already-sanitized commands only).
 //
-//   node eval/report.mjs --results DIR --corpus DIR [--before before] [--after after] [--live live-v2]
+//   node eval/report.mjs --results DIR --corpus DIR [--sides before,after,round2] [--names "before (2de5fdae),round 1,round 2"]
 //
-// Reads <results>/<side>-{stub-recorded,stub-approve,live,live-mutations,stub-regression}.json
-// for each side that exists, and the case files under <corpus> for examples.
+// For each side it reads <results>/<side>-{stub-recorded,stub-approve,live,live-mutations,stub-regression}.json,
+// plus the fresh adversarial batch when it was run separately (<side>-fresh-stub-<stub>.json,
+// <side>-live-fresh.json), and the case files under <corpus> for examples. The first side is the baseline.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
 import { mechanismOf } from "./mechanism.mjs";
 
-const { values: args } = parseArgs({ options: { results: { type: "string" }, corpus: { type: "string" }, before: { type: "string", default: "before" }, after: { type: "string", default: "after" }, live: { type: "string", default: "live" } } });
+const { values: args } = parseArgs({ options: { results: { type: "string" }, corpus: { type: "string" }, sides: { type: "string", default: "before,after" }, names: { type: "string" } } });
+const SIDES = args.sides.split(",");
+const NAMES = Object.fromEntries(SIDES.map((side, index) => [side, args.names?.split(",")[index] ?? side]));
 const RUNS = ["stub-recorded", "stub-approve", "live", "live-mutations", "stub-regression"];
-const SIDES = [args.before, args.after];
-const load = (side, run) => {
-  const file = join(args.results, `${side}-${run === "live" ? args.live : run}.json`);
-  return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : undefined;
-};
+const EXTRA = { "stub-recorded": "fresh-stub-recorded", "stub-approve": "fresh-stub-approve", live: "live-fresh" };
+const read = (file) => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : undefined);
+function load(side, run) {
+  const main = read(join(args.results, `${side}-${run}.json`));
+  const extra = EXTRA[run] ? read(join(args.results, `${side}-${EXTRA[run]}.json`)) : undefined;
+  if (!main && !extra) return undefined;
+  const rows = [...(main?.rows ?? [])];
+  const seen = new Set(rows.map((r) => `${r.file}:${r.id}`));
+  for (const r of extra?.rows ?? []) if (!seen.has(`${r.file}:${r.id}`)) rows.push(r);
+  return { rows };
+}
 const data = Object.fromEntries(SIDES.map((side) => [side, Object.fromEntries(RUNS.map((run) => [run, load(side, run)]))]));
 const cases = new Map();
 for (const name of ["heldout", "adversarial", "adversarial-fresh", "mutations-heldout", "regression-heldout"]) {
@@ -30,6 +39,7 @@ const caseOf = (row) => cases.get(`${row.file}:${row.id}`);
 const mech = (row) => mechanismOf({ outcome: row.outcome, explicit: row.explicit, kind: row.kind, onceOnly: row.onceOnly, judged: row.judged, judgeVerdict: row.judgeVerdict, decidedBy: row.decidedBy ?? row.mechanism?.split(":")[1] });
 const asks = (row) => row.outcome === "ask";
 const approves = (row) => row.outcome && row.outcome !== "ask" && row.outcome !== "denied";
+const forcedApproves = (row) => row.adversarialStub && row.adversarialStub.outcome !== "ask" && row.adversarialStub.outcome !== "denied";
 const plainRows = (result) => (result?.rows ?? []).filter((r) => r.base === undefined && !r.adversarial && !r.error);
 const pct = (hits, n) => (n ? `${hits}/${n} = ${((100 * hits) / n).toFixed(1)}%` : "–");
 const clip = (text, n = 90) => {
@@ -44,137 +54,154 @@ const table = (head, rows) => {
   for (const row of rows) line(`| ${row.join(" | ")} |`);
   line();
 };
+const isFresh = (r) => r.file === "adversarial-fresh.json";
 
-function headline(result) {
+function mutantsOf(result) {
+  const byId = new Map((result?.rows ?? []).filter((r) => !r.error).map((r) => [`${r.file}:${r.id}`, r.outcome]));
+  return (result?.rows ?? []).filter((r) => r.base !== undefined && !r.error).map((r) => ({ ...r, baseOutcome: byId.get(`${r.file}:${r.base}`) })).filter((r) => r.baseOutcome !== undefined);
+}
+const stable = (r) => (r.baseOutcome === "ask") === (r.outcome === "ask");
+
+function headline(side, run) {
+  const result = data[side][run];
   if (!result) return {};
   const rows = plainRows(result);
   const approved = rows.filter((r) => r.label?.owner === "allowed");
   const allow = approved.filter((r) => r.label?.should === "allow");
   const denied = rows.filter((r) => r.label?.owner === "denied");
   const adversarial = result.rows.filter((r) => r.adversarial && !r.error);
-  const forced = adversarial.filter((r) => r.adversarialStub);
-  const byId = new Map(result.rows.filter((r) => !r.error).map((r) => [`${r.file}:${r.id}`, r.outcome]));
-  const mutants = result.rows.filter((r) => r.base !== undefined && !r.error).map((r) => ({ ...r, baseOutcome: byId.get(`${r.file}:${r.base}`) })).filter((r) => r.baseOutcome !== undefined);
-  const stable = (r) => (r.baseOutcome === "ask") === (r.outcome === "ask");
+  const original = adversarial.filter((r) => !isFresh(r));
+  const fresh = adversarial.filter(isFresh);
+  const mutants = mutantsOf(result);
   const passingBase = mutants.filter((r) => r.baseOutcome !== "ask");
+  const errors = result.rows.filter((r) => r.error).length;
   return {
-    prompt: pct(approved.filter(asks).length, approved.length),
-    promptAllow: pct(allow.filter(asks).length, allow.length),
-    denied: pct(denied.filter(approves).length, denied.length),
-    adversarial: adversarial.length ? pct(adversarial.filter(approves).length, adversarial.length) : "–",
-    forced: forced.length ? pct(forced.filter((r) => r.adversarialStub.outcome !== "ask" && r.adversarialStub.outcome !== "denied").length, forced.length) : "–",
-    stability: mutants.length ? pct(mutants.filter(stable).length, mutants.length) : "–",
-    stabilityPassing: passingBase.length ? pct(passingBase.filter(stable).length, passingBase.length) : "–",
-    errors: result.rows.filter((r) => r.error).length,
-    mutants,
+    prompt: approved.length ? pct(approved.filter(asks).length, approved.length) : undefined,
+    promptAllow: allow.length ? pct(allow.filter(asks).length, allow.length) : undefined,
+    denied: denied.length ? pct(denied.filter(approves).length, denied.length) : undefined,
+    adversarial: original.length ? pct(original.filter(approves).length, original.length) : undefined,
+    adversarialForced: original.some((r) => r.adversarialStub) ? pct(original.filter(forcedApproves).length, original.filter((r) => r.adversarialStub).length) : undefined,
+    fresh: fresh.length ? pct(fresh.filter(approves).length, fresh.length) : undefined,
+    freshForced: fresh.some((r) => r.adversarialStub) ? pct(fresh.filter(forcedApproves).length, fresh.filter((r) => r.adversarialStub).length) : undefined,
+    stability: mutants.length ? pct(mutants.filter(stable).length, mutants.length) : undefined,
+    stabilityPassing: passingBase.length ? pct(passingBase.filter(stable).length, passingBase.length) : undefined,
+    errors: String(errors),
   };
 }
+const h = Object.fromEntries(SIDES.map((side) => [side, Object.fromEntries(RUNS.map((run) => [run, headline(side, run)]))]));
+const liveOf = (side) => ({ ...h[side].live, stability: h[side]["live-mutations"].stability, stabilityPassing: h[side]["live-mutations"].stabilityPassing, errors: `${h[side].live.errors ?? "–"} + ${h[side]["live-mutations"].errors ?? "–"}` });
 
-const B = args.before;
-const A = args.after;
-const h = Object.fromEntries(SIDES.map((side) => [side, Object.fromEntries(RUNS.map((run) => [run, headline(data[side][run])]))]));
-const live = (side) => ({ ...h[side].live, stability: h[side]["live-mutations"].stability, stabilityPassing: h[side]["live-mutations"].stabilityPassing });
-
-line("## Headline (held-out)");
-line();
-table(
-  ["metric", `${B} stub recorded`, `${A} stub recorded`, `${B} stub approve-all`, `${A} stub approve-all`, `${B} live`, `${A} live`],
-  [
-    ["prompt rate, owner-approved", "prompt"],
-    ["prompt rate, should=allow", "promptAllow"],
-    ["false approvals, owner-denied", "denied"],
-    ["false approvals, adversarial", "adversarial"],
-    ["false approvals, adversarial (forced adversarial verdict)", "forced"],
-    ["mutation stability, all", "stability"],
-    ["mutation stability, bases that didn't ask", "stabilityPassing"],
-    ["errors", "errors"],
-  ].map(([name, key]) => [name, h[B]["stub-recorded"][key] ?? "–", h[A]["stub-recorded"][key] ?? "–", h[B]["stub-approve"][key] ?? "–", h[A]["stub-approve"][key] ?? "–", live(B)[key] ?? "–", live(A)[key] ?? "–"]),
-);
+const METRICS = [
+  ["prompt rate, owner-approved held-out", "prompt"],
+  ["prompt rate, should=allow", "promptAllow"],
+  ["false approvals, owner-denied", "denied"],
+  ["false approvals, original adversarial (59)", "adversarial"],
+  ["…with the adversarial verdict forced (live runs)", "adversarialForced"],
+  ["false approvals, fresh adversarial (124, unseen)", "fresh"],
+  ["…with the adversarial verdict forced (live runs)", "freshForced"],
+  ["mutation stability, all mutants", "stability"],
+  ["mutation stability, bases that didn't ask", "stabilityPassing"],
+  ["errors", "errors"],
+];
+for (const [title, run, get] of [["stub: recorded verdict", "stub-recorded", (s) => h[s]["stub-recorded"]], ["stub: approve-all (the code's bar alone)", "stub-approve", (s) => h[s]["stub-approve"]], ["live judge (mutations: fixed sample of 40 bases, seed 20261122)", "live", liveOf]]) {
+  line(`## Headline, ${title}`);
+  line();
+  table(["metric", ...SIDES.map((s) => NAMES[s])], METRICS.filter(([, key]) => !(run !== "live" && key.endsWith("Forced"))).map(([name, key]) => [name, ...SIDES.map((s) => get(s)[key] ?? "–")]));
+}
 
 line("## Why owner-approved held-out cases still ask, by mechanism");
 line();
 const MECHS = ["A consent", "B target", "C provenance", "D lifecycle", "E shell/unknown", "judge said ask", "floor", "other"];
-const mechCount = (side, run) => {
-  const rows = plainRows(data[side][run]).filter((r) => r.label?.owner === "allowed" && asks(r));
+const cols = SIDES.flatMap((side) => ["stub-recorded", "stub-approve", "live"].map((run) => [side, run]));
+const mc = cols.map(([side, run]) => {
   const counts = {};
-  for (const r of rows) counts[mech(r)] = (counts[mech(r)] ?? 0) + 1;
+  for (const r of plainRows(data[side][run]).filter((r) => r.label?.owner === "allowed" && asks(r))) counts[mech(r)] = (counts[mech(r)] ?? 0) + 1;
   return counts;
-};
-const mc = Object.fromEntries(SIDES.flatMap((side) => ["stub-recorded", "stub-approve", "live"].map((run) => [`${side}/${run}`, mechCount(side, run)])));
-table(
-  ["mechanism", ...SIDES.flatMap((side) => ["stub-recorded", "stub-approve", "live"].map((run) => `${side} ${run}`))],
-  MECHS.map((m) => [m, ...SIDES.flatMap((side) => ["stub-recorded", "stub-approve", "live"].map((run) => String(mc[`${side}/${run}`][m] ?? 0)))]),
-);
-line("Mechanisms come from the decision's reasons (`eval/mechanism.mjs`, the same keyword map for both sides). \"judge said ask\": the code would have let the model decide and the model asked; \"E shell/unknown\": the line could not be read and no verdict decided it.");
+});
+table(["mechanism", ...cols.map(([side, run]) => `${NAMES[side]} ${run}`)], MECHS.map((m) => [m, ...mc.map((c) => String(c[m] ?? 0))]));
+line("Mechanisms come from the decision's reasons (`eval/mechanism.mjs`, one keyword map for every side). \"judge said ask\": the code let the model decide and the model asked. Lines the rules can't read go to the judge, so E shows up as \"judge said ask\" unless the explicit check names the unreadable part.");
 line();
 
-line("## Adversarial cases, by class (approved / total)");
+line("## Adversarial cases by class (approved / total)");
 line();
-const advClass = (result, forced) => {
+const advCols = SIDES.flatMap((side) => [[side, "stub-recorded", false], [side, "stub-approve", false], [side, "live", false], [side, "live", true]]);
+const advCount = ([side, run, forced]) => {
   const counts = {};
-  for (const r of (result?.rows ?? []).filter((x) => x.adversarial && !x.error)) {
+  for (const r of (data[side][run]?.rows ?? []).filter((x) => x.adversarial && !x.error)) {
     const c = (counts[r.adversarial.class] ??= [0, 0]);
+    if (forced && !r.adversarialStub) continue;
     c[1]++;
-    const outcome = forced ? r.adversarialStub?.outcome : r.outcome;
-    if (outcome && outcome !== "ask" && outcome !== "denied") c[0]++;
+    if (forced ? forcedApproves(r) : approves(r)) c[0]++;
   }
   return counts;
 };
-const classes = [...new Set((data[A]["stub-recorded"]?.rows ?? data[B]["stub-recorded"]?.rows ?? []).filter((r) => r.adversarial).map((r) => r.adversarial.class))];
-const advCols = [[B, "stub-recorded"], [A, "stub-recorded"], [B, "stub-approve"], [A, "stub-approve"], [B, "live"], [A, "live"]];
-const advData = advCols.map(([side, run]) => advClass(data[side][run]));
-table(["class", ...advCols.map(([side, run]) => `${side} ${run}`)], classes.map((c) => [c, ...advData.map((d) => (d[c] ? `${d[c][0]}/${d[c][1]}` : "–"))]));
+const advData = advCols.map(advCount);
+const classes = [...new Set(advData.flatMap((d) => Object.keys(d)))];
+table(["class", ...advCols.map(([side, run, forced]) => `${NAMES[side]} ${run}${forced ? " (forced)" : ""}`)], classes.map((c) => [c, ...advData.map((d) => (d[c] && d[c][1] ? `${d[c][0]}/${d[c][1]}` : "–"))]));
 
-line(`### Every adversarial case that passes (${A})`);
-line();
-// Decision paths of adversarial rows from a separate adversarial-only run (`<side>-adv-<stub>.json`), when the main run predates them.
-const detail = new Map();
-for (const stub of ["recorded", "approve"]) {
-  const extra = load(A, `adv-${stub}`);
-  for (const r of extra?.rows ?? []) detail.set(`stub-${stub}:${r.id}`, r);
-  if (stub === "approve") for (const r of extra?.rows ?? []) detail.set(`live:${r.id}`, r);
+// Decision paths from an adversarial-only rerun (<side>-adv-<stub>.json), for rows written before run.mjs kept them.
+const details = new Map();
+for (const side of SIDES) for (const stub of ["approve", "recorded"]) for (const r of read(join(args.results, `${side}-adv-${stub}.json`))?.rows ?? []) details.set(`${side}:${r.file}:${r.id}`, r);
+function decisionPath(r, side) {
+  if (!r.explicitCheck && details.has(`${side}:${r.file}:${r.id}`)) r = { ...r, ...details.get(`${side}:${r.file}:${r.id}`) };
+  const check = r.explicitCheck ? `explicit check ok: quote "${clip(r.explicitCheck.quote, 50)}" (${r.explicitCheck.quoteSource}), targets ${clip((r.explicitCheck.targets ?? []).join("; "), 80)}, passed ${(r.explicitCheck.passed ?? []).join("+")}` : "no explicit check";
+  return `tier ${r.tier ?? "?"}${r.kind ? ` (${clip(r.kind, 60)})` : ""}; judge ${r.judgeVerdict ?? "?"}; ${check}`;
 }
-const passes = [];
-for (const run of ["stub-recorded", "stub-approve", "live"]) {
-  for (const r of (data[A][run]?.rows ?? []).filter((x) => x.adversarial && !x.error)) {
-    if (approves(r)) passes.push({ run, r, outcome: r.outcome });
-    if (r.adversarialStub && r.adversarialStub.outcome !== "ask" && r.adversarialStub.outcome !== "denied") passes.push({ run: `${run} (forced verdict)`, r, outcome: r.adversarialStub.outcome });
+
+for (const side of SIDES.slice(1)) {
+  line(`### Every false approval, ${NAMES[side]}`);
+  line();
+  const list = [];
+  for (const run of ["stub-recorded", "stub-approve", "live"]) {
+    for (const r of data[side][run]?.rows ?? []) {
+      if (r.error) continue;
+      const must = r.adversarial || r.label?.owner === "denied";
+      if (!must || r.base !== undefined) continue;
+      if (approves(r)) list.push({ run, r, outcome: r.outcome, path: decisionPath(r, side) });
+      if (forcedApproves(r)) list.push({ run: `${run} (forced verdict)`, r, outcome: r.adversarialStub.outcome, path: r.adversarialStub.explicit ? `explicit: ${clip(r.adversarialStub.explicit, 80)}` : decisionPath(r, side) });
+    }
   }
-}
-if (!passes.length) line("None.");
-else {
+  if (!list.length) {
+    line("None.");
+    line();
+    continue;
+  }
+  // One row per case, with the runs it passed in.
+  const byCase = new Map();
+  for (const item of list) {
+    const key = `${item.r.file}:${item.r.id}`;
+    const got = byCase.get(key) ?? { ...item, runs: [] };
+    got.runs.push(`${item.run}: ${item.outcome}`);
+    if (!/explicit check ok/.test(got.path) && /explicit check ok/.test(item.path)) got.path = item.path;
+    byCase.set(key, got);
+  }
   table(
-    ["run", "id", "class / variant", "command", "outcome", "decision path"],
-    passes.map(({ run, r: row, outcome }) => {
-      const r = row.explicitCheck ? row : { ...row, ...(detail.get(`${run.split(" ")[0]}:${row.id}`) ?? {}) };
-      const item = caseOf(r);
-      const check = r.explicitCheck ? `explicit check ok: quote "${clip(r.explicitCheck.quote, 50)}" (${r.explicitCheck.quoteSource}), targets ${clip((r.explicitCheck.targets ?? []).join("; "), 80)}, passed ${(r.explicitCheck.passed ?? []).join("+")}` : "no explicit check";
-      return [run, r.id, `${r.adversarial.class} / ${clip(r.adversarial.variant, 50)}`, `\`${clip(item?.command, 70)}\``, outcome, `tier ${r.tier ?? "?"} (${clip(r.kind, 60)}); judge ${r.judgeVerdict ?? "?"}; ${check}`];
-    }),
+    ["id", "set / class", "command", "passed in", "decision path"],
+    [...byCase.values()].map(({ r, runs, path }) => [r.id, r.adversarial ? `${isFresh(r) ? "fresh" : "original"} ${r.adversarial.class} / ${clip(r.adversarial.variant, 45)}` : "owner-denied held-out", `\`${clip(caseOf(r)?.command ?? (caseOf(r)?.paths ?? []).join(" "), 70)}\``, runs.join("<br>"), path]),
   );
 }
 
 line("## Mutation stability by family (bases that didn't ask: stable / n)");
 line();
-const fam = (result) => {
+const famCols = SIDES.flatMap((side) => [[side, "stub-recorded"], [side, "stub-approve"], [side, "live-mutations"]]);
+const famData = famCols.map(([side, run]) => {
   const counts = {};
-  for (const r of headline(result).mutants ?? []) {
+  for (const r of mutantsOf(data[side][run])) {
     if (r.baseOutcome === "ask") continue;
     const c = (counts[r.mutation?.family ?? "?"] ??= [0, 0]);
     c[1]++;
-    if ((r.baseOutcome === "ask") === (r.outcome === "ask")) c[0]++;
+    if (stable(r)) c[0]++;
   }
   return counts;
-};
-const famCols = [[B, "stub-recorded"], [A, "stub-recorded"], [B, "stub-approve"], [A, "stub-approve"], [B, "live-mutations"], [A, "live-mutations"]];
-const famData = famCols.map(([side, run]) => fam(data[side][run]));
+});
 const families = [...new Set(famData.flatMap((d) => Object.keys(d)))].sort();
-table(["family", ...famCols.map(([side, run]) => `${side} ${run}`)], families.map((f) => [f, ...famData.map((d) => (d[f] ? `${d[f][0]}/${d[f][1]}` : "–"))]));
+table(["family", ...famCols.map(([side, run]) => `${NAMES[side]} ${run}`)], families.map((f) => [f, ...famData.map((d) => (d[f] ? `${d[f][0]}/${d[f][1]}` : "–"))]));
 
+const last = SIDES.at(-1);
 for (const run of ["stub-recorded", "stub-approve"]) {
-  const broken = (headline(data[A][run]).mutants ?? []).filter((r) => r.baseOutcome !== "ask" && r.outcome === "ask");
+  const broken = mutantsOf(data[last][run]).filter((r) => r.baseOutcome !== "ask" && r.outcome === "ask");
   if (!broken.length) continue;
-  line(`Mutants that ask where their base passes (${A} ${run}), by family and reason:`);
+  line(`Mutants that ask where their base passes (${NAMES[last]} ${run}), by family and reason:`);
   line();
   const groups = {};
   for (const r of broken) {
@@ -184,16 +211,16 @@ for (const run of ["stub-recorded", "stub-approve"]) {
   table(["family — reason", "n", "example"], Object.entries(groups).sort((a, b) => b[1].length - a[1].length).slice(0, 25).map(([key, rows]) => [key, rows.length, `\`${clip(caseOf(rows[0])?.command, 80)}\``]));
 }
 
-line("## Regression sample (auto-decided records), ask vs not ask");
+line("## Regression sample (auto-decided records), ask vs not ask, against the baseline");
 line();
 const reg = (side) => data[side]["stub-regression"]?.rows ?? [];
-if (reg(B).length && reg(A).length) {
-  const old = new Map(reg(B).map((r) => [r.id, r]));
-  const changed = reg(A).filter((r) => old.has(r.id) && asks(old.get(r.id)) !== asks(r));
-  line(`${B}: ${reg(B).filter(asks).length}/${reg(B).length} ask; ${A}: ${reg(A).filter(asks).length}/${reg(A).length} ask. Newly ask: ${changed.filter(asks).length}; newly pass: ${changed.filter((r) => !asks(r)).length}.`);
+for (const side of SIDES.slice(1)) {
+  if (!reg(SIDES[0]).length || !reg(side).length) continue;
+  const old = new Map(reg(SIDES[0]).map((r) => [r.id, r]));
+  const changed = reg(side).filter((r) => old.has(r.id) && asks(old.get(r.id)) !== asks(r));
+  line(`${NAMES[side]}: ${reg(side).filter(asks).length}/${reg(side).length} ask (baseline ${reg(SIDES[0]).filter(asks).length}). Newly ask: ${changed.filter(asks).length}; newly pass: ${changed.filter((r) => !asks(r)).length}.`);
   line();
-  if (changed.length)
-    table(["id", "change", "recorded", `${A} reason`, "command"], changed.map((r) => [r.id, `${old.get(r.id).outcome} → ${r.outcome}`, `${r.recorded?.decidedBy}/${r.recorded?.decision}`, `${mech(r)}: ${clip(r.explicit || r.kind || r.reviewer, 70)}`, `\`${clip(caseOf(r)?.command ?? (caseOf(r)?.paths ?? []).join(" "), 70)}\``]));
+  if (changed.length) table(["id", "change", "recorded", "reason", "command"], changed.map((r) => [r.id, `${old.get(r.id).outcome} → ${r.outcome}`, `${r.recorded?.decidedBy}/${r.recorded?.decision}`, `${mech(r)}: ${clip(r.explicit || r.kind || r.reviewer, 70)}`, `\`${clip(caseOf(r)?.command ?? (caseOf(r)?.paths ?? []).join(" "), 70)}\``]));
 }
 
 function normalize(text) {
@@ -206,9 +233,9 @@ function normalize(text) {
 }
 
 for (const run of ["live", "stub-recorded"]) {
-  const rows = plainRows(data[A][run]).filter((r) => r.label?.owner === "allowed" && asks(r));
+  const rows = plainRows(data[last][run]).filter((r) => r.label?.owner === "allowed" && asks(r));
   if (!rows.length) continue;
-  line(`## Remaining asks on owner-approved held-out (${A} ${run}): ${rows.length}, by reason`);
+  line(`## Remaining asks on owner-approved held-out (${NAMES[last]} ${run}): ${rows.length}, by reason`);
   line();
   const groups = {};
   for (const r of rows) {
@@ -216,12 +243,6 @@ for (const run of ["live", "stub-recorded"]) {
     const key = `${mech(r)} — ${clip(normalize(reason), 100)}`;
     (groups[key] ??= []).push(r);
   }
-  table(
-    ["mechanism — reason", "n", "examples"],
-    Object.entries(groups)
-      .sort((a, b) => b[1].length - a[1].length)
-      .slice(0, 40)
-      .map(([key, list]) => [key, list.length, list.slice(0, 2).map((r) => `#${r.id} \`${clip(caseOf(r)?.command ?? (caseOf(r)?.paths ?? []).join(" "), 70)}\``).join("<br>")]),
-  );
+  table(["mechanism — reason", "n", "examples"], Object.entries(groups).sort((a, b) => b[1].length - a[1].length).slice(0, 40).map(([key, list]) => [key, list.length, list.slice(0, 2).map((r) => `#${r.id} \`${clip(caseOf(r)?.command ?? (caseOf(r)?.paths ?? []).join(" "), 70)}\``).join("<br>")]));
 }
 console.log(out.join("\n"));
