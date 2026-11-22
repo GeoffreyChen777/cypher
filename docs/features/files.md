@@ -78,7 +78,8 @@ Narrow panes show one at a time.
   scrolls, selects and copies; it also has Copy (the resolved path and lines)
   and Open.
 - **Clicking** a chip opens the file in the Files tab with the cited lines
-  selected.
+  selected. A drag inside a chip (or a link) selects its text instead and
+  opens nothing.
 - The Pi runtime asks every model for this form by default (paths relative to
   the working directory, the whole path every time, lines as a `:42-58`
   suffix; see [File references](../../pi-runtime/README.md#file-references)),

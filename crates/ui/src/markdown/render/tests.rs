@@ -451,17 +451,32 @@ fn file_references_flatten_to_chips_that_copy_as_written() {
     // Identifiers stay inline code; chips are not code washes.
     assert_eq!(flat.code_ranges.len(), 1);
     assert_eq!(&flat.text[flat.code_ranges[0].clone()], "identity()");
-    // Each chip copies as the reference the agent wrote.
+    // Each chip copies as the reference the agent wrote; the thin margins
+    // beside code copy as nothing.
     let sources = flat.copy_sources.as_deref().unwrap();
-    assert_eq!(sources.len(), 2);
-    assert_eq!(sources[0].0, flat.refs[0].range);
-    assert_eq!(sources[0].1, "utils/checkpointing/processors/file.py:69-73");
-    assert_eq!(sources[1].1, "file.py:128-131");
-    // Without chips the same runs stay plain inline code.
+    let chips: Vec<_> = sources.iter().filter(|(_, s)| !s.is_empty()).collect();
+    assert_eq!(chips.len(), 2);
+    assert_eq!(chips[0].0, flat.refs[0].range);
+    assert_eq!(chips[0].1, "utils/checkpointing/processors/file.py:69-73");
+    assert_eq!(chips[1].1, "file.py:128-131");
+    let copied = |flat: &FlatText| {
+        let subs = flat.copy_sources.as_deref().unwrap_or_default();
+        crate::markdown::selection::substitute(&flat.text, &(0..flat.text.len()), subs)
+    };
+    assert_eq!(
+        copied(&flat),
+        "saved (utils/checkpointing/processors/file.py:69-73), matched by identity() in file.py:128-131"
+    );
+    // Without chips the same runs stay plain inline code, and copy as the
+    // runs' own text.
     let plain = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, 14.0, None, false);
     assert!(plain.refs.is_empty());
     assert_eq!(plain.code_ranges.len(), 3);
-    assert!(plain.copy_sources.is_none());
+    assert!(plain.text.contains(INLINE_CODE_MARGIN));
+    assert_eq!(
+        copied(&plain),
+        runs.iter().map(|run| run.text.as_str()).collect::<String>()
+    );
 }
 
 #[test]

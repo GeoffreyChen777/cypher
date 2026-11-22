@@ -49,7 +49,8 @@ Inline code and the names in [file-reference chips](files.md#from-the-chat)
 are set in the code font at **0.86×** the size of the text around them
 (12.04 px in 14 px body text, larger in headings), as part of the text
 itself: they wrap, select (also by double-click), find, fade in while a reply
-streams, and copy like the prose. The **Code font size** setting applies to
+streams, and copy like the prose (the thin space that keeps a code box off
+its neighbours copies as nothing). The **Code font size** setting applies to
 fenced code blocks only. A line of text has the same height and baseline with
 or without code in it; a line that is only code (a list item or table cell
 of one path) sits on the same baseline as prose.

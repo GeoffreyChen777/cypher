@@ -1177,8 +1177,11 @@ fn flatten_runs_math(
         let run = run.as_ref();
         // CSS-like separation without making the wash itself larger: a thin
         // space sits outside the code range at each prose/code boundary.
+        // Like a CSS margin it is layout only: it copies as nothing.
         if previous_was_code.is_some_and(|was_code| was_code != run.style.code) {
+            let at = text.len();
             text.push_str(INLINE_CODE_MARGIN);
+            copy.push((at..text.len(), String::new()));
             let mut margin_font = font(theme.font_sans.clone());
             margin_font.weight = base_weight;
             out.push(TextRun {
@@ -1444,6 +1447,7 @@ fn flat_text_element(
         }
         let id: SharedString = format!("{}-t{ix}", opts.row_key).into();
         let handler = opts.link.clone();
+        let scope = opts.scope;
         let chip_click = chip_ui.clone().map(|ui| {
             let (chips, key, row_key, layout) = (
                 flat.refs.clone(),
@@ -1460,6 +1464,11 @@ fn flat_text_element(
         });
         InteractiveText::new(id, styled)
             .on_click(ranges, move |clicked_ix, window, cx| {
+                // A press that dragged out a selection inside one link or
+                // chip selected its text; it is not a click.
+                if super::selection::has_selected_text(scope) {
+                    return;
+                }
                 if clicked_ix >= link_count {
                     if let Some(click) = &chip_click {
                         click(clicked_ix - link_count, window, cx);
