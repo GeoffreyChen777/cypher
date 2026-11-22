@@ -185,9 +185,18 @@ final class FileReferenceTests: XCTestCase {
                 XCTAssertEqual(a, CGFloat(alpha), accuracy: 0.0001)
             }
         }
-        XCTAssertEqual(FileReferenceChip.radius, 6)
-        XCTAssertEqual(FileReferenceChip.padLeft, 5)
-        XCTAssertEqual(FileReferenceChip.padRight, 6)
+        // The desktop's geometry (render.rs): inline code's box and radius,
+        // 4 pt to the glyph, 5 pt past the label, 3 pt at a line break, the
+        // glyph 0.9 of the name's size, the glue 1.45 of it.
+        XCTAssertEqual(FileReferenceChip.heightEm, InlineCodeBox.heightEm)
+        XCTAssertEqual(FileReferenceChip.radius, InlineCodeBox.radius)
+        XCTAssertEqual(FileReferenceChip.radius, 5)
+        XCTAssertEqual(FileReferenceChip.padLeft, 4)
+        XCTAssertEqual(FileReferenceChip.padRight, 5)
+        XCTAssertEqual(FileReferenceChip.padWrap, 3)
+        XCTAssertEqual(FileReferenceChip.glyphEm, 0.9)
+        XCTAssertEqual(FileReferenceChip.glyphSide(MD.textSize), 11)
+        XCTAssertEqual(FileReferenceChip.glueWidth(MD.textSize), MD.textSize * 0.86 * 1.45, accuracy: 0.0001)
     }
 
     @MainActor
@@ -264,7 +273,7 @@ final class FileReferenceTests: XCTestCase {
         let boxes = FileReferenceChip.boxes(layout, storage: storage, container: container, chip: chip)
         XCTAssertEqual(boxes.count, 1)
         let box = try XCTUnwrap(boxes.first)
-        XCTAssertEqual(box.height, 17)
+        XCTAssertEqual(box.height, 15, "inline code's box: 1.25 em of the 12.04 pt name")
         let line = layout.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil)
         XCTAssertEqual(line.height, MD.lineHeight, "a chip never changes the line height")
         XCTAssertGreaterThanOrEqual(box.minY, line.minY)
@@ -277,7 +286,8 @@ final class FileReferenceTests: XCTestCase {
         // after the label.
         let advance = NSAttributedString(string: "x", attributes: [.font: font]).size().width
         let label = CGFloat("Example.swift:20".count) * advance
-        let glue = FileReferenceChip.padLeft + FileReferenceChip.glyphSide(MD.textSize) + FileReferenceChip.glyphGap
+        let glue = FileReferenceChip.glueWidth(MD.textSize)
+        XCTAssertGreaterThan(glue, FileReferenceChip.padLeft + FileReferenceChip.glyphSide(MD.textSize) + 2)
         XCTAssertEqual(box.width, glue + label + FileReferenceChip.padRight, accuracy: 0.01)
         let name = (text.string as NSString).range(of: "Example")
         let nameX = layout.location(forGlyphAt: layout.glyphIndexForCharacter(at: name.location)).x
@@ -325,7 +335,7 @@ final class FileReferenceTests: XCTestCase {
         for box in boxes {
             XCTAssertGreaterThanOrEqual(box.minX, 0)
             XCTAssertLessThanOrEqual(box.maxX, width)
-            XCTAssertEqual(box.height, 17)
+            XCTAssertEqual(box.height, 15)
         }
         XCTAssertEqual(Set(boxes.map(\.minY)).count, boxes.count, "one box per line")
     }

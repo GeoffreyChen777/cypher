@@ -139,6 +139,78 @@ final class InlineCodeTests: XCTestCase {
         XCTAssertEqual(after, box.maxX, accuracy: 0.01, "the box ends where the prose resumes")
     }
 
+    /// The desktop's rules (render.rs `INLINE_CODE_PAD_X`, `code_box_band`):
+    /// 4 pt past the glyphs, and the box centered on the code text — its
+    /// ascent and descent, which for Geist Mono is its cap height's middle
+    /// to within half a point.
+    func testTheBoxMatchesTheDesktopsPaddingAndCenter() throws {
+        XCTAssertEqual(InlineCodeBox.padX, 4)
+        let font = Theme.monoUI(MD.textSize * Theme.codeScale)
+        let desktop = (font.ascender + font.descender) / 2
+        XCTAssertEqual(font.capHeight / 2, desktop, accuracy: 0.5)
+    }
+
+    /// Inline code and a file reference share one box: the same height and
+    /// radius, centered at the same height on one line.
+    func testInlineCodeAndChipsShareOneBox() throws {
+        let text = TranscriptTextStyle.inline([
+            InlineRun(text: "Run ", style: .plain),
+            InlineRun(text: "cargo test", style: code),
+            InlineRun(text: " and read ", style: .plain),
+            InlineRun(text: "src/render.rs:12", style: code),
+            InlineRun(text: ".", style: .plain),
+        ])
+        let (storage, layout, container) = layOut(text, width: 1_000)
+        let codeRange = (text.string as NSString).range(of: "cargo test")
+        let codeBox = try XCTUnwrap(
+            InlineCodeBox.boxes(layout, storage: storage, container: container, code: codeRange).first)
+        var chip = NSRange()
+        let at = (text.string as NSString).range(of: "render").location
+        _ = storage.attribute(
+            .cypherFileChip, at: at, longestEffectiveRange: &chip, in: NSRange(location: 0, length: storage.length))
+        let chipBox = try XCTUnwrap(
+            FileReferenceChip.boxes(layout, storage: storage, container: container, chip: chip).first)
+        XCTAssertEqual(codeBox.height, 15)
+        XCTAssertEqual(chipBox.height, codeBox.height)
+        XCTAssertEqual(chipBox.minY, codeBox.minY, accuracy: 0.01)
+        XCTAssertEqual(FileReferenceChip.radius, InlineCodeBox.radius)
+    }
+
+    /// Mention chips in a sent prompt keep their violet look; only inline
+    /// code went neutral (the desktop keeps its mention chips' colors too).
+    func testMentionChipsInAPromptKeepTheirViolet() throws {
+        let raw = "Look at " + Mentions.fileLink(path: "src/render.rs", isDir: false) + " please"
+        let runs = Mentions.inlineRuns(raw)
+        let mention = try XCTUnwrap(runs.first { $0.style.mention })
+        XCTAssertTrue(mention.style.code)
+        let text = TranscriptTextStyle.inline(runs)
+        let at = (text.string as NSString).range(of: "render.rs").location
+        XCTAssertNotEqual(at, NSNotFound)
+        XCTAssertEqual(
+            text.attribute(.foregroundColor, at: at, effectiveRange: nil) as? UIColor, UIColor(Theme.mentionText))
+        XCTAssertEqual(
+            text.attribute(.cypherMentionWash, at: at, effectiveRange: nil) as? UIColor, UIColor(Theme.mentionWash))
+        // Not inline code, not a file chip, no kerned room; the old size.
+        XCTAssertNil(text.attribute(.cypherInlineCode, at: at, effectiveRange: nil))
+        XCTAssertNil(text.attribute(.cypherFileChip, at: at, effectiveRange: nil))
+        XCTAssertNil(text.attribute(.kern, at: at - 1, effectiveRange: nil))
+        let font = try XCTUnwrap(text.attribute(.font, at: at, effectiveRange: nil) as? UIFont)
+        XCTAssertEqual(font.pointSize, MD.textSize - 1.5, accuracy: 0.001)
+        XCTAssertEqual(MD.mentionRadius, 4.5)
+        // The violet the chips always had, not the body ink.
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let traits = UITraitCollection(userInterfaceStyle: style)
+            let violet = UIColor(Theme.mentionText).resolvedColor(with: traits)
+            XCTAssertNotEqual(violet, UIColor(Theme.text).resolvedColor(with: traits))
+            var r: CGFloat = 0
+            var g: CGFloat = 0
+            var b: CGFloat = 0
+            var a: CGFloat = 0
+            XCTAssertTrue(violet.getRed(&r, green: &g, blue: &b, alpha: &a))
+            XCTAssertGreaterThan(b, g + 0.1, "violet")
+        }
+    }
+
     func testCodeWrappingAtTheViewEdgeStaysInsideIt() throws {
         let text = TranscriptTextStyle.inline([
             InlineRun(text: "Then ", style: .plain),

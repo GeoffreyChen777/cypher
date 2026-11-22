@@ -67,6 +67,16 @@ enum Theme {
     static let inlineCodeWash = adaptive(
         light: .black.opacity(inlineCodeWashLight), dark: .white.opacity(inlineCodeWashDark))
 
+    // ---- paint: mention chips (violet family) ----
+    /// Mention chips — in the composer and in sent prompts — keep the violet
+    /// inline code used to read in, as the desktop's mention chips keep
+    /// theirs (theme.rs `code_text`/`code_wash`): only markdown inline code
+    /// went neutral.
+    static let mentionText = adaptive(light: oklch(0.491, 0.241, 292.581), dark: oklch(0.811, 0.111, 293.571))
+    static let mentionWash = adaptive(
+        light: oklch(0.541, 0.281, 293.009).opacity(0.08),
+        dark: oklch(0.702, 0.183, 293.541).opacity(0.12))
+
     // ---- paint: syntax tokens (soft, paint-only) ----
     static let tokenKeyword = adaptive(light: oklch(0.49, 0.16, 20.0), dark: oklch(0.709, 0.129, 20.0))
     static let tokenString = adaptive(light: oklch(0.46, 0.10, 168.0), dark: oklch(0.770, 0.110, 168.0))

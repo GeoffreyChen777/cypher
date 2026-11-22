@@ -74,7 +74,7 @@ final class ComposerLayoutManager: NSLayoutManager {
                 ) { rect, _ in
                     let rect = rect.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: 0, dy: 1)
                     color.setFill()
-                    UIBezierPath(roundedRect: rect, cornerRadius: MD.inlineCodeRadius).fill()
+                    UIBezierPath(roundedRect: rect, cornerRadius: MD.mentionRadius).fill()
                 }
             }
         }
@@ -276,8 +276,8 @@ struct ComposerTextInput: UIViewRepresentable {
             let result = NSMutableAttributedString(string: projection.display, attributes: base)
             var chipAttributes = base
             chipAttributes[.font] = Theme.monoUI(ComposerTextInput.fontSize - 1)
-            chipAttributes[.foregroundColor] = UIColor(Theme.inlineCodeText)
-            chipAttributes[.cypherInlineCode] = UIColor(Theme.inlineCodeWash)
+            chipAttributes[.foregroundColor] = UIColor(Theme.mentionText)
+            chipAttributes[.cypherInlineCode] = UIColor(Theme.mentionWash)
             for chip in projection.chips {
                 let source = (raw as NSString).substring(with: chip.link.range)
                 var attributes = chipAttributes

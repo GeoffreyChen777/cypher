@@ -64,7 +64,10 @@ of one path) sits on the same baseline as prose.
 - **Syntax colors** appear only in fenced code blocks.
 
 The iOS app sets inline code and chip names at the same 0.86 scale, with the
-same neutral inline code.
+same neutral inline code and the same box (1.25× the code size, 5 pt
+corners, 4 pt past inline code; chips 4/5 pt, glyph 0.9× the code size).
+Mention chips in the composer and in sent prompts keep their violet, as the
+desktop's keep their colours.
 
 The preview uses the real Markdown renderer, including headings, inline code,
 links, and syntax-highlighted code blocks. Its light/dark selector previews the palette being

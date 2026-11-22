@@ -18,8 +18,9 @@ enum InlineCodeBox {
     /// baseline at 18), and a 15 pt box centered on the code's cap height
     /// ends near 21, inside the line, so the last line never clips.
     nonisolated static let heightEm: CGFloat = 1.25
-    /// How far the box reaches past the code's glyphs, in pt.
-    nonisolated static let padX: CGFloat = 3
+    /// How far the box reaches past the code's glyphs, in pt (render.rs
+    /// `INLINE_CODE_PAD_X`).
+    nonisolated static let padX: CGFloat = 4
     /// The box's corner radius, in pt.
     nonisolated static let radius = MD.inlineCodeRadius
 

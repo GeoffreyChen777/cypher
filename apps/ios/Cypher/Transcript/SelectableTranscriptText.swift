@@ -5,6 +5,8 @@ import UIKit
 
 extension NSAttributedString.Key {
     static let cypherInlineCode = NSAttributedString.Key("cypher.inlineCode")
+    /// Under a mention chip in a sent prompt: its wash color.
+    static let cypherMentionWash = NSAttributedString.Key("cypher.mentionWash")
 }
 
 /// The transcript entry a piece of selectable text belongs to.
@@ -44,7 +46,8 @@ enum TranscriptTextStyle {
         // File references show as chips, labelled together so two files of
         // one name keep a folder apart.
         let references = runs.map { run in
-            run.style.code && run.style.link == nil && run.style.math == nil ? FileReference.detect(run.text) : nil
+            run.style.code && !run.style.mention && run.style.link == nil && run.style.math == nil
+                ? FileReference.detect(run.text) : nil
         }
         let labels = FileReference.labels(references.compactMap { $0 })
         var chips = 0
@@ -97,6 +100,19 @@ enum TranscriptTextStyle {
                 run.text = rest
                 result.append(NSAttributedString(string: "\n", attributes: proseAttributes))
                 breakPending = false
+            }
+            if run.style.mention {
+                // A mention chip keeps its look: violet code type a little
+                // under the prose, on a violet wash (`paintMentions`).
+                result.append(
+                    NSAttributedString(
+                        string: run.text,
+                        attributes: [
+                            .font: Theme.monoUI(size - 1.5),
+                            .foregroundColor: UIColor(Theme.mentionText),
+                            .cypherMentionWash: UIColor(Theme.mentionWash),
+                        ]))
+                continue
             }
             var font =
                 run.style.code
@@ -195,12 +211,12 @@ enum TranscriptTextStyle {
     }
 
     /// Thinking's quieter tone: body text and inline code (which reads in
-    /// the body ink) take the muted color; links keep theirs.
+    /// the body ink) take the muted color; links and mentions keep theirs.
     static func muted(_ text: NSAttributedString) -> NSAttributedString {
         let result = NSMutableAttributedString(attributedString: text)
         var plain: [NSRange] = []
         result.enumerateAttributes(in: NSRange(location: 0, length: result.length)) { attributes, range, _ in
-            if attributes[.link] == nil { plain.append(range) }
+            if attributes[.link] == nil, attributes[.cypherMentionWash] == nil { plain.append(range) }
         }
         let color = UIColor(Theme.textMuted)
         for range in plain { result.addAttribute(.foregroundColor, value: color, range: range) }
@@ -419,8 +435,31 @@ final class TranscriptTextLayoutManager: NSLayoutManager {
             FileReferenceChip.paint(
                 self, storage: storage, container: container, characters: characters, origin: origin)
             InlineCodeBox.paint(self, storage: storage, container: container, characters: characters, origin: origin)
+            paintMentions(storage: storage, container: container, characters: characters, origin: origin)
         }
         super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
+    }
+
+    /// A sent prompt's mention chips: their wash over the glyphs' line
+    /// rects, as before inline code had its own box.
+    private func paintMentions(
+        storage: NSTextStorage, container: NSTextContainer, characters: NSRange, origin: CGPoint
+    ) {
+        storage.enumerateAttribute(.cypherMentionWash, in: characters) { value, range, _ in
+            guard let color = value as? UIColor else { return }
+            let glyphs = glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            enumerateEnclosingRects(
+                forGlyphRange: glyphs,
+                withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                in: container
+            ) { rect, _ in
+                // The native text view's glyph bounds place this wash
+                // slightly above the visible ink; nudge it down.
+                let rect = rect.offsetBy(dx: origin.x, dy: origin.y + 2.5).insetBy(dx: -2, dy: 2)
+                color.setFill()
+                UIBezierPath(roundedRect: rect, cornerRadius: MD.mentionRadius).fill()
+            }
+        }
     }
 }
 

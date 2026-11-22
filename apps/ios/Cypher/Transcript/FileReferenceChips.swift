@@ -113,21 +113,26 @@ enum FileReferenceChip {
     /// The name's and the lines' size, in em of the prose: the one code
     /// scale inline code is set at too (`Theme.codeScale`).
     nonisolated static let nameEm: CGFloat = Theme.codeScale
-    /// The file glyph's side, in em of the prose (render.rs `CHIP_GLYPH_EM`).
-    nonisolated static let glyphEm: CGFloat = 0.86
-    /// The box's height, in em of the prose: 17 pt on 14 pt body text, a
-    /// point under the desktop's 18. TextKit sets a line's text at its
-    /// bottom (a 22 pt line has its baseline at 18), so an 18 pt box centered
-    /// on the name would cross into the next line, and a text view clips
-    /// its last line there; 17 pt centers on the name and stays inside.
-    nonisolated static let heightEm: CGFloat = 17.0 / 14.0
-    /// Corner radius, the box's edge to the glyph, the glyph to the name,
-    /// and the label's end to the box's edge, in pt (render.rs `CHIP_RADIUS`,
-    /// `CHIP_PAD_LEFT`, `CHIP_PAD_RIGHT`).
-    nonisolated static let radius: CGFloat = 6
-    nonisolated static let padLeft: CGFloat = 5
-    nonisolated static let glyphGap: CGFloat = 4
-    nonisolated static let padRight: CGFloat = 6
+    /// The file glyph's side, in em of the name's (code) size (render.rs
+    /// `CHIP_GLYPH_EM`).
+    nonisolated static let glyphEm: CGFloat = 0.9
+    /// The leading glue's width — left padding, glyph and the gap to the
+    /// name — in em of the name's size: the desktop's glue, two 0.6 em code
+    /// spaces and a 0.25 em space (code_ref.rs `ICON_GLUE`), so a chip is as
+    /// wide as there.
+    nonisolated static let glueEm: CGFloat = 1.45
+    /// The box is inline code's (`InlineCodeBox`): 1.25 em of the name's
+    /// size tall (15 pt on 14 pt prose), centered on the name and kept inside
+    /// its line, with its corner radius (render.rs `CODE_BOX_EM`,
+    /// `CODE_BOX_RADIUS`). TextKit sets a line's text low (a 22 pt line has
+    /// its baseline at 18), and that box ends near 21, so the last line of a
+    /// text view never clips.
+    nonisolated static let heightEm: CGFloat = InlineCodeBox.heightEm
+    nonisolated static let radius: CGFloat = InlineCodeBox.radius
+    /// The box's edge to the glyph, and the label's end to the box's edge,
+    /// in pt (render.rs `CHIP_PAD_LEFT`, `CHIP_PAD_RIGHT`).
+    nonisolated static let padLeft: CGFloat = 4
+    nonisolated static let padRight: CGFloat = 5
     /// The padding on the broken edges of a chip wider than its line
     /// (render.rs `CHIP_PAD_WRAP`).
     nonisolated static let padWrap: CGFloat = 3
@@ -171,8 +176,7 @@ enum FileReferenceChip {
             attributes: [.font: font, .cypherFileGlyph: UIColor(Theme.textMuted)])
         // The glue's last space carries the room the glyph needs past both.
         let space = NSAttributedString(string: "\u{a0}", attributes: [.font: font]).size().width
-        let room = padLeft + glyphSide(size) + glyphGap
-        chip.addAttribute(.kern, value: room - 2 * space, range: NSRange(location: 1, length: 1))
+        chip.addAttribute(.kern, value: glueWidth(size) - 2 * space, range: NSRange(location: 1, length: 1))
         chip.append(NSAttributedString(string: name, attributes: [.font: font, .foregroundColor: UIColor(Theme.text)]))
         if !suffix.isEmpty {
             chip.append(
@@ -199,12 +203,18 @@ enum FileReferenceChip {
 
     /// The file glyph's side in prose of `size`, whole points.
     nonisolated static func glyphSide(_ size: CGFloat) -> CGFloat {
-        (size * glyphEm).rounded()
+        (size * nameEm * glyphEm).rounded()
+    }
+
+    /// The leading glue's width in prose of `size`: the left padding, the
+    /// glyph and the gap to the name.
+    nonisolated static func glueWidth(_ size: CGFloat) -> CGFloat {
+        size * nameEm * glueEm
     }
 
     /// The chip around `chip` (a whole chip's characters), one box per line
     /// it spans, in the container's coordinates: as tall as `heightEm` of
-    /// the prose, centered on the name's cap height but kept inside its line
+    /// the name, centered on the name's cap height but kept inside its line
     /// (the text sits low in a line, and the box must not reach into the
     /// next one or past the view's edge). Edges where a chip wider than its
     /// line breaks get `padWrap`; no box leaves the container.
@@ -214,7 +224,7 @@ enum FileReferenceChip {
         guard let font = storage.attribute(.font, at: chip.location, effectiveRange: nil) as? UIFont else {
             return []
         }
-        let height = (font.pointSize / nameEm * heightEm).rounded()
+        let height = (font.pointSize * heightEm).rounded()
         let glyphs = layout.glyphRange(forCharacterRange: chip, actualCharacterRange: nil)
         var lines: [(rect: CGRect, line: CGRect)] = []
         layout.enumerateLineFragments(forGlyphRange: glyphs) { line, _, _, lineGlyphs, _ in
