@@ -22,7 +22,7 @@ use gpui::{
 };
 
 use crate::kit::theme::{
-    MonoStyled, Theme, code_block_background, inline_code_text, inline_code_wash,
+    CODE_SCALE, MonoStyled, Theme, code_block_background, inline_code_text, inline_code_wash,
 };
 
 use super::code_ref::{self, CodeRef};
@@ -546,6 +546,7 @@ fn render_display_math(tex: &str, ctx: BlockCtx, window: &Window) -> AnyElement 
     let flat = flatten_cached(
         &runs,
         FontWeight::NORMAL,
+        size,
         top_ix,
         ix,
         opts,
@@ -671,6 +672,7 @@ fn render_table(
             let flat = flatten_cached(
                 runs,
                 weight,
+                theme.markdown.body_size,
                 top_ix,
                 table_cell_ix(ix, r, c),
                 opts,
@@ -730,11 +732,9 @@ fn render_table(
                 TableAlign::Right => cell.text_right(),
             };
             if let Some(flat) = cell_flat {
-                cell = cell.child(flat_text_element(
-                    flat,
-                    table_cell_ix(ix, r, c),
-                    opts,
-                    theme,
+                cell = cell.child(on_prose_baseline(
+                    flat_text_element(flat, table_cell_ix(ix, r, c), opts, theme),
+                    strut_shift(window, theme, flat, theme.markdown.body_size),
                 ));
             }
             row_el = row_el.child(cell);
@@ -828,6 +828,11 @@ pub struct RefSpan {
 impl RefSpan {
     fn glue(&self) -> Range<usize> {
         self.range.start..self.range.start + code_ref::ICON_GLUE.len()
+    }
+
+    /// Where the label (the chip's code text) starts.
+    fn name_start(&self) -> usize {
+        self.glue().end
     }
 
     /// The glue and the label: what the chip's box is measured from (its
@@ -924,19 +929,59 @@ fn settle_math(run: &InlineRun) -> std::borrow::Cow<'_, InlineRun> {
     }
 }
 
-/// Rounded-wash geometry: small radius on a box sized from the font, not the
-/// line box (paint-only — x extends 4px past the glyphs; the height is
-/// `INLINE_CODE_HEIGHT_EM × font size`, centered like GPUI centers glyphs).
-pub const INLINE_CODE_RADIUS: f32 = 4.5;
+/// The box behind code set in prose — an inline-code wash and a
+/// file-reference chip alike: [`CODE_BOX_EM`] of the code's own size tall
+/// (the code runs at [`CODE_SCALE`] of the text), centered on the code text
+/// ([`code_box_band`]), [`CODE_BOX_RADIUS`] corners. Paint only: the line
+/// height never changes. One height and one radius for both, so they read as
+/// the same family; a chip is set apart by its hairline and glyph.
+pub const CODE_BOX_EM: f32 = 1.25;
+pub const CODE_BOX_RADIUS: f32 = 5.0;
+/// Inline code's wash runs this far past its glyphs on each side.
 pub const INLINE_CODE_PAD_X: f32 = 4.0;
-/// 18px at the default 14px text — the original 22px line box inset by 2px.
-pub const INLINE_CODE_HEIGHT_EM: f32 = 18.0 / 14.0;
 
-/// Vertical inset that centers a font-sized wash in the line box, so a taller
-/// line height adds air around the pill instead of stretching it. Never
-/// negative: a line box tighter than the wash clips it to the line.
-fn inline_code_inset_y(line_height: f32, font_size: f32) -> f32 {
-    ((line_height - font_size * INLINE_CODE_HEIGHT_EM) / 2.0).max(0.0)
+/// The size code is set at inside text of `font_size`.
+pub fn code_size_in(font_size: f32) -> f32 {
+    font_size * CODE_SCALE
+}
+
+/// Where a code box sits in its line box: `(top, height)`, top measured from
+/// the line's top. gpui puts a line's baseline at
+/// `(line_height - ascent - descent) / 2 + ascent` (the line's ascent and
+/// descent, the largest over its runs); the code's own glyphs span
+/// `code_ascent` above and `code_descent` below that baseline, and the box
+/// centers on them, [`CODE_BOX_EM`] × `code_size` tall. Kept inside the line
+/// box (a line tighter than the box clips it to the line).
+pub(crate) fn code_box_band(
+    line_height: f32,
+    line_metrics: (f32, f32),
+    code_metrics: (f32, f32),
+    code_size: f32,
+) -> (f32, f32) {
+    let (ascent, descent) = line_metrics;
+    let (code_ascent, code_descent) = code_metrics;
+    let baseline = (line_height - ascent - descent) / 2.0 + ascent;
+    let center = baseline - (code_ascent - code_descent) / 2.0;
+    let height = (code_size * CODE_BOX_EM).min(line_height);
+    let top = (center - height / 2.0).clamp(0.0, line_height - height);
+    (top, height)
+}
+
+/// `rects` (full line boxes, one per visual line, as [`range_rects`] gives
+/// them at no inset) narrowed to the code band `(top, height)`.
+fn in_band(
+    rects: Vec<Bounds<gpui::Pixels>>,
+    (top, height): (f32, f32),
+) -> Vec<Bounds<gpui::Pixels>> {
+    rects
+        .into_iter()
+        .map(|rect| {
+            Bounds::new(
+                point(rect.left(), rect.top() + px(top)),
+                size(rect.size.width, px(height)),
+            )
+        })
+        .collect()
 }
 /// A thin visual margin between an inline-code pill and neighboring prose.
 const INLINE_CODE_MARGIN: &str = "\u{2009}";
@@ -1080,20 +1125,33 @@ pub fn count_block_matches(block: &Block, query: &str) -> usize {
 /// drop below semibold). Pure given a theme.
 #[cfg(test)]
 fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWeight) -> FlatText {
-    flatten_runs_math(runs, theme, base_weight, None, false)
+    flatten_runs_math(
+        runs,
+        theme,
+        base_weight,
+        theme.markdown.body_size,
+        None,
+        false,
+    )
 }
 
 /// [`flatten_runs_weighted`] with formulas: given the window-measured
 /// `math` env each formula becomes glue its typeset width wide; without one
 /// (nothing to measure with) it reads as inline code of its source. With
 /// `chips`, file references in inline code become chips ([`RefSpan`]).
+///
+/// `font_size` is the size the element's text is set at: inline code and
+/// whole chips are sized runs at [`code_size_in`] of it; prose and the thin
+/// margins beside code keep the element's size (`font_size: None`).
 fn flatten_runs_math(
     runs: &[InlineRun],
     theme: &Theme,
     base_weight: FontWeight,
+    font_size: f32,
     math_env: Option<&MathEnv>,
     chips: bool,
 ) -> FlatText {
+    let code_size = Some(px(code_size_in(font_size)));
     let mut text = String::new();
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
@@ -1137,7 +1195,8 @@ fn flatten_runs_math(
             // The chip: glyph glue, the short label in the code font, its
             // line suffix muted, the tail. It copies as the reference as
             // written. The glue and tail are spaces: their fonts only set
-            // the room they leave for the glyph and the padding.
+            // the room they leave for the glyph and the padding. The whole
+            // chip is set at the code size, so it scales as one piece.
             let start = text.len();
             let style = ChipStyle::new(theme, 0.0);
             let mut f = theme.mono();
@@ -1165,7 +1224,7 @@ fn flatten_runs_math(
                     background_color: None,
                     underline: None,
                     strikethrough: None,
-                    font_size: None,
+                    font_size: code_size,
                 });
             }
             copy.push((start..text.len(), run.text.to_string()));
@@ -1223,8 +1282,8 @@ fn flatten_runs_math(
         };
         // Monochrome by default; a scoped chat theme may override link color.
         let is_link = run.style.link.is_some();
-        // Inline code reads emerald (see `inline_code_text`); everything else
-        // stays the monochrome foreground.
+        // Inline code reads in the body ink too (see `inline_code_text`); its
+        // face, size and wash set it apart.
         let color = if run.style.code {
             inline_code_text(theme)
         } else if is_link {
@@ -1270,7 +1329,7 @@ fn flatten_runs_math(
                 thickness: px(1.0),
                 color: Some(theme.text_muted),
             }),
-            font_size: None,
+            font_size: if run.style.code { code_size } else { None },
         });
         previous_was_code = Some(run.style.code);
     }
@@ -1294,9 +1353,11 @@ fn flatten_runs_math(
 /// Flatten through the cross-frame cache when one is wired: settled blocks
 /// reuse text + runs untouched (O(1) per block per frame); only blocks the
 /// incremental parser invalidated rebuild.
+#[allow(clippy::too_many_arguments)]
 fn flatten_cached(
     runs: &[InlineRun],
     base_weight: FontWeight,
+    font_size: f32,
     top_ix: usize,
     ix: usize,
     opts: &RenderOptions,
@@ -1304,7 +1365,16 @@ fn flatten_cached(
     math_env: Option<&MathEnv>,
 ) -> Rc<FlatText> {
     let chips = opts.code_refs.is_some();
-    let build = || Rc::new(flatten_runs_math(runs, theme, base_weight, math_env, chips));
+    let build = || {
+        Rc::new(flatten_runs_math(
+            runs,
+            theme,
+            base_weight,
+            font_size,
+            math_env,
+            chips,
+        ))
+    };
     match &opts.cache {
         Some(cache) => {
             let mut cache = cache.borrow_mut();
@@ -1354,9 +1424,9 @@ fn flat_text_element(
             .code(super::justified::CodeWash {
                 ranges: flat.code_ranges.clone(),
                 color: inline_code_wash(theme),
-                radius: INLINE_CODE_RADIUS,
+                radius: CODE_BOX_RADIUS,
                 pad_x: INLINE_CODE_PAD_X,
-                height_em: INLINE_CODE_HEIGHT_EM,
+                font: theme.mono(),
             })
             .links(flat.links.clone(), on_link)
             .into_any_element();
@@ -1421,6 +1491,7 @@ fn flat_text_element(
     });
     let code_ranges = flat.code_ranges.clone();
     let flat_text = flat.text.clone();
+    let mono = theme.mono();
     let wash = inline_code_wash(theme);
     let sel_wash = selection_wash(theme);
     let selection = opts.selection.clone();
@@ -1441,21 +1512,12 @@ fn flat_text_element(
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, cx| {
-            let line_height = f32::from(layout.line_height());
-            let inset_for = |ix: usize| {
-                layout
-                    .line_layout_for_index(ix)
-                    .map(|line| {
-                        inline_code_inset_y(line_height, f32::from(line.unwrapped_layout.font_size))
-                    })
-                    .unwrap_or(0.0)
-            };
             for range in &code_ranges {
-                let inset_y = inset_for(range.start);
-                for rect in range_rects(&layout, range, INLINE_CODE_PAD_X, inset_y) {
+                let band = code_band_at(window, &layout, &mono, range.start);
+                for rect in in_band(range_rects(&layout, range, INLINE_CODE_PAD_X, 0.0), band) {
                     window.paint_quad(quad(
                         rect,
-                        px(INLINE_CODE_RADIUS),
+                        px(CODE_BOX_RADIUS),
                         wash,
                         px(0.0),
                         gpui::transparent_black(),
@@ -1468,19 +1530,19 @@ fn flat_text_element(
                 for (chip_ix, chip) in chips.iter().enumerate() {
                     let t = crate::kit::motion::hover_t(&chip_fade_key(&underlay_key, chip_ix));
                     let style = ChipStyle::new(&chip_theme, t);
-                    let inset_y = inset_for(chip.range.start);
-                    let lines = range_rects(&layout, &chip.boxed(), 0.0, inset_y);
+                    let band = code_band_at(window, &layout, &mono, chip.name_start());
+                    let lines = in_band(range_rects(&layout, &chip.boxed(), 0.0, 0.0), band);
                     for rect in chip_boxes(&lines, scale) {
                         window.paint_quad(quad(
                             rect,
-                            px(CHIP_RADIUS),
+                            px(CODE_BOX_RADIUS),
                             style.wash,
                             px(1.0),
                             style.hairline,
                             BorderStyle::default(),
                         ));
                     }
-                    paint_chip_glyph(window, cx, &layout, chip, style.glyph);
+                    paint_chip_glyph(window, cx, &layout, chip, band, style.glyph);
                 }
             }
             // Under the selection wash below: a drag over a hit must still
@@ -1528,18 +1590,19 @@ fn flat_text_element(
         .into_any_element()
 }
 
-/// File-reference chip geometry, in px at any text size: the box's corner
-/// radius, its edge to the file glyph's box on the left, and the label's end
-/// to its edge on the right. The box is as tall as an inline-code wash
-/// ([`INLINE_CODE_HEIGHT_EM`]), so a chip never changes the line height.
-pub const CHIP_RADIUS: f32 = 6.0;
-pub const CHIP_PAD_LEFT: f32 = 5.0;
-pub const CHIP_PAD_RIGHT: f32 = 6.0;
+/// File-reference chip padding, in px at any text size: the box's edge to
+/// the file glyph's box on the left, and the label's end to its edge on the
+/// right. The box itself is the inline-code box ([`CODE_BOX_EM`] of the code
+/// size, centered on the label, [`CODE_BOX_RADIUS`] corners), so a chip never
+/// changes the line height.
+pub const CHIP_PAD_LEFT: f32 = 4.0;
+pub const CHIP_PAD_RIGHT: f32 = 5.0;
 /// Where a chip that is wider than its line breaks: the padding on the
 /// broken edges of its line fragments.
 const CHIP_PAD_WRAP: f32 = 3.0;
-/// The file glyph's side, in em of the chip's text.
-const CHIP_GLYPH_EM: f32 = 0.86;
+/// The file glyph's side, in em of the chip's (code) size: a little under
+/// the box's height, so the glyph's outline clears the hairline.
+const CHIP_GLYPH_EM: f32 = 0.9;
 
 /// Chip ink alphas `(rest, hover)`: the same numbers on both themes, black
 /// ink on light and white ink on dark. Exact alphas, not [`Theme::ink`] /
@@ -1593,6 +1656,35 @@ pub(crate) fn chip_weight(base: FontWeight, bold: bool) -> FontWeight {
     if base.0 < floor.0 { floor } else { base }
 }
 
+/// The code band ([`code_box_band`]) of the visual line holding byte `ix`
+/// of a laid-out text: the line's own ascent and descent place its baseline,
+/// the code font's at the code size place the code on it.
+fn code_band_at(
+    window: &Window,
+    layout: &gpui::TextLayout,
+    mono: &gpui::Font,
+    ix: usize,
+) -> (f32, f32) {
+    let line_height = f32::from(layout.line_height());
+    let Some(line) = layout.line_layout_for_index(ix) else {
+        return (0.0, line_height);
+    };
+    let line = &line.unwrapped_layout;
+    let code_size = code_size_in(f32::from(line.font_size));
+    let system = window.text_system();
+    let font_id = system.resolve_font(mono);
+    code_box_band(
+        line_height,
+        (f32::from(line.ascent), f32::from(line.descent)),
+        (
+            f32::from(system.ascent(font_id, px(code_size))),
+            // Font metrics give the descent as a negative distance.
+            f32::from(system.descent(font_id, px(code_size))).abs(),
+        ),
+        code_size,
+    )
+}
+
 /// The hover-fade key of a text element's `chip_ix`-th chip.
 fn chip_fade_key(key: &str, chip_ix: usize) -> String {
     format!("chip:{key}#{chip_ix}")
@@ -1632,12 +1724,14 @@ pub(crate) fn chip_boxes(lines: &[Bounds<gpui::Pixels>], scale: f32) -> Vec<Boun
 }
 
 /// The file glyph over a chip's leading glue, [`CHIP_PAD_LEFT`] in from the
-/// chip's edge and centered on the line.
+/// chip's edge and centered on the chip's box (`band`, see
+/// [`code_box_band`]), so on the label.
 fn paint_chip_glyph(
     window: &mut Window,
     cx: &mut gpui::App,
     layout: &gpui::TextLayout,
     chip: &RefSpan,
+    band: (f32, f32),
     color: Hsla,
 ) {
     let Some(rect) = range_rects(layout, &chip.glue(), 0.0, 0.0)
@@ -1650,13 +1744,17 @@ fn paint_chip_glyph(
         .line_layout_for_index(chip.range.start)
         .map_or(13.0, |line| f32::from(line.unwrapped_layout.font_size));
     let room = f32::from(rect.size.width) - CHIP_PAD_LEFT;
-    let side = (font_size * CHIP_GLYPH_EM).min(room).max(0.0).round();
+    let side = (code_size_in(font_size) * CHIP_GLYPH_EM)
+        .min(room)
+        .max(0.0)
+        .round();
     let scale = window.scale_factor();
     let snap = |v: f32| (v * scale).round() / scale;
+    let (band_top, band_height) = band;
     let origin = point(
         px(snap(f32::from(rect.left()) + CHIP_PAD_LEFT)),
         px(snap(
-            f32::from(rect.top()) + (f32::from(rect.size.height) - side) / 2.0,
+            f32::from(rect.top()) + band_top + (band_height - side) / 2.0,
         )),
     );
     let _ = window.paint_svg(
@@ -2329,12 +2427,64 @@ fn text_element(
         FontWeight::NORMAL
     };
     let env = has_math(runs).then(|| MathEnv::new(window, theme, size));
-    let flat = flatten_cached(runs, weight, top_ix, ix, opts, theme, env.as_ref());
-    let inner = flat_text_element(&flat, ix, opts, theme);
+    let flat = flatten_cached(runs, weight, size, top_ix, ix, opts, theme, env.as_ref());
+    let inner = on_prose_baseline(
+        flat_text_element(&flat, ix, opts, theme),
+        strut_shift(window, theme, &flat, size),
+    );
     div()
         .text_size(px(size))
         .line_height(px(line_height))
         .child(inner)
+        .into_any_element()
+}
+
+/// How far down a text element must move to sit on the prose baseline.
+///
+/// gpui places a line's baseline from the largest ascent and descent among
+/// its runs. Text with any run at the element's own size (all prose, and
+/// prose beside code) gets the prose's; text made only of code — a list item
+/// or table cell that is just `src/main.rs` — has only the smaller code runs,
+/// so its baseline would ride higher than its neighbours'. Like CSS's strut,
+/// count the prose font at the element's size as if it were there.
+fn strut_shift(window: &Window, theme: &Theme, flat: &FlatText, font_size: f32) -> f32 {
+    if flat.runs.is_empty() || flat.runs.iter().any(|run| run.font_size.is_none()) {
+        return 0.0;
+    }
+    let system = window.text_system();
+    let metrics = |run_font: &gpui::Font, size: f32| {
+        let id = system.resolve_font(run_font);
+        (
+            f32::from(system.ascent(id, px(size))),
+            // Font metrics give the descent as a negative distance.
+            f32::from(system.descent(id, px(size))).abs(),
+        )
+    };
+    let own = flat.runs.iter().fold((0.0f32, 0.0f32), |(a, d), run| {
+        let size = run.font_size.map_or(font_size, f32::from);
+        let (ra, rd) = metrics(&run.font, size);
+        (a.max(ra), d.max(rd))
+    });
+    strut_offset(own, metrics(&font(theme.font_sans.clone()), font_size))
+}
+
+/// The baseline move [`strut_shift`] makes: from a line laid out with
+/// `own` `(ascent, descent)` to one that also holds the prose strut.
+pub(crate) fn strut_offset(own: (f32, f32), prose: (f32, f32)) -> f32 {
+    let strut = (own.0.max(prose.0), own.1.max(prose.1));
+    ((strut.0 - strut.1) - (own.0 - own.1)) / 2.0
+}
+
+/// `element`, moved `shift` px down (paint and hit-testing alike, layout
+/// untouched) when it needs the prose baseline ([`strut_shift`]).
+fn on_prose_baseline(element: AnyElement, shift: f32) -> AnyElement {
+    if shift.abs() < 0.01 {
+        return element;
+    }
+    div()
+        .relative()
+        .top(px(shift))
+        .child(element)
         .into_any_element()
 }
 

@@ -40,7 +40,30 @@ caption over the code rather than a separate strip.
 **Inline code text** and **Inline code background** independently style Markdown
 backtick spans, including those in lists, headings, and tables. They do not
 recolor fenced code blocks, syntax highlighting, or file/session mention chips.
-Clearing either field restores its original theme color or translucent wash.
+Clearing either field restores the default: the message text color on a
+neutral wash.
+
+## Code in prose
+
+Inline code and the names in [file-reference chips](files.md#from-the-chat)
+are set in the code font at **0.86×** the size of the text around them
+(12.04 px in 14 px body text, larger in headings), as part of the text
+itself: they wrap, select (also by double-click), find, fade in while a reply
+streams, and copy like the prose. The **Code font size** setting applies to
+fenced code blocks only. A line of text has the same height and baseline with
+or without code in it; a line that is only code (a list item or table cell
+of one path) sits on the same baseline as prose.
+
+- **Inline code** reads in the message text color, set apart by its face and
+  a neutral wash (black at 6% on light, white at 8% on dark), never a hue.
+- **Box:** inline code and chips share one box, 1.25× the code size tall
+  (15 px at default sizes), centred on the code text, with 5 px corners.
+  Inline code's wash runs 4 px past its glyphs; a chip adds a hairline
+  outline and a file glyph (see [Files](files.md#from-the-chat)).
+- **Syntax colors** appear only in fenced code blocks.
+
+The iOS app sets inline code and chip names at the same 0.86 scale, with the
+same neutral inline code.
 
 The preview uses the real Markdown renderer, including headings, inline code,
 links, and syntax-highlighted code blocks. Its light/dark selector previews the palette being

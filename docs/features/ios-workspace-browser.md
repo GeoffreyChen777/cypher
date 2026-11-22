@@ -34,7 +34,9 @@ filesystem or the project's main checkout if the chat uses a worktree.
 - **File references** in a reply's inline code (`` `core/context.py:146-160` ``,
   `` `src/lib.rs` ``) show as chips — a grey file glyph, the file name in
   medium-weight code type and muted lines, on a faint neutral wash with a
-  hairline outline, as on the desktop — detected by the desktop's rules
+  hairline outline, as on the desktop (name at the same 0.86× code size;
+  inline code is the message text on a neutral wash there too, see
+  [Code in prose](chat-appearance.md#code-in-prose)) — detected by the desktop's rules
   ([Files → From the chat](files.md#from-the-chat)). A chip that no longer
   fits its line moves to the next one whole. A chip has no pressed look of
   its own (the desktop deepens it under the pointer). Copying a selection

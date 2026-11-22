@@ -330,8 +330,11 @@ fn clipped_long_line_cannot_start_selection_in_the_other_diff_column() {
 #[test]
 fn inline_colors_preserve_prose_fenced_code_and_default_washes() {
     for mut theme in [Theme::dark(), Theme::light()] {
-        assert_eq!(inline_code_text(&theme), theme.code_text);
-        assert_eq!(inline_code_wash(&theme), theme.code_wash);
+        // Defaults: the body ink on a neutral wash, not the mention chips'
+        // emerald.
+        assert_eq!(inline_code_text(&theme), theme.text);
+        assert_ne!(inline_code_text(&theme), theme.code_text);
+        assert_ne!(inline_code_wash(&theme), theme.code_wash);
         let plain_code_color = code_block_theme(&theme).text;
         let fenced_background = code_block_background(&theme);
         let foreground = gpui::rgb(0xaa2266).into();
@@ -423,7 +426,7 @@ fn file_references_flatten_to_chips_that_copy_as_written() {
         prose(" in "),
         code("file.py:128-131"),
     ];
-    let flat = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, None, true);
+    let flat = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, 14.0, None, true);
     // Find counts over the same text the chips render.
     assert_eq!(runs_text(&runs), flat.text.as_ref());
     let glue = crate::markdown::code_ref::ICON_GLUE;
@@ -455,7 +458,7 @@ fn file_references_flatten_to_chips_that_copy_as_written() {
     assert_eq!(sources[0].1, "utils/checkpointing/processors/file.py:69-73");
     assert_eq!(sources[1].1, "file.py:128-131");
     // Without chips the same runs stay plain inline code.
-    let plain = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, None, false);
+    let plain = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, 14.0, None, false);
     assert!(plain.refs.is_empty());
     assert_eq!(plain.code_ranges.len(), 3);
     assert!(plain.copy_sources.is_none());
@@ -526,11 +529,11 @@ fn inline_color_changes_refresh_cached_runs() {
     }];
     let mut theme = Theme::dark();
     theme.text_style_revision = 1;
-    let before = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme, None);
+    let before = flatten_cached(&runs, FontWeight::NORMAL, 14.0, 0, 0, &opts, &theme, None);
     theme.inline_code_text = Some(gpui::rgb(0xffcc88).into());
     theme.inline_code_background = Some(gpui::rgb(0x332200).into());
     theme.text_style_revision = 2;
-    let after = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme, None);
+    let after = flatten_cached(&runs, FontWeight::NORMAL, 14.0, 0, 0, &opts, &theme, None);
     assert!(!Rc::ptr_eq(&before, &after));
     assert_eq!(after.runs[0].color, theme.inline_code_text.unwrap());
     assert_eq!(
@@ -610,7 +613,10 @@ fn code_block_base_color_preserves_colored_syntax_and_other_renderers() {
             ordinary[0].color, theme.text,
             "generic/diff rendering must not use the fenced override"
         );
-        assert_eq!(inline_code_text(&code), inline_code_text(&theme));
+        // Inline code is never set in the fenced scope: the prose theme
+        // keeps the body ink for it, whatever the fence's override.
+        assert_eq!(inline_code_text(&theme), theme.text);
+        assert_ne!(code.text, theme.text);
     }
 }
 
@@ -648,12 +654,12 @@ fn chat_style_revision_invalidates_cached_fonts_and_colors() {
     }];
     let mut old = Theme::dark();
     old.text_style_revision = 1;
-    let before = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &old, None);
+    let before = flatten_cached(&runs, FontWeight::NORMAL, 14.0, 0, 0, &opts, &old, None);
     let mut new = old.clone();
     new.text_style_revision = 2;
     new.font_sans = "Test Serif".into();
     new.markdown_link = Some(gpui::rgb(0x3388cc).into());
-    let after = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &new, None);
+    let after = flatten_cached(&runs, FontWeight::NORMAL, 14.0, 0, 0, &opts, &new, None);
     assert!(!Rc::ptr_eq(&before, &after));
     assert_eq!(after.runs[0].font.family.as_ref(), "Test Serif");
     assert_eq!(after.runs[0].color, new.markdown_link.unwrap());
@@ -740,9 +746,11 @@ fn flatten_collects_and_merges_inline_code_ranges() {
     // adjacent code runs still merge into ONE box.
     assert_eq!(flat.text, "use \u{2009}foo()\u{2009} and \u{2009}bar");
     assert_eq!(flat.code_ranges, vec![7..12, 23..26]);
-    // Code text is the emerald tint; the square run background is gone
-    // (the rounded wash is painted by the canvas underlay instead).
+    // Code text is the inline-code ink (the body ink by default); the
+    // square run background is gone (the rounded wash is painted by the
+    // canvas underlay instead).
     assert_eq!(flat.runs[2].color, inline_code_text(&theme));
+    assert_eq!(flat.runs[2].color, theme.text);
     assert_eq!(flat.runs[2].background_color, None);
     assert_eq!(flat.runs[0].color, theme.text);
 }
@@ -818,14 +826,94 @@ fn wrapped_range_rects(range: Range<usize>) -> Vec<Bounds<gpui::Pixels>> {
 }
 
 #[test]
-fn inline_code_wash_follows_font_size_not_line_height() {
-    // Default metrics keep the original 2px inset (18px wash).
-    assert!((inline_code_inset_y(22.0, 14.0) - 2.0).abs() < 1e-4);
-    // A taller line only adds inset; the wash height stays 18px.
-    let inset = inline_code_inset_y(32.0, 14.0);
-    assert!((32.0 - 2.0 * inset - 18.0).abs() < 1e-4);
-    // A tighter line than the wash never goes negative.
-    assert_eq!(inline_code_inset_y(16.0, 14.0), 0.0);
+fn inline_code_wash_is_neutral_ink_on_both_themes() {
+    let light = inline_code_wash(&Theme::light());
+    assert_eq!(rgba8(light), (0, 0, 0, 15)); // black 6%
+    let dark = inline_code_wash(&Theme::dark());
+    assert_eq!(rgba8(dark), (255, 255, 255, 20)); // white 8%
+    for theme in [Theme::light(), Theme::dark()] {
+        assert_eq!(inline_code_wash(&theme).s, 0.0, "no hue");
+    }
+}
+
+#[test]
+fn code_box_is_125em_of_the_code_size_and_centred_on_the_code_text() {
+    let code_size = code_size_in(14.0);
+    assert!((code_size - 12.04).abs() < 1e-4);
+    // A prose line (ascent 13, descent 3) in a 22px box: baseline at 16.
+    // Code with ascent 11, descent 3 spans 5..19, centre 12.
+    let line = (13.0, 3.0);
+    let code = (11.0, 3.0);
+    let (top, height) = code_box_band(22.0, line, code, code_size);
+    assert!((height - code_size * CODE_BOX_EM).abs() < 1e-4);
+    assert!((top + height / 2.0 - 12.0).abs() < 1e-4, "centred: {top}");
+    // A taller line box adds air around the box; its height and its place
+    // on the code text stay (the baseline moves by half the extra height).
+    let (tall_top, tall_height) = code_box_band(32.0, line, code, code_size);
+    assert_eq!(tall_height, height);
+    assert!((tall_top - (top + 5.0)).abs() < 1e-4);
+    // The box never leaves a line tighter than itself.
+    let (tight_top, tight_height) = code_box_band(12.0, line, code, code_size);
+    assert_eq!((tight_top, tight_height), (0.0, 12.0));
+}
+
+#[test]
+fn a_code_only_line_moves_down_onto_the_prose_baseline() {
+    // Code alone (ascent 11, descent 3) under prose metrics (13, 3.5): with
+    // the prose strut the line's metrics would be (13, 3.5), whose baseline
+    // sits (13 - 3.5 - (11 - 3)) / 2 = 0.75px lower.
+    assert!((strut_offset((11.0, 3.0), (13.0, 3.5)) - 0.75).abs() < 1e-4);
+    // Text already holding the prose (or larger) needs no move.
+    assert_eq!(strut_offset((13.0, 3.5), (13.0, 3.5)), 0.0);
+    assert_eq!(strut_offset((20.0, 5.0), (13.0, 3.5)), 0.0);
+}
+
+#[test]
+fn inline_code_and_chips_are_sized_runs_at_code_scale() {
+    let theme = Theme::dark();
+    let runs = [
+        InlineRun {
+            text: "see ".into(),
+            style: InlineStyle::default(),
+        },
+        InlineRun {
+            text: "foo()".into(),
+            style: InlineStyle {
+                code: true,
+                ..Default::default()
+            },
+        },
+        InlineRun {
+            text: " in ".into(),
+            style: InlineStyle::default(),
+        },
+        InlineRun {
+            text: "crates/ui/src/lib.rs:12".into(),
+            style: InlineStyle {
+                code: true,
+                ..Default::default()
+            },
+        },
+    ];
+    for size in [14.0, 20.0] {
+        let code = Some(px(size * CODE_SCALE));
+        let flat = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, size, None, true);
+        let code_at = flat.text.find("foo()").unwrap();
+        assert_eq!(run_at(&flat, code_at).font_size, code);
+        // Prose and the thin margins beside code stay at the text's size.
+        assert_eq!(run_at(&flat, 0).font_size, None);
+        assert_eq!(run_at(&flat, code_at - 1).font_size, None);
+        assert_eq!(run_at(&flat, code_at + "foo()".len()).font_size, None);
+        // The whole chip — glue, name, suffix, tail — is at the code size.
+        let chip = &flat.refs[0];
+        let mut at = chip.range.start;
+        while at < chip.range.end {
+            let run = run_at(&flat, at);
+            assert_eq!(run.font_size, code, "chip run at {at}");
+            at += run.len.max(1);
+        }
+    }
+    assert!((CODE_SCALE - 0.86).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -1026,7 +1114,7 @@ fn formulas_flatten_to_glue_with_a_math_env() {
             },
         },
     ];
-    let flat = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, Some(&env), false);
+    let flat = flatten_runs_math(&runs, &theme, FontWeight::NORMAL, 14.0, Some(&env), false);
     let [span] = flat.math.as_slice() else {
         panic!("one formula");
     };
@@ -1128,7 +1216,7 @@ fn run_at(flat: &FlatText, ix: usize) -> &TextRun {
 #[test]
 fn chips_set_the_name_in_medium_code_and_the_line_suffix_muted() {
     for theme in [Theme::light(), Theme::dark()] {
-        let flat = flatten_runs_math(&chip_runs(), &theme, FontWeight::NORMAL, None, true);
+        let flat = flatten_runs_math(&chip_runs(), &theme, FontWeight::NORMAL, 14.0, None, true);
         assert_eq!(flat.refs.len(), 2);
         let chip = &flat.refs[0];
         let text = &flat.text[chip.range.clone()];
@@ -1138,6 +1226,7 @@ fn chips_set_the_name_in_medium_code_and_the_line_suffix_muted() {
         assert_eq!(name.font.family, theme.font_mono);
         assert_eq!(name.font.weight, FontWeight::MEDIUM);
         assert_eq!(name.color, theme.text);
+        assert_eq!(name.font_size, Some(px(14.0 * CODE_SCALE)));
         let suffix = run_at(&flat, suffix_at);
         assert_eq!(suffix.font.family, theme.font_mono);
         assert_eq!(suffix.font.weight, FontWeight::MEDIUM);
@@ -1275,9 +1364,9 @@ fn chip_boxes_snap_to_device_pixels() {
     let [snapped] = chip_boxes(&lines, 2.0)[..] else {
         panic!("one box");
     };
-    assert_eq!(snapped, rect(10.5, 2.0, 86.0, 18.0));
+    assert_eq!(snapped, rect(10.5, 2.0, 85.0, 18.0));
     let [snapped] = chip_boxes(&lines, 1.0)[..] else {
         panic!("one box");
     };
-    assert_eq!(snapped, rect(10.0, 2.0, 86.0, 18.0));
+    assert_eq!(snapped, rect(10.0, 2.0, 85.0, 18.0));
 }

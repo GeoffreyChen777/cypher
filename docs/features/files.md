@@ -59,10 +59,13 @@ Narrow panes show one at a time.
   `file:///…`) open the file in the session's Files tab, at the line.
 - **File references** in inline code (`` `core/context.py:146-160` ``,
   `` `file.py:128` ``, `` `src/lib.rs` ``) show as chips: a grey file glyph,
-  the file name in medium-weight code type and muted lines, on a faint neutral
-  wash with a hairline outline (never the inline-code color), so a reference
-  stands out from the prose around it. Under the pointer the wash and outline
-  deepen. A chip that no longer fits its line moves to the next one whole;
+  the file name in medium-weight code type at the inline-code size (0.86× the
+  text, see [Code in prose](chat-appearance.md#code-in-prose)) and muted
+  lines, on a faint neutral wash with a hairline outline, so a reference
+  reads apart from plain inline code by its shape, not its color. The box is
+  inline code's (1.25× the code size, centred on the name, 5 px corners); the
+  wash is black or white ink at 3% with an 8% outline, deepening to 6% / 15%
+  under the pointer. A chip that no longer fits its line moves to the next one whole;
   only one wider than the line breaks, a box per line.
   A span counts when it is one path-shaped token naming a file and either
   cites lines or has a folder; bare names without lines, globs, placeholders

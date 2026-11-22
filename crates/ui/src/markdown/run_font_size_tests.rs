@@ -1,6 +1,6 @@
 //! The (local) gpui fork's per-run `TextRun::font_size`, checked with the
 //! real platform text system and the bundled Geist / Geist Mono: inline code
-//! typeset at 0.86em inside one prose line, as real text.
+//! typeset at 0.86em ([`CODE_SCALE`]) inside one prose line, as real text.
 
 use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock};
 use gpui::{Font, Pixels, TextRun, TextSystem, WindowTextSystem, font, px};
 
 const PROSE: Pixels = px(16.);
-const CODE_SCALE: f32 = 0.86;
+use crate::kit::theme::CODE_SCALE;
 
 /// One platform text system for all tests: building (or dropping) headless
 /// macOS platforms on parallel test threads aborts the process.
@@ -117,4 +117,76 @@ fn wrapping_uses_the_smaller_code_width() {
     };
     assert_eq!(wrapped(None), 1);
     assert_eq!(wrapped(Some(PROSE * CODE_SCALE)), 0);
+}
+
+/// Where gpui puts a line's baseline in a box `line_height` tall.
+fn baseline(line_height: f32, ascent: Pixels, descent: Pixels) -> f32 {
+    let (ascent, descent) = (f32::from(ascent), f32::from(descent));
+    (line_height - ascent - descent) / 2. + ascent
+}
+
+#[test]
+fn code_alone_needs_the_prose_strut_to_share_the_prose_baseline() {
+    let text_system = text_system();
+    let code_size = PROSE * CODE_SCALE;
+    let text = format!("{BEFORE}{CODE}{AFTER}");
+    let mixed = text_system.layout_line(&text, PROSE, &line_runs(Some(code_size)), None);
+    let alone = text_system.layout_line(
+        CODE,
+        PROSE,
+        &[run(CODE.len(), font("Geist Mono"), Some(code_size))],
+        None,
+    );
+    // Code alone takes only its own, smaller metrics: it would ride higher.
+    assert!(alone.ascent < mixed.ascent);
+    let metrics = |name: &'static str, size: Pixels| {
+        let id = text_system.resolve_font(&font(name));
+        (
+            f32::from(text_system.ascent(id, size)),
+            f32::from(text_system.descent(id, size)).abs(),
+        )
+    };
+    // The text system's font metrics are the ones line layout uses.
+    let code = metrics("Geist Mono", code_size);
+    assert!((code.0 - f32::from(alone.ascent)).abs() < 0.01);
+    assert!((code.1 - f32::from(alone.descent)).abs() < 0.01);
+    // The strut shift moves it exactly onto the mixed line's baseline.
+    let shift = crate::markdown::render::strut_offset(code, metrics("Geist", PROSE));
+    let line_height = 26.;
+    let gap = baseline(line_height, mixed.ascent, mixed.descent)
+        - baseline(line_height, alone.ascent, alone.descent);
+    assert!(shift > 0.);
+    assert!((shift - gap).abs() < 0.01, "shift {shift} vs {gap}");
+    // Justified text paints a word of code, shaped alone, by the same move.
+    let piece = crate::markdown::justified::baseline_shift(
+        (mixed.ascent, mixed.descent),
+        (alone.ascent, alone.descent),
+    );
+    assert!((f32::from(piece) - gap).abs() < 0.01);
+}
+
+#[test]
+fn the_code_box_centres_on_the_code_glyphs_within_the_line() {
+    let text_system = text_system();
+    let code_size = PROSE * CODE_SCALE;
+    let text = format!("{BEFORE}{CODE}{AFTER}");
+    let line = text_system.layout_line(&text, PROSE, &line_runs(Some(code_size)), None);
+    let id = text_system.resolve_font(&font("Geist Mono"));
+    let code = (
+        f32::from(text_system.ascent(id, code_size)),
+        f32::from(text_system.descent(id, code_size)).abs(),
+    );
+    let line_height = 26.;
+    let (top, height) = crate::markdown::render::code_box_band(
+        line_height,
+        (f32::from(line.ascent), f32::from(line.descent)),
+        code,
+        f32::from(code_size),
+    );
+    let base = baseline(line_height, line.ascent, line.descent);
+    // Centred on the code's em box, which sits on the shared baseline.
+    let code_centre = base - (code.0 - code.1) / 2.;
+    assert!((top + height / 2. - code_centre).abs() < 0.01);
+    assert!((height - f32::from(code_size) * crate::markdown::render::CODE_BOX_EM).abs() < 0.01);
+    assert!(top >= 0. && top + height <= line_height);
 }
