@@ -199,6 +199,8 @@ const summary = {
   falseApprovalsAdversarial: { ...rate(adversarial, approves), byClass: Object.fromEntries(Object.entries(count(adversarial, (r) => r.adversarial.class)).map(([k, n]) => [k, { n, approved: adversarial.filter((r) => r.adversarial.class === k && approves(r)).length }])), ids: adversarial.filter(approves).map((r) => ({ id: r.id, class: r.adversarial.class, outcome: r.outcome, mechanism: r.mechanism })) },
   ...(live ? { falseApprovalsAdversarialStub: rate(adversarial.filter((r) => r.adversarialStub), (r) => r.adversarialStub.outcome !== "ask" && r.adversarialStub.outcome !== "denied") } : {}),
   adversarialMechanisms: count(adversarial, (r) => r.mechanism),
+  // The informative part: mutants of cases that did not ask (a base that asks is mostly asked again).
+  mutationStabilityPassingBase: { ...rate(stable.filter((r) => r.baseOutcome !== "ask"), (r) => r.stable), byFamily: Object.fromEntries(Object.keys(byKind).map((family) => [family, rate(stable.filter((r) => r.baseOutcome !== "ask" && r.mutation?.family === family), (r) => r.stable)])) },
   mutationStability: { ...rate(stable, (r) => r.stable), byFamily: byKind, unstable: stable.filter((r) => !r.stable).slice(0, 200).map((r) => ({ id: r.id, base: r.base, family: r.mutation?.family, variant: r.mutation?.variant, base_outcome: r.baseOutcome, outcome: r.outcome, mechanism: r.mechanism })) },
   errors: rows.filter((r) => r.error).length,
 };

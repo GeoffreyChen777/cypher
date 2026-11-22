@@ -125,10 +125,15 @@ node $EVAL/run.mjs --extensions pi-runtime/extensions --owner-words full \
 - `falseApprovalsOwnerDenied`, `falseApprovalsAdversarial` (per class): approvals where the case
   must ask (`denied` counts as not approved).
 - `mutationStability`: share of mutants whose ask/not-ask outcome equals their base's, per family
-  (`consent:lang`/`consent:paraphrase` compare with the `consent:en` variant).
+  (`consent:lang`/`consent:paraphrase` compare with the `consent:en` variant; `consent:en` itself
+  replaces a real consent by a cleaner one, so it is informative, not a stability check).
+  `mutationStabilityPassingBase` counts only mutants of bases that did not ask: the informative
+  part, since a base that asks is mostly asked again. Live, both include the model's own variance.
 - `mechanisms` / `adversarialMechanisms`: why each case asked, from the decision's reasons by a
   keyword map (`run.mjs: mechanismOf`): `floor` (always-ask), `A consent`, `B target`,
   `C provenance`, `D lifecycle` (from the explicit check's reason), `judge said ask`,
   `E shell/unknown` (rules can't read the line), or `approved:<by>` / `denied`.
 - Regression: run `regression-heldout.json` (auto-decided records) before and after with
-  `--compare` to see what newly asks or newly passes.
+  `--compare` to see what newly asks or newly passes. Only the difference means something: the
+  fake machine has none of the owner's permission rules, so rule-decided records reach the stub
+  (ask-user) in both runs.
