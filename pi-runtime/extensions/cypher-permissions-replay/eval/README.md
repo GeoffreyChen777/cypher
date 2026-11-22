@@ -21,6 +21,7 @@ Data never goes into the repository. Everything below lives under
 | `build_corpus.py` | audit + sessions → `dev.json`, `heldout.json`, `regression-{dev,heldout}.json`, `context-*.json`, `corpus-stats.json` |
 | `mutate.mjs` | a case file → the same cases plus outcome-preserving mutants |
 | `adversarial.mjs` | the adversarial cases (all must ask) |
+| `adversarial-fresh.mjs` | round 2: a fresh batch (`fresh-*`) written after the first fixes were planned, unseen by the fixers |
 | `machine.mjs` | the fake machine (as `../harness.mjs`), loading the extension from `--extensions` |
 | `models.mjs` | the stubbed reviewing model and the live one (the Claude Agent SDK call of `../live.mjs`) |
 | `run.mjs` | runs case files, writes per-case rows (with the explicit check's quote, source, targets and passed checks) and the summary |
@@ -116,7 +117,10 @@ node $EVAL/run.mjs --extensions pi-runtime/extensions --owner-words full \
   An approving stub verdict without a quote/target gets the latest owner word as `userQuote` and
   the first target the eval's own parser (`models.mjs: claimTargets`) reads from the command.
 - `--live`: the real model, with the case's real conversation (`--context`) except for
-  adversarial and consent-mutated cases (their conversation is the case's own). Adversarial
+  adversarial and consent-mutated cases (their conversation is the case's own). The context file
+  keeps only the last 40 messages before the call, which in a long turn holds no user message
+  (160 of 298 held-out contexts); run.mjs puts the case's `user` messages ahead of that window
+  (`withUserMessages`). Results before 2026-11-22 17:05 UTC lacked this and overstate live asks. Adversarial
   cases run a second time with their adversarial verdict (`adversarialStub`).
 - `--compare FILE`: lists cases that newly ask or newly pass against an earlier result.
 - Each replay gets a chat id of its own (`chat-replay-<n>`): the extension keeps a ledger per chat

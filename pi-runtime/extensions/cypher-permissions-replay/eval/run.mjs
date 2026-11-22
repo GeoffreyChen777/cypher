@@ -90,11 +90,24 @@ if (args.live) {
 }
 const stubbed = stubModel(args.stub);
 
+/**
+ * The context file keeps the last 40 messages before the call, which in a long turn holds no
+ * user message at all; the extension reads the whole branch. Put the case's user messages (the
+ * last 8, oldest first) ahead of the window, without those the window already has.
+ */
+function withUserMessages(branch, user) {
+  if (!branch) return branch;
+  const text = (content) => (typeof content === "string" ? content : (content ?? []).filter((p) => p.type === "text").map((p) => p.text).join("\n")).trim();
+  const present = new Set(branch.filter((e) => e.message?.role === "user").map((e) => text(e.message.content)));
+  const missing = (user ?? []).filter((t) => !present.has(t.trim()));
+  return [...missing.map((content) => ({ type: "message", message: { role: "user", content } })), ...branch];
+}
+
 const rows = [];
 let done = 0;
 const jobs = cases;
 async function runOne(item) {
-  const conversation = context[String(item.base ?? item.id)]?.branch;
+  const conversation = withUserMessages(context[String(item.base ?? item.id)]?.branch, item.user);
   const useContext = args.live && conversation && !item.adversarial && !item.mutation?.owner;
   const complete = live ? live.complete : stubbed;
   const got = await machine.replay(item, { complete, ...(useContext ? { branch: conversation } : {}) });
