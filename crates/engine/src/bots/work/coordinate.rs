@@ -687,17 +687,7 @@ impl Bots {
                     p::STEP_TITLE_MAX
                 )));
             }
-            let detail = step.detail.as_deref().map_or(0, count);
-            if detail > p::STEP_DETAIL_MAX {
-                return Err(refuse(format!(
-                    "Step {}'s detail has {detail} characters; a step's detail holds at most \
-                     {}. Nothing is cut for you: shorten it to what the background session \
-                     needs to carry the step out, and propose the plan again.",
-                    index + 1,
-                    p::STEP_DETAIL_MAX
-                )));
-            }
-            details += detail;
+            details += step.detail.as_deref().map_or(0, count);
         }
         if details > p::PLAN_DETAILS_MAX {
             return Err(refuse(format!(

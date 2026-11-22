@@ -937,13 +937,13 @@ async fn a_plan_is_refused_rather_than_cut() {
             serde_json::json!({ "title": "Long plan", "steps": steps }),
         )
     };
+    // The details share one budget, whether one step uses it or several.
     let long_step = propose(serde_json::json!([
-        { "title": "a", "project": "sp-billing", "detail": "d".repeat(1_501) },
+        { "title": "a", "project": "sp-billing", "detail": "d".repeat(4_001) },
     ]))
     .await;
     assert!(
-        long_step
-            .contains("Step 1's detail has 1501 characters; a step's detail holds at most 1500"),
+        long_step.contains("add up to 4001 characters; a plan holds at most 4000"),
         "{long_step}"
     );
     let long_plan = propose(serde_json::json!([
@@ -991,14 +991,15 @@ async fn a_plan_is_refused_rather_than_cut() {
         "the model reads the same words"
     );
 
-    // At the caps it is stored whole, and the brief carries every character.
+    // At the caps it is stored whole, and the brief carries every character:
+    // one step may hold every detail character a plan has.
     rig.core
         .doc_host
         .open(&bot.chat_id)
         .unwrap()
         .write_user_message("m-long", &"词".repeat(1_600), 1_000)
         .unwrap();
-    let detail = format!("{}END", "设".repeat(1_497));
+    let detail = format!("{}END", "设".repeat(3_997));
     let kept = raw(serde_json::json!([
         { "title": "a", "project": "sp-billing", "detail": detail },
     ]))

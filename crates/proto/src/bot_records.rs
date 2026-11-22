@@ -52,10 +52,9 @@ pub const TITLE_MAX: usize = 120;
 pub const LINE_MAX: usize = 300;
 pub const STEP_TITLE_MAX: usize = 160;
 pub const DETAIL_MAX: usize = 400;
-/// One step's detail: what the orchestration needs to start it.
-pub const STEP_DETAIL_MAX: usize = 1_500;
-/// Every step's detail together. With the other caps this keeps a work row
-/// under the registry's per-row size ([`WORK_ROW_MAX`]).
+/// Every step's detail together (what the orchestration needs to start
+/// each step); one step may use all of it. With the other caps this keeps a
+/// work row under the registry's per-row size ([`WORK_ROW_MAX`]).
 pub const PLAN_DETAILS_MAX: usize = 4_000;
 /// A step's progress note.
 pub const STEP_NOTE_MAX: usize = 200;
@@ -103,6 +102,15 @@ pub fn clip(text: &str, max: usize) -> String {
     let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+/// What `c` takes in serde_json's output, in UTF-16 units.
+fn json_units(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        c if c < ' ' => 6,
+        c => c.len_utf16(),
+    }
 }
 
 fn clip_opt(text: &Option<String>, max: usize) -> Option<String> {
@@ -488,8 +496,10 @@ impl BotWork {
     }
 
     /// A last resort for text the caps let through but whose JSON runs long
-    /// (escaped newlines and quotes): shorten the result, then the longest
-    /// detail, until the row is one the registry takes.
+    /// (escaped newlines, quotes and control characters): shorten the
+    /// result, then the longest detail, until the row is one the registry
+    /// takes. Each cut takes off what the row is over as JSON, not as
+    /// characters, so a detail of six-unit escapes loses only what it must.
     fn fit_row(&mut self) {
         for _ in 0..16 {
             let units = self.row_units();
@@ -498,8 +508,14 @@ impl BotWork {
             }
             let over = units - WORK_ROW_MAX + 16;
             let shorten = |text: &mut String| {
-                let keep = text.chars().count().saturating_sub(over);
-                *text = clip(text, keep.max(1));
+                let chars: Vec<char> = text.chars().collect();
+                // The ellipsis that marks the cut costs one unit back.
+                let (mut keep, mut freed) = (chars.len(), 0);
+                while keep > 1 && freed < over + 1 {
+                    keep -= 1;
+                    freed += json_units(chars[keep]);
+                }
+                *text = chars[..keep].iter().chain(['…'].iter()).collect();
             };
             match self.result.as_mut().filter(|r| r.chars().count() > 200) {
                 Some(result) => shorten(result),
@@ -648,7 +664,9 @@ pub struct WorkStep {
 impl WorkStep {
     fn clamp(&mut self) {
         self.title = clip(&self.title, STEP_TITLE_MAX);
-        self.detail = clip_opt(&self.detail, STEP_DETAIL_MAX);
+        // No step holds more than the whole plan's budget; the steps share
+        // it in `BotWork::clamp`.
+        self.detail = clip_opt(&self.detail, PLAN_DETAILS_MAX);
         self.note = clip_opt(&self.note, STEP_NOTE_MAX);
         self.sessions.truncate(STEP_SESSIONS_MAX);
         self.session_choice.clamp();
@@ -1757,7 +1775,7 @@ mod tests {
         work.warned_at = Some(1_794_465_204_971);
         let steps = work.steps.len();
         for (index, step) in work.steps.iter_mut().enumerate() {
-            step.detail = Some("\"".repeat(STEP_DETAIL_MAX));
+            step.detail = Some("\"".repeat(PLAN_DETAILS_MAX));
             step.note = Some("n".repeat(STEP_NOTE_MAX));
             let share = (SESSIONS_PER_WORK_CAP as usize).div_ceil(steps);
             let count = share.min(
@@ -1879,6 +1897,118 @@ mod tests {
         );
     }
 
+    /// One step may take the whole details budget. Every other text at its
+    /// cap and made of quotes (two units each in JSON), on a plan that ran
+    /// to its end: the row still fits. A detail of quotes, newlines and
+    /// backslashes costs a proposal none of its characters.
+    #[test]
+    fn one_step_may_carry_every_detail_character() {
+        let id = "0".repeat(36);
+        let at = Some(1_794_465_204_971);
+        let choice = SessionChoice {
+            model: Some("m".repeat(MODEL_ID_MAX)),
+            thinking: Some(crate::ReasoningLevel::XHigh),
+            fast: Some(true),
+        };
+        let q = |max: usize| "\"".repeat(max);
+        let ended = |detail: &str| BotWork {
+            id: id.clone(),
+            bot_id: id.clone(),
+            title: q(TITLE_MAX),
+            instruction: q(INSTRUCTION_MAX),
+            summary: Some(q(DETAIL_MAX)),
+            steps: vec![WorkStep {
+                id: "1".into(),
+                title: q(STEP_TITLE_MAX),
+                project: Some(id.clone()),
+                detail: Some(detail.into()),
+                state: StepState::Done,
+                sessions: vec![id.clone(); STEP_SESSIONS_MAX],
+                note: Some(q(STEP_NOTE_MAX)),
+                started_at: at,
+                ended_at: at,
+                session_choice: choice.clone(),
+            }],
+            state: WorkState::Done,
+            chat_id: id.clone(),
+            tool_call_id: Some(id.clone()),
+            thread_chat_id: Some(id.clone()),
+            created_at: 1_794_465_204_971,
+            started_at: at,
+            ended_at: at,
+            result: Some(q(RESULT_MAX)),
+            decision: Some(PlanDecision {
+                approve: true,
+                at: 1_794_465_204_971,
+            }),
+            stop_requested_at: at,
+            notify: true,
+            time_limit_minutes: Some(PLAN_TIME_LIMIT_MAX_MINUTES),
+            time_added_minutes: Some(PLAN_TIME_ADDED_MAX_MINUTES),
+            warned_at: at,
+            coordinator_choice: choice.clone(),
+        };
+        // The proposal as the engine stores it: nothing has run yet.
+        let proposed = |detail: &str| {
+            let mut work = ended(detail);
+            work.state = WorkState::Proposed;
+            work.started_at = None;
+            work.ended_at = None;
+            work.result = None;
+            work.decision = None;
+            work.stop_requested_at = None;
+            work.time_added_minutes = None;
+            work.warned_at = None;
+            let step = &mut work.steps[0];
+            step.state = StepState::Pending;
+            step.sessions.clear();
+            step.note = None;
+            step.started_at = None;
+            step.ended_at = None;
+            work
+        };
+        // `PLAN_DETAILS_MAX` characters of `unit`, between letters so that
+        // clamp's trim takes none of them.
+        let detail = |unit: &str| {
+            let fill: String = unit.chars().cycle().take(PLAN_DETAILS_MAX - 2).collect();
+            format!("d{fill}d")
+        };
+        for unit in ["\"", "\n", "\"\n\\\t"] {
+            let detail = detail(unit);
+            assert_eq!(detail.chars().count(), PLAN_DETAILS_MAX);
+            let mut work = proposed(&detail);
+            work.clamp();
+            let units = work.row_units();
+            assert!(units <= WORK_ROW_MAX, "{unit:?}: {units}");
+            assert!(
+                work.steps[0].detail.as_deref() == Some(detail.as_str()),
+                "{unit:?}: a proposal keeps its detail ({units} units)"
+            );
+            // Ended, with every field filled in, it runs over even without
+            // its result: the result goes, then only as much of the detail
+            // as the row is over.
+            let mut work = ended(&detail);
+            work.clamp();
+            let units = work.row_units();
+            assert!(units <= WORK_ROW_MAX, "{unit:?} ended: {units}");
+            assert!(
+                units > WORK_ROW_MAX - 40,
+                "{unit:?}: cut too much ({units})"
+            );
+            assert!(work.result.as_ref().is_some_and(|r| r.chars().count() <= 2));
+            assert!(work.steps[0].detail.as_ref().unwrap().ends_with('…'));
+        }
+        // Control characters escape to six units each (`\u0001`): more than
+        // the row holds, so the detail gives way, but only so far.
+        let control = detail("\u{1}");
+        for mut work in [proposed(&control), ended(&control)] {
+            work.clamp();
+            let units = work.row_units();
+            assert!(units <= WORK_ROW_MAX, "control characters: {units}");
+            assert!(units > WORK_ROW_MAX - 40, "cut too much ({units})");
+        }
+    }
+
     #[test]
     fn a_plan_within_its_caps_is_stored_whole() {
         let step = |detail: &str| WorkStep {
@@ -1900,9 +2030,9 @@ mod tests {
             instruction: "指".repeat(INSTRUCTION_MAX),
             summary: Some("s".repeat(DETAIL_MAX)),
             steps: vec![
-                step(&"设".repeat(STEP_DETAIL_MAX)),
-                step(&"计".repeat(STEP_DETAIL_MAX)),
-                step(&"d".repeat(PLAN_DETAILS_MAX - 2 * STEP_DETAIL_MAX)),
+                step(&"设".repeat(1_500)),
+                step(&"计".repeat(1_500)),
+                step(&"d".repeat(PLAN_DETAILS_MAX - 3_000)),
             ],
             state: WorkState::Proposed,
             chat_id: "c".into(),

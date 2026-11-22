@@ -79,14 +79,13 @@ export const PLAN_LIMITS = {
   TITLE_MAX: 120,
   DETAIL_MAX: 400,
   STEP_TITLE_MAX: 160,
-  STEP_DETAIL_MAX: 1_500,
   PLAN_DETAILS_MAX: 4_000,
   PLAN_STEPS_MAX: 10,
   PLAN_TIME_LIMIT_MIN_MINUTES: 15,
   PLAN_TIME_LIMIT_MAX_MINUTES: 4_320,
 } as const;
 const L = PLAN_LIMITS;
-/** A cap as the descriptions write it: 1,500. */
+/** A cap as the descriptions write it: 4,000. */
 const n = (value: number) => String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 
 // A session's model, thinking level and GPT Fast mode; what is left out
@@ -201,7 +200,7 @@ const TOOLS: ToolDef[] = [
         Type.Object({
           title: Type.String({ maxLength: L.STEP_TITLE_MAX, description: `What this step does, at most ${L.STEP_TITLE_MAX} characters` }),
           project: Type.Optional(Type.String({ description: "Project id or name it works in" })),
-          detail: Type.Optional(Type.String({ maxLength: L.STEP_DETAIL_MAX, description: `How: directly or in a session, worktree, how it gets another step's change (path, pushed branch, version), and the constraints and decisions from this conversation the step depends on. At most ${n(L.STEP_DETAIL_MAX)} characters a step and ${n(L.PLAN_DETAILS_MAX)} across the plan` })),
+          detail: Type.Optional(Type.String({ maxLength: L.PLAN_DETAILS_MAX, description: `How: directly or in a session, worktree, how it gets another step's change (path, pushed branch, version), and the constraints and decisions from this conversation the step depends on. At most ${n(L.PLAN_DETAILS_MAX)} characters across the plan` })),
           session: Type.Optional(
             Type.Object(choiceFields("the workspace's choice for sessions"), {
               description: "The model, thinking level and Fast mode of the sessions this step starts",

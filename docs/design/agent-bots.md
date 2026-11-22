@@ -344,10 +344,15 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
   writes it as proposed, with the bot chat and the tool call that draws its card (the
   `BotTool` RPC passes Pi's tool call id), the steps (ids 1 to n, at most 10, projects
   resolved within the scope) and the owner's newest message in the bot chat as the
-  instruction. Its answer tells the model to stop.
+  instruction. Its answer tells the model to stop. The steps' details share one budget,
+  4,000 characters across the plan (`PLAN_DETAILS_MAX`), however they split it: one step
+  may hold all of it. There is no cap per step.
 - **Who writes what.** Owner devices write only `decision` (`Mutate resolveBotPlan`) and
   `stopRequestedAt` (`Mutate stopBotWork`); the host writes the rest, always leaving those
-  two fields alone. Every text is clamped before it is written.
+  two fields alone. Every text is clamped before it is written, and the row as a whole
+  to `WORK_ROW_MAX` UTF-16 units of JSON (under the registry's 16 KiB per op): text
+  whose JSON runs long (escaped quotes, newlines, control characters) shortens the
+  result, then the longest detail, by what the row is over.
 - **The work host** (`bots/work/host.rs`) runs on the bot's host. It reconciles on every
   change of the bot records, bot rows and session rows, and every 5 seconds:
 
@@ -681,7 +686,8 @@ are plain text, bounded to 48 KiB. A refusal is an answer too, flagged `isError:
 extension returns it, in the engine's words, as an error result, and a call that fails on
 the way (the engine unreachable, a timeout) as "<label> failed: <reason>", so the chat
 draws a failed chip for either. `propose_plan`'s schema carries the engine's caps
-(`maxLength` on the title, summary, step titles and details; `PLAN_LIMITS`, kept equal to
+(`maxLength` on the title, summary, step titles and details, a detail's being the plan's
+whole details budget; `PLAN_LIMITS`, kept equal to
 `cypher_proto`'s by a harness test), so Pi refuses an over-long plan before the engine
 sees it.
 
