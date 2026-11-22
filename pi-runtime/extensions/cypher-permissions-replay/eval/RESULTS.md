@@ -66,7 +66,7 @@ data reads; #3879 and #4002 ask). Against round 2's live run: 7 newly ask, 1 new
 now asked by the explicit check: two branch-or-tag pushes under "pr 给main", a simulator target the judge
 named as the app's bundle id, an unreadable `rpc_probe` target, an iOS tag the code can't confirm, and two
 where file and symbol names in a long owner message were read as branch names ("your words name branch
-crates/ui/src/shell/dock.rs, rail_order, …"). Live variance between runs is a few cases either way.
+crates/ui/src/shell/dock.rs, rail_order, …"). The live judge varies between runs (the same adversarial case was approved in one run and not another), and this was one run, so a difference of a few cases is within noise.
 
 ## Round 4 (19910c43): what passed then
 
