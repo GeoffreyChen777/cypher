@@ -206,7 +206,7 @@ test("tools (property): every row's generated command line reads back as its ent
 // --- Consent sources ---------------------------------------------------------------------
 
 const facts = {
-  git: () => ({ current: "fix-badge", defaults: ["main"], isBranch: () => true }),
+  git: () => ({ current: "fix-badge", defaults: ["main"], isBranch: (name) => /^(main|fix-badge|feature|fix-x|(relay|badge)-\d+)$/.test(name) }),
   tagExists: () => false,
   readFile: () => undefined,
 };
@@ -443,6 +443,15 @@ test("repositories (property): qualifying, unqualifying or URL-ifying a target i
     const consent = pick([`merge PR #${n}`, `merge ${pick(cases(`${owner}/${name}`))}#${n}`, `merge https://github.com/${qualified}/pull/${n}`, `PR ${n} 没问题合并`]);
     const got = checkExplicit({ quote: consent, targets: [{ kind: "pr", value: claimValue }] }, read, words({ text: consent, source: "typed" }), [], ef);
     assert.equal(got.ok, true, `${line.join(" ")} / ${claimValue} / "${consent}": ${got.reason}`);
+    // Another repository on the line against another named in the consent: never, whatever the origin says.
+    const theirs = pick(cases("acme/infra"));
+    const named = pick([`merge #${n} in acme/web`, `merge acme/web#${n}`, `merge https://github.com/acme/web/pull/${n}`, `PR ${n} 在 acme/web 合并`]);
+    for (const origin of [undefined, "acme/web", `${owner}/${name}`]) {
+      const facts2 = { ...ef, originRepo: () => origin };
+      const line2 = pick([["gh", "pr", "merge", n, "--repo", theirs, "--merge"], ["gh", "pr", "merge", `https://github.com/${theirs}/pull/${n}`], ["glab", "mr", "merge", n, "-R", theirs]]);
+      const got2 = checkExplicit({ quote: named, targets: [{ kind: "pr", value: n }] }, targetsOf([line2]), words({ text: named, source: "typed" }), [], facts2);
+      assert.equal(got2.ok, false, `${line2.join(" ")} / "${named}" / origin ${origin}`);
+    }
     // The same in another repository: never.
     const elsewhere = targetsOf([["gh", "pr", "merge", n, "--repo", "other/elsewhere", "--merge"]]);
     assert.equal(checkExplicit({ quote: consent, targets: [{ kind: "pr", value: claimValue }] }, elsewhere, words({ text: consent, source: "typed" }), [], ef).ok, false, `other repo, "${consent}"`);
@@ -469,4 +478,26 @@ test("tools: glab merge requests read like gh pull requests", () => {
   assert.equal(checkExplicit({ quote: "open an MR from fix-x into release/2.0", targets: [{ kind: "pr", value: "fix-x → release/2.0" }] }, create, words1, [], explicitFacts).ok, true);
   const intoMain = targetsOf([["glab", "mr", "create", "-b", "main", "-s", "fix-x", "-t", "t"]]);
   assert.equal(checkExplicit({ quote: "open an MR from fix-x into release/2.0", targets: [{ kind: "branch", value: "main" }] }, intoMain, words1, [], explicitFacts).ok, false, "another base");
+});
+
+test("attributes (property): ordinary words from every language around a consent never change its outcome", () => {
+  const prose = [...new Set(LANGUAGES.flatMap((language) => Object.entries(language.nouns).filter(([kind]) => !["pr", "tag", "version", "branch"].includes(kind)).flatMap(([, list]) => list)).map(bare))]
+    .filter((w) => w.length >= 2);
+  const adjectives = prose.flatMap((a) => [`${a}-only`, `${a}-based`, `${a}-side`]).slice(0, 400);
+  const cases = [
+    [["gh", "pr", "merge", "52", "--merge"], "merge PR #52", { kind: "pr", value: "52" }],
+    [["gh", "pr", "create", "--base", "main", "--fill"], "open a PR into main", { kind: "pr", value: "fix-badge → main" }],
+    [["git", "push", "origin", "fix-badge"], "push fix-badge", { kind: "branch", value: "fix-badge" }],
+  ];
+  for (const [line, quote, target] of cases) {
+    const read = targetsOf([line]);
+    const base = checkExplicit({ quote, targets: [target] }, read, words({ text: quote, source: "typed" }), [], explicitFacts).ok;
+    assert.equal(base, true, quote);
+    for (let i = 0; i < 150; i++) {
+      const pad = () => Array.from({ length: 1 + Math.floor(rand() * 3) }, () => pick(rand() < 0.5 ? prose : adjectives)).join(" ");
+      const text = `${pad()} ${quote} ${pick(["", "into", "from", "to", "in", "给", "に"])} ${pad()}`;
+      const got = checkExplicit({ quote, targets: [target] }, read, words({ text, source: "typed" }), [], explicitFacts);
+      assert.equal(got.ok, base, `"${text}": ${got.reason}`);
+    }
+  }
 });

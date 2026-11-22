@@ -47,7 +47,7 @@ import { antecedentsFor } from "./lifecycle.ts";
 import type { LedgerEntity } from "./ledger.ts";
 import type { GitFacts } from "./risk.ts";
 import { UNKNOWN } from "./shell.ts";
-import { actionWords, carriesOnOnly, listWords, nounWords, uncoveredScript } from "./lexicon.ts";
+import { actionWords, allWords, carriesOnOnly, listWords, nounWords, uncoveredScript } from "./lexicon.ts";
 import { readTool } from "./tools.ts";
 import type { ToolRead } from "./tools.ts";
 
@@ -777,7 +777,7 @@ function uncovered(target: Target, message: string, opened: readonly PullRequest
   if (why) return why;
   const originRaw = target.dir ? facts.originRepo(target.dir) : undefined;
   const origin = originRaw ? repoOf(originRaw) || undefined : context.currentRepo;
-  return attributeClash(target, message, { ...context, ...(origin ? { currentRepo: origin } : {}) });
+  return attributeClash(target, message, { ...context, ...(origin ? { currentRepo: origin } : {}) }, facts);
 }
 
 function uncoveredByKind(target: Target, message: string, opened: readonly PullRequestFact[], facts: ExplicitFacts, context: EntityContext): string | undefined {
@@ -853,6 +853,15 @@ const IN_REPO_KINDS: ReadonlySet<string> = new Set(["pr", "branch", "tag", "rele
 
 /** Articles between a marker and the name it marks ("into the main branch"). */
 const ARTICLES = new Set(["the", "a", "an", "der", "die", "das", "den", "dem", "le", "la", "les", "l", "el", "los", "las", "il", "lo", "gli", "o", "os", "as", "het", "een"]);
+/** Remote names, never branches by themselves. */
+const REMOTE_NAMES = /^(origin|upstream|fork)$/i;
+
+/** A word of the language table (lexicon.ts), not a name: "PR", "remote", "merge". */
+function ordinaryWord(word: string): boolean {
+  return LEXICON_WORD.test(word);
+}
+const LEXICON_WORD = new RegExp(`^(?:${allWords().source})$`, "iu");
+
 /** Branch names that are branches whatever the repository has. */
 const BRANCHY = /^(main|master|develop|development|dev|trunk|staging)$/i;
 const VERSIONISH = /^v?\d+(?:\.\d+)*$/;
@@ -870,13 +879,18 @@ export interface NamedAttributes {
  * table's role markers (lexicon.ts: `into`/`给`/`に`/`에` before or after a
  * branch, `from`/`从`/`から`/`에서`): a name counts as a branch when the
  * repository has it, a branch noun stands next to it, or a role marker
- * marks it and it looks like one (has a `/`, `-` or `_`, or is `main`,
- * `master`, …). A repository is a URL's, an `owner/name#N`'s, or an
+ * marks it and it has a `/`; ordinary words never (an adjective like
+ * "read-only" is no branch). A repository is a URL's, an `owner/name#N`'s, or an
  * `owner/name` of the current repository's owner or next to a repository noun.
  */
-export function namedAttributes(text: string, context: EntityContext, isBranch: (name: string) => boolean = () => false): NamedAttributes {
+export function namedAttributes(text: string, context: EntityContext, isBranch: (name: string) => boolean = () => false, options: { explicitRepo?: boolean } = {}): NamedAttributes {
   const out: NamedAttributes = { branches: [], repos: [], commits: [] };
   const haystack = text.normalize("NFKC");
+  // Branches this chat's pull requests name.
+  const chatRefs = new Set((context.prs ?? []).flatMap((pr) => [pr.head, pr.base]).filter((name): name is string => !!name));
+  // Code formatting: `…` spans.
+  const spans = [...haystack.matchAll(/`[^`\n]+`/g)].map((m) => [m.index, m.index + m[0].length] as const);
+  const inCode = (at: number) => spans.some(([start, end]) => at > start && at < end);
   const owner = context.currentRepo?.split("/")[0];
   for (const match of haystack.matchAll(/(?:https?:\/\/)?(?:www\.)?(?:github\.com|gitlab\.com)[/:]([\w.-]+\/[\w.-]+?)(?:\.git)?(?=[/#?\s]|$)/gi)) out.repos.push(repoOf(match[1]));
   for (const match of haystack.matchAll(/(?<![\w./-])([\w.-]+\/[\w.-]+)[#!]\d+/g)) out.repos.push(repoOf(match[1]));
@@ -899,16 +913,20 @@ export function namedAttributes(text: string, context: EntityContext, isBranch: 
     const nextWord = after.trim().split(/\s+/)[0] ?? "";
     const repoNoun = nounWords("repo");
     const repoBase = context.currentRepo?.split("/")[1];
-    if (/^[\w.-]+\/[\w.-]+$/.test(name) && !isBranch(name) && ((owner && name.split("/")[0].toLowerCase() === owner) || (repoBase && name.split("/")[1].toLowerCase() === repoBase) || repoNoun.test(lastWord) || repoNoun.test(nextWord) || repoNoun.test(before.slice(-6)))) {
-      out.repos.push(repoOf(name));
-      continue;
-    }
     const role = roleOf(before, after, rawLast) ?? roleOf(before, after, lastWord);
-    const branchNoun = nounWords("branch");
-    const nouned = branchNoun.test(lastWord) || branchNoun.test(nextWord) || branchNoun.test(before.slice(-6)) || branchNoun.test(after.slice(0, 6));
-    const known = isBranch(name) || isBranch(name.replace(/^origin\//, ""));
-    const shaped = /[/_-]/.test(name) || BRANCHY.test(name);
-    if (nouned || (shaped && (known || role !== undefined))) out.branches.push({ name: name.replace(/^origin\//, ""), ...(role ? { role } : {}) });
+    const coded = inCode(at);
+    const ref = name.replace(/^origin\//, "");
+    // An entity, not a word: a branch the repository or this chat has, or one in code formatting; a role-marked `x/y`.
+    const exists = ((isBranch(name) || isBranch(ref)) && !ordinaryWord(ref) && !REMOTE_NAMES.test(ref)) || chatRefs.has(ref);
+    // With a repository on the line, any `x/y` that is no branch may be one: a name of another must conflict (safe side).
+    if (/^[\w.-]+\/[\w.-]+$/.test(name) && !exists && (role === undefined || options.explicitRepo === true)) {
+      const repoish = coded || options.explicitRepo === true || (owner && name.split("/")[0].toLowerCase() === owner) || (repoBase && name.split("/")[1].toLowerCase() === repoBase) || repoNoun.test(lastWord) || repoNoun.test(nextWord) || repoNoun.test(before.slice(-6));
+      if (repoish) {
+        out.repos.push(repoOf(name));
+        continue;
+      }
+    }
+    if (exists || coded || (role !== undefined && name.includes("/"))) out.branches.push({ name: ref, ...(role ? { role } : {}) });
   }
   return out;
 }
@@ -940,20 +958,26 @@ function roleOf(before: string, after: string, lastWord: string): "base" | "head
  * doesn't name the target itself; a repository it names that isn't the
  * target's; a commit it names that isn't the one a tag marks.
  */
-function attributeClash(target: Target, message: string, context: EntityContext): string | undefined {
-  const named = namedAttributes(message, context, target.isBranch);
+function attributeClash(target: Target, message: string, context: EntityContext, facts?: ExplicitFacts): string | undefined {
+  const named = namedAttributes(message, context, target.isBranch, { explicitRepo: target.repo !== undefined });
   const entity = canonical(target.entity, context);
-  // Repositories.
+  // Repositories: the current one named in any form never conflicts with itself; another named against another acted on does.
   const repo = target.repo ? repoOf(target.repo) : entity.repo ?? context.currentRepo;
-  if (named.repos.length && IN_REPO_KINDS.has(entity.kind)) {
-    const related = repo !== undefined && named.repos.some((name) => ["same", "contains", "contained"].includes(relation({ kind: "repo", name }, { kind: "repo", name: repo }, context)));
-    if (!related) return `your words name repository ${named.repos.join(", ")}, but it acts on ${repo ?? "a repository Cypher can't tell"}`;
+  const others = named.repos.filter((name) => !(context.currentRepo && repoOf(name) === context.currentRepo && (repo === undefined || repo === context.currentRepo)));
+  if (others.length && repo !== undefined && IN_REPO_KINDS.has(entity.kind)) {
+    const related = others.some((name) => ["same", "contains", "contained"].includes(relation({ kind: "repo", name }, { kind: "repo", name: repo }, context)));
+    if (!related) return `your words name repository ${others.join(", ")}, but it acts on ${repo}`;
   }
   // Commits a tag marks.
   if (entity.kind === "tag" || entity.kind === "release") {
     const commit = target.commit?.toLowerCase();
     if (named.commits.length && commit && COMMITISH.test(commit) && !named.commits.some((sha) => sha.startsWith(commit) || commit.startsWith(sha))) {
       return `your words name commit ${named.commits.join(", ")}, but ${target.value} marks ${commit}`;
+    }
+    // A branch the consent names ("from main"): the tag's commit must be on it, by git's facts; unknown asks.
+    for (const branch of named.branches) {
+      const onIt = target.dir && target.commit && /^(main|master)$/i.test(branch.name) ? facts?.release(target.dir, target.commit, versionOf(target.value) ?? "").onDefault : undefined;
+      if (onIt !== true) return `your words name ${branch.name}, and Cypher can't confirm the commit ${target.value} marks is on it`;
     }
     return undefined;
   }

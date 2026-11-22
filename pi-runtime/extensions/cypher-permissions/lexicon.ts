@@ -607,6 +607,13 @@ export function listWords(key: ListKey, global = false): RegExp {
   return cached(`${key}:${global}`, () => compile(LANGUAGES.flatMap((language) => language[key] ?? []), global ? "giu" : "iu"));
 }
 
+/** Every word of the table, any class, any language. */
+export function allWords(): RegExp {
+  return cached("all", () =>
+    compile(LANGUAGES.flatMap((language) => [...Object.values(language.actions), ...Object.values(language.nouns), language.negate, language.retract, language.remind, language.carryOn, language.filler, language.baseBefore ?? [], language.headBefore ?? [], language.baseAfter ?? [], language.headAfter ?? []].flat() as string[])),
+  );
+}
+
 /** A message that is only a carry-on: one of the table's, at its start. */
 export function carriesOnOnly(text: string): boolean {
   const words = LANGUAGES.flatMap((language) => language.carryOn);
@@ -636,4 +643,5 @@ export function uncoveredScript(text: string): string | undefined {
 const SCRIPTS: readonly [string, RegExp][] = [
   "Latin", "Cyrillic", "Han", "Hiragana", "Katakana", "Hangul", "Greek", "Arabic", "Hebrew", "Thai", "Devanagari", "Bengali", "Tamil", "Telugu",
   "Armenian", "Georgian", "Ethiopic", "Khmer", "Lao", "Myanmar", "Sinhala", "Gujarati", "Gurmukhi", "Kannada", "Malayalam", "Tibetan", "Mongolian",
-].map((script) => [script, new RegExp(`\\p{Script=${script}}`, "u")]);
+  "Common", "Inherited",
+].map((script) => [script, new RegExp(`\\p{Script_Extensions=${script}}`, "u")]);
