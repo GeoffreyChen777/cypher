@@ -227,8 +227,8 @@ impl Shell {
                 cx,
             )
         });
-        // A workspace's chat has no rail to close a side chat from: its
-        // bar carries the close button.
+        // The session a workspace's panel shows live has no rail to close
+        // a side chat from: its bar carries the close button.
         if self.slot_without_rail(sid) {
             panel.update(cx, |panel, cx| panel.set_closable(true, cx));
         }
@@ -423,15 +423,14 @@ impl Shell {
             slot.dock.active = DockSurface::Picker;
         }
         panel.update(cx, |panel, cx| panel.dispose(cx));
-        // The last tab gone, the dock shuts — every session's, and a
-        // workspace chat's has no rail to close it from anyway.
+        // The last tab gone, the dock shuts (every session's).
         self.close_emptied_dock(sid, cx);
         cx.notify();
     }
 
-    /// Whether `sid` is drawn without the session rail: a workspace's own
-    /// chat, or the session its panel shows live.
+    /// Whether `sid` is drawn without the session rail: the session a
+    /// workspace's panel shows live (the workspace's own chat has one).
     fn slot_without_rail(&self, sid: SlotId) -> bool {
-        self.board.slot == Some(sid) || self.board.session_slot == Some(sid)
+        self.board.session_slot == Some(sid)
     }
 }

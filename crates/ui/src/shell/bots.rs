@@ -33,6 +33,7 @@ mod sessions;
 mod shortcuts;
 mod work;
 
+pub(super) use column::BoardSide;
 pub(super) use dialog::BotDialog;
 pub(super) use panel::PanelItem;
 
@@ -58,6 +59,9 @@ pub(super) struct BoardUi {
     panel_recent: Option<PanelItem>,
     /// The panel's width tween (0 ↔ its width and gap).
     panel_tween: Option<WidthTween>,
+    /// What the right side showed last, the detail panel or the chat's
+    /// dock: what the chat's side panel button opens again.
+    pub(super) side: BoardSide,
     /// The sessions the panel looks into, by chat id (the asking sessions of
     /// the Needs you page, a hidden thread): for each a session context
     /// watching its transcript, and for a thread the read-only transcript

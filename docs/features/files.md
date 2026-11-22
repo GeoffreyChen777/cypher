@@ -144,3 +144,29 @@ All or Selected) on the workspace's host device. Engine side, as built:
 - Projects on another device are not offered: a workspace works directly only
   on its host's projects (as Pi's workspace roots, [§10.2](../design/agent-bots.md#102-direct-work-owner-threads-with-work-directly))
   and reaches the others through sessions.
+
+Desktop side (`crates/ui`: `files/roots.rs`, `state/file_roots.rs`,
+`files/root_picker.rs`):
+
+- The chat's tile (the Botboard's chat card) lists its roots when it shows the
+  chat, and again when the grant or the host's projects change. An empty
+  answer, an error or an older engine leaves the workspace's folder alone.
+- **Files** and **Git** show one root at a time. A picker at the start of the
+  surface's header lists the roots (the workspace's folder with the workspace
+  glyph, projects with a folder) and appears only when there is a choice; Git
+  lists only checkouts (a `checkoutId`, or a project found to have git). Files
+  and Git follow one pick per chat: the root the owner picked or last opened
+  a reference in, else the first granted project, else the workspace's folder.
+  Git on a pick that is no checkout shows the first checkout. A commit opened
+  from History stays on its project.
+- **References** (code-reference chips and file links in replies): a relative
+  path is tried in the workspace's folder first, then each granted project in
+  list order (the chips also search every root for paths ending in it, and
+  list several matches, each under its project's name); an absolute path only
+  opens inside the root it lies in (the innermost one when roots nest). It
+  opens in Files at that root and line, and that root becomes the pick. A
+  relative link found nowhere opens in the workspace's folder (which then says
+  it is missing); a path outside every root never opens in Files: one on this
+  device is revealed in Finder.
+- Git's Branch scope names a project root's branch `HEAD` (the chat row
+  carries no branch for it). The terminal runs in the workspace's folder.

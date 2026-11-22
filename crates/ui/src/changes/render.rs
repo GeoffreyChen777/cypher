@@ -404,6 +404,29 @@ impl Changes {
                 .into_any_element();
         }
         let scope = self.scope;
+        // A workspace's own chat with several checkouts: which one.
+        let picker = {
+            let state = self.state.read(cx);
+            let choices: Vec<_> = state.git_roots().into_iter().cloned().collect();
+            state
+                .git_root()
+                .cloned()
+                .filter(|_| choices.len() > 1)
+                .map(|shown| (choices, shown))
+        }
+        .map(|(choices, shown)| {
+            let mounted = crate::files::root_picker::mounted(&self.root_menu);
+            crate::files::root_picker::render(
+                "changes-root-picker",
+                &choices,
+                &shown,
+                &self.state.clone(),
+                |this: &mut Self| &mut this.root_menu,
+                mounted,
+                &theme,
+                cx,
+            )
+        });
         let history_count = (scope == DiffScope::History).then(|| self.history_count(cx));
         let history_fetch_button =
             (scope == DiffScope::History).then(|| self.history_fetch_button(cx));
@@ -496,6 +519,7 @@ impl Changes {
             .flex_row()
             .items_center()
             .gap(px(6.0))
+            .children(picker)
             .child(trigger)
             .when_some(history_count, |element, count| {
                 element.child(div().flex_1().min_w_0().h_full().child(count))
@@ -547,9 +571,7 @@ impl Changes {
             return None;
         }
         let branch = self
-            .state
-            .read(cx)
-            .selected_chat_row()
+            .chat_row(self.state.read(cx))
             .and_then(|chat| chat.branch.clone())
             .unwrap_or_else(|| "HEAD".to_string());
         let base = self.base_ref.clone().unwrap_or_else(|| "…".to_string());
@@ -1245,7 +1267,7 @@ impl Changes {
         let base = self.base_ref.clone();
         // With no session selected (new-chat canvas) there is nothing to
         // prepare — show the quiet empty state, not an endless spinner.
-        let no_chat = self.state.read(cx).selected_chat_row().is_none();
+        let no_chat = self.chat_row(self.state.read(cx)).is_none();
         let phase = if no_chat {
             DiffPhase::Clean
         } else {

@@ -1020,9 +1020,9 @@ impl FilesPanel {
             return path.to_string();
         };
         let root = if context.target.is_none() {
-            expand_home(&context.cwd)
+            expand_home(&context.root)
         } else {
-            context.cwd.clone()
+            context.root.clone()
         };
         if path.is_empty() {
             root
@@ -1075,9 +1075,21 @@ impl FilesPanel {
     }
 
     pub(super) fn mention(&mut self, items: &[(String, bool)], cx: &mut Context<Self>) {
+        // A granted project's path means nothing relative to the workspace
+        // chat's own folder: it goes in whole (and opens back in that
+        // project, see `crate::files::roots::candidates`).
+        let whole = self
+            .context
+            .as_ref()
+            .is_some_and(|context| context.root_space_id.is_some());
         for (path, is_dir) in items {
+            let path = if whole {
+                self.absolute_path(path)
+            } else {
+                path.clone()
+            };
             cx.emit(FilesEvent::Mention {
-                path: path.clone(),
+                path,
                 is_dir: *is_dir,
             });
         }

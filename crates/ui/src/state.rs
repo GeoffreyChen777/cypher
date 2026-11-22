@@ -40,6 +40,8 @@ use cypher_rpc::methods;
 use crate::prefs::SidebarSort;
 mod engine;
 pub use engine::*;
+mod file_roots;
+pub use file_roots::FileRoots;
 mod glue;
 use glue::*;
 mod queries;
@@ -385,6 +387,9 @@ pub struct AppState {
     /// (transcript, echoes, command ledger, steers, selection) — views gate
     /// their row rebuild on it ([`Self::transcript_revision`]).
     transcript_rev: u64,
+    /// Session context showing a workspace's own chat: the folders its
+    /// Files and Git may open ([`file_roots`]).
+    chat_roots: file_roots::ChatRoots,
 }
 
 /// Which projects a window lists. The main window lists every project except
@@ -578,6 +583,7 @@ impl AppState {
             parent: None,
             mirror: None,
             transcript_rev: 0,
+            chat_roots: Default::default(),
         }
     }
 
@@ -789,6 +795,7 @@ impl AppState {
             changed = true;
         }
         if changed {
+            self.sync_file_roots(cx);
             cx.notify();
         }
     }

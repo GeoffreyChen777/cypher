@@ -1241,15 +1241,20 @@ the panel shut none does. A click on a card's header folds the card to that one 
 
 **The chat** is the bot conversation: the owner instructs the bot here. Besides their
 exchange it holds only notices: a plan's compact card, a saved routine's and a result
-notice's (§6.8), each one row or little more, each opening the detail panel. Progress never shows here. It has
-no terminal and no session dock.
+notice's (§6.8), each one row or little more, each opening the detail panel. Progress never shows here. Like
+a session it has a tile's rail in its top-right corner: a terminal in the workspace's folder, and the session
+dock with Files and Git over the workspace's folder and each project it is granted on its host (a picker in
+the surface's header switches; see [Files › Workspace chats](../features/files.md#workspace-chats)). A file
+reference in a reply opens there, in the project it resolves in. The workspace's hidden threads have neither.
 
 **The detail panel** slides in from the window's right edge and the chat narrows to make
 room. Its left edge drags to resize it (340 to 760px, never squeezing the chat below
 380px); a double click restores 420px, and the width is saved with the UI settings. It shows one item in full with its actions, and opening
 another row replaces its content; the opened row stays highlighted in the sidebar. The
-button at the right end of the chat's header opens and closes it (Esc closes it too): it
-opens on what the panel last showed, or on Needs you. An item is one card under its
+right side is for details, one at a time: the panel and the chat's dock never show
+together, and opening either shuts the other. The rail's side panel button stands for
+both: it shuts whichever is open (Esc closes the panel too), else opens the one shown
+last, the panel on what it last showed or on Needs you. An item is one card under its
 title; the panel has no close button of its own.
 
 **A session opens live in the panel.** A session the workspace runs in a project (a
