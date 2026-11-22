@@ -20,6 +20,9 @@ import { parseArgs } from "node:util";
 
 import { createMachine } from "./machine.mjs";
 import { liveModel, stubModel } from "./models.mjs";
+import { mechanismOf as mechanismOfRow } from "./mechanism.mjs";
+
+const mechanismOf = (got) => mechanismOfRow({ outcome: got.outcome, explicit: got.explicit, kind: got.kind, onceOnly: got.onceOnly, judged: got.judged, judgeVerdict: got.audit.judgeVerdict ?? got.answer, decidedBy: got.audit.decidedBy });
 
 const { values: args } = parseArgs({
   options: {
@@ -87,27 +90,6 @@ if (args.live) {
 }
 const stubbed = stubModel(args.stub);
 
-/** Which mechanism made the outcome, from the decision's reasons (keyword map, documented in README). */
-export function mechanismOf(got) {
-  if (got.outcome !== "ask") return got.outcome === "denied" ? "denied" : `approved:${got.audit.decidedBy ?? "default"}`;
-  const explicit = got.explicit ?? "";
-  const kind = got.kind ?? "";
-  const all = `${explicit} ${kind} ${got.onceOnly ?? ""}`;
-  if (/only you can approve|always asks|secret|credential|permission system|permission-system|no reviewing model|no judge/i.test(all)) return "floor";
-  if (explicit) {
-    if (/made|created|this task's|this chat's own|not this chat|did not start|didn't start|didn't make|not its own|someone else/i.test(explicit)) return "C provenance";
-    if (/target|acts on|named|names|pull request|branch|tag|repo|host|package|path/i.test(explicit) && !/quote|your words|you wrote|written since|wrote later/i.test(explicit)) return "B target";
-    if (/delete|remov|discard|stop|kill|lifecycle|still in use|running/i.test(explicit)) return "D lifecycle";
-    return "A consent";
-  }
-  if (got.judged && /ask/.test(got.audit.judgeVerdict ?? got.answer ?? "")) return "judge said ask";
-  if (got.onceOnly || /can't read|cannot read|known only when it runs|rules can't|opaque|unknown/i.test(kind)) return "E shell/unknown";
-  if (/delete|discard|stop|kill|remove/i.test(kind)) return "D lifecycle";
-  if (/made|created|not this chat|this task/i.test(kind)) return "C provenance";
-  if (got.judged) return "judge said ask";
-  return "other";
-}
-
 const rows = [];
 let done = 0;
 const jobs = cases;
@@ -129,6 +111,10 @@ async function runOne(item) {
     judged: got.judged,
     judgeVerdict: got.audit.judgeVerdict,
     explicit: got.explicit,
+    // The decision path: the explicit check's quote, its source, the targets it read and the checks it passed.
+    ...(got.audit.explicit && typeof got.audit.explicit === "object" ? { explicitCheck: { ok: got.audit.explicit.ok, quote: got.audit.explicit.quote, quoteSource: got.audit.explicit.quoteSource, targets: got.audit.explicit.targets, passed: got.audit.explicit.passed } } : {}),
+    decidedBy: got.audit.decidedBy,
+    judge: got.audit.judge,
     onceOnly: got.onceOnly,
     reviewer: got.reviewer,
     recorded: item.recorded ? { tier: item.recorded.tier, decidedBy: item.recorded.decidedBy, decision: item.recorded.decision } : undefined,

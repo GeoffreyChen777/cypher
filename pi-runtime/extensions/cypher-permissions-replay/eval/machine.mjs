@@ -80,9 +80,13 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
   for (const item of cases) if (item.checkout) spawnSync("git", ["-C", expand(item.cwd), "switch", "-q", "-c", item.checkout]);
   const resolveIn = findProgram(UNKNOWN);
 
+  let replays = 0;
   async function replay(item, { complete, branch: conversation, proposal } = {}) {
     const cwd = expand(item.cwd);
-    const permissions = new Permissions({ agentDir, chatId: "chat-replay", cwd, home, landstrip: { available: true, binary: "/nonexistent/landstrip" }, scratch: [tmp] });
+    // A chat of its own per replay: the extension may keep a ledger per chat on disk (ledger.ts), and
+    // one case's creations must not become another's.
+    const chatId = `chat-replay-${++replays}`;
+    const permissions = new Permissions({ agentDir, chatId, cwd, home, landstrip: { available: true, binary: "/nonexistent/landstrip" }, scratch: [tmp] });
     permissions.appendEntry = () => {};
     const records = [];
     permissions.audit.write = (record) => records.push(record);

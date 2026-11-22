@@ -23,7 +23,9 @@ Data never goes into the repository. Everything below lives under
 | `adversarial.mjs` | the adversarial cases (all must ask) |
 | `machine.mjs` | the fake machine (as `../harness.mjs`), loading the extension from `--extensions` |
 | `models.mjs` | the stubbed reviewing model and the live one (the Claude Agent SDK call of `../live.mjs`) |
-| `run.mjs` | runs case files, writes per-case rows and the summary |
+| `run.mjs` | runs case files, writes per-case rows (with the explicit check's quote, source, targets and passed checks) and the summary |
+| `mechanism.mjs` | which mechanism made an outcome, from the decision's reasons (shared by run and report) |
+| `report.mjs` | before/after tables as Markdown (`RESULTS.md` is its output, plus notes) |
 
 ## Rebuilding the corpus
 
@@ -117,6 +119,14 @@ node $EVAL/run.mjs --extensions pi-runtime/extensions --owner-words full \
   adversarial and consent-mutated cases (their conversation is the case's own). Adversarial
   cases run a second time with their adversarial verdict (`adversarialStub`).
 - `--compare FILE`: lists cases that newly ask or newly pass against an earlier result.
+- Each replay gets a chat id of its own (`chat-replay-<n>`): the extension keeps a ledger per chat
+  on disk, and one case's creations must not count for another.
+- Export the code under test rather than pointing at the worktree, so uncommitted edits don't leak in:
+  `git archive <sha> pi-runtime/extensions | tar -x -C $D/after`.
+
+```sh
+node $EVAL/report.mjs --results $D/results --corpus $D/corpus > /tmp/tables.md
+```
 
 ## Metrics (in the summary)
 
