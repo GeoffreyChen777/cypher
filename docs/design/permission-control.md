@@ -975,6 +975,28 @@ a Latin- or Cyrillic-script language without a row (Swedish, Czech, …) can't b
 from one that has one, so its "wait" is not recognised; such a later message still
 makes a request stale unless it names the target.
 
+**A reply binds only as bare assent** (round 3). A reply binds to the agent's proposal
+only when (`bareAssent`) it holds a plain yes from the table's `assent` class, and no
+question mark of any script (`? ？ ¿ ؟ …`), no negation, wait, preference or deferral
+(the table's `defer` class: rather/instead/later/for now/tomorrow/leave it… per
+language, counted with retractions everywhere), no action verb the quoted proposal
+doesn't have, and no name of its own (a number, `#13`, `fix-x`) the quote doesn't hold.
+Otherwise the reply is the owner's own words, checked as `typed`. The judge must also
+say so: `"consent": {"source": "reply", …, "assents": true}`; without it the verdict's
+source reads `reply-unconfirmed` and a reply consent is refused. Residual: a judge that
+is fully fooled can still bind a bare yes ("ok", "做") to the proposal right before it,
+which is the design (the owner said yes to that message); what that proposal names is
+still checked as a target like any consent's.
+
+**Attributes are entities, not prose** (round 3). A name counts as a branch only when the
+repository has it and it is no word of the table nor a remote name, when this chat's
+pull requests name it, when it is in code formatting, or when a role marker marks an
+`x/y`. With a repository on the line, any `x/y` the consent gives that is no branch
+reads as a repository, so another repository named never covers the one acted on; the
+current repository named in any form never conflicts with itself. A tag the consent
+places on `main`/`master` ("from main") needs git's fact that its commit is on the
+default branch; unknown asks.
+
 **A reply's quote must come from the proposal.** A quote found only in the reply's own
 words is those words, checked as `typed` (quote source `typed` in the audit), with every
 typed check, and the reply's own "wait"/"not yet" still takes it back.

@@ -311,8 +311,9 @@ test("consent: the judge sees each kind, and names the one it relies on", () => 
   assert.match(prompt, /\[reply\] Right after the agent wrote:\n {3}> Shall I merge PR 52\?\n {3}the owner replied: 做/);
   assert.match(prompt, /\[answer\] The agent asked:/);
   assert.match(prompt, /\[card\]/);
-  const verdict = parseVerdict('{"decision":"approve-once","reason":"r","consent":{"source":"reply","quote":"merge PR 52"},"target":{"kind":"pr","value":"52"}}');
+  const verdict = parseVerdict('{"decision":"approve-once","reason":"r","consent":{"source":"reply","quote":"merge PR 52","assents":true},"target":{"kind":"pr","value":"52"}}');
   assert.deepEqual([verdict.quote, verdict.source, verdict.targets], ["merge PR 52", "reply", [{ kind: "pr", value: "52" }]]);
+  assert.equal(parseVerdict('{"decision":"approve","reason":"r","consent":{"source":"reply","quote":"merge PR 52"}}').source, "reply-unconfirmed", "a reply the model doesn't say assents");
   assert.equal(parseVerdict('{"decision":"approve","reason":"r","userQuote":"merge PR 52"}').quote, "merge PR 52", "the old field still reads");
   assert.ok(ENTITY_KINDS.includes("simulator"));
 });
@@ -500,4 +501,45 @@ test("attributes (property): ordinary words from every language around a consent
       assert.equal(got.ok, base, `"${text}": ${got.reason}`);
     }
   }
+});
+
+test("replies (property): a reply binds to the proposal only as bare assent; questions, other targets or actions, and deferrals never do", () => {
+  const read = targetsOf([["gh", "pr", "merge", "12", "--merge"]]);
+  const proposal = "Checks are green. Next I'd merge PR #12.";
+  const claim = (source = "reply") => ({ quote: "merge PR #12", source, targets: [{ kind: "pr", value: "12" }] });
+  const reply = (text) => checkExplicit(claim(), read, words({ text, source: "reply", proposal }), [], explicitFacts);
+  let checked = 0;
+  for (const language of LANGUAGES) {
+    const yes = (language.assent ?? []).map(bare);
+    assert.ok(yes.length, `${language.code} has assent words`);
+    for (const word of yes) {
+      if (/^(do|go|mach|faz|faça|vai|pode|yap|делай|сделай|rób|zrób)$/i.test(word)) continue;
+      const got = reply(word);
+      assert.equal(got.ok, true, `${language.code} "${word}": ${got.reason}`);
+      // Unconfirmed by the model: no.
+      assert.equal(checkExplicit(claim("reply-unconfirmed"), read, words({ text: word, source: "reply", proposal }), [], explicitFacts).ok, false);
+      for (const mark of ["?", "？", "¿", "؟"]) {
+        assert.equal(reply(`${word}${mark}`).ok, false, `${language.code} "${word}${mark}"`);
+        checked++;
+      }
+      for (const other of ["#13", "fix-other", "v2.0", "PR 13"]) {
+        assert.equal(reply(`${word} ${other}`).ok, false, `${language.code} "${word} ${other}"`);
+        checked++;
+      }
+    }
+    const word = yes[0];
+    for (const defer of LANGUAGES.flatMap((row) => row.defer ?? []).map(bare)) {
+      assert.equal(reply(`${word} ${defer}`).ok, false, `${language.code} "${word} ${defer}"`);
+      checked++;
+    }
+    for (const action of ["delete", "release", "close", "push"]) {
+      for (const verb of (language.actions[action] ?? []).map(bare).filter((v) => v.length >= 2)) {
+        assert.equal(reply(`${word} ${verb}`).ok, false, `${language.code} "${word} ${verb}"`);
+        checked++;
+      }
+    }
+  }
+  // Words with no assent at all never bind either.
+  for (const text of ["thanks", "nice", "看看日志", "画面", "로그", "logs", "merci"]) assert.equal(reply(text).ok, false, text);
+  assert.ok(checked > 1000, `${checked}`);
 });

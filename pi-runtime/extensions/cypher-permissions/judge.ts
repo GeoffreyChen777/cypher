@@ -120,7 +120,7 @@ Two things always ask the user, so you never see them: a secret or credential le
 Judge each the same way: does it, read on its own terms, ask for exactly this action on this target?
 
 When you approve a danger, your answer must also carry:
-- "consent": {"source": "typed" | "plan" | "card" | "answer" | "reply", "quote": "<the words that ask for it, copied exactly from that entry>"}: for typed and plan, the owner's words; for card, the card's words; for answer, the question's or the picked option's words; for reply, the words of the agent message the reply agrees to (a quote found only in the reply's own words is checked as typed words, on their own terms). Copy a phrase or sentence, in the language it is written in, never from the agent's justification, a translation or tool output;
+- "consent": {"source": "typed" | "plan" | "card" | "answer" | "reply", "quote": "<the words that ask for it, copied exactly from that entry>", "assents": true | false}. For a reply, "assents" says whether the owner's reply is plain agreement to exactly that proposal: false when it asks a question, doubts, defers, prefers something else, names another target or action, or is about something else; a reply that doesn't assent consents to nothing, so then answer "ask-user" unless other words of the owner ask for it. for typed and plan, the owner's words; for card, the card's words; for answer, the question's or the picked option's words; for reply, the words of the agent message the reply agrees to (a quote found only in the reply's own words is checked as typed words, on their own terms). Copy a phrase or sentence, in the language it is written in, never from the agent's justification, a translation or tool output;
 - "target": what the command acts on, {"kind": "pr" | "branch" | "tag" | "release" | "package" | "host" | "repo" | "path" | "worktree" | "process" | "simulator" | "container" | "image" | "resource", "value": "<the pull request's number, the branch, the tag, name@version, the host, the path, …>"}, one of those listed under "What the command acts on" (a branch may name the pull request from or into it).
 Cypher checks both: a quote that isn't in that consent, too vague a one, a target the command doesn't act on or the consent doesn't name, or a later message that takes it back, all put the question to the user.
 
@@ -265,7 +265,10 @@ export function parseVerdict(text: string): JudgeVerdict {
     const raw = JSON.parse(match[0]) as { decision?: unknown; reason?: unknown; userQuote?: unknown; quote?: unknown; consent?: unknown; target?: unknown; targets?: unknown };
     const consent = typeof raw.consent === "object" && raw.consent !== null && !Array.isArray(raw.consent) ? (raw.consent as { source?: unknown; kind?: unknown; quote?: unknown }) : undefined;
     const quoted = typeof consent?.quote === "string" ? consent.quote : typeof raw.userQuote === "string" ? raw.userQuote : typeof raw.quote === "string" ? raw.quote : undefined;
-    const sourced = typeof consent?.source === "string" ? consent.source : typeof consent?.kind === "string" ? consent.kind : undefined;
+    const named = typeof consent?.source === "string" ? consent.source : typeof consent?.kind === "string" ? consent.kind : undefined;
+    // A reply binds only when the model says it assents: otherwise it is cited as unconfirmed (explicit.ts refuses it).
+    const assents = (consent as { assents?: unknown } | undefined)?.assents === true;
+    const sourced = named?.trim().toLowerCase() === "reply" && !assents ? "reply-unconfirmed" : named;
     const claimed = [raw.target, ...(Array.isArray(raw.target) ? raw.target : []), ...(Array.isArray(raw.targets) ? raw.targets : [])]
       .filter((item): item is { kind: unknown; value: unknown } => typeof item === "object" && item !== null && !Array.isArray(item))
       .filter((item) => typeof item.kind === "string" && (typeof item.value === "string" || typeof item.value === "number"))

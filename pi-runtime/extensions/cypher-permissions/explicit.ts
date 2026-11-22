@@ -155,14 +155,44 @@ export function consentText(word: OwnerWord): string {
  * what the owner typed and checked as such; an answer's question and the
  * option picked; any other word's text.
  */
-export function citedIn(word: OwnerWord, wanted: string): { source: ConsentSource; said: string } | undefined {
+export function citedIn(word: OwnerWord, wanted: string, quote = wanted): { source: ConsentSource; said: string } | undefined {
   if (word.source === "reply") {
-    if (word.proposal && normalize(word.proposal).includes(wanted)) return { source: "reply", said: consentText(word) };
+    if (word.proposal && normalize(word.proposal).includes(wanted) && bareAssent(word.text, quote)) return { source: "reply", said: consentText(word) };
     return normalize(word.text).includes(wanted) ? { source: "typed", said: word.text } : undefined;
   }
   const said = consentText(word);
   return normalize(said).includes(wanted) ? { source: word.source, said } : undefined;
 }
+
+/** A question mark in any script. */
+const QUESTION = /[?？¿؟;՞፧⸮⁇⁈⁉꘏]/u;
+/** Things a reply may name of its own: numbers, `#12`, `v1.2`, `a/b`, `x-y`, `a_b`. */
+const OWN_NAME = /[\p{L}\p{N}_]*(?:[#!]\d+|\d[\p{L}\p{N}._/-]*|[\p{L}\p{N}]+[/_-][\p{L}\p{N}._/-]+)/gu;
+
+/**
+ * Whether a reply is bare assent to the proposal it answers, so it may bind
+ * to it: it says a plain yes in some language of the table (lexicon.ts
+ * `assent`), and nothing more that could change what it agrees to — no
+ * question mark of any script, no negation, wait, preference or deferral,
+ * no action verb the quoted proposal doesn't have, no name (a number, a
+ * `#12`, a `fix-x`) the quote doesn't hold. Anything else is the owner's
+ * own words, checked as typed. Whether a bare yes agrees is still the
+ * reviewing model's call (`assents`).
+ */
+export function bareAssent(reply: string, quote: string): boolean {
+  const text = reply.normalize("NFKC");
+  if (QUESTION.test(text)) return false;
+  if (listWords("negate").test(text) || listWords("retract").test(text)) return false;
+  const assent = listWords("assent", true);
+  if (!listWords("assent").test(text)) return false;
+  const rest = text.replace(assent, " ");
+  const quoted = normalize(quote);
+  for (const name of rest.match(OWN_NAME) ?? []) if (!quoted.includes(normalize(name))) return false;
+  for (const action of ACTIONS) if (actionWords(action).test(rest) && !actionWords(action).test(quote)) return false;
+  return true;
+}
+
+const ACTIONS = ["create", "delete", "merge", "close", "comment", "review", "edit", "ready", "reopen", "push", "publish", "release", "unpublish", "install", "stop", "erase", "apply", "rename", "write", "archive", "reach"];
 
 /** How the dialog names each kind of consent. */
 const SOURCE_NAMES: Readonly<Record<ConsentSource, string>> = {
@@ -1067,14 +1097,17 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
   if (VAGUE.has(wanted)) return result([], `"${quote}" doesn't say what to do`);
   if (weight(wanted) < MIN_QUOTE_WEIGHT) return result([], `"${quote}" is too short to ask for this`);
   // The consent the model relies on: the latest owner word of its kind holding the quote.
-  const kind = claim.source && SOURCES.has(claim.source) ? (claim.source as ConsentSource) : undefined;
+  // `reply-unconfirmed`: the model cited a reply without saying it assents (judge.ts).
+  const assentClaimed = claim.source === "reply";
+  const claimedSource = claim.source === "reply-unconfirmed" ? "reply" : claim.source;
+  const kind = claimedSource && SOURCES.has(claimedSource) ? (claimedSource as ConsentSource) : undefined;
   // Without a target to check, the consent must be cited exactly: its kind too.
   if (unknown !== undefined && kind === undefined) return result([], `${unknown}, and the reviewing model cited no consent of yours by its kind`);
   // A reply consents to its proposal: a quote found only in the reply's own words is those words, checked as typed.
   let at = -1;
   let found: { source: ConsentSource; said: string } | undefined;
   owner.messages.forEach((message, index) => {
-    const cited = citedIn(message, wanted);
+    const cited = citedIn(message, wanted, quote);
     // A model citing a reply whose quote is the reply's own words: those are typed words, checked as such.
     if (cited && (kind === undefined || cited.source === kind || (kind === "reply" && message.source === "reply"))) {
       at = index;
@@ -1082,13 +1115,16 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
     }
   });
   if (at < 0 || !found) {
-    const other = kind !== undefined && owner.messages.some((message) => citedIn(message, wanted) !== undefined);
+    const unagreed = owner.messages.findLast((message) => message.source === "reply" && message.proposal && normalize(message.proposal).includes(wanted));
+    if (unagreed) return result([], `"${quote}" is the agent's proposal, and your reply ("${unagreed.text.trim().slice(0, 80)}") doesn't plainly agree to it`);
+    const other = kind !== undefined && owner.messages.some((message) => citedIn(message, wanted, quote) !== undefined);
     if (other) return result([], `"${quote}" isn't in your ${SOURCE_NAMES[kind]}`);
     const elsewhere = userTexts(entries).some((text) => normalize(text).includes(wanted));
     return result([], elsewhere ? `"${quote}" is in the conversation but not in your own words (an agent's brief or steering, or a translation)` : `"${quote}" isn't in your messages`);
   }
   const message = owner.messages[at];
   const said = found.said;
+  if (found.source === "reply" && !assentClaimed) return result([], `the reviewing model didn't say your reply ("${message.text.trim().slice(0, 80)}") agrees to the agent's proposal`, { quoteSource: "reply" });
   const source = { quoteSource: found.source };
   // A "don't" can only be read in a language the table has: the owner's words, and everything they wrote since.
   for (const text of [message.text, ...(found.source === "typed" ? [] : [said]), ...owner.messages.slice(at + 1).map((later) => later.text)]) {
