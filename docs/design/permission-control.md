@@ -937,8 +937,47 @@ any row deliberately left local-only, empty today). Three replay cases the model
 because their targets became readable (#59, #121, #153) carry a stubbed "ask-user" verdict:
 none has the owner's words, so no danger can run.
 
-Coverage for kinds beyond §7.3.2's is generic: the consent must say the action (a word
-table per action, `ACTION_WORDS`) and name the entity (`namesOf`).
+Coverage for kinds beyond §7.3.2's is generic: the consent must say the action (the
+action's words in the language table, below) and name the entity (`namesOf`).
+
+**Attributes must not conflict** (round 2, 2026-11-22). Naming the target is not enough
+when the consent also names something of the kind of one of the target's attributes:
+`namedAttributes(text)` reads the branches, repositories and commits a consent names, and
+`attributeClash` refuses when
+- a branch the consent marks as a pull request's base (`into`, `给`, `に`, `에`, … from
+  the table's `baseBefore`/`baseAfter`) or head (`from`, `从`, `から`, `에서`, …) isn't
+  that pull request's base or head (known from the line or this chat's facts; an
+  attribute not known is left to the target's own identity, its number); a word that is
+  a head marker in one language and a base marker in another marks neither;
+- the consent names branches with no role, none of them the target's (head, base, or the
+  pushed branch), and doesn't name the target itself (its number);
+- it names a repository (a URL, `owner/name#N`, or `owner/name` next to a repository
+  noun, of the current owner, or with the current repository's name) unrelated to the
+  target's;
+- it names a commit and a tag marks another.
+A name counts as a branch when the repository has it (and it looks like one), a branch
+noun stands next to it, or a role marker marks it and it looks like one (`/`, `-`, `_`,
+`main`, `master`, …). Repositories compare as entities (case-insensitive `owner/name`
+from any URL form); the checkout's origin is read through `repoOf`, so `--repo
+Owner/Cypher`, `https://github.com/Owner/Cypher/pull/9` and a bare `9` are the same
+pull request, and a model naming `pr 9` without a repository names the one the command
+acts on (the repository is the consent check's to compare).
+
+**Languages** (round 2): every word the check reads — what asks for each action, what
+names each kind, negation, postponement/retraction, reminders ("don't forget"),
+carry-ons, fillers and the base/head markers — is one data table,
+`cypher-permissions/lexicon.ts` `LANGUAGES`, with rows for en, zh, ja, ko, de, fr, es,
+pt, it, ru, nl, pl, tr. Spaced scripts match at a word start (`*` marks a stem), CJK
+and Hangul anywhere; a "don't" counts before the verb, or after it in verb-final
+languages or at the end of its clause. A message written in a script no row covers
+(Arabic, Thai, Hebrew, Devanagari, …: `uncoveredScript`) asks, saying so. Not covered:
+a Latin- or Cyrillic-script language without a row (Swedish, Czech, …) can't be told
+from one that has one, so its "wait" is not recognised; such a later message still
+makes a request stale unless it names the target.
+
+**A reply's quote must come from the proposal.** A quote found only in the reply's own
+words is those words, checked as `typed` (quote source `typed` in the audit), with every
+typed check, and the reply's own "wait"/"not yet" still takes it back.
 
 Tests: `cypher-permissions-entities.test.mjs` — unit tests, and seeded property tests
 over generated entity pairs (symmetry, antisymmetry, transitivity, qualification with the
@@ -946,7 +985,13 @@ current repository changes nothing, a path outside a folder is never in it, unre
 never covers, every name `namesOf` gives covers), generated command lines for every table
 row reading back as their entities, and the consent sources (a reply binds its proposal,
 an answer's unpicked option fails, a card's branch identifies the pull request, a target
-nobody named never passes whatever the source).
+nobody named never passes whatever the source); round 2 adds, per language row of the
+table, generated consents with its merge words (pass), its retractions later or as the
+reply (ask) and its negations next to the verb (ask), uncovered scripts, random pull
+requests against consents naming another base, head or repository in random languages
+(never pass), and qualified/unqualified/URL forms of a pull request, branch or release
+in the current repository (identical outcome). `PERMISSIONS_SEED=<n>` reruns the
+property tests with another seed.
 
 #### 7.3.3 What this task made: the provenance ledger (2026-11-18, ledger since 2026-11-22)
 
