@@ -851,7 +851,8 @@ fn bot_tools_plan_limits_match_the_engines() {
         ("TITLE_MAX", p::TITLE_MAX),
         ("DETAIL_MAX", p::DETAIL_MAX),
         ("STEP_TITLE_MAX", p::STEP_TITLE_MAX),
-        ("PLAN_DETAILS_MAX", p::PLAN_DETAILS_MAX),
+        ("PLAN_BODY_MAX", p::PLAN_BODY_MAX),
+        ("RESULT_BODY_MAX", p::RESULT_BODY_MAX),
         ("PLAN_STEPS_MAX", p::PLAN_STEPS_MAX),
         (
             "PLAN_TIME_LIMIT_MIN_MINUTES",

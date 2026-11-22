@@ -30,6 +30,7 @@ use cypher_proto::{
 };
 use tokio_util::sync::CancellationToken;
 
+use super::bodies::{CLEANUP_EVERY, MISSING_BODY};
 use super::coordinate::{commands_of, last_answer, last_error};
 use super::{text, workspace_roots};
 use crate::EngineError;
@@ -59,9 +60,20 @@ pub(super) async fn run(bots: Bots, cancel: CancellationToken) {
     // Approvals the previous process was waiting on have no waiter now.
     bots.expire_approvals(true);
     let mut tick = tokio::time::interval(TICK);
+    // Orphaned plan bodies go at start, then hourly (plan-body.md §8).
+    let mut next_cleanup = tokio::time::Instant::now();
     loop {
         if let Err(err) = bots.reconcile_work() {
             tracing::warn!(error = %err, "bot work pass failed");
+        }
+        if tokio::time::Instant::now() >= next_cleanup {
+            let bots = bots.clone();
+            let cleaned =
+                crate::util::off_runtime(move || bots.clean_plan_bodies(p::now_ms())).await;
+            if let Err(err) = cleaned {
+                tracing::warn!(error = %err, "plan body cleanup failed");
+            }
+            next_cleanup = tokio::time::Instant::now() + CLEANUP_EVERY;
         }
         tokio::select! {
             () = cancel.cancelled() => return,
@@ -233,6 +245,13 @@ impl Bots {
                 .filter(|a| a.bot_id == bot.id)
                 .collect();
             let (work_ids, activity_ids) = prune(&work, &activity);
+            // A pruned plan's full text leaves its chat with its row.
+            let pruned: Vec<&BotWork> = work
+                .iter()
+                .copied()
+                .filter(|w| work_ids.contains(&w.id))
+                .collect();
+            self.delete_bodies(&pruned);
             for id in &work_ids {
                 if let Some(thread) = work
                     .iter()
@@ -317,9 +336,16 @@ impl Bots {
             WorkState::Failed => ("failed", "The plan failed."),
             _ => ("was stopped", "The plan was stopped."),
         };
-        let text = work
-            .result
-            .clone()
+        // The post holds the whole result: from the chat doc when the row
+        // keeps a preview.
+        let result = match self.plan_text(work) {
+            Ok(text) => text.result,
+            Err(err) => {
+                tracing::warn!(work = %work.id, error = %err, "the plan's full result is unreadable; posting its preview");
+                work.result.clone()
+            }
+        };
+        let text = result
             .filter(|r| !r.trim().is_empty())
             .unwrap_or_else(|| fallback.to_string());
         let owner_stopped = work.state == WorkState::Stopped && work.stop_requested_at.is_some();
@@ -337,6 +363,7 @@ impl Bots {
                 headline: format!("Plan \"{}\" {word}", work.title),
                 what: "the plan you proposed just ended",
                 author: cypher_doc::command_author::PLAN,
+                whole: Some(format!("get_work with work_id {} shows all of it", work.id)),
             }),
             entry_id,
         };
@@ -399,7 +426,11 @@ impl Bots {
     }
 
     /// Approved: create the orchestration thread and start it on the brief.
+    /// A plan whose row holds previews starts only with its full text here.
     fn start_work(&self, bot: &Bot, work: &BotWork) -> Result<(), EngineError> {
+        if self.plan_text(work)?.plan.is_preview() {
+            return self.fail_without_body(bot, work);
+        }
         let thread_id = new_id();
         let now = p::now_ms();
         // Running first: a crash after this finds the thread missing and
@@ -489,6 +520,36 @@ impl Bots {
         Ok(chat)
     }
 
+    /// A plan that can't run because its full text isn't here (§4): it
+    /// fails, and its chat is told. Never run on the previews.
+    fn fail_without_body(&self, bot: &Bot, work: &BotWork) -> Result<(), EngineError> {
+        let now = p::now_ms();
+        let failed = self.edit_work(&work.id, |w| {
+            if !w.is_live() {
+                return false;
+            }
+            w.state = WorkState::Failed;
+            w.result = Some(MISSING_BODY.to_string());
+            w.ended_at = Some(now);
+            w.close_steps(now);
+            // Approved, then failed before it ran: the chat still hears.
+            w.notify = true;
+            true
+        })?;
+        if failed == Some(true) {
+            tracing::warn!(work = %work.id, "plan's full text missing on its host; not run");
+            self.log(
+                &bot.id,
+                ActivityKind::WorkFailed,
+                format!("The plan failed: {}", work.title),
+                work.thread_chat_id.as_deref(),
+                Some(&work.id),
+                None,
+            );
+        }
+        Ok(())
+    }
+
     /// Queue the thread's first run: the brief. Its message id is fixed per
     /// work item, so a repeat after a crash never shows twice.
     fn dispatch_brief(&self, bot: &Bot, work_id: &str, thread: &Chat) -> Result<(), EngineError> {
@@ -496,6 +557,11 @@ impl Bots {
         let Some(work) = ws.record::<BotWork>(p::KIND_BOT_WORK, work_id) else {
             return Ok(());
         };
+        // The brief carries the full text; without it the plan fails.
+        let plan_text = self.plan_text(&work)?;
+        if plan_text.plan.is_preview() {
+            return self.fail_without_body(bot, &work);
+        }
         let marker = thread
             .bot
             .clone()
@@ -504,6 +570,7 @@ impl Bots {
         let brief = text::brief(
             bot,
             &work,
+            &plan_text,
             &ws.read_spaces()?,
             &ws.read_devices()?,
             self.device_id(),
@@ -640,22 +707,42 @@ impl Bots {
     ) -> Result<(), EngineError> {
         let now = p::now_ms();
         let failed = error.is_some();
+        // The row as it is now: a body is written only for work still
+        // running (finish_work may have ended it since this pass began).
+        let Some(current) = self
+            .inner
+            .workspace
+            .record::<BotWork>(p::KIND_BOT_WORK, &work.id)
+            .filter(|w| w.state == WorkState::Running)
+        else {
+            return Ok(());
+        };
+        let state = if failed {
+            WorkState::Failed
+        } else {
+            WorkState::Done
+        };
+        let end = |w: &mut BotWork| {
+            w.state = state;
+            w.ended_at = Some(now);
+            w.close_steps(now);
+        };
+        let result = match (&error, &last) {
+            (Some(error), _) => error.clone(),
+            (None, Some(last)) => last.clone(),
+            (None, None) => "The orchestration ended without a result.".into(),
+        };
+        // The full quote goes to the chat doc first, outside the row lock.
+        let mut row = current;
+        end(&mut row);
+        let (preview, rev) = self.host_result_fields(row, &result, now);
         let settled = self.edit_work(&work.id, |w| {
             if w.state != WorkState::Running {
                 return false;
             }
-            w.state = if failed {
-                WorkState::Failed
-            } else {
-                WorkState::Done
-            };
-            w.result = Some(match (&error, &last) {
-                (Some(error), _) => error.clone(),
-                (None, Some(last)) => last.clone(),
-                (None, None) => "The orchestration ended without a result.".into(),
-            });
-            w.ended_at = Some(now);
-            w.close_steps(now);
+            end(w);
+            w.result = preview;
+            w.result_rev = rev;
             true
         })?;
         if settled == Some(true) {
@@ -706,16 +793,26 @@ impl Bots {
             }
         }
         let now = p::now_ms();
+        let end = |w: &mut BotWork| {
+            w.state = WorkState::Stopped;
+            w.ended_at = Some(now);
+            w.close_steps(now);
+        };
+        // Like settle_work: a result the row must cut is written first.
+        let result = reason.map(|reason| {
+            let mut row = work.clone();
+            end(&mut row);
+            self.host_result_fields(row, reason, now)
+        });
         let stopped = self.edit_work(&work.id, |w| {
             if w.state != WorkState::Running {
                 return false;
             }
-            w.state = WorkState::Stopped;
-            w.ended_at = Some(now);
-            if let Some(reason) = reason {
-                w.result = Some(reason.to_string());
+            end(w);
+            if let Some((preview, rev)) = result {
+                w.result = preview;
+                w.result_rev = rev;
             }
-            w.close_steps(now);
             true
         })?;
         if stopped == Some(true) {

@@ -109,7 +109,7 @@ test("propose_plan's schema carries the engine's caps", () => {
   assert.equal(schema.properties.title.maxLength, PLAN_LIMITS.TITLE_MAX);
   assert.equal(schema.properties.summary.maxLength, PLAN_LIMITS.DETAIL_MAX);
   assert.equal(step.properties.title.maxLength, PLAN_LIMITS.STEP_TITLE_MAX);
-  assert.equal(step.properties.detail.maxLength, PLAN_LIMITS.PLAN_DETAILS_MAX);
+  assert.equal(step.properties.detail.maxLength, PLAN_LIMITS.PLAN_BODY_MAX);
   assert.equal(schema.properties.steps.maxItems, PLAN_LIMITS.PLAN_STEPS_MAX);
   const limit = schema.properties.time_limit_minutes;
   assert.deepEqual(
@@ -118,6 +118,9 @@ test("propose_plan's schema carries the engine's caps", () => {
   );
   // The descriptions say the same numbers.
   assert.match(schema.properties.title.description, /at most 120 characters/);
-  assert.match(step.properties.detail.description, /At most 4,000 characters across the plan$/);
+  assert.match(step.properties.detail.description, /at most 30,000 characters across the plan$/);
+  const result = tools.get("finish_work").parameters.properties.result;
+  assert.equal(result.maxLength, PLAN_LIMITS.RESULT_BODY_MAX);
+  assert.match(result.description, /^Concise: .*at most 30,000 characters$/);
   assert.match(limit.description, /15 to 4320 \(72 hours\)/);
 });

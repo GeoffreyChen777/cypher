@@ -71,21 +71,25 @@ function failure(value: string) {
 }
 
 /**
- * The plan caps the engine enforces (cypher_proto `bot_records.rs`; a
- * harness test checks they agree). In the schema too, so the model fits
- * them the first time; the engine still refuses what goes over.
+ * The plan caps the engine enforces (cypher_proto `bot_records.rs` and
+ * `plan_body.rs`; a harness test checks they agree). In the schema too, so
+ * the model fits them the first time; the engine still refuses what goes
+ * over. A plan's details and a result may run long: the row keeps a
+ * preview and the full text lives in the workspace chat
+ * (docs/design/plan-body.md).
  */
 export const PLAN_LIMITS = {
   TITLE_MAX: 120,
   DETAIL_MAX: 400,
   STEP_TITLE_MAX: 160,
-  PLAN_DETAILS_MAX: 4_000,
+  PLAN_BODY_MAX: 30_000,
+  RESULT_BODY_MAX: 30_000,
   PLAN_STEPS_MAX: 10,
   PLAN_TIME_LIMIT_MIN_MINUTES: 15,
   PLAN_TIME_LIMIT_MAX_MINUTES: 4_320,
 } as const;
 const L = PLAN_LIMITS;
-/** A cap as the descriptions write it: 4,000. */
+/** A cap as the descriptions write it: 30,000. */
 const n = (value: number) => String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 
 // A session's model, thinking level and GPT Fast mode; what is left out
@@ -200,7 +204,7 @@ const TOOLS: ToolDef[] = [
         Type.Object({
           title: Type.String({ maxLength: L.STEP_TITLE_MAX, description: `What this step does, at most ${L.STEP_TITLE_MAX} characters` }),
           project: Type.Optional(Type.String({ description: "Project id or name it works in" })),
-          detail: Type.Optional(Type.String({ maxLength: L.PLAN_DETAILS_MAX, description: `How: directly or in a session, worktree, how it gets another step's change (path, pushed branch, version), and the constraints and decisions from this conversation the step depends on. At most ${n(L.PLAN_DETAILS_MAX)} characters across the plan` })),
+          detail: Type.Optional(Type.String({ maxLength: L.PLAN_BODY_MAX, description: `How: directly or in a session, worktree, how it gets another step's change (path, pushed branch, version), and the constraints and decisions from this conversation the step depends on. As long as the step needs, and no longer: at most ${n(L.PLAN_BODY_MAX)} characters across the plan` })),
           session: Type.Optional(
             Type.Object(choiceFields("the workspace's choice for sessions"), {
               description: "The model, thinking level and Fast mode of the sessions this step starts",
@@ -331,7 +335,7 @@ const TOOLS: ToolDef[] = [
       "Finish the orchestration with its outcome and a concise result for your owner, citing sessions as cypher://session/<id> links. Call it once, at the end: the steps still open end with it. A session that is still working or waiting on your owner is a reason to keep waiting, not to finish.",
     parameters: Type.Object({
       outcome: Type.Union([Type.Literal("done"), Type.Literal("failed")]),
-      result: Type.String({ description: "What was done, what was found, what needs the owner; at most 2,000 characters" }),
+      result: Type.String({ maxLength: L.RESULT_BODY_MAX, description: `Concise: what was done, what was found, what needs the owner, opening with one sentence on how it went. Link sessions for the details rather than repeating them; at most ${n(L.RESULT_BODY_MAX)} characters` }),
     }),
   },
 
