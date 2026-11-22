@@ -66,6 +66,12 @@ def side_values(side):
     v["fresh adversarial (124), live"] = count(adv, approves, fresh)
     v["original adversarial, forced, plain stub"] = count(adv, forced, lambda r: not fresh(r) and "adversarialStub" in r)
     v["fresh adversarial, forced, plain stub"] = count(adv, forced, lambda r: fresh(r) and "adversarialStub" in r)
+    if not adv:
+        # No live run: the recorded stub is the forced verdict.
+        ps = [r for r in (merged(f"{side}-stub-recorded", f"{side}-fresh-stub-recorded") or []) if r.get("adversarial")]
+        v["original adversarial, forced, plain stub"] = count(ps, approves, lambda r: not fresh(r)) + " (stub)"
+        v["fresh adversarial, forced, plain stub"] = count(ps, approves, fresh) + " (stub)"
+        v["original adversarial (59), live"] = v["fresh adversarial (124), live"] = "(not run)"
     clive = merged(f"{consent}-live", f"{consent}-live-fresh") if side != "before" else None
     cadv = [r for r in (clive or []) if r.get("adversarial") and "adversarialStub" in r]
     if cadv:
