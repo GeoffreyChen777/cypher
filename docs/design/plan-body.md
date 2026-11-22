@@ -1,6 +1,6 @@
 # Plan bodies: long plan text out of the registry row
 
-Status: design, not built (2026-11-22). Context: [agent-bots.md §6.7](agent-bots.md#67-as-built-p2).
+Status: design approved, not built (2026-11-22; the owner took every recommendation in §13). Context: [agent-bots.md §6.7](agent-bots.md#67-as-built-p2).
 
 A workspace plan is one `botWork` registry row. Every text in it is capped so the row fits
 the registry, which makes long plans impossible. This design keeps the row as the plan's
@@ -331,7 +331,9 @@ the unmerged `cypher/refused-plan-cards` branch, with a harness test against
 Total: about 4–5 days. Phases 1–3 make one PR (one bundle), phase 4 is the iOS PR, and
 phase 5 can go on its own.
 
-## 13. Decisions for the owner
+## 13. Decisions
+
+Decided 2026-11-22: the owner took the recommendation on all nine.
 
 | # | Question | Recommendation |
 | --- | --- | --- |
