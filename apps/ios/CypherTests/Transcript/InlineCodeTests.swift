@@ -211,6 +211,80 @@ final class InlineCodeTests: XCTestCase {
         }
     }
 
+    /// Lays out a reply's prose blocks from Markdown, `width` wide.
+    private func prose(_ source: String, width: CGFloat = 354) -> (NSTextStorage, NSLayoutManager, NSTextContainer) {
+        layOut(TranscriptTextStyle.prose(MarkdownParser.parse(source).map(\.block)), width: width)
+    }
+
+    /// Code that ends a paragraph keeps its box to its glyphs: the break
+    /// after it is prose, not code (it used to carry the code's wash, and
+    /// the box ran to the view's edge).
+    func testCodeEndingAParagraphKeepsItsBoxToItsGlyphs() throws {
+        let (storage, layout, container) = prose("- Build with `just ios`\n- `InlineCode.swift`\n\nNext.")
+        let string = storage.string as NSString
+        for code in ["just ios", "InlineCode.swift"] {
+            let range = string.range(of: code)
+            var whole = NSRange()
+            _ = storage.attribute(
+                .cypherInlineCode, at: range.location, longestEffectiveRange: &whole,
+                in: NSRange(location: 0, length: storage.length))
+            XCTAssertEqual(whole, range, "the break is not code")
+            XCTAssertEqual(string.character(at: NSMaxRange(range)), 0x0A)
+            let font = try XCTUnwrap(storage.attribute(.font, at: range.location, effectiveRange: nil) as? UIFont)
+            let advance = NSAttributedString(string: "x", attributes: [.font: font]).size().width
+            let box = try XCTUnwrap(
+                InlineCodeBox.boxes(layout, storage: storage, container: container, code: whole).first)
+            XCTAssertEqual(
+                box.width, CGFloat(range.length) * advance + 2 * InlineCodeBox.padX, accuracy: 0.01, code)
+        }
+    }
+
+    /// Every line sits on the prose baseline, with code or without, and a
+    /// line of only code too (desktop `strut_shift`); the boxes sit at one
+    /// height in their lines.
+    func testALineOfOnlyCodeSitsOnTheProseBaseline() throws {
+        let (storage, layout, container) = prose(
+            """
+            Plain prose.
+
+            `only_code_here`
+
+            Run `cargo test` now.
+
+            See `src/a_rather_long_generated_preview_fixture_name_that_goes_on.swift:120-148` here.
+            """)
+        var baselines: [CGFloat] = []
+        layout.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: layout.numberOfGlyphs)) {
+            rect, _, _, glyphs, _ in
+            // From the line's bottom: paragraph spacing sits above the text.
+            baselines.append(rect.height - layout.location(forGlyphAt: glyphs.location).y)
+        }
+        XCTAssertEqual(baselines.count, 6, "the chip starts a line of its own and wraps")
+        for baseline in baselines { XCTAssertEqual(baseline, baselines[0], accuracy: 0.01) }
+        let string = storage.string as NSString
+        let all = NSRange(location: 0, length: storage.length)
+        var offsets: [CGFloat] = []
+        for code in ["only_code_here", "cargo test"] {
+            let range = string.range(of: code)
+            let line = layout.lineFragmentRect(
+                forGlyphAt: layout.glyphIndexForCharacter(at: range.location), effectiveRange: nil)
+            let box = try XCTUnwrap(
+                InlineCodeBox.boxes(layout, storage: storage, container: container, code: range).first)
+            offsets.append(line.maxY - box.minY)
+        }
+        var chip = NSRange()
+        _ = storage.attribute(
+            .cypherFileChip, at: string.range(of: "a_rather").location, longestEffectiveRange: &chip, in: all)
+        let chipBoxes = FileReferenceChip.boxes(layout, storage: storage, container: container, chip: chip)
+        XCTAssertEqual(chipBoxes.count, 2)
+        for box in chipBoxes {
+            let glyph = layout.glyphIndex(for: CGPoint(x: box.midX, y: box.midY), in: container)
+            offsets.append(layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).maxY - box.minY)
+        }
+        XCTAssertEqual(offsets.count, 4)
+        for offset in offsets { XCTAssertEqual(offset, offsets[0], accuracy: 0.01) }
+    }
+
     func testCodeWrappingAtTheViewEdgeStaysInsideIt() throws {
         let text = TranscriptTextStyle.inline([
             InlineRun(text: "Then ", style: .plain),

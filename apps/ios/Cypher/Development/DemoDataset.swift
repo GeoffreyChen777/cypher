@@ -153,6 +153,8 @@ final class DemoDataset {
                 config: claude, lastMessagePreview: "Changed the greeting in Example.swift.",
                 lastMessageAt: now - 1_700_000, createdAt: now - 1_800_000,
                 spaceId: cypher.id, lastSeenAt: now - 1_700_000),
+            // Code in prose: inline code, chips, CJK, a list and a code block.
+            codeTypesettingChat(spaceId: cypher.id, cwd: cypher.path, config: claude, now: now),
             // Artifacts in a reply (the mock harness's [mock:artifacts] showcase).
             Chat(
                 id: "chat-artifacts", deviceId: "dev-mac", title: "Explain binary search",
@@ -891,6 +893,8 @@ final class DemoDataset {
                         ],
                         fileCount: 3, additions: 17, deletions: 3)),
             ]
+        case codeTypesettingChatId:
+            return codeTypesettingTranscript(now: now)
         case "chat-tools":
             return longToolRuns(now: now)
         case "chat-permissions-story":

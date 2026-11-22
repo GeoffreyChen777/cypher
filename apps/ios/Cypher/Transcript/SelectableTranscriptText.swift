@@ -354,9 +354,13 @@ enum TranscriptTextStyle {
         }
         if result.length > 0 {
             // The break belongs to the paragraph before it (but is not part
-            // of a formula that ends it).
+            // of a formula, inline code, a chip, a mention or a link that
+            // ends it: their boxes and copies would take the break in).
             var previous = result.attributes(at: result.length - 1, effectiveRange: nil)
-            for key in [NSAttributedString.Key.attachment, .cypherMathSource, .cypherDisplayMath] {
+            for key in [
+                NSAttributedString.Key.attachment, .cypherMathSource, .cypherDisplayMath, .cypherInlineCode,
+                .cypherMentionWash, .cypherFileChip, .cypherFileRef, .cypherFileGlyph, .link, .underlineStyle, .kern,
+            ] {
                 previous[key] = nil
             }
             result.append(NSAttributedString(string: "\n", attributes: previous))

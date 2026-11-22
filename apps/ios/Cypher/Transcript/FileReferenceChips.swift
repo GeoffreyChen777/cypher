@@ -298,8 +298,9 @@ enum FileReferenceChip {
 
 /// Keeps a file reference chip on one line: a chip that no longer fits
 /// moves to the next line whole, and only one wider than its line breaks
-/// (render.rs's joined glue). Shared by the transcript's text views and
-/// their measurer, so a measured height matches the laid-out one.
+/// (render.rs's joined glue); and keeps a line of only code on the prose
+/// baseline. Shared by the transcript's text views and their measurer, so a
+/// measured height matches the laid-out one.
 final class FileReferenceChipLineBreaks: NSObject, NSLayoutManagerDelegate {
     static let shared = FileReferenceChipLineBreaks()
 
@@ -312,6 +313,43 @@ final class FileReferenceChipLineBreaks: NSObject, NSLayoutManagerDelegate {
         else { return true }
         // Inside a chip, never; between two chips side by side, as usual.
         return chip != before
+    }
+
+    /// A line of nothing but code in prose — a paragraph of one path, or
+    /// inline code or a chip wrapped onto a line of its own — sits on the
+    /// prose's baseline, as on the desktop (render.rs `strut_shift`).
+    /// TextKit sets a fixed-height line's baseline above its fonts' deepest
+    /// descent, and the smaller code's is shallower than the prose's, so such
+    /// a line would sit about half a point low.
+    func layoutManager(
+        _ layoutManager: NSLayoutManager, shouldSetLineFragmentRect lineFragmentRect: UnsafeMutablePointer<CGRect>,
+        lineFragmentUsedRect: UnsafeMutablePointer<CGRect>, baselineOffset: UnsafeMutablePointer<CGFloat>,
+        in textContainer: NSTextContainer, forGlyphRange glyphRange: NSRange
+    ) -> Bool {
+        guard let storage = layoutManager.textStorage, glyphRange.length > 0 else { return false }
+        let characters = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+        guard NSMaxRange(characters) <= storage.length,
+            let style = storage.attribute(.paragraphStyle, at: characters.location, effectiveRange: nil)
+                as? NSParagraphStyle,
+            style.minimumLineHeight > 0, style.minimumLineHeight == style.maximumLineHeight
+        else { return false }
+        let string = storage.string as NSString
+        var code: UIFont?
+        var onlyCode = true
+        storage.enumerateAttributes(in: characters) { attributes, range, stop in
+            if attributes[.cypherInlineCode] != nil || attributes[.cypherFileChip] != nil {
+                if code == nil { code = attributes[.font] as? UIFont }
+            } else if !string.substring(with: range).allSatisfy(\.isWhitespace) {
+                onlyCode = false
+                stop.pointee = true
+            }
+        }
+        guard onlyCode, let code else { return false }
+        let prose = Theme.sansUI(code.pointSize / Theme.codeScale)
+        let target = lineFragmentRect.pointee.height + prose.descender
+        guard target < baselineOffset.pointee else { return false }
+        baselineOffset.pointee = target
+        return true
     }
 }
 
