@@ -168,6 +168,10 @@ export const DEFAULT_PROTECTED: readonly string[] = [
   "~/.cypher*/*/pi-runtime/agent/extensions/**",
   "~/.cypher*/pi-runtime/versions/**",
   "~/.cypher*/*/pi-runtime/versions/**",
+  // The permission system's own state: what each chat made (ledger.ts), the judge's health.
+  "~/.cypher*/pi-runtime/agent/cypher-permissions/**",
+  "~/.cypher*/*/pi-runtime/agent/cypher-permissions/**",
+  "~/.pi/agent/cypher-permissions/**",
   // A project's own rules can only tighten (deny or ask): removing one loosens them.
   "<root>/.pi/permissions.json",
   "<root>/.gitmodules",
