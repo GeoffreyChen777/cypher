@@ -61,21 +61,23 @@ cypher-syntax = { path = "crates/syntax" }
 # CRDT
 loro = "1.13"
 
-# gpui — the wingleeio/zed fork: upstream f14fea9 plus the fork's commits on
-# `comet/edge-fade-horizontal` (wrap-rule fixes, EdgeFade, BackdropBlur, GPU
-# memory bounds, ImageSource::evict, transparent-window alpha). Rebase the
-# branch when bumping the upstream rev.
-gpui = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d" }
-gpui_platform = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d", features = [
+# gpui — GeoffreyChen777/zed-gpui, branch `cypher/per-run-font-size`: the
+# wingleeio/zed fork (upstream f14fea9 plus `comet/edge-fade-horizontal`:
+# wrap-rule fixes, EdgeFade, BackdropBlur, GPU memory bounds,
+# ImageSource::evict, transparent-window alpha) at 5d1f83d, plus one commit
+# adding an optional per-run `TextRun::font_size` (inline code and file
+# reference chips at the code scale). Rebase the branch when bumping upstream.
+gpui = { git = "https://github.com/GeoffreyChen777/zed-gpui", rev = "b358761a54dbd5a5b82cd08bc112505d5f5203b9" }
+gpui_platform = { git = "https://github.com/GeoffreyChen777/zed-gpui", rev = "b358761a54dbd5a5b82cd08bc112505d5f5203b9", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d" }
+gpui_tokio = { git = "https://github.com/GeoffreyChen777/zed-gpui", rev = "b358761a54dbd5a5b82cd08bc112505d5f5203b9" }
 # Real HTTP for gpui's `img()` element (remote avatar URLs); gpui itself
 # defaults to a null client, so images would always fall back.
-reqwest_client = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d" }
+reqwest_client = { git = "https://github.com/GeoffreyChen777/zed-gpui", rev = "b358761a54dbd5a5b82cd08bc112505d5f5203b9" }
 
 # diffs
 similar = "2"

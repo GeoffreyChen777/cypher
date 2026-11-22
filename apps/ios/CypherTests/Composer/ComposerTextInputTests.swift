@@ -23,6 +23,24 @@ final class ComposerTextInputTests: XCTestCase {
         XCTAssertTrue(focus.isFocused)
     }
 
+    /// Mention chips in the composer keep their violet wash and ink: only
+    /// inline code in replies went neutral.
+    func testMentionChipsKeepTheirVioletLook() throws {
+        let draft = ComposerDraft()
+        let coordinator = ComposerTextInput.Coordinator(text: draft.binding, focus: ComposerFocus())
+        let view = UITextView()
+        coordinator.render("See " + Mentions.fileLink(path: "src/render.rs", isDir: false), in: view)
+        let text = try XCTUnwrap(view.attributedText)
+        let at = (text.string as NSString).range(of: "render.rs").location
+        XCTAssertNotEqual(at, NSNotFound)
+        XCTAssertEqual(
+            text.attribute(.foregroundColor, at: at, effectiveRange: nil) as? UIColor, UIColor(Theme.mentionText))
+        XCTAssertEqual(
+            text.attribute(.cypherInlineCode, at: at, effectiveRange: nil) as? UIColor, UIColor(Theme.mentionWash))
+        XCTAssertNotEqual(UIColor(Theme.mentionWash), UIColor(Theme.inlineCodeWash))
+        XCTAssertEqual(MD.mentionRadius, 4.5)
+    }
+
     func testDelegateFocusDoesNotDependOnAccessibilityOrTextLength() {
         let draft = ComposerDraft()
         let focus = ComposerFocus()

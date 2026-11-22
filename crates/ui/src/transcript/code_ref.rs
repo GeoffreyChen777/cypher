@@ -358,7 +358,7 @@ impl Transcript {
         if let Some(scope) = preview.scope {
             selection::clear(scope);
         }
-        render::clear_chip_hover(self.scope);
+        render::clear_chip_hover(self.scope, crate::kit::motion::reduced_motion(cx));
         cx.notify();
     }
 

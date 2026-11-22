@@ -86,6 +86,33 @@ fn drag_lifecycle_and_copy_joins() {
 }
 
 #[test]
+fn only_a_press_that_selected_text_counts_as_a_selection() {
+    // A link or chip opens on mouse-up unless the press selected text.
+    let _state = state_lock();
+    clear(S);
+    assert!(!has_selected_text(S));
+    // A press that has not moved: no spans, so a click.
+    begin(S, "p1", 6);
+    assert!(!has_selected_text(S));
+    // Dragged within one element: selected text, live and settled.
+    assert!(update_drag(
+        S,
+        "p1",
+        9,
+        resolve_spans(&elems(), (0, 6), (0, 9))
+    ));
+    assert!(has_selected_text(S));
+    end_drag(S, "p1").expect("settled");
+    assert!(has_selected_text(S));
+    assert!(!has_selected_text(C));
+    // The next press begins afresh.
+    begin(S, "p1", 2);
+    assert!(!has_selected_text(S));
+    assert_eq!(end_drag(S, "p1"), None);
+    assert!(!has_selected_text(S));
+}
+
+#[test]
 fn begin_in_any_scope_clears_others_and_becomes_latest() {
     // Copy is single-active: beginning a drag in another scope clears the
     // earlier one entirely, and `selected_text()` returns the latest.

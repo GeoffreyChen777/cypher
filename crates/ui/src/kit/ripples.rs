@@ -342,6 +342,7 @@ fn shape<const N: usize>(
             background_color: None,
             underline: None,
             strikethrough: None,
+            font_size: None,
         };
         window.text_system().shape_line(text, size, &[run], None)
     };

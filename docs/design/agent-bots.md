@@ -1220,7 +1220,10 @@ itself.
 them: buttons, each an icon and a short label, wrapping; with none, the area isn't drawn. A
 shortcut is a request the owner
 makes often; a click sends it into the workspace chat as if they had typed it (their draft
-stays). A request may hold `{input}`, and a click then asks for that text first. Nobody
+stays). A request may hold `{input}`, and a click then asks for that text first; it is
+optional, and left empty the blank drops out with the spaces around it ("from branch
+{input} to main." sends "from branch to main."; punctuation a leading blank leaves behind
+goes too). Nobody
 builds shortcuts by hand: the owner asks the agent in the workspace chat ("make this a
 button", "rename the Fix button"), and it keeps them with `save_shortcut`, `delete_shortcut`
 and `list_shortcuts`, and offers one when the owner keeps asking the same kind of thing. A
@@ -1466,8 +1469,8 @@ app has the desktop's whole surface, laid out for a phone.
   (bot-marked threads, the sessions a workspace started and memory passes) are never
   listed among sessions, nor offered by `@` mentions.
 - **The workspace** opens on its chat: the session screen with the workspace's avatar
-  and name, its shortcuts as chips above the composer (a `{input}` blank asks first;
-  long press moves or deletes), an amber "N need you" pill in the status row, the
+  and name, its shortcuts as chips above the composer (a `{input}` blank asks first,
+  for optional text; long press moves or deletes), an amber "N need you" pill in the status row, the
   quiet off-line ("Atlas is paused" with Resume, "<device> is offline"), and the start
   screen with suggested questions while the chat is empty. The chat only announces, as
   on the desktop: a plan's compact card (Details, Reject, Approve, then the decision),
