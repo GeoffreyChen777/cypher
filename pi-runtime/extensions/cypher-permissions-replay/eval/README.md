@@ -130,7 +130,11 @@ node $EVAL/run.mjs --extensions pi-runtime/extensions --owner-words full \
 
 ```sh
 node $EVAL/report.mjs --results $D/results --corpus $D/corpus > /tmp/tables.md
+# one whole round of a committed sha (export, stubbed + live, compared with before):
+$EVAL/round.sh <sha> <label> [stub|live|all]     # live parts need escalation
+node $EVAL/report.mjs --results $D/results --corpus $D/corpus --after <label> > /tmp/tables.md
 ```
+`before-live*.json` are the corrected (`withUserMessages`) runs; the uncorrected ones are kept as `*-v1.json`.
 
 ## Metrics (in the summary)
 
