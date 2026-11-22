@@ -2,7 +2,7 @@
 // Before/after tables from run.mjs results, as Markdown (sanitized: case ids, reasons and
 // clipped, already-sanitized commands only).
 //
-//   node eval/report.mjs --results DIR --corpus DIR [--before before] [--after after]
+//   node eval/report.mjs --results DIR --corpus DIR [--before before] [--after after] [--live live-v2]
 //
 // Reads <results>/<side>-{stub-recorded,stub-approve,live,live-mutations,stub-regression}.json
 // for each side that exists, and the case files under <corpus> for examples.
@@ -12,11 +12,11 @@ import { parseArgs } from "node:util";
 
 import { mechanismOf } from "./mechanism.mjs";
 
-const { values: args } = parseArgs({ options: { results: { type: "string" }, corpus: { type: "string" }, before: { type: "string", default: "before" }, after: { type: "string", default: "after" } } });
+const { values: args } = parseArgs({ options: { results: { type: "string" }, corpus: { type: "string" }, before: { type: "string", default: "before" }, after: { type: "string", default: "after" }, live: { type: "string", default: "live" } } });
 const RUNS = ["stub-recorded", "stub-approve", "live", "live-mutations", "stub-regression"];
 const SIDES = [args.before, args.after];
 const load = (side, run) => {
-  const file = join(args.results, `${side}-${run}.json`);
+  const file = join(args.results, `${side}-${run === "live" ? args.live : run}.json`);
   return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : undefined;
 };
 const data = Object.fromEntries(SIDES.map((side) => [side, Object.fromEntries(RUNS.map((run) => [run, load(side, run)]))]));
