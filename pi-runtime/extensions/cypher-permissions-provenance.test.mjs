@@ -686,7 +686,7 @@ test("evaluator: an alias's text is code the line may run", () => {
 
 test("property: an unknown dangerous target runs only on a checked, cited consent, and only once", async () => {
   const lines = ["git push origin $BRANCH", "rm -rf $TARGET_DIR", "gh pr merge $(gh pr list -q .number)", "gh release delete $TAG --yes", "diff <(ls) <(ls -a) && git push --force origin $B"];
-  const request = "push the branch and clean up the build for this task";
+  const request = "push and merge the release branch, then delete the release build";
   const variants = {
     none: { verdict: { decision: "approve", reason: "asked" }, words: [request] },
     noKind: { verdict: { decision: "approve", reason: "asked", userQuote: request }, words: [request] },
@@ -695,7 +695,10 @@ test("property: an unknown dangerous target runs only on a checked, cited consen
     retracted: { verdict: { decision: "approve", reason: "asked", consent: { source: "typed", quote: request } }, words: [request, "wait, don't do that yet"] },
     movedOn: { verdict: { decision: "approve", reason: "asked", consent: { source: "typed", quote: request } }, words: [request, "now look at the flaky CI test in the edge worker instead"] },
     agentWritten: { verdict: { decision: "approve", reason: "asked", consent: { source: "typed", quote: request } }, words: [], brief: request },
-    verified: { verdict: { decision: "approve", reason: "asked", consent: { source: "typed", quote: request } }, words: [request] },
+    verified: { verdict: { decision: "approve", reason: "asked", consent: { source: "typed", quote: request }, target: { kind: "branch", value: "release" } }, words: [request] },
+    // A checked consent whose words name no target, or a target they don't name: never enough for an unreadable target.
+    bare: { verdict: { decision: "approve", reason: "asked", consent: { source: "typed", quote: "yes, go ahead and clean up what you made" } }, words: ["yes, go ahead and clean up what you made"] },
+    otherTarget: { verdict: { decision: "approve", reason: "asked", consent: { source: "typed", quote: request }, target: { kind: "branch", value: "hotfix" } }, words: [request] },
   };
   for (const seed of SEEDS.slice(0, 4)) {
     const rng = prng(seed);
@@ -975,4 +978,47 @@ test("property: code a shell or interpreter reads from its input, known only whe
   // A script whose text the reader has, and interpreters given a script file: as before.
   assert.notEqual(permissions.assess("bash <<'EOF'\nls\nEOF", workspace).tier, "danger");
   assert.notEqual(permissions.assess("python3 tools.py", workspace).tier, "danger");
+});
+
+test("property: a destroyer whose owner Cypher can't tell names its target, and only a consent naming it runs it", async () => {
+  const shapes = [
+    (name) => `limactl delete -f ${name}`,
+    (name) => `docker network rm ${name}`,
+    (name) => `docker volume rm ${name}`,
+    (name) => `podman pod rm -f ${name}`,
+    (name) => `tart delete ${name}`,
+    (name) => `docker rm -f ${name}`,
+    (name) => `VBoxManage unregistervm ${name} --delete`,
+  ];
+  for (const seed of SEEDS.slice(0, 4)) {
+    const rng = prng(seed);
+    for (const shape of shapes) {
+      const name = `box-${rng.word()}`;
+      const line = shape(name);
+      const { permissions } = engineIn(workspace);
+      const assessed = permissions.assess(line, workspace);
+      assert.equal(assessed.tier, "danger", line);
+      const read = permissions.lineTargets(assessed);
+      assert.ok("targets" in read && read.targets.some((target) => target.value === name), `seed ${seed}: ${line} reads ${JSON.stringify(read)}`);
+      const run = async (words, target) => {
+        permissions.ownerWords = { messages: [{ text: words, source: "typed" }], agentWritten: false };
+        const context = {
+          cwd: workspace, hasUI: true, ui: { async select() { return "Deny"; }, notify() {} },
+          branch: () => [{ type: "message", message: { role: "user", content: words } }],
+          complete: async () => JSON.stringify({ decision: "approve", reason: "asked", consent: { source: "typed", quote: words }, target }),
+          abort() {},
+        };
+        return (await permissions.requestEscalation(line, { label: "x" }, context)).ok;
+      };
+      const kind = read.targets.find((target) => target.value === name).kind;
+      assert.equal(await run(`please delete ${name} now`, { kind, value: name }), true, `seed ${seed}: ${line}`);
+      assert.equal(await run("sí, dale", { kind, value: name }), false, `seed ${seed}: ${line} on "sí, dale"`);
+      assert.equal(await run("clean up what you made", { kind, value: name }), false);
+      assert.equal(await run(`please delete box-other now`, { kind, value: name }), false, "another name");
+      assert.equal(permissions.grants.all().length, 0, "never remembered");
+    }
+  }
+  // A name known only when it runs stays unreadable.
+  const { permissions } = engineIn(workspace);
+  assert.ok("unknown" in permissions.lineTargets(permissions.assess("limactl delete $VM", workspace)));
 });

@@ -1141,6 +1141,18 @@ part that can be checked (explicit.ts `checkExplicit`, `once`):
 - every target that *can* be read (`LineTargets.known`: other commands of the line, a
   dangerous redirection's file) is what that consent names, as in §7.3.2.
 
+- (2026-11-22, round 4) the quote itself names a target the model claims the command acts on
+  (by entity, or the value written out) and holds an action word (lexicon.ts) of the
+  line's danger's action class (from the tool table's action, or the danger's kind:
+  delete, stop, push, merge, …): "sí, dale" or "clean up what you made" never suffice.
+
+A destroyer whose owner Cypher can't tell but whose names are written out (the generic
+destroy-verb fallback, catalogue rows like `docker rm`, `docker volume rm`, VM tools) is
+not an unreadable target: core.ts reads its operands as entities (`destroyedEntities`:
+the catalogue's kind, else a `resource` of that program) and the normal check applies, so
+the consent must name that volume, network, VM or container. Only names known only when
+they run stay unreadable.
+
 Then it runs **once** and nothing is remembered (no chat grant, no task grant); otherwise
 the user is asked, with the reason. With no owner's words at all, the model isn't asked.
 The always-ask floor (§7.3.1) never reaches the model: an opaque line is held to it by its

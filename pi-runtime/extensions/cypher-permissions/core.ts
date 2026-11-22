@@ -17,6 +17,8 @@ import { appendCommandRule, appendRule, approvalMode as approvalModeFor, CONFIG_
 import { CREATED_ENTRY, CreatedStore, creationsOf } from "./created.ts";
 import type { CreationFacts, CreationPlan } from "./created.ts";
 import type { CatalogueFacts } from "./catalogue.ts";
+import { genericDestroyer, targetsOf } from "./catalogue.ts";
+import { readTool } from "./tools.ts";
 import { ledgerFile } from "./ledger.ts";
 import type { LedgerEntity } from "./ledger.ts";
 import type { LifecycleFacts } from "./lifecycle.ts";
@@ -36,7 +38,7 @@ import { globBase, hasGlob } from "./glob.ts";
 import { GRANT_ENTRY, GrantStore, newGrant, REVOKE_ENTRY, ROOT_ENTRY } from "./grants.ts";
 import type { Grant, GrantScope } from "./grants.ts";
 import { checkExplicit, describeTarget, lineTargets, repoName } from "./explicit.ts";
-import type { ExplicitClaim, ExplicitFacts, ExplicitResult, LineTargets, OwnerWords, TargetFacts } from "./explicit.ts";
+import type { ExplicitClaim, ExplicitFacts, ExplicitResult, LineTargets, OwnerWords, Target, TargetFacts } from "./explicit.ts";
 import { conversationContext, judgePrompt, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
 import type { JudgeRequest } from "./judge.ts";
 import { isUnder, PathContext } from "./paths.ts";
@@ -355,6 +357,19 @@ interface LineCommand extends SimpleCommand {
 }
 
 const DIRECTORY_BUILTINS: ReadonlySet<string> = new Set(["cd", "pushd", "popd"]);
+
+/** A danger's kind or key, by the action class a consent must ask for (lexicon.ts words). */
+const UNREAD_ACTIONS: readonly [string, RegExp][] = [
+  ["delete", /delet|remov|discard|destroy|wipe|prune|erase|\brm\b|undoes/i],
+  ["stop", /stop|kill/i],
+  ["push", /push|publish to|force/i],
+  ["publish", /publish|release/i],
+  ["merge", /merge|pull request/i],
+  ["install", /install/i],
+  ["apply", /deploy|appl|scale|chang/i],
+  ["write", /write|writes/i],
+  ["reach", /send|reach|upload/i],
+];
 
 /** Shells and interpreters that run code from their input: no script, no `-c`/`-e`, only options (or `-`). */
 const CODE_READERS = /^(sh|bash|zsh|dash|ksh|fish|python\d*(\.\d+)?|node|deno|bun|ruby|perl|php|lua|osascript|tclsh|Rscript)$/;
@@ -1864,17 +1879,62 @@ export class Permissions {
   /** What a dangerous line's commands act on (explicit.ts), or why that is known only when it runs. */
   lineTargets(line: LineAssessment): LineTargets {
     const facts = this.riskFacts();
-    return lineTargets(
-      line.commands.map((item, index) => {
-        const danger = line.assessments![index].tier === "danger";
-        // A dangerous redirection's file is a target of its own; the command's words, only when they are dangerous too.
-        const fromWrites = danger && redirectRisk(item, facts)?.tier === "danger";
-        const wordsDanger = danger && (!fromWrites || (!item.inert && assessCommand({ ...item, writes: [] }, facts).tier === "danger"));
-        const writes = fromWrites ? item.writes.map((path) => (path === UNKNOWN ? UNKNOWN : (this.classify(path, item.cwd ?? this.cwd).path ?? path))) : [];
-        return { words: this.shortRefspecs(item.words, item.cwd), cwd: item.cwd, danger: wordsDanger, ...(writes.length ? { writes } : {}) };
-      }),
-      this.targetFacts(),
-    );
+    const commands = line.commands.map((item, index) => {
+      const danger = line.assessments![index].tier === "danger";
+      // A dangerous redirection's file is a target of its own; the command's words, only when they are dangerous too.
+      const fromWrites = danger && redirectRisk(item, facts)?.tier === "danger";
+      const wordsDanger = danger && (!fromWrites || (!item.inert && assessCommand({ ...item, writes: [] }, facts).tier === "danger"));
+      const writes = fromWrites ? item.writes.map((path) => (path === UNKNOWN ? UNKNOWN : (this.classify(path, item.cwd ?? this.cwd).path ?? path))) : [];
+      return { words: this.shortRefspecs(item.words, item.cwd), cwd: item.cwd, danger: wordsDanger, ...(writes.length ? { writes } : {}) };
+    });
+    const read = lineTargets(commands, this.targetFacts());
+    if (!("unknown" in read)) return read;
+    // A destroyer whose owner Cypher can't tell still names what it destroys: the catalogue's rows, or the
+    // generic destroy verb's operands, read as entities for the owner's words to name (explicit.ts `uncovered`).
+    const own: Target[] = [];
+    const named = commands.map((command) => {
+      if (!command.danger || basename(command.words[0] ?? "") === "git") return command;
+      const alone = lineTargets([command], this.targetFacts());
+      if (!("unknown" in alone)) return command;
+      const found = this.destroyedEntities(command.words, command.cwd);
+      if (!found) return command;
+      own.push(...found);
+      return { ...command, danger: false };
+    });
+    if (own.length === 0) return { ...read, actions: this.unreadActions(line) };
+    const again = lineTargets(named, this.targetFacts());
+    return "unknown" in again ? { ...again, known: [...(again.known ?? []), ...own], actions: this.unreadActions(line) } : { targets: [...again.targets, ...own] };
+  }
+
+  /** What a destroyer the target reader has no row for destroys, as entities: undefined when a name is known only when it runs. */
+  private destroyedEntities(words: readonly string[], cwd: string | undefined): Target[] | undefined {
+    if (words.includes(UNKNOWN)) return undefined;
+    const destruction = targetsOf({ words, cwd, writes: [] }, this.catalogueFacts());
+    if (destruction) {
+      if (destruction.unknown || destruction.targets.length === 0) return undefined;
+      const action = destruction.op === "stop" ? "stop" : "delete";
+      return destruction.targets.map(([entity]) => ({ kind: entity.kind as Target["kind"], value: entity.name, action, entity: { ...entity } as Target["entity"], ...(cwd ? { dir: cwd } : {}) }));
+    }
+    const generic = genericDestroyer(words);
+    if (!generic || generic.operands.length === 0 || generic.operands.includes(UNKNOWN)) return undefined;
+    const action = /^(kill|stop|terminate)$/i.test(generic.verb) ? "stop" : "delete";
+    const type = basename(words[0]);
+    return generic.operands.map((name) => ({ kind: "resource" as Target["kind"], value: name, action, entity: { kind: "resource", name, type } as Target["entity"], ...(cwd ? { dir: cwd } : {}) }));
+  }
+
+  /** The action classes the line's unreadable dangers could be, for a consent to say (explicit.ts): the danger keys' families. */
+  private unreadActions(line: LineAssessment): string[] {
+    const actions = new Set<string>();
+    for (const [index, item] of line.commands.entries()) {
+      const assessment = line.assessments?.[index];
+      if (assessment?.tier !== "danger") continue;
+      const tool = readTool(item.words);
+      if (tool && !("unknown" in tool)) actions.add(tool.action);
+      const kind = `${assessment.kind ?? ""} ${assessment.key ?? ""}`;
+      for (const [action, pattern] of UNREAD_ACTIONS) if (pattern.test(kind)) actions.add(action);
+    }
+    if (line.parsed.kind === "opaque" && /\b(push|publish|release|tag)\b/.test(line.kind ?? "")) actions.add("push");
+    return [...actions];
   }
 
   /** A `git push`'s refspecs in their short spelling (risk.ts `normalRefspec`), so every spelling names the same target. */

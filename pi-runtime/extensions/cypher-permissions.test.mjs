@@ -2442,7 +2442,7 @@ test("explicit requests: a danger runs on the owner's quoted words and its check
   assert.deepEqual([got.judged, got.asked, got.result.ok], [1, 1, false]);
   assert.match(got.audit.explicit.reason, /known only when it runs, and the reviewing model cited no consent of yours by its kind/);
   // With the consent cited and checked, it runs once, never remembered.
-  got = await run("git push origin $BRANCH", owner("push it to main"), { decision: "approve", reason: "asked", consent: { source: "typed", quote: "push it to main" } });
+  got = await run("git push origin $BRANCH", owner("push it to main"), { decision: "approve", reason: "asked", consent: { source: "typed", quote: "push it to main" }, target: { kind: "branch", value: "main" } });
   assert.deepEqual([got.judged, got.asked, got.result.ok, got.audit.explicit.once, got.audit.scope], [1, 0, true, true, "once"]);
 
   // Secrets leaving the machine: the hard rules come first, whatever the owner said.

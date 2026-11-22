@@ -356,7 +356,7 @@ export interface Target {
 
 /** A line's targets, or why one can't be read before it runs. */
 /** What a dangerous line acts on; or why some of it can't be read, with the targets that could (`known`). */
-export type LineTargets = { targets: Target[] } | { unknown: string; known?: Target[] };
+export type LineTargets = { targets: Target[] } | { unknown: string; known?: Target[]; actions?: string[] };
 
 /** What reading targets needs to know about the machine. */
 export interface TargetFacts {
@@ -1189,8 +1189,19 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
       targets.some((target) => mentions(text, target.value) || (about !== undefined && concerns(about, target)));
     if (!carriesOn) return result(["quote", "target"], `you've written since ("${short}"), so that request may be about earlier work`, source);
   }
-  // The target can't be read: the checked consent lets it run once, never remembered.
-  if (unknown !== undefined) return result(["quote", "current"], undefined, { ...source, once: true, unknown, ...(followUps.length ? { followUps } : {}) });
+  // The target can't be read: the checked consent lets it run once, never remembered, when its own words name
+  // what the model says the command acts on and ask for that kind of action (lexicon.ts); a bare "yes" never does.
+  if (unknown !== undefined) {
+    if (claimed.length === 0) return result(["quote"], `${unknown}, and the reviewing model named no target`, source);
+    const unnamed = claimed.find((item) => {
+      const entity = claimEntity(item);
+      return entity === undefined || !(namesEntity(quote, entity, context) || mentions(quote, item.value));
+    });
+    if (unnamed) return result(["quote"], `${unknown}, and your words "${quote}" don't name ${unnamed.kind} ${unnamed.value}`, source);
+    const actions = "actions" in read && read.actions?.length ? read.actions : ["delete", "stop", "push", "publish", "release", "merge", "install", "apply", "write", "erase", "reach"];
+    if (!actions.some((action) => actionWords(action).test(quote))) return result(["quote"], `${unknown}, and your words "${quote}" don't ask to ${actions.join(" or ")}`, source);
+    return result(["quote", "current"], undefined, { ...source, once: true, unknown, ...(followUps.length ? { followUps } : {}) });
+  }
   return result(["quote", "target", "current"], undefined, { ...source, ...(followUps.length ? { followUps } : {}) });
 }
 
