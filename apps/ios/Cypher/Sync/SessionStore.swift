@@ -90,6 +90,12 @@ final class SessionStore {
     /// Host outcomes of respondInput commands (command id → status), read
     /// with each projection.
     @ObservationIgnored private var inputCommandOutcomes: [String: String] = [:]
+    /// The `planBodies` entries work pages read (`watchPlanBody`), by work
+    /// id: a watched work id whose entry the doc lacks is absent. Read with
+    /// each projection while any page watches, never otherwise.
+    private(set) var planBodies: [String: WorkBodies] = [:]
+    /// Work pages on screen, per work id.
+    @ObservationIgnored private var planBodyWatches: [String: Int] = [:]
 
     let doc = LoroDoc()
     /// The chat2 room cursor — the last server row seq folded into `doc`.
@@ -546,8 +552,9 @@ final class SessionStore {
         let memo = transcriptCache.settledParses
         let outline = outlineReading ? nil : self.outline
         let artifacts = artifactsReading ? nil : self.artifactOutline
+        let bodyIds = Set(planBodyWatches.keys)
         Task { @MainActor [weak self] in
-            let read = await Task.detached(priority: .userInitiated) {
+            let (read, bodies) = await Task.detached(priority: .userInitiated) {
                 let read = Self.readWindow(of: doc, held: held)
                 // Up to a page of prompts inline; a long history's outline
                 // must not hold up its first page (`readOutline`).
@@ -556,10 +563,12 @@ final class SessionStore {
                 }
                 // The same for the artifacts (`readArtifacts`).
                 let pages = artifacts.flatMap { ArtifactOutline.extend($0, of: doc, limit: Self.pageMessages) }
-                return (read, rounds, TranscriptBuilderCache.parseSettled(read.entries, memo: memo), pages)
+                let parses = TranscriptBuilderCache.parseSettled(read.entries, memo: memo)
+                return ((read, rounds, parses, pages), Self.readPlanBodies(of: doc, ids: bodyIds))
             }.value
             guard let self else { return }
             self.projecting = false
+            self.adoptPlanBodies(bodies, read: bodyIds)
             self.transcriptCache.adopt(read.2)
             self.inputCommandOutcomes = read.0.inputOutcomes
             if let rounds = read.1 {
@@ -938,6 +947,56 @@ final class SessionStore {
             guard let root = doc.getDeepValue().mapValue else { return [] }
             return SessionReferences.entries(root: root)
         }.value
+    }
+
+    // MARK: Plan bodies
+
+    /// A work page showing `workId` reads its `planBodies` entry from here
+    /// (docs/design/plan-body.md §5): read now, and again with every
+    /// projection until `unwatchPlanBody`.
+    func watchPlanBody(_ workId: String) {
+        planBodyWatches[workId, default: 0] += 1
+        refreshPlanBodies()
+    }
+
+    func unwatchPlanBody(_ workId: String) {
+        let count = (planBodyWatches[workId] ?? 0) - 1
+        planBodyWatches[workId] = count > 0 ? count : nil
+        if count <= 0, planBodies[workId] != nil { planBodies[workId] = nil }
+    }
+
+    /// Read the watched entries now, on the caller's thread: one entry each,
+    /// not the doc. Projections keep them current; a store fed through
+    /// `setEntries` (demo) has none, so its writer calls this.
+    func refreshPlanBodies() {
+        let ids = Set(planBodyWatches.keys)
+        adoptPlanBodies(Self.readPlanBodies(of: doc, ids: ids), read: ids)
+    }
+
+    /// `bodies` as read for `ids`: entries of watches that ended meanwhile
+    /// are dropped, watches that began after the read keep what they have.
+    private func adoptPlanBodies(_ bodies: [String: WorkBodies], read ids: Set<String>) {
+        var next = planBodies.filter { planBodyWatches[$0.key] != nil && !ids.contains($0.key) }
+        for (id, entry) in bodies where planBodyWatches[id] != nil { next[id] = entry }
+        if next != planBodies { planBodies = next }
+    }
+
+    /// The doc's `planBodies[id]` for each of `ids` it holds (plan_bodies.rs
+    /// `plan_body`): an entry that isn't a map, or parts that don't read,
+    /// read as missing parts.
+    nonisolated static func readPlanBodies(of doc: LoroDoc, ids: Set<String>) -> [String: WorkBodies] {
+        guard !ids.isEmpty else { return [:] }
+        let map = doc.getMap(id: "planBodies")
+        var bodies: [String: WorkBodies] = [:]
+        for id in ids {
+            guard let item = map.get(key: id) else { continue }
+            if let entry = item.asLoroMap() {
+                bodies[id] = WorkBodies(entry.getDeepValue())
+            } else {
+                bodies[id] = item.asValue().map(WorkBodies.init) ?? WorkBodies()
+            }
+        }
+        return bodies
     }
 
     // MARK: Derived

@@ -132,6 +132,12 @@ struct BotWork: Codable, Hashable, Identifiable, Sendable {
     var timeAddedMinutes: Int?
     /// The coordinating session's model, thinking and Fast mode.
     var coordinatorChoice = SessionChoice()
+    /// Set when the plan's text was cut to fit the row: the rev of its full
+    /// text in the workspace chat doc's `planBodies[id].plan` (PlanText.swift).
+    /// nil: the row is the whole plan.
+    var bodyRev: String?
+    /// The same for `result` (`planBodies[id].result`).
+    var resultRev: String?
 
     var isLive: Bool { state == .proposed || state == .running }
 
@@ -209,7 +215,7 @@ extension BotWork {
     private enum CodingKeys: String, CodingKey {
         case id, botId, title, instruction, summary, steps, state, chatId, toolCallId, threadChatId
         case createdAt, startedAt, endedAt, result, decision, stopRequestedAt
-        case timeLimitMinutes, timeAddedMinutes, coordinatorChoice
+        case timeLimitMinutes, timeAddedMinutes, coordinatorChoice, bodyRev, resultRev
     }
 
     init(from decoder: Decoder) throws {
@@ -234,6 +240,8 @@ extension BotWork {
         timeAddedMinutes = (try? c.decodeIfPresent(Int.self, forKey: .timeAddedMinutes)) ?? nil
         coordinatorChoice =
             ((try? c.decodeIfPresent(SessionChoice.self, forKey: .coordinatorChoice)) ?? nil) ?? SessionChoice()
+        bodyRev = try c.decodeIfPresent(String.self, forKey: .bodyRev)
+        resultRev = try c.decodeIfPresent(String.self, forKey: .resultRev)
         closeSteps()
     }
 }

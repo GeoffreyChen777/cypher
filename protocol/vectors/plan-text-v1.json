@@ -1,0 +1,756 @@
+{
+  "planText": [
+    {
+      "name": "no rev and no body: the row is the whole plan",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "result": "done"
+      },
+      "bodies": null,
+      "expect": {
+        "instruction": "go",
+        "details": [
+          "one…",
+          null,
+          "three"
+        ],
+        "plan": "row",
+        "result": "done",
+        "resultSource": "row",
+        "loading": false
+      }
+    },
+    {
+      "name": "a body with no rev on the row is ignored",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "result": "done"
+      },
+      "bodies": {
+        "plan": {
+          "rev": "5c1e9a03d27b4f68",
+          "instruction": "go, in full",
+          "details": {
+            "1": "one, in full",
+            "2": "two, in full",
+            "9": "a step the row doesn't have"
+          },
+          "at": 5
+        },
+        "result": {
+          "rev": "a7f20c94e1b35d80",
+          "text": "all of the result",
+          "at": 6
+        }
+      },
+      "expect": {
+        "instruction": "go",
+        "details": [
+          "one…",
+          null,
+          "three"
+        ],
+        "plan": "row",
+        "result": "done",
+        "resultSource": "row",
+        "loading": false
+      }
+    },
+    {
+      "name": "a matching body gives the full text; a step it lacks keeps the row's detail",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "bodyRev": "5c1e9a03d27b4f68"
+      },
+      "bodies": {
+        "plan": {
+          "rev": "5c1e9a03d27b4f68",
+          "instruction": "go, in full",
+          "details": {
+            "1": "one, in full",
+            "2": "two, in full",
+            "9": "a step the row doesn't have"
+          },
+          "at": 5
+        }
+      },
+      "expect": {
+        "instruction": "go, in full",
+        "details": [
+          "one, in full",
+          "two, in full",
+          "three"
+        ],
+        "plan": "body",
+        "result": null,
+        "resultSource": "row",
+        "loading": false
+      }
+    },
+    {
+      "name": "a rev and no body: the preview, loading",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "bodyRev": "5c1e9a03d27b4f68"
+      },
+      "bodies": null,
+      "expect": {
+        "instruction": "go",
+        "details": [
+          "one…",
+          null,
+          "three"
+        ],
+        "plan": "preview",
+        "result": null,
+        "resultSource": "row",
+        "loading": true
+      }
+    },
+    {
+      "name": "a rev and an empty entry: the preview",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "bodyRev": "5c1e9a03d27b4f68"
+      },
+      "bodies": {},
+      "expect": {
+        "instruction": "go",
+        "details": [
+          "one…",
+          null,
+          "three"
+        ],
+        "plan": "preview",
+        "result": null,
+        "resultSource": "row",
+        "loading": true
+      }
+    },
+    {
+      "name": "a body of another rev: the preview",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "bodyRev": "5c1e9a03d27b4f68"
+      },
+      "bodies": {
+        "plan": {
+          "rev": "0000000000000000",
+          "instruction": "go, in full",
+          "details": {
+            "1": "one, in full",
+            "2": "two, in full",
+            "9": "a step the row doesn't have"
+          },
+          "at": 5
+        }
+      },
+      "expect": {
+        "instruction": "go",
+        "details": [
+          "one…",
+          null,
+          "three"
+        ],
+        "plan": "preview",
+        "result": null,
+        "resultSource": "row",
+        "loading": true
+      }
+    },
+    {
+      "name": "an empty rev on the row matches nothing, not even an empty stored rev",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "bodyRev": ""
+      },
+      "bodies": {
+        "plan": {
+          "rev": "",
+          "instruction": "go, in full",
+          "details": {
+            "1": "one, in full",
+            "2": "two, in full",
+            "9": "a step the row doesn't have"
+          },
+          "at": 5
+        }
+      },
+      "expect": {
+        "instruction": "go",
+        "details": [
+          "one…",
+          null,
+          "three"
+        ],
+        "plan": "preview",
+        "result": null,
+        "resultSource": "row",
+        "loading": true
+      }
+    },
+    {
+      "name": "a body without its rev field matches nothing",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "bodyRev": "5c1e9a03d27b4f68"
+      },
+      "bodies": {
+        "plan": {
+          "instruction": "x",
+          "details": {},
+          "at": 1
+        }
+      },
+      "expect": {
+        "instruction": "go",
+        "details": [
+          "one…",
+          null,
+          "three"
+        ],
+        "plan": "preview",
+        "result": null,
+        "resultSource": "row",
+        "loading": true
+      }
+    },
+    {
+      "name": "missing fields take their defaults",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "bodyRev": "5c1e9a03d27b4f68"
+      },
+      "bodies": {
+        "plan": {
+          "rev": "5c1e9a03d27b4f68"
+        }
+      },
+      "expect": {
+        "instruction": "",
+        "details": [
+          "one…",
+          null,
+          "three"
+        ],
+        "plan": "body",
+        "result": null,
+        "resultSource": "row",
+        "loading": false
+      }
+    },
+    {
+      "name": "the result is checked on its own: plan body here, result not yet",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "bodyRev": "5c1e9a03d27b4f68",
+        "resultRev": "a7f20c94e1b35d80",
+        "result": "all of…"
+      },
+      "bodies": {
+        "plan": {
+          "rev": "5c1e9a03d27b4f68",
+          "instruction": "go, in full",
+          "details": {
+            "1": "one, in full",
+            "2": "two, in full",
+            "9": "a step the row doesn't have"
+          },
+          "at": 5
+        }
+      },
+      "expect": {
+        "instruction": "go, in full",
+        "details": [
+          "one, in full",
+          "two, in full",
+          "three"
+        ],
+        "plan": "body",
+        "result": "all of…",
+        "resultSource": "preview",
+        "loading": true
+      }
+    },
+    {
+      "name": "a short plan with a long result: only the result has a body",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "resultRev": "a7f20c94e1b35d80",
+        "result": "all of…"
+      },
+      "bodies": {
+        "result": {
+          "rev": "a7f20c94e1b35d80",
+          "text": "all of the result",
+          "at": 6
+        }
+      },
+      "expect": {
+        "instruction": "go",
+        "details": [
+          "one…",
+          null,
+          "three"
+        ],
+        "plan": "row",
+        "result": "all of the result",
+        "resultSource": "body",
+        "loading": false
+      }
+    },
+    {
+      "name": "a malformed plan part costs only itself",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "bodyRev": "5c1e9a03d27b4f68",
+        "resultRev": "a7f20c94e1b35d80",
+        "result": "all of…"
+      },
+      "bodies": {
+        "plan": "not a body",
+        "result": {
+          "rev": "a7f20c94e1b35d80",
+          "text": "all of the result",
+          "at": 6
+        }
+      },
+      "expect": {
+        "instruction": "go",
+        "details": [
+          "one…",
+          null,
+          "three"
+        ],
+        "plan": "preview",
+        "result": "all of the result",
+        "resultSource": "body",
+        "loading": true
+      }
+    },
+    {
+      "name": "a detail of the wrong type fails its part",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "bodyRev": "5c1e9a03d27b4f68"
+      },
+      "bodies": {
+        "plan": {
+          "rev": "5c1e9a03d27b4f68",
+          "instruction": "x",
+          "details": {
+            "1": 5
+          },
+          "at": 1
+        }
+      },
+      "expect": {
+        "instruction": "go",
+        "details": [
+          "one…",
+          null,
+          "three"
+        ],
+        "plan": "preview",
+        "result": null,
+        "resultSource": "row",
+        "loading": true
+      }
+    },
+    {
+      "name": "a time of the wrong type fails its part",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "resultRev": "a7f20c94e1b35d80",
+        "result": "all of…"
+      },
+      "bodies": {
+        "result": {
+          "rev": "a7f20c94e1b35d80",
+          "text": "t",
+          "at": "soon"
+        }
+      },
+      "expect": {
+        "instruction": "go",
+        "details": [
+          "one…",
+          null,
+          "three"
+        ],
+        "plan": "row",
+        "result": "all of…",
+        "resultSource": "preview",
+        "loading": true
+      }
+    },
+    {
+      "name": "an entry that is not a map reads as empty",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [
+          {
+            "id": "1",
+            "title": "One",
+            "detail": "one…"
+          },
+          {
+            "id": "2",
+            "title": "Two"
+          },
+          {
+            "id": "3",
+            "title": "Three",
+            "detail": "three"
+          }
+        ],
+        "bodyRev": "5c1e9a03d27b4f68"
+      },
+      "bodies": 7,
+      "expect": {
+        "instruction": "go",
+        "details": [
+          "one…",
+          null,
+          "three"
+        ],
+        "plan": "preview",
+        "result": null,
+        "resultSource": "row",
+        "loading": true
+      }
+    },
+    {
+      "name": "a row with no steps",
+      "work": {
+        "id": "w1",
+        "botId": "b",
+        "title": "Ship it",
+        "chatId": "c",
+        "createdAt": 1,
+        "instruction": "go",
+        "steps": [],
+        "bodyRev": "5c1e9a03d27b4f68"
+      },
+      "bodies": {
+        "plan": {
+          "rev": "5c1e9a03d27b4f68",
+          "instruction": "go, in full",
+          "details": {
+            "1": "one, in full",
+            "2": "two, in full",
+            "9": "a step the row doesn't have"
+          },
+          "at": 5
+        }
+      },
+      "expect": {
+        "instruction": "go, in full",
+        "details": [],
+        "plan": "body",
+        "result": null,
+        "resultSource": "row",
+        "loading": false
+      }
+    }
+  ]
+}

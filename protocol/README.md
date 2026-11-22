@@ -23,6 +23,7 @@ Every language loads the same JSON file and runs every case in it.
 | Device trust: chain entries (`signingBytes`, hash, replay rules, refusal reasons), pairing code and MACs, Noise IK transcript and fragmenting | [`crates/trust/src`](../crates/trust/src); generator and check [`crates/trust/tests/vectors.rs`](../crates/trust/tests/vectors.rs) | [`apps/edge/src/trust/trust-chain.ts`](../apps/edge/src/trust/trust-chain.ts) (chain only); [`trust-chain.test.ts`](../apps/edge/src/trust/trust-chain.test.ts), [`trust-room.workerd.test.ts`](../apps/edge/test/workerd/trust-room.workerd.test.ts) | [`Sync/DeviceTrust.swift`](../apps/ios/Cypher/Sync/DeviceTrust.swift); [`scripts/tests/device-trust-vectors.swift`](../scripts/tests/device-trust-vectors.swift) | [`device-trust-v1.json`](vectors/device-trust-v1.json) |
 | Signed durable commands and launch records: the bytes a signature covers, from the entry's Loro value tree | [`crates/doc/src/command_auth.rs`](../crates/doc/src/command_auth.rs); generator and check [`crates/doc/tests/command_vectors.rs`](../crates/doc/tests/command_vectors.rs) | — (the Edge never sees inside commands) | [`Sync/CommandSignature.swift`](../apps/ios/Cypher/Sync/CommandSignature.swift); [`scripts/tests/command-signing-vectors.swift`](../scripts/tests/command-signing-vectors.swift), [`DeviceTrustTests.swift`](../apps/ios/CypherTests/Sync/DeviceTrustTests.swift) | [`command-signing-v1.json`](vectors/command-signing-v1.json) |
 | Preview reducer | [`crates/sync/src/preview_link.rs`](../crates/sync/src/preview_link.rs) (inline tests) | — | [`Sync/PreviewProjection.swift`](../apps/ios/Cypher/Sync/PreviewProjection.swift); [`PreviewProjectionTests.swift`](../apps/ios/CypherTests/Sync/PreviewProjectionTests.swift) | [`preview-reducer-v1.json`](vectors/preview-reducer-v1.json) |
+| Plan text reader (`PlanText::of`: a row's `bodyRev`/`resultRev` against the workspace chat doc's `planBodies` entry, docs/design/plan-body.md) | [`crates/proto/src/plan_body.rs`](../crates/proto/src/plan_body.rs); [`crates/proto/tests/plan_text_vectors.rs`](../crates/proto/tests/plan_text_vectors.rs) | — | [`Bots/PlanText.swift`](../apps/ios/Cypher/Bots/PlanText.swift); [`PlanTextTests.swift`](../apps/ios/CypherTests/Bots/PlanTextTests.swift) | [`plan-text-v1.json`](vectors/plan-text-v1.json) |
 
 The two preview files are also run without a simulator: the macOS stage of
 `scripts/check.sh` compiles the iOS sources with
@@ -118,6 +119,15 @@ Arrays. Stream preview cases are `{name, kind, header, text}` to encode or
 `{kind, header, text}` applied in order with the expected `display`,
 `interrupted` and `replies`. The preview protocol is dormant: the Rust and Swift clients
 carry it, but no Edge relays it (the production `ChatRoom` rejects its frames).
+
+### `plan-text-v1.json`
+
+An object; `planText` holds `{name, work, bodies, expect}`: `work` is a
+`botWork` row, `bodies` the `planBodies[workId]` entry as the chat doc holds
+it (`null`: no entry; each of its `plan` and `result` parts is read on its own,
+and one that doesn't read is missing). `PlanText.of(work, bodies)` gives
+`expect`'s `instruction`, `details` (in step order), `plan`, `result` and
+`resultSource` (`row`, `body` or `preview`) and `loading`.
 
 ### `artifact-patch-v1.json`
 
