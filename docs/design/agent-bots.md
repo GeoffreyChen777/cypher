@@ -345,14 +345,17 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
   `BotTool` RPC passes Pi's tool call id), the steps (ids 1 to n, at most 10, projects
   resolved within the scope) and the owner's newest message in the bot chat as the
   instruction. Its answer tells the model to stop. The steps' details share one budget,
-  4,000 characters across the plan (`PLAN_DETAILS_MAX`), however they split it: one step
-  may hold all of it. There is no cap per step.
+  30,000 characters across the plan (`PLAN_BODY_MAX`), however they split it: one step
+  may hold all of it. There is no cap per step. What does not fit the row is kept in the
+  workspace chat's doc (*Plan bodies*, below).
 - **Who writes what.** Owner devices write only `decision` (`Mutate resolveBotPlan`) and
   `stopRequestedAt` (`Mutate stopBotWork`); the host writes the rest, always leaving those
-  two fields alone. Every text is clamped before it is written, and the row as a whole
-  to `WORK_ROW_MAX` UTF-16 units of JSON (under the registry's 16 KiB per op): text
-  whose JSON runs long (escaped quotes, newlines, control characters) shortens the
-  result, then the longest detail, by what the row is over.
+  two fields alone. Every text in the row is clamped to a preview before it is written
+  (the details to 4,000 characters across the plan, `PLAN_DETAILS_MAX`; the instruction
+  to 1,500; the result to 2,000), and the row as a whole to `WORK_ROW_MAX` UTF-16 units
+  of JSON (under the registry's 16 KiB per op): text whose JSON runs long (escaped
+  quotes, newlines, control characters) shortens the result, then the longest detail, by
+  what the row is over.
 - **The work host** (`bots/work/host.rs`) runs on the bot's host. It reconciles on every
   change of the bot records, bot rows and session rows, and every 5 seconds:
 
@@ -412,8 +415,53 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
   slot) and sessions per plan (default 8), 8 sessions per step, 10 steps per plan, and
   the time limit (§6.6). The bot's `paused` flag keeps approved plans waiting and refuses
   new worktrees and sessions. Turn budgets are not built.
-- **Text limits.** The plan's text is capped to fit its registry row; moving long text into the
-  workspace chat's doc is designed in [plan-body.md](plan-body.md) (not built).
+- **Plan bodies** ([plan-body.md](plan-body.md)). The row is the plan's index; when its
+  clamp had to cut the instruction, a detail or the result, the host keeps the full text
+  in the workspace chat's doc, root map `planBodies[workId]` (`SessionDoc::put_plan_body`,
+  `put_plan_result`, `plan_bodies`, `delete_plan_body` in
+  `crates/doc/src/schema/plan_bodies.rs`). A plan that fits is written exactly as before:
+  no body (D1).
+  - *Shape* (`crates/proto/src/plan_body.rs`). `plan` is a `PlanBody {rev, instruction,
+    details by step id, at}`, written once when the plan is proposed; `result` is a
+    `PlanResult {rev, text, at}`, written once when the plan ends. Each is one plain JSON
+    value written whole. The row names them with `bodyRev` / `resultRev`: the first 16
+    hex characters of a SHA-256 over the part's canonical JSON (sorted keys). Only the
+    host hashes; readers compare the two strings.
+  - *Writing* (`crates/engine/src/bots/work/bodies.rs`). `BotWork::cut_plan` and
+    `cut_result` turn the full text into the row's previews and return the body to keep.
+    The host writes the doc first, then the row, so no device sees a row that points at a
+    body the host failed to write.
+  - *Caps* (§7 of the design): the steps' details in all and a result are refused over
+    30,000 characters (`PLAN_BODY_MAX`, `RESULT_BODY_MAX`), with the overshoot ("The
+    steps' details add up to N characters, M over the 30000 a plan holds in all. Nothing
+    is cut for you…"). The owner's instruction can't be refused: it is cut at 30,000
+    (`INSTRUCTION_BODY_MAX`), and `propose_plan`'s answer and the brief say so. A result the host quotes from the
+    thread's last message is cut at 30,000 and ends in "…(cut)".
+  - *Reading on the host.* The brief, `get_work` (which lists every step's detail) and the
+    result notice read the full text through `PlanText::of(work, body)`; only parts whose
+    content hashes to their stored rev count (`WorkBodies::intact`). A wake turn whose
+    text was cut adds that `get_work` shows all of it. An approved plan whose row was cut
+    but whose body is missing on the host, or is another rev, fails with "Its full text
+    is missing on its host, so it didn't run on the shortened preview. Propose the plan
+    again." It never runs on the previews.
+  - *Deleting.* Pruning deletes a plan's body with its row. `Mutate deleteBotWork` may
+    run on another device, so the host's cleanup pass (`Bots::clean_plan_bodies`, at
+    start and then hourly) removes any `planBodies` key with no row that is over an hour
+    old. The text stays in the doc's Loro history until the chat is deleted, like a
+    message.
+  - *Reading in the apps.* The desktop's work page watches the body through the
+    `WatchPlanBody` stream RPC and shows the row's preview, marked cut, with "Loading the
+    full plan…" until a body of the row's rev arrives; Approve stays enabled (D5). iOS
+    reads `planBodies` from its `SessionStore` of the workspace chat, which the work page
+    warms. Apps older than this show the previews.
+- **Other texts kept whole in their row** (plan-body.md §9, D8): a routine's prompt and
+  a shortcut's request (4,000 characters, `PROMPT_MAX`) and the owner's edit of an answer
+  to review (8,000, `ANSWER_MAX`). Over the cap they are refused with the overshoot, never
+  cut: "The prompt has 4,120 characters, 120 over the 4,000 a routine holds. Nothing is
+  cut: shorten it and save again." (`save_routine` and `Mutate saveBotRoutine`; the same
+  for "The request … a shortcut holds" in `save_shortcut`, and "The answer … an answer
+  holds … send it again" in `Mutate reviewBotExchange`). The tools' schemas carry the
+  cap; the desktop's routine form and review panel refuse before they send.
 - **The activity log** gets a `botActivity` row for each proposal, start, cancel, finish,
   failure, Stop, worktree, session started, answered, steered or stopped, and approval
   asked.
@@ -1036,7 +1084,8 @@ connection.
   (`PeerAsked` activity), and waits for the pull that settles it, pulling itself every
   15 s in case a nudge is lost. An answer marks the calling thread tainted
   (`Taint::mark`, "<bot> answered in this thread").
-- **Bounds.** Rows are clamped before every write (answers to `ANSWER_MAX` characters);
+- **Bounds.** Rows are clamped before every write (answers to `ANSWER_MAX` characters;
+  the owner's edit in review is refused over it instead, §6.7);
   at most `KEEP_EXCHANGES` exchanges and `KEEP_ACTIVITY` activity entries per bot, the
   oldest settled ones going first.
 
