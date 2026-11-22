@@ -244,6 +244,107 @@ extension NotificationNavigationTests {
     }
 }
 
+extension NotificationNavigationTests {
+    /// A workspace notice opens the workspace (its chat, `Route.bot`), its
+    /// Needs you item's board page over it, and the chat counts as viewed
+    /// there, as a session's does; a gone item leaves it on the chat.
+    func testWorkspaceNoticeTapsOpenTheWorkspaceAndItsItem() async throws {
+        let model = AppModel()
+        model.enterDemoMode()
+        let scope = String(repeating: "a", count: 64)
+        let controller = model.notifications
+        controller.readRegistration = { nil }
+        controller.writeRegistration = { _ in true }
+        controller.authorization = { .authorized }
+        controller.registerWithOS = {}
+        controller.clearDelivered = {}
+        controller.setBadge = { _ in }
+        controller.perform = { request in
+            let url = request.url!
+            var body: [String: Any] = ["ok": true, "scope": scope]
+            if url.path.hasSuffix("/settings") {
+                let prefs = try JSONSerialization.jsonObject(with: JSONEncoder().encode(NotificationPreferences()))
+                body = ["scope": scope, "available": true, "settings": prefs]
+            } else if url.path.hasSuffix("/register") {
+                body = ["scope": scope, "bindingId": String(repeating: "c", count: 64), "lease": "l"]
+            }
+            return (
+                try JSONSerialization.data(withJSONObject: body),
+                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }
+        controller.bind(
+            AppConfig(
+                edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
+                userId: "u", orgId: "org", deviceId: "phone", deviceName: "Test",
+                devBearer: "u@org"))
+        defer { controller.disconnect() }
+        try await settle("scope bound") { controller.scope == scope }
+
+        let hosted = try HostedWindow(HomeView().environment(model).environment(\.horizontalSizeClass, .compact))
+        defer { hosted.close() }
+        let hostVC = hosted.host
+        try await settle("home mounted") { navigationController(in: hostVC) != nil }
+        let nav = try XCTUnwrap(navigationController(in: hostVC))
+        try await Task.sleep(for: .milliseconds(300))
+
+        func tap(_ item: PushItem?) {
+            controller.receive(
+                PushPayload(
+                    eventId: UUID().uuidString, scope: scope, chatId: "chat-atlas", projectId: DemoDataset.atlasId,
+                    kind: "input", workspaceId: DemoDataset.atlasId, item: item),
+                tapped: true)
+        }
+        func presented() -> UIViewController? {
+            var top = hostVC.presentedViewController
+            while let next = top?.presentedViewController { top = next }
+            return top
+        }
+        func settled(_ depth: Int) -> Bool {
+            controller.pendingNavigation == nil && nav.viewControllers.count == depth
+                && nav.transitionCoordinator == nil
+        }
+
+        // The workspace alone: its chat, reported as the one on screen.
+        tap(nil)
+        try await settle("the workspace opens") { settled(2) }
+        XCTAssertEqual(nav.topViewController?.navigationItem.title, "Atlas")
+        XCTAssertEqual(controller.currentChat, "chat-atlas", "the workspace's chat is reported as viewed")
+        XCTAssertNil(controller.pendingBoard)
+        XCTAssertNil(controller.navigationError)
+
+        // A plan: the same screen (not pushed again), its board at the plan.
+        tap(.plan("work-rounding"))
+        try await settle("the plan's board page opens") {
+            settled(2) && controller.pendingBoard == nil && presented() != nil
+        }
+        XCTAssertEqual(controller.currentChat, "chat-atlas")
+        presented()?.dismiss(animated: false)
+        try await settle("the board closes") { presented() == nil }
+
+        // A gone item: the workspace's chat, no board, no error.
+        tap(.approval("approval-gone"))
+        try await settle("a gone item stays on the chat") { settled(2) }
+        try await Task.sleep(for: .milliseconds(900))
+        XCTAssertNil(presented(), "no board for an item that is gone")
+        XCTAssertNil(controller.navigationError)
+
+        // A session notice still opens its session, and leaving the
+        // workspace reports that session instead.
+        controller.receive(
+            PushPayload(
+                eventId: UUID().uuidString, scope: scope, chatId: "chat-veil", projectId: "space-cypher",
+                kind: "completed"),
+            tapped: true)
+        try await settle("the session opens over the workspace") { settled(3) }
+        XCTAssertEqual(controller.currentChat, "chat-veil")
+        nav.popViewController(animated: false)
+        try await settle("back on the workspace") { nav.viewControllers.count == 2 && nav.transitionCoordinator == nil }
+        try await settle("the workspace's chat is viewed again") { controller.currentChat == "chat-atlas" }
+        XCTAssertNil(controller.navigationError)
+    }
+}
+
 @MainActor
 private final class ReproDriver: ObservableObject {
     @Published var path: [Route] = []

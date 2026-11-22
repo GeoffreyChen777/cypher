@@ -50,9 +50,11 @@ is no Smart/Always/Off policy.
   thread's questions follow a session's rule (each question of a run once).
   Deciding the item anywhere, or the thread working again, withdraws a
   pending alert and the chat's unread mark when that mark is the item's. A
-  workspace turn's "completed" never displaces a pending item alert. No
-  client reports a workspace's chat as the session on screen, so without a
-  target its alerts go to every phone.
+  workspace turn's "completed" never displaces a pending item alert. The
+  iPhone reports a workspace's chat as the chat on screen while the
+  workspace is frontmost (as it does a session), so being there reads its
+  notices and makes that phone its target; the desktop doesn't, so a
+  workspace chat with no target sends its alerts to every phone.
 - No output-token, tool-call or progress notifications. Completions under 30
   seconds are skipped when run duration is known.
 - Independent child results default off. A child asking for input can still
@@ -194,6 +196,15 @@ engines and ordinary registry presence are not routing signals.
 - A tap can wait for cold-start authentication/sync, but only opens an actual
   chat in the matching current workspace and project. No URL from the payload
   is followed.
+- On iOS a workspace notice (`workspaceId` set) opens that workspace, and only
+  when the payload's `chatId` is its own chat. An item notice then opens the
+  board page that settles it: `plan` the plan's page, `approval` the
+  approval's, `review` the exchange's and `asking` the thread's Asking page
+  (with its plan for a work thread). A decided item still opens its page; an
+  item no longer synced here (or not that workspace's), or an `itemKind` the
+  build doesn't know, leaves the tap on the workspace's chat. A malformed
+  `workspaceId` drops the payload; a malformed item only drops the item
+  (`PushPayload.parse`, `WorkspaceData.notificationTarget`).
 
 Apple may already have accepted a notification when logout/muting occurs. Those
 in-flight system alerts cannot be recalled reliably; their text stays generic,

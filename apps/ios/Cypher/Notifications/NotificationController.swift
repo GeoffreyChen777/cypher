@@ -22,7 +22,13 @@ final class NotificationController {
     private(set) var badgesAllowed = true
     var error: String?
     var banner: PushPayload?
-    var pendingNavigation: PushPayload?
+    var pendingNavigation: PushPayload? {
+        // A new tap supersedes a board page an earlier one still waits on.
+        didSet { if pendingNavigation != nil { pendingBoard = nil } }
+    }
+    /// The board page a workspace notice's tap opens once the workspace's
+    /// screen is up (see `NotificationBoardRequest`).
+    var pendingBoard: NotificationBoardRequest?
     var navigationError: String?
     private(set) var currentChat: String?
     private var foreground = true
@@ -95,6 +101,7 @@ final class NotificationController {
         activityClientId = UUID().uuidString.lowercased()
         banner = nil
         pendingNavigation = nil
+        pendingBoard = nil
         currentChat = nil
         if saved.binding?.account != account(config) {
             saved.retire()
@@ -151,6 +158,7 @@ final class NotificationController {
         scope = nil
         banner = nil
         pendingNavigation = nil
+        pendingBoard = nil
         deferredTap = nil
         currentChat = nil
         clearDelivered()

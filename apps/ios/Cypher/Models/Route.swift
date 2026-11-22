@@ -27,7 +27,16 @@ enum SessionNavigation {
     /// NavigationStack crashes. Only pop-to-existing or append the chat —
     /// or, in the iPad split layout, select it as a sidebar tap would.
     static func openingNotification(_ chatId: String, in path: [Route], split: Bool = false) -> [Route] {
-        if split, !path.contains(.chat(chatId)) { return [.chat(chatId)] }
-        return opening(chatId, in: path)
+        openingNotification(route: .chat(chatId), in: path, split: split)
+    }
+
+    /// The same for any route a notification opens (a workspace is
+    /// `.bot(id)`).
+    static func openingNotification(route: Route, in path: [Route], split: Bool = false) -> [Route] {
+        if split, !path.contains(route) { return [route] }
+        if let index = path.lastIndex(of: route) {
+            return Array(path.prefix(index + 1))
+        }
+        return path + [route]
     }
 }
