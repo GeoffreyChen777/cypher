@@ -21,7 +21,7 @@ const load = (side, run) => {
 };
 const data = Object.fromEntries(SIDES.map((side) => [side, Object.fromEntries(RUNS.map((run) => [run, load(side, run)]))]));
 const cases = new Map();
-for (const name of ["heldout", "adversarial", "mutations-heldout", "regression-heldout"]) {
+for (const name of ["heldout", "adversarial", "adversarial-fresh", "mutations-heldout", "regression-heldout"]) {
   const file = join(args.corpus, `${name}.json`);
   if (existsSync(file)) for (const item of JSON.parse(readFileSync(file, "utf8")).cases) cases.set(`${name}.json:${item.id}`, item);
 }
