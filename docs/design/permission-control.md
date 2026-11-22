@@ -246,7 +246,7 @@ the file is self-guarded). Every field is optional; lists take `{ "add": [], "re
     "tools": "assisted",
     "escalate": "assisted"
   },
-  "judge": { "model": null, "timeoutMs": 20000 },
+  "judge": { "model": null, "timeoutMs": 60000 },
   "ask": { "timeoutMs": null },
   "sensitive": { "add": [], "remove": [] },
   "protected": { "add": [], "remove": [] },
@@ -447,7 +447,7 @@ rules (`commands.ts`, in `permissions.json`'s `commands`, a project's
   A regular expression whose delimiter stands inside a bracket expression (`/[/]/`) is
   refused: implementations end it at different places. Options after an operand count as
   operands too, the way BSD tools read them.
-- **Reading the line** (`shell.ts`) finds every command the line can run: words, quotes,
+- **Reading the line** (`shell.ts`, read as an evaluator since 2026-11-22: see below) finds every command the line can run: words, quotes,
   `~`, comments; `&&`, `||`, `;`, `|`, `|&` and newlines between commands; the commands
   in `$(…)` and backticks, and in `if`/`while`/`until`/`for … in`, `case … esac`,
   `{ …; }`, `!` and `[[ … ]]` (each read as one that may run); redirections, with the
@@ -467,6 +467,34 @@ rules (`commands.ts`, in `permissions.json`'s `commands`, a project's
   assignment in front of a command that changes how programs run) makes the line
   **opaque**: no rule matches it, so it
   runs in the sandbox, or outside once if the user approves it as written.
+- **The evaluator** (`parseShell` with `evaluate`, what core.ts uses, 2026-11-22) settles
+  more of a line so that its targets are known, every rule general (no command is special):
+  - `for NAME in w1 w2 …; do BODY; done` over literal words is BODY once per word with
+    NAME bound (≤ 64 words; a glob, `$(…)` or unknown word in the list keeps NAME unknown
+    and BODY is read once). So `for d in a b; do rm -rf /tmp/$d; done` is `rm -rf /tmp/a`
+    and `rm -rf /tmp/b`.
+  - A function the line defines (`f() { …; }`, `function f { …; }`) is inlined where it is
+    called (a definition that may not have run also reads the call as the program of that
+    name; a body that calls itself is opaque; a body in `( … )` stays opaque).
+  - A heredoc or here-string feeding a shell that reads its script from its input (`bash
+    <<'EOF'`, `sh -s <<< '…'`, no `-c`, no file) is code: its commands are read as a shell
+    of their own (like a subshell; a `cd` there leaves the directory unknown). For any other
+    program its known text is the command's `input` (shown to the model); an unquoted body
+    with `$` or `\` is known only when it runs (`inputUnknown`).
+  - `A=1 B=2 cmd` keeps the values for the command (`envValues`); `env [-u X] [A=1] cmd` is
+    read through as before (`unwrap`). An assignment that changes how programs run
+    (`PATH=…`, `LD_*`, `GIT_*`, …) no longer makes the line opaque: the program is known
+    only when it runs (its name kept as a hint, tier `local`, for the model), unless the
+    assignment is `PATH=` with literal directories where the program resolves to the
+    system's.
+  - `&&`, `||`, `;`, `|` and `&`: every command is a target and the most dangerous decides,
+    as before; each command now says how it is joined (`joint`) and whether it runs in the
+    line's own shell (`topLevel`), which tells, from the line's exit status, which commands
+    surely succeeded (§7.3.3).
+  What is still unknown or opaque goes to the model when it is not dangerous by itself
+  (an unknown program is `local`); a danger whose target is unknown still asks the user,
+  because no code-checked fact can stand for it. The always-ask floor holds through every
+  wrapper (tests: `cypher-permissions-provenance.test.mjs`).
 - **Deciding**: every command in the line is checked (inert builtins and filters skipped). An unknown
   word matches only `**` in an `allow` rule, but anything a `deny` or `ask` rule names. A
   `deny` that matches blocks the line before it runs, escalated or not. If every command
@@ -637,7 +665,15 @@ When several paths are requested together, the strictest mode wins.
   request (§7.3.2) or that it touches nothing but what this task made (§7.3.3); the
   always-ask floor (§7.3.1) never reaches the model at all. Safety rests on the review
   prompt, the deterministic classifier (risk.ts, shell.ts) and those code-checked facts,
-  not on a score the model gives itself. Timeout 20 s.
+  not on a score the model gives itself. Timeout 60 s per attempt (`judge.timeoutMs`), and
+  one retry when it times out or fails for a reason other than signing in (`JUDGE_ATTEMPTS`;
+  the pause after repeated timeouts counts the request once).
+- The model sees, besides the request: the owner's own words with their consent source
+  (trusted), the conversation's user messages (an agent-written brief or steering flagged
+  as such), the agent's justification and recent tool calls (untrusted), and Cypher's
+  ledger (§7.3.3): first how this line's targets follow from what this chat did (the
+  lifecycle rule and the command that did it), then the rest, labelled trusted because the
+  agent can't write it.
 - When the judge asks the user, its reason is shown in the dialog.
 
 #### 7.3.1 The always-ask floor
@@ -682,7 +718,7 @@ the reviewing model at all (`core.ts` `alwaysAsk`, `risk.ts` `floor`):
    "open('…/permissions.json','w')"`). The file tools too: such a write skips the model and
    the dialog says *Only you can approve this*.
 3. **No reviewing model** (`review`): none configured, paused after repeated failures, an
-   error, or no answer within 20 s. The request goes to the user with the reason.
+   error, or no answer within 60 s twice. The request goes to the user with the reason.
 
 A rule the user set to `ask` or `deny` counts as the floor too: they asked to be asked.
 Everything else reaches the model.
@@ -897,39 +933,89 @@ row reading back as their entities, and the consent sources (a reply binds its p
 an answer's unpicked option fails, a card's branch identifies the pull request, a target
 nobody named never passes whatever the source).
 
-#### 7.3.3 What this task made (2026-11-18)
+#### 7.3.3 What this task made: the provenance ledger (2026-11-18, ledger since 2026-11-22)
 
-The other fact a danger may run on: the action touches nothing but what this task made
-itself. Cypher records that from the commands the chat actually ran, not from what the
-model says (`cypher-permissions/created.ts`):
+The other fact a danger may rest on: the action touches nothing but what this task made or
+did itself. Cypher records that from the commands the chat actually ran and their results,
+never from what the model says.
 
-- Every bash call the extension lets through — in the sandbox or outside it — is read by
-  the shell reader, and what it creates is recorded (`noteCreated`, `creationsOf`): the
-  path and branch of a `git worktree add`, a branch from `git switch -c` / `checkout -b` /
-  `git branch <name>`, a `git clone`'s directory, the operands of `mkdir`, `install -d`,
-  `touch` and `tee`, a copy's destination, the files its redirections write, and the data
-  directories of a dev instance it names (`CYPHER_DEV_INSTANCE=<name>` →
-  `~/.cypher-development/{local,dev}-{engine,ui}-<name>` and their logs, or
-  `CYPHER_DATA_DIR=<path>` under `~/.cypher-development`). Never the whole
-  `~/.cypher-development`: other chats keep their instances there.
+**The catalogue** (`cypher-permissions/catalogue.ts` `CATALOGUE`): one table, per program
+and subcommand, of which kind of entity it creates, destroys, stops, starts or merges, and
+where the entity's name comes from — an operand, an option's value, or the command's own
+output: `mkdir`/`install -d`/`touch`/`tee` operands, a copy's destination, `mktemp`'s
+printed path, `git worktree add` (worktree, path, `-b` branch), `git clone`'s directory,
+`git branch`/`checkout -b`/`switch -c`, `git tag`, `git push` refspecs (a remote branch,
+only when the local branch it pushes is the chat's), `gh repo create`/`gh pr create`/`gh
+release create` (the URL they print), `gh pr merge` (an antecedent for §7.3.6), `xcrun
+simctl create`/`clone` (the UDID), `simctl boot`, `docker`/`podman run -d`/`create` (the
+container id) or `--name`, `docker start`, `npm publish` (`+ name@version`), `multipass
+launch`. Destroyers: `rm`/`rmdir`/`unlink`/`trash`, `git worktree remove`, `git branch
+-d/-D`, `git tag -d`, `git push --delete`/`:ref`, `gh repo delete`, `gh release delete`, `gh
+pr close`, `simctl delete`/`erase`/`shutdown`, `docker rm`/`stop`/`kill`, `npm unpublish`,
+`multipass delete`/`stop`, `kill`. Redirections' files, and a dev instance's data
+directories named by `CYPHER_DEV_INSTANCE`/`CYPHER_DATA_DIR` (`ENV_CREATORS`), are rows too.
+A new tool is a new row.
+
+**Recording** (`created.ts` `CreatedStore.plan`/`settle`, wired in `cypher-permissions.ts`
+around every bash call, in the sandbox and outside it):
+
+- Before the line runs, `planCreations` lists what it may create and what is there
+  already: a path, a local branch or tag that exists is never the task's.
+- After it ran, `settleCreations` keeps what it surely made: a path, worktree or local ref
+  that is there now and was not before (`observed`, whatever the exit status); anything
+  else only when the line exited 0, every command ran in the line's own shell joined by
+  `&&`, and the creator is the system's program (`succeeded`); a name read from output only
+  when, in addition, the creator is the line's only command and the last line of its
+  output has the row's shape (`output`). So `echo <UDID>`, `printf`, `cat`, or another
+  command in the same line can never mint an entry; a dev instance's directories, which it
+  makes in the background, count when the line ran (`ran`). A truncated output is not read.
 - Nothing sensitive, protected, Cypher's own, the installed app's or the permission
-  system's is ever recorded, however it was created (`recordable`), so a write the owner
-  approved once can never become a free hand to delete it later.
-- The record is kept with the chat, like a grant (session entries
-  `cypher-permissions.created`, tagged with the chat id, bounded), so it holds across the
-  turns of one chat and never crosses into another.
-- The chat's own workspace roots and the temp directories count as its own anyway
-  (`disposable`), and so does the branch checked out in a workspace root, which is the
-  work Cypher gave the chat (`workspaceBranches`, never a default branch).
+  system's is ever recorded, however it was created, so a write the owner approved once
+  can never become a free hand to delete it later.
 
-What that makes local work instead of a danger (`risk.ts` `facts.created`): `git worktree
-remove` of a worktree it added, `git branch -D` of a branch it created or is working on,
-`rm -rf`, `mv` and `chmod -R` of a directory or file it made (its dev instance, its
-`target/`, its clones and scratch files), `git reset --hard` / `checkout --` / `clean -f`
-in a checkout it made, `kill` of processes running in it or using it as their data
-directory (`processFacts.inCreated`), and a write under its dev instance's own Runtime
-directory. Anything else — another chat's worktree, a branch it did not make, a path it
-never created — stays a danger and asks.
+**The ledger** (`cypher-permissions/ledger.ts`): one append-only JSONL file per chat,
+`<agentDir>/cypher-permissions/ledger/<chat>.jsonl` (mode 0600), each entry the entity
+(`kind`, `name`, `repo`, `remote`, `head`, `version`), what was done (`action`: created,
+started, merged), the command and the time. It survives a Pi or engine restart and is read
+by a resumed chat; another chat's file is not read. The directory is part of the permission
+system (§3.6, so a write there always asks the owner) and protected (`DEFAULT_PROTECTED`),
+so commands in the sandbox can't write it; only the extension's own process appends.
+Names match per kind (`MATCHING`: a path covers what is inside it, a container's 12+ hex
+prefix its id, UDIDs without case; a branch only in its repository and on its remote). The
+session entries `cypher-permissions.created` from before the ledger are still read.
+
+The chat's own workspace roots and the temp directories count as its own anyway
+(`disposable`), and so does the branch checked out in a workspace root, which is the work
+Cypher gave the chat (`workspaceBranches`, never a default branch).
+
+What that makes local work instead of a danger (`risk.ts` `facts.created`): a command
+whose every destroy or stop target (catalogue) is a follow-up of the ledger (§7.3.6) — a
+worktree, branch, simulator, container, file, repository or release it made, a process
+or simulator it started, the head branch and worktree of a pull request it merged — and,
+as before, `rm -rf`, `mv`, `chmod -R`, `git reset --hard` / `checkout --` / `clean -f` in
+what it made, and `kill` of processes running in it (`processFacts.inCreated`). Local
+work still goes to the model, which sees the ledger's line saying why. Anything else stays
+a danger and asks.
+
+#### 7.3.6 Lifecycle closure (2026-11-22)
+
+The standard, contained follow-ups an action implies, as data (`cypher-permissions/
+lifecycle.ts` `LIFECYCLE`): merging a pull request → deleting its head branch (here and on
+the remote) and the worktree it is checked out in; what this task created → deleting,
+stopping, closing or erasing it; what it started → stopping it; a branch it created and
+pushed → deleting it from the remote again. Each rule names the antecedent action and
+kinds, the implied actions, and a relation (`itself`, `remote-copy`, `head-branch`,
+`head-worktree`) resolved once for every kind with what is known (a pull request's head
+from the ledger, the session or `gh pr view`; a worktree's branch from git).
+
+An antecedent is either recorded in the ledger (§7.3.3: the risk tier) or consented to
+(explicit.ts `consentedFollowUp`): a target the owner's words don't name is covered when it
+follows from an action they do ask for, the antecedent checked against the consent exactly
+as a target would be ("merge #52" covers `git push origin --delete <#52's head>` and
+`git worktree remove <its worktree>`; "merge #52 but keep the branch" does not; another
+remote or repository still has to be named). The explicit result lists the follow-ups for
+the audit. A follow-up is a fact for the model and the explicit check, never a bypass of
+the always-ask floor.
 
 ### 7.4 Human approval
 
@@ -1092,12 +1178,15 @@ Commands:
 | `cypher-permissions/judge.ts` | Judge prompt and verdict parsing |
 | `cypher-permissions/risk.ts`, `packs.ts` | The risk classifier: an action's tier, the always-ask floor, what each program does |
 | `cypher-permissions/created.ts` | What this task made, read from the commands it ran: the facts a danger over its own leavings rests on (§7.3.3) |
+| `cypher-permissions/catalogue.ts` | The creator/destroyer catalogue: per tool and subcommand, the entity it creates, destroys, stops, starts or merges and where its name comes from; plan before a run, settle after (§7.3.3) |
+| `cypher-permissions/ledger.ts` | The provenance ledger: per chat, on disk where the sandbox can't write (§7.3.3) |
+| `cypher-permissions/lifecycle.ts` | Lifecycle closure: the follow-ups an action implies, as data (§7.3.6) |
 | `cypher-permissions/explicit.ts` | Explicit requests: the owner's words, what a dangerous line acts on, the quote, target and retraction checks (§7.3.2) |
 | `cypher-permissions/entities.ts` | Target identity: typed entities and `relation`/`covers`/`identifies`/`namesOf` (§7.3.5) |
 | `cypher-permissions/tools.ts` | The tool table: per program and subcommand, the action and which operands/options carry which entities (§7.3.5) |
 | `crates/engine/src/host/doc_host/owner_words.rs` | The owner's words from a chat's command ledger and transcript (`CYPHER_OWNER_WORDS`): typed, plan, answer, card, reply (§7.3.4); `SessionCommandEntry::author` marks agents' messages |
 | `cypher-permissions/audit.ts` | The audit log |
-| `cypher-permissions/shell.ts` | Reading a command line into every command it can run and the files it redirects, or opaque |
+| `cypher-permissions/shell.ts` | Reading a command line into every command it can run and the files it redirects, or opaque; with `evaluate`, literal loops, functions, heredoc scripts and assignment prefixes (§6.3) |
 | `cypher-permissions/commands.ts` | Command rules: patterns, validation, the banned programs, categories, resolving a program |
 | `crates/engine/src/pi/permissions.rs` | The settings Settings → Permissions edits; `landstrip doctor` |
 | `crates/ui/src/settings/permissions.rs` | Settings → Permissions |
@@ -1105,6 +1194,11 @@ Commands:
 | `crates/ui/src/pickers/` (`PERMISSION_LEVELS`, `PickerKind::Permissions`) | The level names; the Full access shield and its menu |
 
 Tests: `cypher-permissions.test.mjs` (engine, no Pi or Landstrip),
+`cypher-permissions-provenance.test.mjs` (the catalogue, ledger, lifecycle and evaluator,
+with seeded property tests: a creator→destroyer pair per catalogue row is the chat's own
+and the same destroyer elsewhere is not, printed output never mints, the ledger survives a
+restart, a loop over n words is n commands, `A=1 cmd` ≡ `env A=1 cmd` ≡ `cmd`, the floor
+holds through every wrapper),
 `cypher-permissions-replay.test.mjs` (every question that reached the owner in the week
 from 2026-11-11, sanitized in `cypher-permissions-replay/`, replayed through the
 classifier and the decision path with the judge's verdict stubbed per case; the
