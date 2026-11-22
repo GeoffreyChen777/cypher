@@ -715,6 +715,7 @@ impl CodeEditor {
                         wavy: false,
                     }),
                     strikethrough: None,
+                    font_size: None,
                 };
                 vec![
                     run(start, false),
@@ -762,6 +763,7 @@ impl CodeEditor {
                 background_color: None,
                 underline: None,
                 strikethrough: None,
+                font_size: None,
             };
             self.char_width = f32::from(
                 window

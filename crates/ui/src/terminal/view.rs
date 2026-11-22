@@ -647,6 +647,7 @@ fn shape_row(
                 background_color: None,
                 underline,
                 strikethrough: None,
+                font_size: None,
             }),
         }
         if pinned {

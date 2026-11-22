@@ -345,6 +345,7 @@ fn label_width(label: &str, weight: gpui::FontWeight, theme: &Theme, window: &Wi
         background_color: None,
         underline: None,
         strikethrough: None,
+        font_size: None,
     };
     let line = window.text_system().shape_line(
         SharedString::from(label.to_string()),

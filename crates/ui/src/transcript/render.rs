@@ -1254,6 +1254,7 @@ fn user_bubble_text(
         background_color: None,
         underline: None,
         strikethrough: None,
+        font_size: None,
     };
     let chip_run = |len: usize| TextRun {
         len,
@@ -1262,6 +1263,7 @@ fn user_bubble_text(
         background_color: None,
         underline: None,
         strikethrough: None,
+        font_size: None,
     };
     let mut runs = Vec::with_capacity(mentions.len() * 2 + 1);
     let mut at = 0;

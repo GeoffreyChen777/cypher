@@ -189,6 +189,41 @@ lingua = { version = "1.8", default-features = false, features = [
     "english",
 ] }
 
+# LOCAL PATH PATCH (branch cypher/code-typesetting only): gpui with the
+# optional per-run `TextRun::font_size`, from the local checkout at
+# ~/.cypher-development/gpui-fork, branch `cypher/per-run-font-size` (one
+# commit on top of the rev above). It builds only on this machine. Hosting it
+# (pushing a fork branch and pointing the git deps above at it) is the
+# owner's decision; until then this must not reach main. Every crate of the
+# wingleeio/zed repo in the graph is patched, so Cargo.lock holds exactly one
+# gpui.
+[patch."https://github.com/wingleeio/zed"]
+collections = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/collections" }
+derive_refineable = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/refineable/derive_refineable" }
+gpui = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/gpui" }
+gpui_linux = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/gpui_linux" }
+gpui_macos = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/gpui_macos" }
+gpui_macros = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/gpui_macros" }
+gpui_platform = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/gpui_platform" }
+gpui_shared_string = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/gpui_shared_string" }
+gpui_tokio = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/gpui_tokio" }
+gpui_util = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/gpui_util" }
+gpui_web = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/gpui_web" }
+gpui_wgpu = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/gpui_wgpu" }
+gpui_windows = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/gpui_windows" }
+http_client = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/http_client" }
+http_client_tls = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/http_client_tls" }
+media = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/media" }
+perf = { path = "/Users/administrator/.cypher-development/gpui-fork/tooling/perf" }
+refineable = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/refineable" }
+reqwest_client = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/reqwest_client" }
+scheduler = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/scheduler" }
+sum_tree = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/sum_tree" }
+util_macros = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/util_macros" }
+zlog = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/zlog" }
+ztracing = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/ztracing" }
+ztracing_macro = { path = "/Users/administrator/.cypher-development/gpui-fork/crates/ztracing_macro" }
+
 [profile.release]
 # Distribution profile (scripts/package-linux.sh): thin LTO buys most of fat
 # LTO's size/speed win at a fraction of the link time; strip debug symbols.

@@ -368,6 +368,7 @@ impl TextInput {
                 wavy: false,
             }),
             strikethrough: None,
+            font_size: None,
         };
         let runs: Vec<TextRun> = match self.marked_range.as_ref() {
             Some(marked) if !is_placeholder => {

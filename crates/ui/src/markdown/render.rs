@@ -878,6 +878,7 @@ impl MathEnv {
                     background_color: None,
                     underline: None,
                     strikethrough: None,
+                    font_size: None,
                 };
                 f32::from(
                     window
@@ -1129,6 +1130,7 @@ fn flatten_runs_math(
                 background_color: None,
                 underline: None,
                 strikethrough: None,
+                font_size: None,
             });
         }
         if let Some((code_ref, label)) = chip {
@@ -1163,6 +1165,7 @@ fn flatten_runs_math(
                     background_color: None,
                     underline: None,
                     strikethrough: None,
+                    font_size: None,
                 });
             }
             copy.push((start..text.len(), run.text.to_string()));
@@ -1188,6 +1191,7 @@ fn flatten_runs_math(
                 background_color: None,
                 underline: None,
                 strikethrough: None,
+                font_size: None,
             });
             math_spans.push(MathSpan {
                 range: start..text.len(),
@@ -1266,6 +1270,7 @@ fn flatten_runs_math(
                 thickness: px(1.0),
                 color: Some(theme.text_muted),
             }),
+            font_size: None,
         });
         previous_was_code = Some(run.style.code);
     }
@@ -2632,6 +2637,7 @@ pub fn runs_for_syntax_line_with_plain(
         background_color: None,
         underline: None,
         strikethrough: None,
+        font_size: None,
     };
     // The runs must cover `line` exactly on char boundaries — gpui's text
     // layout `split_at`s by run length and panics otherwise. Spans can be
