@@ -685,7 +685,8 @@ test("evaluator: an alias's text is code the line may run", () => {
 // --- Dangers whose target can't be read: the judge, on a consent the code checks -------------
 
 test("property: an unknown dangerous target runs only on a checked, cited consent, and only once", async () => {
-  const lines = ["git push origin $BRANCH", "rm -rf $TARGET_DIR", "gh pr merge $(gh pr list -q .number)", "gh release delete $TAG --yes", "diff <(ls) <(ls -a) && git push --force origin $B"];
+  // Each line says "release" somewhere, as the claimed target must be in the command's own text.
+  const lines = ["git push origin release $BRANCH", "rm -rf $TARGET_DIR/release", "gh pr merge $(gh pr list --head release -q .number)", "gh release delete $TAG --yes", "diff <(ls) <(ls -a) && git push --force origin release"];
   const request = "push and merge the release branch, then delete the release build";
   const variants = {
     none: { verdict: { decision: "approve", reason: "asked" }, words: [request] },
@@ -1021,4 +1022,34 @@ test("property: a destroyer whose owner Cypher can't tell names its target, and 
   // A name known only when it runs stays unreadable.
   const { permissions } = engineIn(workspace);
   assert.ok("unknown" in permissions.lineTargets(permissions.assess("limactl delete $VM", workspace)));
+});
+
+
+test("property: for an unreadable line, a claimed target counts only when the command's own text names it", async () => {
+  const name = "feat-login";
+  const words = `push the ${name} branch to origin`;
+  const without = ['eval "$CMD"', 'sh -c \'eval "$CMD"\'', 'bash -c "$(cat f)"', "echo Z2l0IHB1c2g= | base64 -d | sh", "xargs git push origin < refs.txt", 'f() { git push origin "$1"; }; f "$B"', 'eval "git $op origin"'];
+  const within = [`CMD="git push origin ${name}"; eval "$CMD"`, `printf 'git push origin ${name}\\n' | sh`, `bash -c "$(echo git push origin ${name})"`, `echo ${name} | xargs git push origin`];
+  const run = async (line) => {
+    const { permissions } = engineIn(workspace);
+    permissions.ownerWords = { messages: [{ text: words, source: "typed" }], agentWritten: false };
+    assert.equal(permissions.assess(line, workspace).tier, "danger", line);
+    const context = {
+      cwd: workspace, hasUI: true, ui: { async select() { return "Deny"; }, notify() {} },
+      branch: () => [{ type: "message", message: { role: "user", content: words } }],
+      complete: async () => JSON.stringify({ decision: "approve", reason: "asked", consent: { source: "typed", quote: words }, target: { kind: "branch", value: name } }),
+      abort() {},
+    };
+    const result = await permissions.requestEscalation(line, { label: "x" }, context);
+    return { ok: result.ok, scope: result.scope, grants: permissions.grants.all().length };
+  };
+  for (const seed of SEEDS.slice(0, 3)) {
+    const rng = prng(seed);
+    for (let round = 0; round < 4; round++) {
+      const line = rng.pick(without);
+      assert.equal((await run(line)).ok, false, `seed ${seed}: ${line} never says ${name}`);
+      const said = rng.pick(within);
+      assert.deepEqual(await run(said), { ok: true, scope: "once", grants: 0 }, `seed ${seed}: ${said}`);
+    }
+  }
 });

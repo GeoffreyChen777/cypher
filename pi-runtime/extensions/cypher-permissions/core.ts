@@ -1728,6 +1728,8 @@ export class Permissions {
             ? { unknown: `it uses ${line.parsed.reason}, which Cypher can't read`, known: [] }
             : this.lineTargets(line)
           : undefined;
+      // What the line says, as written and with the evaluator's known expansions: an unreadable target the model claims must occur in it.
+      if (targets && "unknown" in targets) targets.text = [command, ...line.commands.map((item) => item.words.filter((word) => word !== UNKNOWN).join(" "))].join("\n");
       const unknownTarget = targets && "unknown" in targets ? targets.unknown : undefined;
       // A danger runs on the owner's own words: the ones they have written by now. A target that can't be read runs on
       // nothing else, so with no words at all the model isn't asked.

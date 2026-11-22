@@ -1146,6 +1146,11 @@ part that can be checked (explicit.ts `checkExplicit`, `once`):
   line's danger's action class (from the tool table's action, or the danger's kind:
   delete, stop, push, merge, …): "sí, dale" or "clean up what you made" never suffice.
 
+- (round 5) the target the model claims occurs as a token in the command's own text (as
+  written, quotes and heredocs included, and with the evaluator's known expansions): a
+  name the line never says (`eval "$CMD"`, `bash -c "$(cat f)"`, `xargs git push`) is the
+  model's guess, and asks.
+
 A destroyer whose owner Cypher can't tell but whose names are written out (the generic
 destroy-verb fallback, catalogue rows like `docker rm`, `docker volume rm`, VM tools) is
 not an unreadable target: core.ts reads its operands as entities (`destroyedEntities`:

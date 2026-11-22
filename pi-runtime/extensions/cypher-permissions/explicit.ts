@@ -356,7 +356,7 @@ export interface Target {
 
 /** A line's targets, or why one can't be read before it runs. */
 /** What a dangerous line acts on; or why some of it can't be read, with the targets that could (`known`). */
-export type LineTargets = { targets: Target[] } | { unknown: string; known?: Target[]; actions?: string[] };
+export type LineTargets = { targets: Target[] } | { unknown: string; known?: Target[]; actions?: string[]; text?: string };
 
 /** What reading targets needs to know about the machine. */
 export interface TargetFacts {
@@ -1198,6 +1198,11 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
       return entity === undefined || !(namesEntity(quote, entity, context) || mentions(quote, item.value));
     });
     if (unnamed) return result(["quote"], `${unknown}, and your words "${quote}" don't name ${unnamed.kind} ${unnamed.value}`, source);
+    // The claimed target must be in the command's own text: a name the line never says is the model's guess.
+    const text = "text" in read ? read.text : undefined;
+    const token = (value: string) => value !== "" && new RegExp(`(?<![A-Za-z0-9_.-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_-])`, "i").test(text ?? "");
+    const absent = claimed.find((item) => text === undefined || !token(item.value.trim()));
+    if (absent) return result(["quote"], `${unknown}, and the command never names ${absent.kind} ${absent.value}`, source);
     const actions = "actions" in read && read.actions?.length ? read.actions : ["delete", "stop", "push", "publish", "release", "merge", "install", "apply", "write", "erase", "reach"];
     if (!actions.some((action) => actionWords(action).test(quote))) return result(["quote"], `${unknown}, and your words "${quote}" don't ask to ${actions.join(" or ")}`, source);
     return result(["quote", "current"], undefined, { ...source, once: true, unknown, ...(followUps.length ? { followUps } : {}) });
