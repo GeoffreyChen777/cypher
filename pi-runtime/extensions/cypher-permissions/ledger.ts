@@ -42,8 +42,13 @@ export interface LedgerEntity {
   version?: string;
 }
 
+/** What a command did to the entity: made it (the default), started it, merged it. */
+export type LedgerAction = "create" | "start" | "merge";
+
 export interface LedgerEntry extends LedgerEntity {
-  /** The command that made it (shortened). */
+  /** What was done; absent: created. */
+  action?: LedgerAction;
+  /** The command that did it (shortened). */
   by?: string;
   at?: string;
   chatId?: string;
@@ -119,13 +124,14 @@ function validEntry(value: unknown): value is LedgerEntry {
   const entry = value as Partial<LedgerEntry>;
   if (typeof entry.kind !== "string" || !LEDGER_KINDS.includes(entry.kind as LedgerKind)) return false;
   if (typeof entry.name !== "string" || entry.name === "") return false;
+  if (entry.action !== undefined && !["create", "start", "merge"].includes(entry.action)) return false;
   for (const field of ["repo", "remote", "head", "version", "by", "at", "chatId"] as const) {
     if (entry[field] !== undefined && typeof entry[field] !== "string") return false;
   }
   return true;
 }
 
-const key = (entity: LedgerEntity) => JSON.stringify([entity.kind, entity.name, entity.repo ?? "", entity.remote ?? "", entity.version ?? ""]);
+const key = (entity: LedgerEntity & { action?: LedgerAction }) => JSON.stringify([entity.action ?? "create", entity.kind, entity.name, entity.repo ?? "", entity.remote ?? "", entity.version ?? ""]);
 
 /** One chat's ledger: in memory, and in its file when it has one. */
 export class Ledger {
@@ -171,13 +177,15 @@ export class Ledger {
   }
 
   /** Record what a command made; returns the entries that were new. `persist: false` keeps them in memory (restored from elsewhere). */
-  record(entities: readonly LedgerEntity[], by?: string, persist = true): LedgerEntry[] {
+  record(entities: readonly (LedgerEntity & { action?: LedgerAction })[], by?: string, persist = true): LedgerEntry[] {
     this.load();
     const fresh: LedgerEntry[] = [];
     const at = new Date().toISOString();
     for (const entity of entities) {
+      const { action, ...rest } = entity;
       const entry: LedgerEntry = {
-        ...entity,
+        ...rest,
+        ...(action && action !== "create" ? { action } : {}),
         ...(by ? { by: by.length > 200 ? `${by.slice(0, 200)}…` : by } : {}),
         at,
         ...(this.chatId ? { chatId: this.chatId } : {}),
@@ -200,7 +208,7 @@ export class Ledger {
   /** The entry that says this chat made `target`, or something holding it. */
   covering(target: LedgerEntity): LedgerEntry | undefined {
     this.load();
-    return this.entries.find((entry) => entryCovers(entry, target));
+    return this.entries.find((entry) => (entry.action ?? "create") === "create" && entryCovers(entry, target));
   }
 
   covers(target: LedgerEntity): boolean {

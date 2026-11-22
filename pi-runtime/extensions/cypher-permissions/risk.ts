@@ -248,7 +248,18 @@ export interface RiskFacts extends PackFacts {
   /** The branches checked out in the chat's project folders, bar a default branch: the chat's own work. */
   workspaceBranches?(): readonly string[];
   /** What this task made (created.ts): what it may undo without asking anyone. */
-  created?: { has(path: string): boolean; worktree(path: string): boolean; branch(name: string): boolean };
+  created?: {
+    has(path: string): boolean;
+    worktree(path: string): boolean;
+    branch(name: string): boolean;
+    /**
+     * What a command deletes or stops (catalogue.ts), and whether every
+     * target is a follow-up of what the ledger holds (lifecycle.ts): what
+     * this task created or started, the head branch of a pull request it
+     * merged. `why`: the lifecycle rules.
+     */
+    destroys?(command: RiskCommand): { own: boolean; op: "destroy" | "stop"; why: string[] } | undefined;
+  };
   /** A canonical path of the permission system itself (config.ts): a change there always asks. */
   permissionSystem?(path: string): boolean;
 }
@@ -881,6 +892,12 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
   if (words.length === 0) return { tier: "inspect" };
   const view = viewOf(words);
   if (words[0] === UNKNOWN) return { tier: "local", kind: "runs a program known only when it runs" };
+  // Undoing what this task made or started, or what the lifecycle of what it did implies (a merged pull
+  // request's head branch): its own work, for the reviewing model to decide (created.ts, lifecycle.ts).
+  if (command.writes.length === 0) {
+    const undo = facts.created?.destroys?.(command);
+    if (undo?.own) return { tier: "local", kind: `${undo.op === "stop" ? "stops" : "undoes"} what this task did (${undo.why.join("; ")})` };
+  }
   const inner = innerLine(view);
   if (inner) {
     // What ssh runs is the other machine's: its variables and files are not this one's secrets.

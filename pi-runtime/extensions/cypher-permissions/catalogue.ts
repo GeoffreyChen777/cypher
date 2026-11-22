@@ -31,11 +31,12 @@
 
 import { basename, isAbsolute, join, resolve } from "node:path";
 
-import type { LedgerEntity, LedgerKind } from "./ledger.ts";
+import type { LedgerAction, LedgerEntity, LedgerKind } from "./ledger.ts";
 import { UNKNOWN } from "./shell.ts";
 import type { Joint } from "./shell.ts";
 
-export type Op = "create" | "destroy" | "stop";
+/** What a row's command does: creates, destroys or stops its entity, or starts or merges one (lifecycle.ts antecedents). */
+export type Op = "create" | "destroy" | "stop" | "start" | "merge";
 
 /** Where an entity's name comes from. */
 export type IdSource =
@@ -124,6 +125,7 @@ export const CATALOGUE: readonly CatalogueRow[] = [
   { programs: ["gh"], sub: ["repo", "create"], op: "create", kind: "repo", id: { from: "output", pattern: new RegExp(`^${GITHUB_HOSTED}(?<name>[\\w.-]+/[\\w.-]+?)(?:\\.git)?/?$`) } },
   { programs: ["gh"], sub: ["repo", "delete"], op: "destroy", kind: "repo", id: { from: "operand", at: 0 } },
   { programs: ["gh"], sub: ["pr", "create"], op: "create", kind: "pr", id: { from: "output", pattern: new RegExp(`^${GITHUB_HOSTED}(?<repo>[\\w.-]+/[\\w.-]+)/pull/(?<name>\\d+)$`) }, values: ["-t", "--title", "-b", "--body", "-F", "--body-file", "-B", "--base", "-H", "--head", "-R", "--repo", "-a", "--assignee", "-l", "--label", "-m", "--milestone", "-r", "--reviewer", "-p", "--project", "-T", "--template"], fields: { "-H": "head", "--head": "head" } },
+  { programs: ["gh"], sub: ["pr", "merge"], op: "merge", kind: "pr", id: { from: "operand", at: 0 }, values: ["-b", "--body", "-F", "--body-file", "-t", "--subject", "-A", "--author-email", "--match-head-commit", "-R", "--repo"], fields: { "-R": "repo", "--repo": "repo" } },
   { programs: ["gh"], sub: ["pr", "close"], op: "destroy", kind: "pr", id: { from: "operand", at: 0 }, values: ["-c", "--comment", "-R", "--repo"], fields: { "-R": "repo", "--repo": "repo" } },
   { programs: ["gh"], sub: ["release", "create"], op: "create", kind: "release", id: { from: "output", pattern: new RegExp(`^${GITHUB_HOSTED}(?<repo>[\\w.-]+/[\\w.-]+)/releases/tag/(?<name>\\S+)$`) }, values: ["-t", "--title", "-n", "--notes", "-F", "--notes-file", "--target", "-R", "--repo", "--notes-start-tag", "--discussion-category"] },
   { programs: ["gh"], sub: ["release", "delete"], op: "destroy", kind: "release", id: { from: "operand", at: 0 }, values: ["-R", "--repo"], fields: { "-R": "repo", "--repo": "repo" } },
@@ -132,12 +134,14 @@ export const CATALOGUE: readonly CatalogueRow[] = [
   { programs: ["xcrun"], sub: ["simctl", "clone"], op: "create", kind: "simulator", id: { from: "output", pattern: UUID_LINE } },
   { programs: ["xcrun"], sub: ["simctl", "delete"], op: "destroy", kind: "simulator", id: { from: "operands" } },
   { programs: ["xcrun"], sub: ["simctl", "erase"], op: "destroy", kind: "simulator", id: { from: "operands" } },
+  { programs: ["xcrun"], sub: ["simctl", "boot"], op: "start", kind: "simulator", id: { from: "operands" } },
   { programs: ["xcrun"], sub: ["simctl", "shutdown"], op: "stop", kind: "simulator", id: { from: "operands" } },
   // Containers.
   ...["docker", "podman"].flatMap((program): CatalogueRow[] => [
     ...[["run"], ["container", "run"]].map((sub): CatalogueRow => ({ programs: [program], sub, op: "create", kind: "container", id: { from: "output", pattern: CONTAINER_LINE }, values: DOCKER_RUN_VALUES, requires: ["-d", "--detach"] })),
     ...[["create"], ["container", "create"]].map((sub): CatalogueRow => ({ programs: [program], sub, op: "create", kind: "container", id: { from: "output", pattern: CONTAINER_LINE }, values: DOCKER_RUN_VALUES })),
     ...[["run"], ["create"], ["container", "run"], ["container", "create"]].map((sub): CatalogueRow => ({ programs: [program], sub, op: "create", kind: "container", id: { from: "option", names: ["--name"] }, values: DOCKER_RUN_VALUES, forbids: ["--rm"] })),
+    ...[["start"], ["container", "start"]].map((sub): CatalogueRow => ({ programs: [program], sub, op: "start", kind: "container", id: { from: "operands" } })),
     ...[["rm"], ["container", "rm"]].map((sub): CatalogueRow => ({ programs: [program], sub, op: "destroy", kind: "container", id: { from: "operands" }, values: ["-t", "--time"] })),
     ...[["stop"], ["kill"], ["container", "stop"], ["container", "kill"]].map((sub): CatalogueRow => ({ programs: [program], sub, op: "stop", kind: "container", id: { from: "operands" }, values: ["-t", "--time", "-s", "--signal"] })),
   ]),
@@ -147,6 +151,7 @@ export const CATALOGUE: readonly CatalogueRow[] = [
   // Machines.
   { programs: ["multipass"], sub: ["launch"], op: "create", kind: "host", id: { from: "option", names: ["-n", "--name"] }, values: ["-n", "--name", "-c", "--cpus", "-m", "--memory", "-d", "--disk", "--cloud-init", "--network", "--mount", "--timeout"] },
   { programs: ["multipass"], sub: ["delete"], op: "destroy", kind: "host", id: { from: "operands" } },
+  { programs: ["multipass"], sub: ["start"], op: "start", kind: "host", id: { from: "operands" } },
   { programs: ["multipass"], sub: ["stop"], op: "stop", kind: "host", id: { from: "operands" } },
   // Processes: this chat's are told by the marker its commands carry (core.ts `ownsProcesses`), not by the ledger.
   { programs: ["kill"], sub: [], op: "stop", kind: "process", id: { from: "operands" }, values: ["-s", "-n"] },
@@ -203,6 +208,8 @@ export interface CatalogueFacts {
 /** An entity a line may create. */
 export interface Candidate {
   entity: LedgerEntity;
+  /** What the command does to it, when not creating it (starting, merging). */
+  action?: LedgerAction;
   /** Which command of the line creates it. */
   command: number;
   confirm: Confirm;
@@ -398,7 +405,7 @@ function refspecs(args: Args): { remote: string; create: { name: string; source:
 export function planCreations(commands: readonly CatalogueCommand[], facts: CatalogueFacts): Candidate[] {
   const out: Candidate[] = [];
   const add = (candidate: Candidate) => {
-    if (out.some((other) => JSON.stringify(other.entity) === JSON.stringify(candidate.entity))) return;
+    if (out.some((other) => other.action === candidate.action && JSON.stringify(other.entity) === JSON.stringify(candidate.entity))) return;
     out.push(candidate);
   };
   const observed = (entity: LedgerEntity, index: number, ref?: { repo: string; ref: string }): Candidate => {
@@ -433,7 +440,8 @@ export function planCreations(commands: readonly CatalogueCommand[], facts: Cata
       }
     }
     for (const { row, args, dir } of rowsFor(command)) {
-      if (row.op !== "create") continue;
+      if (row.op === "destroy" || row.op === "stop") continue;
+      const action = row.op === "create" ? undefined : row.op;
       const repo = row.inRepo ? facts.repository?.(dir) : undefined;
       const fields: Partial<LedgerEntity> = {};
       for (const [option, field] of Object.entries(row.fields ?? {})) {
@@ -441,7 +449,7 @@ export function planCreations(commands: readonly CatalogueCommand[], facts: Cata
         if (typeof value === "string" && value !== UNKNOWN) fields[field] = value;
       }
       if (row.id.from === "output") {
-        add({ entity: { kind: row.kind, name: "", ...fields }, command: index, confirm: "output", pattern: row.id.pattern });
+        add({ entity: { kind: row.kind, name: "", ...fields }, command: index, confirm: "output", pattern: row.id.pattern, ...(action ? { action } : {}) });
         continue;
       }
       if (row.id.from === "refspecs") {
@@ -467,7 +475,7 @@ export function planCreations(commands: readonly CatalogueCommand[], facts: Cata
           continue;
         }
         // `observed` needs a path or a ref to look at; anything else is confirmed by the line's success.
-        add({ entity: { kind: row.kind, name, ...fields }, command: index, confirm: "succeeded" });
+        add({ entity: { kind: row.kind, name, ...fields }, command: index, confirm: "succeeded", ...(action ? { action } : {}) });
       }
     }
   });
@@ -492,13 +500,13 @@ export function settleCreations(
   commands: readonly CatalogueCommand[],
   result: { exitCode?: number; output?: string },
   facts: CatalogueFacts,
-): LedgerEntity[] {
+): (LedgerEntity & { action?: LedgerAction })[] {
   const succeeded = lineSucceeded(commands, result.exitCode);
   const trusted = (index: number) => {
     const command = commands[index];
     return command !== undefined && command.words[0] !== undefined && command.words[0] !== UNKNOWN && facts.trusted?.(command.words[0], command.cwd) === true;
   };
-  const out: LedgerEntity[] = [];
+  const out: (LedgerEntity & { action?: LedgerAction })[] = [];
   for (const candidate of plan) {
     if (candidate.before) continue;
     let entity: LedgerEntity | undefined = candidate.entity;
@@ -535,7 +543,8 @@ export function settleCreations(
       }
     }
     if (entity && candidate.needs && facts.ledgered?.(candidate.needs) !== true) entity = undefined;
-    if (entity && !out.some((other) => JSON.stringify(other) === JSON.stringify(entity))) out.push(entity);
+    const done = entity && candidate.action ? { ...entity, action: candidate.action } : entity;
+    if (done && !out.some((other) => JSON.stringify(other) === JSON.stringify(done))) out.push(done);
   }
   return out;
 }
@@ -552,7 +561,7 @@ export interface Destruction {
 export function targetsOf(command: CatalogueCommand, facts: Pick<CatalogueFacts, "canonical" | "repository">): Destruction | undefined {
   let found: Destruction | undefined;
   for (const { row, args, dir } of rowsFor(command)) {
-    const op = row.op === "create" ? (row.id.from === "refspecs" ? "destroy" : undefined) : row.op;
+    const op = row.op === "destroy" || row.op === "stop" ? row.op : row.op === "create" && row.id.from === "refspecs" ? "destroy" : undefined;
     if (op === undefined) continue;
     found ??= { op, targets: [], unknown: false };
     if (args.unknown) found.unknown = true;

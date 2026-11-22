@@ -444,14 +444,16 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
           record: { outcome: "outside", scope: outcome.scope === "project" ? "always" : outcome.scope === "task" ? "once" : outcome.scope, purpose },
         };
       }
+      // What it makes is this task's own from now on (created.ts): planned before it runs, settled on its result.
+      const creations = st.planCreated(command, ctx.cwd);
       if (ranOutside) {
-        // What it makes is this task's own from now on (created.ts).
-        st.noteCreated(command, ctx.cwd);
         const note = `[permissions] Ran outside the sandbox (${ranOutside.note}).`;
         try {
           const result = (await outside().execute(id, bashParams, signal, onUpdate, ctx)) as AnyResult;
+          st.settleCreated(creations, bashOutcome(result));
           return withRecord({ ...result, content: [...result.content, { type: "text", text: note }] }, ranOutside.record) as never;
         } catch (error) {
+          st.settleCreated(creations, {});
           if (error instanceof Error) error.message = `${error.message}\n\n${note}`;
           throw error;
         }
@@ -463,7 +465,6 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
       const viaProxy = compiled.policy.network.httpProxyPort;
       const policy = writePolicyFile(compiled.policy);
       const binary = st.status.binary!;
-      st.noteCreated(command, ctx.cwd);
       st.beginCommand(id, command, requestContext(ctx, signal, id));
       const tool = createBashToolDefinition(ctx.cwd, {
         shellPath,
@@ -483,8 +484,10 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
         : undefined;
       try {
         const result = (await tool.execute(id, bashParams, signal, forward, ctx)) as AnyResult;
+        st.settleCreated(creations, bashOutcome(result));
         return annotateBash(result, st, compiled) as never;
       } catch (error) {
+        st.settleCreated(creations, {});
         if (error instanceof Error) {
           const { denials, rest } = parseDenials(error.message);
           error.message = denials.length || DENIAL_TEXT.test(rest) ? `${rest}\n\n${st.denialHint(compiled, denials)}` : rest;
@@ -496,6 +499,15 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
       }
     },
   });
+
+  /** A bash call's exit status and its whole output, as the tool reports them (structuredContent). */
+  function bashOutcome(result: AnyResult): { exitCode?: number; output?: string } {
+    const structured = result.structuredContent as { output?: unknown; exit_code?: unknown; truncated?: unknown } | undefined;
+    const exitCode = typeof structured?.exit_code === "number" ? structured.exit_code : undefined;
+    // A truncated output's last line may not be the command's.
+    const output = typeof structured?.output === "string" && structured.truncated !== true ? parseDenials(structured.output).rest : undefined;
+    return { ...(exitCode !== undefined ? { exitCode } : {}), ...(output !== undefined ? { output } : {}) };
+  }
 
   function annotateBash(result: AnyResult, st: Permissions, compiled: Awaited<ReturnType<Permissions["compile"]>>): AnyResult {
     const text = result.content.map((part) => (part.type === "text" ? (part.text ?? "") : "")).join("\n");

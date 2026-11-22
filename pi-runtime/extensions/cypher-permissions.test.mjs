@@ -1569,7 +1569,9 @@ test("escalation: each command's category, kept for the project", async () => {
   assert.deepEqual((await offered("git add -A && git commit -m 'Ship it' && git push")).patterns, ["git add …", "git commit …", "git push …"]);
   assert.deepEqual((await offered("git -C ../other push origin main")).patterns, ["git -C ../other push …"]);
   assert.deepEqual((await offered("git push origin $(git branch --show-current)")).patterns, ["git push …"], "dangerous (a branch known only when it runs): for this task at most");
-  assert.deepEqual((await offered("for h in web db; do git fetch $h; done")).patterns, ["git fetch …"]);
+  // A loop over literal words is each of its commands (shell.ts `evaluate`).
+  assert.deepEqual((await offered("for h in web db; do ssh $h uptime; done")).patterns, ["ssh web …", "ssh db …"]);
+  assert.deepEqual((await offered("for h in $(cat hosts); do git fetch $h; done")).patterns, ["git fetch …"]);
   // xcrun and open exist only on macOS; elsewhere they are not found and run once.
   if (process.platform === "darwin") {
     assert.deepEqual((await offered("xcrun simctl boot 'iPhone 17' && open -a Simulator")).patterns, ["xcrun simctl …", "open -a Simulator"]);
@@ -1874,7 +1876,9 @@ test("review: the packs' gaps", () => {
   assert.equal(tier("pgrep node"), "inspect");
   assert.equal(tier("ps -ef"), process.platform === "linux" ? "inspect" : "local", "-e prints environments only on macOS");
   assert.equal(tier("ps eww"), "local");
-  assert.equal(permissions.assess("RUSTUP_TOOLCHAIN=/p cargo build", workspace).parsed.kind, "opaque", "a variable that picks the toolchain");
+  // A variable that picks the toolchain: the program is known only when it runs, for the model to judge.
+  const toolchain = permissions.assess("RUSTUP_TOOLCHAIN=/p cargo build", workspace);
+  assert.deepEqual([toolchain.parsed.kind, toolchain.commands[0].words[0], toolchain.tier], ["simple", UNKNOWN, "local"], "a variable that picks the toolchain");
   assert.equal(permissions.classify(join(home, ".cypher-development", "local-engine-x", "pi-runtime", "agent", "permissions.json")).guard, "protected", "another instance's policy");
   assert.equal(permissions.classify(join(home, ".cypher-development", "local-engine-x", "pi-runtime", "agent", "extensions", "x.ts")).guard, "protected");
 });
@@ -2281,20 +2285,24 @@ test("these still ask the user when the model approves them without the owner's 
 
 test("an opaque line that writes where it names the installed app is dangerous; one that reads it is not", () => {
   const { permissions } = engine();
-  const assessment = permissions.assess('f() { rm -rf "$HOME/.cypher/trust"; }; f', workspace);
+  // A function with a subshell for its body is not followed: opaque.
+  const assessment = permissions.assess('f() ( rm -rf "$HOME/.cypher/trust" ); f', workspace);
   assert.equal(assessment.parsed.kind, "opaque");
   assert.deepEqual([assessment.tier, assessment.kind], ["danger", "changes the installed Cypher app or its data ($HOME/.cypher/trust)"]);
   for (const line of [
+    'f() ( cp /tmp/x "$HOME/.cypher/ui-settings.json" ); f',
+    `f() ( python3 -c "open('$HOME/.cypher/ui-settings.json','w')" ); f`,
+    'f() ( echo x > "$HOME/.cypher/ui-settings.json" ); f',
+    // A function with a `{ … }` body is followed into its call (shell.ts `evaluate`): as dangerous.
+    'f() { rm -rf "$HOME/.cypher/trust"; }; f',
     'f() { cp /tmp/x "$HOME/.cypher/ui-settings.json"; }; f',
-    `f() { python3 -c "open('$HOME/.cypher/ui-settings.json','w')"; }; f`,
-    'f() { echo x > "$HOME/.cypher/ui-settings.json"; }; f',
   ]) {
     assert.equal(permissions.assess(line, workspace).tier, "danger", line);
   }
   // Reading it is local work the model decides on.
-  assert.equal(permissions.assess('f() { ls "$HOME/.cypher/trust"; }; f', workspace).tier, "local");
-  assert.equal(permissions.assess('f() { ls "$HOME/.cypher/worktrees/app"; }; f', workspace).tier, "local", "a worktree is not the app's");
-  assert.equal(permissions.assess('f() { ls "$HOME/.cypher-development/x"; }; f', workspace).tier, "local");
+  assert.equal(permissions.assess('f() ( ls "$HOME/.cypher/trust" ); f', workspace).tier, "local");
+  assert.equal(permissions.assess('f() ( ls "$HOME/.cypher/worktrees/app" ); f', workspace).tier, "local", "a worktree is not the app's");
+  assert.equal(permissions.assess('f() ( ls "$HOME/.cypher-development/x" ); f', workspace).tier, "local");
 });
 
 // --- Explicit requests: the owner's own words (explicit.ts) --------------------------------

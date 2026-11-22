@@ -179,7 +179,7 @@ function storeWith(entities) {
 test("catalogue: every row names a known kind and an id source; every created kind but processes can be destroyed by a row", () => {
   for (const row of CATALOGUE) {
     assert.ok(LEDGER_KINDS.includes(row.kind), JSON.stringify(row));
-    assert.ok(["create", "destroy", "stop"].includes(row.op));
+    assert.ok(["create", "destroy", "stop", "start", "merge"].includes(row.op));
   }
   const created = new Set(CATALOGUE.filter((row) => row.op === "create").map((row) => row.kind));
   for (const kind of created) {
@@ -480,4 +480,93 @@ test("property: what a wrapper hides is still read — a secret leaving the mach
     assert.equal(parsed.kind, "simple", `seed ${seed}: ${line}: ${parsed.reason}`);
     assert.ok(parsed.commands.some((command) => command.words[0] === "curl" && command.words.includes(`@${home}/.ssh/id_ed25519`)), `seed ${seed}: ${line}`);
   }
+});
+
+// --- Wired into the permission engine (core.ts, risk.ts) -----------------------------
+
+import { mkdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { Permissions } from "./cypher-permissions/core.ts";
+import { followUpOf, LIFECYCLE } from "./cypher-permissions/lifecycle.ts";
+
+const ihome = join(scratch, "home");
+mkdirSync(join(ihome, "Developer", "app"), { recursive: true });
+const workspace = realpathSync(join(ihome, "Developer", "app"));
+
+function engineIn(cwd, { agentDir = mkdtempSync(join(scratch, "agent-")), chatId = "chat-p" } = {}) {
+  const permissions = new Permissions({ agentDir, chatId, cwd, home: ihome, landstrip: { available: true, binary: "/nonexistent/landstrip" }, scratch: [] });
+  permissions.appendEntry = () => {};
+  return { permissions, agentDir };
+}
+
+test("engine: what a command made, confirmed by its run, is the chat's to undo — after a restart too, and only for that chat", () => {
+  const { permissions, agentDir } = engineIn(workspace);
+  const place = join(ihome, "Developer", "probe-made");
+  const tier = (p, line) => p.assess(line, workspace).tier;
+  assert.equal(tier(permissions, `rm -rf ${place}`), "danger");
+  // Refused or failed: nothing made.
+  permissions.settleCreated(permissions.planCreated(`mkdir -p ${place}`, workspace), { exitCode: 1 });
+  assert.equal(tier(permissions, `rm -rf ${place}`), "danger");
+  const plan = permissions.planCreated(`mkdir -p ${place}`, workspace);
+  mkdirSync(place, { recursive: true });
+  permissions.settleCreated(plan, { exitCode: 0, output: "" });
+  assert.equal(tier(permissions, `rm -rf ${place}`), "local");
+  assert.equal(tier(permissions, `for d in ${place}/a ${place}/b; do rm -rf $d; done`), "local", "a loop over its own paths");
+  assert.equal(tier(permissions, `for d in ${place} ${ihome}/Developer/other; do rm -rf $d; done`), "danger", "one of them isn't");
+  // Naming it again later never makes something that was there the task's.
+  const other = join(ihome, "Developer", "was-there");
+  mkdirSync(other, { recursive: true });
+  permissions.settleCreated(permissions.planCreated(`mkdir -p ${other}`, workspace), { exitCode: 0 });
+  assert.equal(tier(permissions, `rm -rf ${other}`), "danger");
+  // A restart: the same chat reads its ledger; another chat doesn't.
+  assert.equal(tier(engineIn(workspace, { agentDir }).permissions, `rm -rf ${place}`), "local");
+  assert.equal(tier(engineIn(workspace, { agentDir, chatId: "chat-q" }).permissions, `rm -rf ${place}`), "danger");
+  // The ledger is where the sandbox can't write: the permission system's.
+  assert.ok(permissions.paths.isPermissionSystem(ledgerFile(agentDir, "chat-p")));
+});
+
+test("engine: a simulator the chat created is its own to delete; one only printed is not", { skip: process.platform !== "darwin" || !spawnSync("xcrun", ["--version"]).stdout }, () => {
+  const { permissions } = engineIn(workspace);
+  const udid = "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0";
+  const tier = (line) => permissions.assess(line, workspace).tier;
+  const before = tier(`xcrun simctl delete ${udid}`);
+  permissions.settleCreated(permissions.planCreated(`echo ${udid}`, workspace), { exitCode: 0, output: `${udid}\n` });
+  permissions.settleCreated(permissions.planCreated(`xcrun simctl create probe iPhone-15 && echo ${udid}`, workspace), { exitCode: 0, output: `${udid}\n` });
+  assert.equal(tier(`xcrun simctl delete ${udid}`), before, "printed, not created");
+  permissions.settleCreated(permissions.planCreated("xcrun simctl create probe com.apple.CoreSimulator.SimDeviceType.iPhone-15", workspace), { exitCode: 0, output: `${udid}\n` });
+  assert.equal(tier(`xcrun simctl delete ${udid}`), "local");
+  assert.equal(tier(`xcrun simctl shutdown ${udid} && xcrun simctl delete ${udid}`), "local");
+});
+
+test("lifecycle: a merged pull request's head branch and worktree are follow-ups; other branches are not", () => {
+  const repo = join(ihome, "Developer", "life-repo");
+  mkdirSync(repo, { recursive: true });
+  const git = (...args) => spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+  git("init", "-q", "-b", "main");
+  git("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "init");
+  git("branch", "feat/merged");
+  git("branch", "feat/other");
+  const tree = join(ihome, "Developer", "life-tree");
+  git("worktree", "add", "-q", tree, "feat/merged");
+  // The chat works elsewhere: this repository is not its workspace.
+  const { permissions } = engineIn(workspace);
+  const tier = (line) => permissions.assess(line, workspace).tier;
+  const at = realpathSync(repo);
+  const lines = [`git -C ${at} branch -D feat/merged`, `git -C ${at} worktree remove --force ${realpathSync(tree)}`];
+  const before = lines.map(tier);
+  assert.ok(before.every((value) => value === "danger"), JSON.stringify(before));
+  // The ledger says this chat merged #52, whose head is feat/merged.
+  permissions.created.ledger.record([{ kind: "pr", name: "52", head: "feat/merged", action: "merge" }]);
+  assert.deepEqual(lines.map(tier), ["local", "local"]);
+  assert.equal(tier(`git -C ${at} branch -D feat/other`), "danger");
+  // As data: every rule names a relation and follow-up actions.
+  for (const rule of LIFECYCLE) assert.ok(rule.then.length && rule.why);
+  const merged = { action: "merge", entity: { kind: "pr", name: "52", head: "feat/merged" } };
+  assert.ok(followUpOf({ action: "delete", entity: { kind: "branch", name: "feat/merged", remote: "origin" } }, [merged]), "the remote head too");
+  assert.equal(followUpOf({ action: "push", entity: { kind: "branch", name: "feat/merged" } }, [merged]), undefined, "a merge implies no push");
+  // A push implies deleting it again only for a branch the task created.
+  const pushed = { action: "push", entity: { kind: "branch", name: "feat/p" } };
+  const remote = { action: "delete", entity: { kind: "branch", name: "feat/p", remote: "origin" } };
+  assert.equal(followUpOf(remote, [pushed], { created: () => false }), undefined);
+  assert.ok(followUpOf(remote, [pushed], { created: () => true }));
 });

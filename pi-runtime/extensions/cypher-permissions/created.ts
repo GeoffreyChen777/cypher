@@ -25,6 +25,8 @@ import { Ledger } from "./ledger.ts";
 import type { LedgerEntity, LedgerEntry } from "./ledger.ts";
 import { planCreations, settleCreations, targetsOf } from "./catalogue.ts";
 import type { CatalogueCommand, CatalogueFacts, Candidate, Destruction } from "./catalogue.ts";
+import { followUpOf } from "./lifecycle.ts";
+import type { Acted, FollowUp, LifecycleFacts } from "./lifecycle.ts";
 
 export const CREATED_ENTRY = "cypher-permissions.created";
 
@@ -153,12 +155,39 @@ export class CreatedStore {
     return this.ledger.covers(entity);
   }
 
-  /** What a command destroys, and whether this chat made every target of it. */
-  destroys(command: CreationCommand, facts: Pick<CatalogueFacts, "canonical" | "repository">): (Destruction & { own: boolean }) | undefined {
+  /** What the ledger says this chat did, as lifecycle antecedents (lifecycle.ts). */
+  antecedents(): Acted[] {
+    return this.ledger.all().map((entry) => ({ action: entry.action ?? "create", entity: entry }));
+  }
+
+  /** The ledger record and lifecycle rule that make an action on an entity this chat's own follow-up, if any. */
+  followUp(action: string, entity: LedgerEntity, facts: LifecycleFacts = {}): { rule: FollowUp; antecedent: Acted } | undefined {
+    return followUpOf({ action, entity }, this.antecedents(), { ...facts, created: (made) => this.covers(made) });
+  }
+
+  /**
+   * What a command destroys or stops, and whether every target is a
+   * follow-up of what the ledger holds (lifecycle.ts): what this chat
+   * created or started, the head branch and worktree of a pull request it
+   * merged, a branch it made and pushed. `why`: the rules, for the
+   * reviewing model.
+   */
+  destroys(command: CreationCommand, facts: Pick<CatalogueFacts, "canonical" | "repository"> & LifecycleFacts): (Destruction & { own: boolean; why: string[] }) | undefined {
     const destruction = targetsOf(command, facts);
     if (!destruction) return undefined;
-    const own = !destruction.unknown && destruction.targets.length > 0 && destruction.targets.every((alternatives) => alternatives.some((entity) => this.covers(entity)));
-    return { ...destruction, own };
+    const action = destruction.op === "stop" ? "stop" : "delete";
+    const why = new Set<string>();
+    const own =
+      !destruction.unknown &&
+      destruction.targets.length > 0 &&
+      destruction.targets.every((alternatives) =>
+        alternatives.some((entity) => {
+          const found = this.followUp(action, entity, facts);
+          if (found) why.add(found.rule.why);
+          return found !== undefined;
+        }),
+      );
+    return { ...destruction, own, why: own ? [...why] : [] };
   }
 
   /** A canonical path this chat made, or one inside a directory it made. */

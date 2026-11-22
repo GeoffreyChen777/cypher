@@ -7,7 +7,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { constants, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { open, mkdir, access as fsAccess, stat as fsStat, readdir as fsReaddir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
@@ -15,7 +15,11 @@ import { AuditLog } from "./audit.ts";
 import type { AuditRecord } from "./audit.ts";
 import { appendCommandRule, appendRule, approvalMode as approvalModeFor, CONFIG_FILE, editUserConfig, loadConfig, ownFolders, readUserConfig, resolveLevel } from "./config.ts";
 import { CREATED_ENTRY, CreatedStore, creationsOf } from "./created.ts";
-import type { CreationFacts } from "./created.ts";
+import type { CreationFacts, CreationPlan } from "./created.ts";
+import type { CatalogueFacts } from "./catalogue.ts";
+import { ledgerFile } from "./ledger.ts";
+import type { LedgerEntity } from "./ledger.ts";
+import type { LifecycleFacts } from "./lifecycle.ts";
 import type { Capability, LevelName, PermissionsConfig } from "./config.ts";
 import {
   anchorDirectories,
@@ -501,7 +505,7 @@ export class Permissions {
     this.cwd = init.cwd;
     this.audit = new AuditLog(init.agentDir, init.chatId);
     this.grants = new GrantStore(init.chatId);
-    this.created = new CreatedStore(init.chatId);
+    this.created = new CreatedStore(init.chatId, ledgerFile(init.agentDir, init.chatId));
     this.status = init.landstrip ?? landstripStatus();
     this.homeIndex = new HomeIndexCache(join(init.agentDir, "cypher-permissions", "home-index.json"), this.home);
     this.reload(init.cwd, []);
@@ -1205,6 +1209,9 @@ export class Permissions {
     return parseShell(command, this.home, {
       assignable: (name) => this.assignable(name),
       prefixAllowed: benignEnv,
+      // Read as an evaluator (shell.ts): loops over literal words, functions, scripts in heredocs, `PATH=… cmd`.
+      evaluate: true,
+      resolveProgram: (program, assignments) => this.resolveWithPath(program, assignments),
       // An exported value is followed for later words; `export` itself never runs outside by a rule (`ruleCannotVouch`).
       exportable: (name) => !SHELL_VARIABLES.test(name) && !/proxy/i.test(name),
       // `$PWD` is where the line starts, unless a command prefix from the settings could move it first.
@@ -1276,6 +1283,15 @@ export class Permissions {
 
   // --- What this task made ---------------------------------------------------
 
+  /** Whether a path may ever be recorded as made: not sensitive, protected, the permission system's, the installed app's, a home or root. */
+  private recordablePath(path: string): boolean {
+    if (path === "/" || path === this.home || dirname(path) === path) return false;
+    const classification = this.paths.classify(path);
+    if (classification.zone === "sensitive" || classification.guard !== undefined) return false;
+    if (this.paths.isPermissionSystem(path) !== undefined) return false;
+    return !this.installedApp(path);
+  }
+
   /** What `creationsOf` needs: canonical paths, and what may never be recorded. */
   private creationFacts(): CreationFacts {
     return {
@@ -1284,37 +1300,147 @@ export class Permissions {
         if (cwd === undefined && !isAbsolute(path) && !path.startsWith("~")) return undefined;
         return this.paths.canonical(path, cwd ?? this.cwd);
       },
-      recordable: (path) => {
-        if (path === "/" || path === this.home || dirname(path) === path) return false;
-        const classification = this.paths.classify(path);
-        if (classification.zone === "sensitive" || classification.guard !== undefined) return false;
-        if (this.paths.isPermissionSystem(path) !== undefined) return false;
-        if (this.installedApp(path)) return false;
-        // Already there: naming it (`mkdir -p ~/Developer/other`) does not make
-        // it this task's, and a command the sandbox refused made nothing at all.
-        return !existsSync(path);
-      },
+      // Already there: naming it (`mkdir -p ~/Developer/other`) does not make
+      // it this task's, and a command the sandbox refused made nothing at all.
+      recordable: (path) => this.recordablePath(path) && !existsSync(path),
     };
   }
 
+  /** Repositories (shared git directories) by directory, for the catalogue. */
+  private readonly repositories = new Map<string, string | undefined>();
+
+  /** What the catalogue (catalogue.ts) and the lifecycle table (lifecycle.ts) need from this machine. */
+  catalogueFacts(): CatalogueFacts & LifecycleFacts {
+    const git = (args: string[]) => {
+      const result = spawnSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000 });
+      return result.status === 0 ? result.stdout.trim() : undefined;
+    };
+    return {
+      ...this.creationFacts(),
+      recordable: (path) => this.recordablePath(path),
+      exists: (path) => {
+        try {
+          lstatSync(path);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      repository: (dir) => {
+        if (dir === undefined) return undefined;
+        if (!this.repositories.has(dir)) {
+          const common = git(["-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
+          let canonical: string | undefined;
+          try {
+            canonical = common ? realpathSync.native(common) : undefined;
+          } catch {
+            canonical = undefined;
+          }
+          this.repositories.set(dir, canonical);
+        }
+        return this.repositories.get(dir);
+      },
+      refExists: (repo, ref) => git(["--git-dir", repo, "rev-parse", "-q", "--verify", ref]) !== undefined,
+      trusted: (program, cwd) => this.systemProgram(program, cwd),
+      prHead: (pr) => this.prHead(pr),
+      worktreeBranch: (path) => git(["-C", path, "symbolic-ref", "--short", "-q", "HEAD"]),
+    };
+  }
+
+  /** Pull requests' head branches, by `repo#number`, as gh last said. */
+  private readonly prHeads = new Map<string, string | undefined>();
+
+  /** A pull request's head branch: its entity's, else gh's (once per pull request). */
+  private prHead(pr: LedgerEntity): string | undefined {
+    if (pr.head) return pr.head;
+    if (!/^\d+$/.test(pr.name)) return undefined;
+    const key = `${pr.repo ?? ""}#${pr.name}`;
+    if (!this.prHeads.has(key)) {
+      const args = ["pr", "view", pr.name, "--json", "headRefName", "-q", ".headRefName", ...(pr.repo && pr.repo.includes("/") && !pr.repo.startsWith("/") ? ["-R", pr.repo] : [])];
+      const result = spawnSync("gh", args, { cwd: this.cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 8000 });
+      this.prHeads.set(key, result.status === 0 && result.stdout.trim() ? result.stdout.trim() : undefined);
+    }
+    return this.prHeads.get(key);
+  }
+
+  /** The line's commands as the catalogue reads them; undefined when it can't be read. */
+  private catalogueCommands(command: string, cwd: string): LineCommand[] | undefined {
+    try {
+      const parsed = this.parse(command, cwd);
+      if (parsed.kind === "opaque") return undefined;
+      return this.commandsOf(parsed.commands, cwd);
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
-   * Record what a command this chat runs creates: the worktrees, branches,
-   * directories, dev instances and scratch files it may later undo without
-   * asking anyone (created.ts). Called where the command actually runs, in
-   * the sandbox or outside it, never for one that was refused.
+   * Before a command this chat runs: what it may create, and what is there
+   * already (catalogue.ts). Settle it after the run (`settleCreated`).
+   * Undefined when nothing is enforced or the line can't be read.
+   */
+  planCreated(command: string, cwd: string): CreationPlan | undefined {
+    if (!this.enforcing) return undefined;
+    const commands = this.catalogueCommands(command, cwd);
+    if (!commands) return undefined;
+    const plan = this.created.plan(command, commands, this.catalogueFacts());
+    return plan.candidates.length ? plan : undefined;
+  }
+
+  /**
+   * After it ran: record in the ledger what it surely made (its exit
+   * status; its own output, when it is the line's only command). An
+   * exit status that isn't known (a timeout, an abort) confirms only what
+   * is observed on disk.
+   */
+  settleCreated(plan: CreationPlan | undefined, result: { exitCode?: number; output?: string }): void {
+    if (!plan) return;
+    try {
+      const made = this.created.settle(plan, result, this.catalogueFacts());
+      const legacy = made.filter((entry) => entry.action === undefined && (entry.kind === "path" || entry.kind === "worktree" || (entry.kind === "branch" && entry.remote === undefined)));
+      // The session keeps its own record too, for a Runtime that reads only that.
+      if (legacy.length) {
+        this.appendEntry?.(CREATED_ENTRY, {
+          ...(legacy.some((entry) => entry.kind === "path") ? { paths: legacy.filter((entry) => entry.kind === "path").map((entry) => entry.name) } : {}),
+          ...(legacy.some((entry) => entry.kind === "worktree") ? { worktrees: legacy.filter((entry) => entry.kind === "worktree").map((entry) => entry.name) } : {}),
+          ...(legacy.some((entry) => entry.kind === "branch") ? { branches: legacy.filter((entry) => entry.kind === "branch").map((entry) => entry.name) } : {}),
+          ...(this.chatId ? { chatId: this.chatId } : {}),
+          createdAt: new Date().toISOString(),
+        });
+      }
+    } catch {
+      // Recording is best effort: a command that ran stays run.
+    }
+  }
+
+  /**
+   * Record what a command creates without its result: the worktrees,
+   * branches, directories, dev instances and scratch files it names that
+   * are not there yet (created.ts `creationsOf`). For replays and tests;
+   * a real run plans and settles around the command (`planCreated`,
+   * `settleCreated`).
    */
   noteCreated(command: string, cwd: string): void {
     if (!this.enforcing) return;
-    let commands: LineCommand[];
-    try {
-      const parsed = this.parse(command, cwd);
-      if (parsed.kind === "opaque") return;
-      commands = this.commandsOf(parsed.commands, cwd);
-    } catch {
-      return;
-    }
-    const record = this.created.note(creationsOf(commands, this.creationFacts()));
+    const commands = this.catalogueCommands(command, cwd);
+    if (!commands) return;
+    const record = this.created.note(creationsOf(commands, this.creationFacts()), command);
     if (record) this.appendEntry?.(CREATED_ENTRY, record);
+  }
+
+  /** `PATH=… cmd` with literal values: the program the assignments make it, when it is the system's. */
+  private resolveWithPath(program: string, assignments: readonly { name: string; value: string | undefined }[]): string | undefined {
+    if (program.includes("/")) return undefined;
+    if (!assignments.every((item) => item.name === "PATH" && item.value !== undefined && item.value !== "")) return undefined;
+    const path = assignments.at(-1)!.value!;
+    for (const dir of path.split(":")) {
+      if (!dir || !isAbsolute(dir)) return undefined;
+      const candidate = join(dir, program);
+      if (!existsSync(candidate)) continue;
+      // Only a program in a place the agent can't write.
+      return this.systemProgram(candidate, this.cwd) ? candidate : undefined;
+    }
+    return undefined;
   }
 
   /**
@@ -1854,6 +1980,10 @@ export class Permissions {
         has: (path) => this.created.has(path),
         worktree: (path) => this.created.worktree(path),
         branch: (name) => this.created.branch(name),
+        destroys: (command) => {
+          const found = this.created.destroys({ ...command, cwd: command.cwd }, this.catalogueFacts());
+          return found ? { own: found.own, op: found.op, why: found.why } : undefined;
+        },
       },
       permissionSystem: (path) => this.paths.isPermissionSystem(path) !== undefined,
       installedApp: (path) => this.installedApp(path),
