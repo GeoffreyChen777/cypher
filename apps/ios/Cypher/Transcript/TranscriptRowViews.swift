@@ -219,10 +219,17 @@ struct ToolGroupView: View {
     /// Part of a work run: the run's toggle is the header, so only the
     /// chips show.
     var nested = false
+    /// Leading chips folded away: by the group's own cap (`ToolCallCap`), or
+    /// in a work run by the run's (`TranscriptRow.skip`).
+    var hidden = 0
+    /// The group is over the cap: a row over its chips shows the earlier
+    /// calls, or folds them back. A work run draws that row itself.
+    var overflows = false
     let userToggled: Bool
     /// Part ids of the chips whose detail is open.
     let openChips: Set<String>
     let toggleChip: (String) -> Void
+    var toggleOverflow: () -> Void = {}
     let toggle: () -> Void
 
     var body: some View {
@@ -232,7 +239,14 @@ struct ToolGroupView: View {
 
             if open {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(tools.enumerated()), id: \.offset) { _, tool in
+                    if overflows {
+                        ToolOverflowRow(label: ToolCallCap.label(tools: hidden), revealed: hidden == 0) {
+                            toggleOverflow()
+                        }
+                    }
+                    // Keyed by its place in the whole group, so a chip keeps
+                    // its identity as the ones before it fold or show.
+                    ForEach(Array(tools.enumerated().dropFirst(hidden)), id: \.offset) { _, tool in
                         ToolChipRow(tool: tool, open: openChips.contains(tool.id)) {
                             toggleChip(tool.id)
                         }
@@ -262,6 +276,38 @@ struct ToolGroupView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressWashButtonStyle(cornerRadius: 6))
+        .accessibilityValue(open ? "Expanded" : "Collapsed")
+        .accessibilityIdentifier("tool-group-toggle")
+    }
+}
+
+/// The row over the calls a tool group or a work run shows (transcript.rs
+/// `tool_overflow_row`, `render_run_overflow`): "Show N earlier tool calls"
+/// while the cap folds some away, "Show fewer tool calls" once the reader
+/// revealed them. Quiet text on the chips' icon column; the whole row taps.
+struct ToolOverflowRow: View {
+    let label: String
+    /// The earlier calls are showing: a tap folds them back.
+    let revealed: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        Button(action: toggle) {
+            HStack(spacing: 0) {
+                Text(label)
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.textFaint)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 30)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressWashButtonStyle(cornerRadius: 9))
+        .padding(.leading, 12)
+        .accessibilityValue(revealed ? "Expanded" : "Collapsed")
+        .accessibilityIdentifier("tool-overflow")
     }
 }
 

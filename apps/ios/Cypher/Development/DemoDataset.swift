@@ -124,6 +124,13 @@ final class DemoDataset {
                 config: codex, lastMessagePreview: "Done — failed children stay quiet.",
                 lastMessageAt: now - 900_000, createdAt: now - 86_400_000,
                 spaceId: cypher.id, lastSeenAt: now - 3_600_000),
+            // Long tool runs: a group and a work run over the tool call cap.
+            Chat(
+                id: "chat-tools", deviceId: "dev-mac", title: "Release notes and a green build",
+                archived: false, cwd: cypher.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "Tagged and pushed.",
+                lastMessageAt: now - 1_500_000, createdAt: now - 1_600_000,
+                spaceId: cypher.id, lastSeenAt: now - 1_500_000),
             // LaTeX in a reply (the mock harness's [mock:math] showcase).
             Chat(
                 id: "chat-math", deviceId: "dev-mac", title: "Quadratic formula and friends",
@@ -322,6 +329,69 @@ final class DemoDataset {
                 }
             }
         }
+    }
+
+    /// Replies over the tool call cap (`ToolCallCap`): twelve calls in one
+    /// group, which shows its last five under "Show 7 earlier tool calls",
+    /// then a work run of nine calls between three thoughts, which once
+    /// opened folds its first four calls and two thoughts the same way.
+    private static func longToolRuns(now: Int64) -> [MessageEntry] {
+        func call(_ id: String, _ tag: String, _ field: String, _ value: String, failed: Bool = false) -> MessagePart {
+            .tool(id: id, call: RenderToolCall(tag: tag, fields: [field: value]), isError: failed, resolved: true)
+        }
+        func exec(_ id: String, _ command: String, failed: Bool = false) -> MessagePart {
+            call(id, "exec", "command", command, failed: failed)
+        }
+        func read(_ id: String, _ path: String) -> MessagePart { call(id, "readFile", "path", path) }
+        func edit(_ id: String, _ path: String) -> MessagePart { call(id, "editFile", "path", path) }
+        return [
+            MessageEntry(
+                id: "m1", role: .user,
+                parts: [.text(id: "t0", text: "Write the changelog for 0.4.8 and make sure the build is green.")],
+                createdAt: now - 1_600_000, deviceId: "ios-demo", status: .complete),
+            MessageEntry(
+                id: "m2", role: .assistant,
+                parts: [
+                    exec("c1", "git log --oneline v0.4.7..HEAD"),
+                    read("c2", "CHANGELOG.md"),
+                    call("c3", "search", "pattern", "0.4.7"),
+                    read("c4", "Cargo.toml"),
+                    edit("c5", "Cargo.toml"),
+                    edit("c6", "apps/edge/package.json"),
+                    edit("c7", "CHANGELOG.md"),
+                    exec("c8", "cargo fmt --all --check"),
+                    exec("c9", "cargo clippy --locked -- -D warnings", failed: true),
+                    edit("c10", "crates/rpc/src/device_room/relay.rs"),
+                    exec("c11", "cargo clippy --locked -- -D warnings"),
+                    exec("c12", "cargo test --locked"),
+                    .text(
+                        id: "t0",
+                        text:
+                            "The changelog has its 0.4.8 section and the version is bumped. Clippy flagged one needless clone in the relay; with that fixed, lint and tests pass."
+                    ),
+                ], createdAt: now - 1_580_000, deviceId: "dev-mac", status: .complete),
+            MessageEntry(
+                id: "m3", role: .user,
+                parts: [.text(id: "t0", text: "Good. Commit it, tag the release and push.")],
+                createdAt: now - 1_540_000, deviceId: "ios-demo", status: .complete),
+            MessageEntry(
+                id: "m4", role: .assistant,
+                parts: [
+                    .reasoning(id: "r0", text: "**Check the tree first**\n\nOnly the release files should be staged."),
+                    exec("d1", "git status --short"),
+                    exec("d2", "git diff --stat"),
+                    exec("d3", "git add Cargo.toml Cargo.lock apps/edge CHANGELOG.md"),
+                    .reasoning(id: "r4", text: "**Commit, then wait for CI**\n\nThe tag goes on a green commit."),
+                    exec("d5", "git commit -m 'Release Cypher 0.4.8'"),
+                    exec("d6", "git push origin main"),
+                    exec("d7", "gh run watch --exit-status"),
+                    .reasoning(id: "r8", text: "**Tag the platforms**\n\nmacOS and Linux first, then the runtime."),
+                    exec("d9", "git tag cypher-macos-v0.4.8-b1"),
+                    exec("d10", "git tag cypher-linux-v0.4.8-b1"),
+                    exec("d11", "git push origin --tags"),
+                    .text(id: "t0", text: "Tagged and pushed. Both release workflows have started."),
+                ], createdAt: now - 1_500_000, deviceId: "dev-mac", status: .complete),
+        ]
     }
 
     /// Pi's discovery shape (the plugins' own wording): extension commands,
@@ -821,6 +891,8 @@ final class DemoDataset {
                         ],
                         fileCount: 3, additions: 17, deletions: 3)),
             ]
+        case "chat-tools":
+            return longToolRuns(now: now)
         case "chat-permissions-story":
             return permissionStory(now: now)
         case "chat-permissions-card":

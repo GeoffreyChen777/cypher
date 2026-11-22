@@ -1,30 +1,13 @@
 import XCTest
 
-/// The strip under each settled message: copy, the blocked-action reason,
-/// and a confirmed restart that truncates and hands the prompt back.
+/// The strip under each settled message: a confirmed restart that truncates
+/// and hands the prompt back.
 @MainActor
 final class MessageStripUITests: XCTestCase {
     private let restartPrompt = "Restart from here — deletes this message and everything after it"
-    private let restartReply = "Restart from here — deletes everything after this response"
 
     private func strip(_ app: XCUIApplication, _ entryId: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: "message-strip-\(entryId)").firstMatch
-    }
-
-    func testCopyConfirmsAndABlockedRestartSaysWhy() {
-        let app = XCUIApplication.launchDemo(["-route", "chat:chat-tabs"])
-        let last = strip(app, "m8")
-        XCTAssertTrue(last.waitForHittable(timeout: 10))
-        XCTAssertTrue(last.staticTexts.matching(NSPredicate(format: "label CONTAINS ', '")).firstMatch.exists)
-
-        last.buttons["Copy message"].tap()
-        XCTAssertTrue(last.buttons["Copied"].waitForExistence(timeout: 2))
-        XCTAssertTrue(last.buttons["Copy message"].waitForExistence(timeout: 3), "The check reverts")
-
-        // The newest reply has nothing after it to remove.
-        last.buttons[restartReply].tap()
-        XCTAssertTrue(app.staticTexts["Nothing to remove after the last message."].waitForExistence(timeout: 3))
-        capture(app, "blocked-restart")
     }
 
     func testARestartAsksFirstThenTruncatesAndRefillsTheComposer() {

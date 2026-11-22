@@ -205,6 +205,18 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   it on a guide rail, as on the desktop, and old transcripts nest too.
   `tool_search` shows as Find tools with its query, and tool groups count
   "ran 2 commands and 1 script".
+- **Long tool runs:** an open tool group shows its last five calls, the
+  ones the agent just ran; the earlier ones fold behind one quiet row over
+  the chips, "Show 7 earlier tool calls". Tapping it shows them all and the
+  row becomes "Show fewer tool calls". The cap is strict (a sixth call folds
+  too), is counted in chips (a script's nested calls included) and holds
+  while a group streams, so a long run takes a bounded slice of the
+  transcript. A work run (tool calls between thoughts) caps its calls as a
+  whole: its start folds behind "Show 4 earlier tool calls and 2 thoughts",
+  cut right after the last hidden call so the thinking that led into the
+  first shown one stays. What was revealed is kept per session view, not
+  saved. Five is the desktop's default (its Appearance setting); the phone
+  has no setting for it. Demo: `-demo -route chat:chat-tools`.
 - **Tool status:** every tool chip ends with the desktop's status icon — an
   arc turning while the call runs (still under Reduce Motion), a green check
   once it completed, a red cross when it failed. A chip spins for as long as
@@ -430,6 +442,8 @@ Run these commands from the repository root.
   `-demo -route chat:chat-veil -sheet subagents`.
   Child fixture: `-demo -route chat:demo-child-planner`.
   Script fixture: `-demo -route chat:chat-deploy`.
+  Long tool runs (a group and a work run over the five-call cap):
+  `-demo -route chat:chat-tools`.
   Math fixture (LaTeX in a reply): `-demo -route chat:chat-math`.
   Diagram fixture (Mermaid in a reply): `-demo -route chat:chat-mermaid`.
   File references, a file link, a diff fence and a round's changed files:
@@ -514,6 +528,7 @@ mirrors and their vectors are listed in [protocol/README.md](../../protocol/READ
 | Add-project palette (device + folder browser) | New-project sheet: device tabs + remote folder browser (ListFolders over the device-room relay, git repos badged) |
 | ControlRpc over device-room relay | `DeviceRelayClient` — binary `uleb128(len)+header+payload` frames, `{"s","k","to","from"}` header, ndjson ControlRpc; used for ListFolders + direct-to-host `Mutate {createSpace}` (local doc-write fallback when the host is offline) |
 | Hover timestamps / copy | Context menus |
+| Appearance → "Tool calls shown per group" (default 5, 0–50) | The same cap, fixed at the default: last five calls, "Show N earlier tool calls" over them |
 | gpui `list()` sum-tree virtualization | `LazyVStack` + stable row ids + version fingerprints |
 | Stick-to-bottom spring, wheel-up breaks pin | Scroll-phase-gated pin + spring scrollTo, same 70/320pt thresholds |
 | Workspaces mode (logo switcher, cards sidebar, detail panel) | Home's list switch (Sessions / Workspaces); the workspace's chat with its board as a sheet (iPhone) or inspector (iPad), one page per item |

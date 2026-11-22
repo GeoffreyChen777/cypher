@@ -26,6 +26,12 @@ enum RowKind {
     /// they are dropped while it is closed. Open by default only while the
     /// run is the streaming tail, like a tool group.
     case activity(rows: Int, summary: String, autoOpen: Bool)
+    /// Stands in for the start of an open work run that the tool call cap
+    /// folds away ("Show 6 earlier tool calls and 3 thoughts"), or, once the
+    /// reader revealed it (`tools == 0`), folds it back. `run` is the id of
+    /// the run's `activity` row (transcript.rs `RunOverflow`; see
+    /// `capWorkRuns`).
+    case runOverflow(run: String, tools: Int, thoughts: Int)
     /// `permission`: a permission prompt with no call to file it under (one
     /// from an older Runtime): a Permission row, not a Question.
     case inputChip(header: String, resolved: Bool, permission: Bool = false)
@@ -95,6 +101,50 @@ struct ToolItem: Hashable {
         if held { return .held }
         if isError { return .failed }
         return resolved ? .completed : .running
+    }
+}
+
+/// The tool call cap (chips.rs `hidden_tool_count`, chat_style.rs
+/// `DEFAULT_TOOL_CALL_LIMIT`): an open tool group shows its LAST `limit`
+/// calls, the ones the agent just ran, with the earlier ones behind one "Show
+/// N earlier tool calls" row. A long run then takes a bounded slice of the
+/// transcript instead of pushing the answer off the screen. A work run caps
+/// its calls as a whole (`TranscriptRowBuilder.capWorkRuns`).
+enum ToolCallCap {
+    /// The desktop's default; there it is a setting, here it is fixed.
+    static let limit = 5
+
+    /// How many leading calls fold away. The cap is strict (one call over it
+    /// folds too), `limit == 0` keeps every call, and a group the reader
+    /// revealed hides nothing.
+    static func hidden(total: Int, limit: Int = limit, revealed: Bool) -> Int {
+        revealed || limit <= 0 ? 0 : max(0, total - limit)
+    }
+
+    /// Whether a group of `total` calls is over the cap. It then draws the
+    /// row that folds calls away, and keeps it once revealed (as "Show
+    /// fewer"), so the same place puts them back.
+    static func overflows(total: Int, limit: Int = limit) -> Bool {
+        hidden(total: total, limit: limit, revealed: false) > 0
+    }
+
+    /// What a tool group's row draws of its `total` calls: the leading
+    /// chips it leaves out, and whether it draws the row that shows them or
+    /// folds them back. A group caps itself (`revealed`: the reader unfolded
+    /// it); in a work run the run's cap decides (`row.skip`) and the run
+    /// draws the row.
+    static func fold(of row: TranscriptRow, total: Int, revealed: Bool) -> (hidden: Int, overflows: Bool) {
+        if row.nested { return (min(row.skip, total), false) }
+        return (hidden(total: total, revealed: revealed), overflows(total: total))
+    }
+
+    /// The row's label: what it folds away, or for a revealed group or run
+    /// (`tools == 0`) that it folds it back (fold.rs `run_overflow_label`).
+    static func label(tools: Int, thoughts: Int = 0) -> String {
+        let plural = { (n: Int) in n == 1 ? "" : "s" }
+        if tools == 0 { return "Show fewer tool calls" }
+        let calls = "Show \(tools) earlier tool call\(plural(tools))"
+        return thoughts == 0 ? calls : "\(calls) and \(thoughts) thought\(plural(thoughts))"
     }
 }
 
@@ -204,6 +254,9 @@ struct TranscriptRow: Identifiable {
     /// Part of a work run (`activity`): a tool group shows only its chips, a
     /// thought is a chip, and a thought's blocks sit indented under it.
     var nested = false
+    /// Leading chips of a tool group that its work run's cap folds away
+    /// (`capWorkRuns`); 0 outside a run, where the group caps itself.
+    var skip = 0
 }
 
 /// rows.rs `AnsweredLabel`: what a settled answer's strip says about the
@@ -771,6 +824,87 @@ enum TranscriptRowBuilder {
             }
         }
         return folded
+    }
+
+    /// fold.rs `cap_work_runs`: cap each open work run the way a tool group
+    /// caps its chips. The run keeps its LAST `limit` tool calls
+    /// (`ToolCallCap.hidden`), and everything before them, earlier calls and
+    /// thoughts alike, folds behind one `runOverflow` row. The cut lands
+    /// right after the last hidden call, so the thinking that led into the
+    /// first kept one stays; a cut inside a tool group hides that group's
+    /// leading chips (`skip`). `revealed` holds the runs the reader
+    /// unfolded, by `activity` row id: they show whole, under a row that
+    /// folds them back.
+    ///
+    /// Runs after `foldClosedToggles`: a closed run has no rows left to cap.
+    static func capWorkRuns(
+        _ rows: [TranscriptRow], limit: Int = ToolCallCap.limit, revealed: Set<String>
+    ) -> [TranscriptRow] {
+        let isRun = { (row: TranscriptRow) in
+            if case .activity = row.kind { return true }
+            return false
+        }
+        guard limit > 0, rows.contains(where: isRun) else { return rows }
+        var rows = rows
+        var ix = 0
+        while ix < rows.count {
+            guard isRun(rows[ix]) else {
+                ix += 1
+                continue
+            }
+            let run = rows[ix].id
+            let start = ix + 1
+            var end = start
+            var total = 0
+            while end < rows.count, rows[end].nested {
+                if case .toolGroup(let tools, _) = rows[end].kind { total += tools.count }
+                end += 1
+            }
+            guard ToolCallCap.overflows(total: total, limit: limit) else {
+                ix = end
+                continue
+            }
+            let hidden = ToolCallCap.hidden(total: total, limit: limit, revealed: revealed.contains(run))
+            // `rows[start..<cut]` fold away whole; `skip` chips of `rows[cut]` too.
+            var cut = start
+            var left = hidden
+            var skip = 0
+            var thoughts = 0
+            walk: while left > 0 {
+                switch rows[cut].kind {
+                case .toolGroup(let tools, _) where tools.count > left:
+                    skip = left
+                    break walk
+                case .toolGroup(let tools, _):
+                    left -= tools.count
+                case .thought:
+                    thoughts += 1
+                default:
+                    break
+                }
+                cut += 1
+            }
+            if skip > 0 {
+                rows[cut].skip = skip
+                rows[cut].version ^= UInt64(skip) << 48
+            }
+            var overflow = TranscriptRow(
+                id: "\(run).overflow",
+                version: UInt64(hidden) << 32 | UInt64(thoughts),
+                turnStart: false,
+                kind: .runOverflow(run: run, tools: hidden, thoughts: thoughts),
+                entryId: rows[ix].entryId, timestamp: nil, partKey: nil,
+                role: rows[ix].role, settled: rows[ix].settled, nested: true)
+            overflow.topGap = gap(for: overflow, previous: rows[ix], isFirst: false)
+            rows.replaceSubrange(start..<cut, with: [overflow])
+            // The row the fold now stands before takes its gap from it.
+            let next = start + 1
+            if next < rows.count {
+                rows[next].topGap = gap(for: rows[next], previous: overflow, isFirst: false)
+            }
+            ix = end - (cut - start) + 1
+        }
+        return rows
     }
 
     /// A part's blocks in rows: each run of consecutive prose blocks

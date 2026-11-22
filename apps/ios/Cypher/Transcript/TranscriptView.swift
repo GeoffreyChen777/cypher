@@ -47,6 +47,10 @@ struct TranscriptView: View {
     @State private var togglePins: [String: Bool] = [:]
     /// Per tool group row: the part ids of chips whose detail is open.
     @State private var openChips: [String: Set<String>] = [:]
+    /// Tool groups and work runs whose capped-away calls the reader
+    /// revealed, by the group's or the run's row id; every other one shows
+    /// its last `ToolCallCap.limit` calls (transcript.rs `tool_overflow`).
+    @State private var toolOverflow: Set<String> = []
     @State private var turns = TurnTracker()
     /// One-shot guard for the first non-empty projection.
     @State private var hydrated = false
@@ -491,13 +495,15 @@ struct TranscriptView: View {
         }
     }
 
-    /// The rendered rows: the store's cached build with closed translation
-    /// originals folded away. Every index into the transcript (window floor,
-    /// rounds, jumps) is into this array.
+    /// The rendered rows: the store's cached build with closed toggles
+    /// folded away and open work runs capped to their last tool calls. Every
+    /// index into the transcript (window floor, rounds, jumps) is into this
+    /// array.
     private func transcriptRows() -> [TranscriptRow] {
         store.transcriptCache.rows(
             revision: store.revision, entries: store.entries,
-            pendingSends: store.pendingSends, togglePins: togglePins, memoryCards: memoryCards)
+            pendingSends: store.pendingSends, togglePins: togglePins, revealedRuns: toolOverflow,
+            memoryCards: memoryCards)
     }
 
     /// Index of the first shown row: the first of `shownFrom`'s entry, or 0
@@ -852,15 +858,24 @@ struct TranscriptView: View {
                     .opacity(row.muted ? 0.75 : 1)
 
             case .toolGroup(let tools, let autoOpen):
+                let fold = ToolCallCap.fold(
+                    of: row, total: tools.count, revealed: toolOverflow.contains(row.id))
                 ToolGroupView(
                     tools: tools,
                     open: row.nested || (folds[row.id] ?? autoOpen),
                     nested: row.nested,
+                    hidden: fold.hidden,
+                    overflows: fold.overflows,
                     userToggled: folds[row.id] != nil,
                     openChips: openChips[row.id] ?? [],
                     toggleChip: { partId in
                         withAnimation(reduceMotion ? nil : Motion.resize) {
                             openChips[row.id, default: []].formSymmetricDifference([partId])
+                        }
+                    },
+                    toggleOverflow: {
+                        withAnimation(reduceMotion ? nil : Motion.resize) {
+                            toolOverflow.formSymmetricDifference([row.id])
                         }
                     }
                 ) {
@@ -891,6 +906,11 @@ struct TranscriptView: View {
                     identifier: "activity-toggle"
                 ) {
                     togglePins[row.id] = !open
+                }
+
+            case .runOverflow(let run, let tools, let thoughts):
+                ToolOverflowRow(label: ToolCallCap.label(tools: tools, thoughts: thoughts), revealed: tools == 0) {
+                    toolOverflow.formSymmetricDifference([run])
                 }
 
             case .turnChanges(let changes):
