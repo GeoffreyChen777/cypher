@@ -126,6 +126,10 @@ pub(super) struct FileSearchParams {
     /// only after verifying it against the space repository's worktree list.
     #[serde(default)]
     pub(super) path: Option<String>,
+    /// With `chatId`: search a project the chat's workspace grants instead of
+    /// the chat's own folder (see [`WorkspaceFileParams::root_space_id`]).
+    #[serde(default)]
+    pub(super) root_space_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -134,6 +138,11 @@ pub(super) struct WorkspaceFileParams {
     pub(super) chat_id: String,
     /// Optimistic context check: never silently read a newly switched checkout.
     pub(super) cwd: String,
+    /// A workspace's own chat only: address the folder of this project (a
+    /// space its scope grants, on the workspace's host device) instead of the
+    /// chat's own folder. Absent: the chat's own folder, as before.
+    #[serde(default)]
+    pub(super) root_space_id: Option<String>,
     #[serde(default)]
     pub(super) path: String,
     /// `WriteWorkspaceFile` only: the full replacement text.

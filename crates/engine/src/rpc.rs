@@ -871,6 +871,9 @@ impl RpcService for EngineRpc {
             | methods::DELETE_WORKSPACE_ENTRY => {
                 Box::pin(files::workspace_file(self, method, params)).await
             }
+            methods::LIST_CHAT_FILE_ROOTS => {
+                Box::pin(files::list_chat_file_roots(self, params)).await
+            }
             methods::SEARCH_FILES => Box::pin(files::search_files(self, params)).await,
             methods::SEARCH_GITHUB_ISSUES => {
                 Box::pin(github::search_github_issues(self, params)).await

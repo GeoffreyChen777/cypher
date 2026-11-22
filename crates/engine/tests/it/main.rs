@@ -15,6 +15,7 @@ mod support;
 /// Agent bots: creation, coordination, routines, the bot network, memory.
 mod bots {
     mod agents;
+    mod file_roots;
     mod memory;
     mod network;
     mod routines;

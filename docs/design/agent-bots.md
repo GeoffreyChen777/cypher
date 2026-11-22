@@ -1508,6 +1508,7 @@ Each method is one constant plus one `SPECS` entry in `cypher_rpc::methods`.
 | `CreateBotInvite` | unary, forwardable | P4 (built) | Runs on the bot's host: `{botId}` → `{inviteId, code, expiresAt}`; publishes the room first. The code is shown once. |
 | `RedeemBotInvite` | unary, forwardable | P4 (built) | Runs on the bot's host: `{botId, code}` → the new `BotConnection`. |
 | `Mutate revokeBotInvite`, `updateBotConnection`, `revokeBotConnection`, `reviewBotExchange` | unary | P4 (built) | Owner fields on the rows (`revokeRequestedAt`, `replyMode`, `scope`, `review`); the host acts on them. |
+| `ListChatFileRoots` + `rootSpaceId` | unary, forwardable | built (engine) | The workspace chat's Files and Changes panels: its private folder plus each project its scope grants on the host; see [Files › Workspace chats](../features/files.md#workspace-chats). |
 
 As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is no
 `BotAsk` stream, and exchanges and reviews ride `WatchBotRecords` and `Mutate`.

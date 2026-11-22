@@ -178,10 +178,8 @@ pub(super) fn workspace_roots(
         return Vec::new();
     }
     let mut roots: Vec<String> = Vec::new();
-    for space in workspace.read_spaces().unwrap_or_default() {
-        if space.device_id != workspace.device_id() || !bot.scope.sees_space(&space.id) {
-            continue;
-        }
+    let spaces = workspace.read_spaces().unwrap_or_default();
+    for space in super::granted_local_spaces(bot, spaces, workspace.device_id()) {
         let path = std::fs::canonicalize(&space.path)
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or(space.path);
@@ -555,7 +553,7 @@ impl Bots {
     }
 
     /// The bot's private folder (every thread's cwd).
-    pub(super) fn folder(&self, bot_id: &str) -> std::path::PathBuf {
+    pub(crate) fn folder(&self, bot_id: &str) -> std::path::PathBuf {
         self.inner.root.join(bot_id)
     }
 }

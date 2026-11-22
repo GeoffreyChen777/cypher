@@ -654,6 +654,29 @@ impl AppendSystemPrompt {
     pub const MAX_BYTES: usize = 64 * 1024;
 }
 
+/// One folder a chat's Files and Changes panels may open (`ListChatFileRoots`).
+///
+/// A session has one: its checkout. A workspace's own chat has its private
+/// folder first, then each project its scope grants on the workspace's host
+/// device. The file RPCs address a project root by passing its `spaceId` as
+/// `rootSpaceId`; the path-addressed git RPCs take `path` as their `cwd`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatFileRoot {
+    /// `None` for the chat's own folder (the default root); a granted
+    /// project's space id otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    /// The project's display name; the workspace's name for its own folder.
+    pub name: String,
+    /// Canonical absolute folder on the chat's host device.
+    pub path: String,
+    /// The checkout identity `WatchCheckoutDiffs` reports this folder under,
+    /// when it is known to be a git checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceDirectory {
@@ -889,6 +912,33 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<GetCheckoutFileDiffTextRequest>(value).unwrap(),
             request
+        );
+    }
+
+    #[test]
+    fn chat_file_root_wire_is_camel_case_and_omits_the_default_root_id() {
+        let own = ChatFileRoot {
+            space_id: None,
+            name: "Billing".into(),
+            path: "/data/bots/b1".into(),
+            checkout_id: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&own).unwrap(),
+            serde_json::json!({"name": "Billing", "path": "/data/bots/b1"})
+        );
+        let project = ChatFileRoot {
+            space_id: Some("sp-1".into()),
+            name: "cypher".into(),
+            path: "/src/cypher".into(),
+            checkout_id: Some("c1".into()),
+        };
+        let value = serde_json::to_value(&project).unwrap();
+        assert_eq!(value["spaceId"], "sp-1");
+        assert_eq!(value["checkoutId"], "c1");
+        assert_eq!(
+            serde_json::from_value::<ChatFileRoot>(value).unwrap(),
+            project
         );
     }
 

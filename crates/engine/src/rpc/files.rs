@@ -1,4 +1,5 @@
-//! Workspace file access and mention search, jailed to a chat or space checkout.
+//! Workspace file access and mention search, jailed to a chat or space checkout
+//! (or, for a workspace's own chat, a project its scope grants).
 
 use serde_json::Value;
 
@@ -23,6 +24,10 @@ pub(super) fn tool_file_path(call: &ToolCall) -> Option<&str> {
     }
 }
 
+/// How long one root of `ListChatFileRoots` may take to resolve; a project
+/// on a dead mount is left out rather than holding up the list.
+const ROOT_RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
+
 impl EngineRpc {
     /// Resolve a mention-search root from synced workspace rows. A client may
     /// name an existing linked worktree for a new chat, but it is verified
@@ -42,44 +47,15 @@ impl EngineRpc {
                         "SearchFiles path applies only to a space".into(),
                     ));
                 }
-                let chat = self
-                    .workspace
-                    .chat(chat_id)
-                    .map_err(failed)?
-                    .ok_or_else(|| RpcError::Failed("chat not found".into()))?;
-                if chat.device_id != local_device {
-                    return Err(RpcError::Failed("chat belongs to another device".into()));
-                }
-                let cwd = chat
-                    .cwd
-                    .map(|cwd| std::path::PathBuf::from(expand_home(&cwd)))
-                    .ok_or_else(|| RpcError::Failed("chat has no workspace folder".into()))?;
-                let space_id = chat
-                    .space_id
-                    .ok_or_else(|| RpcError::Failed("chat has no workspace space".into()))?;
-                let space = self
-                    .workspace
-                    .space(&space_id)
-                    .map_err(failed)?
-                    .ok_or_else(|| RpcError::Failed("chat workspace space not found".into()))?;
-                if space.device_id != local_device {
-                    return Err(RpcError::Failed(
-                        "chat space belongs to another device".into(),
-                    ));
-                }
-                if let Some(cwd) = self
-                    .repos
-                    .workspace_checkout(std::path::Path::new(&space.path), &cwd)
+                self.chat_file_root(chat_id, p.root_space_id.as_deref())
                     .await
-                {
-                    Ok(cwd)
-                } else {
-                    Err(RpcError::Failed(
-                        "chat folder is not a workspace checkout".into(),
-                    ))
-                }
             }
             (None, Some(space_id)) => {
+                if p.root_space_id.is_some() {
+                    return Err(RpcError::BadParams(
+                        "SearchFiles rootSpaceId applies only to a chat".into(),
+                    ));
+                }
                 let space = self
                     .workspace
                     .space(space_id)
@@ -104,6 +80,185 @@ impl EngineRpc {
                 }
             }
         }
+    }
+
+    /// The folder a chat's file request addresses, canonical. Without
+    /// `root_space_id` that is the chat's own folder: a session's checkout,
+    /// or a workspace's private folder for the workspace's own chat. With
+    /// it, the folder of that project, which only a workspace's own chat may
+    /// name and only when its scope grants the project on this device.
+    pub(super) async fn chat_file_root(
+        &self,
+        chat_id: &str,
+        root_space_id: Option<&str>,
+    ) -> Result<std::path::PathBuf, RpcError> {
+        let chat = self.local_chat(chat_id)?;
+        match root_space_id {
+            None => self.default_file_root(&chat).await,
+            Some(space_id) => {
+                let bot = self.owner_workspace(&chat)?.ok_or_else(|| {
+                    RpcError::Failed("rootSpaceId applies only to a workspace's own chat".into())
+                })?;
+                Ok(self.granted_project_root(&bot, space_id).await?.0)
+            }
+        }
+    }
+
+    /// A chat row hosted on this device.
+    fn local_chat(&self, chat_id: &str) -> Result<cypher_proto::Chat, RpcError> {
+        let chat = self
+            .workspace
+            .chat(chat_id)
+            .map_err(failed)?
+            .ok_or_else(|| RpcError::Failed("chat not found".into()))?;
+        if chat.device_id != self.doc_host.device_id() {
+            return Err(RpcError::Failed("chat belongs to another device".into()));
+        }
+        Ok(chat)
+    }
+
+    /// The workspace `chat` is the own chat of, when that workspace is hosted
+    /// here. Hidden threads (memory passes, routines, plans, peer answers),
+    /// a marker naming another chat, and other devices' workspaces are not.
+    fn owner_workspace(
+        &self,
+        chat: &cypher_proto::Chat,
+    ) -> Result<Option<cypher_proto::Bot>, RpcError> {
+        let Some(marker) = chat.bot.as_ref().filter(|marker| marker.is_owner_chat()) else {
+            return Ok(None);
+        };
+        let Some(bot) = self.workspace.bot(&marker.bot_id).map_err(failed)? else {
+            return Ok(None);
+        };
+        Ok(
+            (bot.chat_id == chat.id && bot.host_device_id == self.doc_host.device_id())
+                .then_some(bot),
+        )
+    }
+
+    async fn default_file_root(
+        &self,
+        chat: &cypher_proto::Chat,
+    ) -> Result<std::path::PathBuf, RpcError> {
+        let cwd = chat
+            .cwd
+            .as_deref()
+            .map(|cwd| std::path::PathBuf::from(expand_home(cwd)))
+            .ok_or_else(|| RpcError::Failed("chat has no workspace folder".into()))?;
+        if let Some(bot) = self.owner_workspace(chat)? {
+            // Only the workspace's own private folder, however the row's
+            // cwd was written.
+            let folder = self
+                .repos
+                .canonical_dir(&self.bots()?.folder(&bot.id))
+                .await;
+            let cwd = self.repos.canonical_dir(&cwd).await;
+            return match (folder, cwd) {
+                (Some(folder), Some(cwd)) if folder == cwd => Ok(folder),
+                _ => Err(RpcError::Failed(
+                    "chat folder is not the workspace's folder".into(),
+                )),
+            };
+        }
+        let space_id = chat
+            .space_id
+            .as_deref()
+            .ok_or_else(|| RpcError::Failed("chat has no workspace space".into()))?;
+        let space = self
+            .workspace
+            .space(space_id)
+            .map_err(failed)?
+            .ok_or_else(|| RpcError::Failed("chat workspace space not found".into()))?;
+        if space.device_id != self.doc_host.device_id() {
+            return Err(RpcError::Failed(
+                "chat space belongs to another device".into(),
+            ));
+        }
+        self.repos
+            .workspace_checkout(std::path::Path::new(&space.path), &cwd)
+            .await
+            .ok_or_else(|| RpcError::Failed("chat folder is not a workspace checkout".into()))
+    }
+
+    /// A project `bot` grants on this device, with its canonical folder.
+    /// Unknown and ungranted projects answer alike.
+    async fn granted_project_root(
+        &self,
+        bot: &cypher_proto::Bot,
+        space_id: &str,
+    ) -> Result<(std::path::PathBuf, cypher_proto::Space), RpcError> {
+        let space = self
+            .workspace
+            .space(space_id)
+            .map_err(failed)?
+            .filter(|space| bot.scope.sees_space(&space.id))
+            .ok_or_else(|| RpcError::Failed("project is not available to this workspace".into()))?;
+        let Some(space) =
+            crate::bots::granted_local_spaces(bot, vec![space], self.doc_host.device_id()).pop()
+        else {
+            return Err(RpcError::Failed(
+                "project is on another device; open it from a session there".into(),
+            ));
+        };
+        let root = self
+            .repos
+            .canonical_dir(std::path::Path::new(&space.path))
+            .await
+            .ok_or_else(|| RpcError::Failed("project folder is missing".into()))?;
+        Ok((root, space))
+    }
+
+    /// `ListChatFileRoots`: every folder the chat's file RPCs accept, the
+    /// default first. A chat with no browsable folder (a hidden workspace
+    /// thread, a damaged row) lists none.
+    pub(super) async fn chat_file_roots(
+        &self,
+        chat_id: &str,
+    ) -> Result<Vec<cypher_proto::ChatFileRoot>, RpcError> {
+        let chat = self.local_chat(chat_id)?;
+        let bot = self.owner_workspace(&chat)?;
+        let mut roots = Vec::new();
+        if let Ok(Ok(path)) =
+            tokio::time::timeout(ROOT_RESOLVE_TIMEOUT, self.default_file_root(&chat)).await
+        {
+            let name = match &bot {
+                Some(bot) => bot.name.clone(),
+                None => chat
+                    .space_id
+                    .as_deref()
+                    .and_then(|id| self.workspace.space(id).ok().flatten())
+                    .map(|space| space.display_name().to_string())
+                    .unwrap_or_default(),
+            };
+            roots.push(cypher_proto::ChatFileRoot {
+                space_id: None,
+                name,
+                path: path.to_string_lossy().into_owned(),
+                checkout_id: chat.checkout_id.clone(),
+            });
+        }
+        let Some(bot) = bot else {
+            return Ok(roots);
+        };
+        let spaces = self.workspace.read_spaces().map_err(failed)?;
+        let mut projects = Vec::new();
+        for space in crate::bots::granted_local_spaces(&bot, spaces, self.doc_host.device_id()) {
+            let resolved = tokio::time::timeout(
+                ROOT_RESOLVE_TIMEOUT,
+                self.repos.canonical_dir(std::path::Path::new(&space.path)),
+            )
+            .await;
+            let Ok(Some(path)) = resolved else { continue };
+            projects.push(cypher_proto::ChatFileRoot {
+                space_id: Some(space.id.clone()),
+                name: space.display_name().to_string(),
+                path: path.to_string_lossy().into_owned(),
+                checkout_id: space.checkout_id.clone(),
+            });
+        }
+        projects.sort_by_cached_key(|root| (root.name.to_lowercase(), root.path.clone()));
+        roots.extend(projects);
+        Ok(roots)
     }
 
     /// Most-recent-first paths the current chat actually touched, followed by
@@ -221,12 +376,7 @@ pub(super) async fn workspace_file(
         };
         same_checkout()?;
         let root = rpc
-            .file_search_root(&FileSearchParams {
-                query: String::new(),
-                chat_id: Some(p.chat_id.clone()),
-                space_id: None,
-                path: None,
-            })
+            .chat_file_root(&p.chat_id, p.root_space_id.as_deref())
             .await?;
         same_checkout()?;
         let value = crate::git::workspace_files::run(root, p.path.clone(), op)
@@ -237,6 +387,14 @@ pub(super) async fn workspace_file(
     })
     .await
     .map_err(|_| RpcError::Failed("workspace file access timed out".into()))?
+}
+
+pub(super) async fn list_chat_file_roots(
+    rpc: &EngineRpc,
+    params: Value,
+) -> Result<RpcReply, RpcError> {
+    let p: ChatParams = parse_params(params)?;
+    RpcReply::value(&rpc.chat_file_roots(&p.chat_id).await?)
 }
 
 pub(super) async fn search_files(rpc: &EngineRpc, params: Value) -> Result<RpcReply, RpcError> {
