@@ -404,29 +404,25 @@ impl Changes {
                 .into_any_element();
         }
         let scope = self.scope;
-        // A workspace's own chat with several checkouts: which one.
-        let picker = {
-            let state = self.state.read(cx);
-            let choices: Vec<_> = state.git_roots().into_iter().cloned().collect();
-            state
-                .git_root()
-                .cloned()
-                .filter(|_| choices.len() > 1)
-                .map(|shown| (choices, shown))
-        }
-        .map(|(choices, shown)| {
-            let mounted = crate::files::root_picker::mounted(&self.root_menu);
-            crate::files::root_picker::render(
-                "changes-root-picker",
-                &choices,
-                &shown,
-                &self.state.clone(),
-                |this: &mut Self| &mut this.root_menu,
-                mounted,
-                &theme,
-                cx,
-            )
-        });
+        // A workspace's own chat with several roots: which checkout this is
+        // (a menu when there are several).
+        let picker = self
+            .state
+            .read(cx)
+            .git_root_choice()
+            .map(|(choices, shown)| {
+                let mounted = crate::files::root_picker::mounted(&self.root_menu);
+                crate::files::root_picker::render(
+                    "changes-root-picker",
+                    &choices,
+                    &shown,
+                    &self.state.clone(),
+                    |this: &mut Self| &mut this.root_menu,
+                    mounted,
+                    &theme,
+                    cx,
+                )
+            });
         let history_count = (scope == DiffScope::History).then(|| self.history_count(cx));
         let history_fetch_button =
             (scope == DiffScope::History).then(|| self.history_fetch_button(cx));
@@ -538,6 +534,7 @@ impl Changes {
         let popup_theme = Theme::of(cx).clone();
         let theme = &popup_theme;
         let current = self.scope;
+        let workspace_chat = self.state.read(cx).workspace_chat_selected();
         popover::popover_card(theme)
             .w(px(180.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_scope_menu(cx)))
@@ -546,19 +543,21 @@ impl Changes {
                 // the card abutted, adjacent washes read as one slab (user
                 // report).
                 div().flex().flex_col().gap(px(2.0)).children(
-                    DiffScope::ALL.into_iter().enumerate().map(|(ix, scope)| {
-                        popover::menu_row(
-                            theme,
-                            scope == current,
-                            format!("changes-scope-row-{ix}"),
-                        )
-                        .id(("changes-scope-row", ix))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_scope(scope, cx);
-                            this.close_scope_menu(cx);
-                        }))
-                        .child(div().flex_1().child(SharedString::from(scope.label())))
-                    }),
+                    DiffScope::menu(workspace_chat)
+                        .enumerate()
+                        .map(|(ix, scope)| {
+                            popover::menu_row(
+                                theme,
+                                scope == current,
+                                format!("changes-scope-row-{ix}"),
+                            )
+                            .id(("changes-scope-row", ix))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_scope(scope, cx);
+                                this.close_scope_menu(cx);
+                            }))
+                            .child(div().flex_1().child(SharedString::from(scope.label())))
+                        }),
                 ),
             )
             .into_any_element()

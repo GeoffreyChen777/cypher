@@ -448,6 +448,24 @@ fn scope_modes_are_wire_stable() {
 }
 
 #[test]
+fn a_workspace_chat_is_offered_no_latest_turn() {
+    // A session: every scope.
+    assert_eq!(
+        DiffScope::menu(false).collect::<Vec<_>>(),
+        DiffScope::ALL.to_vec()
+    );
+    // A workspace's own chat: no turn is recorded in its projects.
+    assert_eq!(
+        DiffScope::menu(true).collect::<Vec<_>>(),
+        vec![
+            DiffScope::WorkingTree,
+            DiffScope::Branch,
+            DiffScope::History
+        ]
+    );
+}
+
+#[test]
 fn diff_frames_replace_lists_and_upsert_singles() {
     let mut diffs = Vec::new();
     let one = diff("co-1", "d", "/w", "p1");

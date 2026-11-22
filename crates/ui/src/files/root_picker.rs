@@ -1,7 +1,9 @@
 //! The project picker at the start of a workspace chat's Files and Git
 //! headers: which of its roots ([`super::roots`]) the surface shows. Drawn
-//! only when there is a choice. A pick is the chat's (Files and Git follow
-//! it together, see [`crate::state::AppState::pick_file_root`]).
+//! only for a chat with several roots; with a single choice (Git when one
+//! project is a checkout) it is a plain label naming the root. A pick is
+//! the chat's (Files and Git follow it together, see
+//! [`crate::state::AppState::pick_file_root`]).
 
 use cypher_proto::ChatFileRoot;
 use gpui::{AnyElement, Context, Entity, SharedString, div, prelude::*, px};
@@ -21,9 +23,43 @@ fn glyph(root: &ChatFileRoot) -> &'static str {
     }
 }
 
+/// The row the label sits in, a menu's trigger or not.
+fn frame(id: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(24.0))
+        .px(px(7.0))
+        .flex_shrink(1.0)
+        .min_w(px(48.0))
+        .max_w(px(180.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(5.0))
+}
+
+/// The shown root's glyph and name.
+fn label(shown: &ChatFileRoot, theme: &Theme) -> [AnyElement; 2] {
+    [
+        icon(glyph(shown))
+            .flex_none()
+            .size(px(12.0))
+            .text_color(theme.text_muted)
+            .into_any_element(),
+        div()
+            .min_w_0()
+            .truncate()
+            .text_size(px(12.0))
+            .text_color(theme.text)
+            .child(SharedString::from(shown.name.clone()))
+            .into_any_element(),
+    ]
+}
+
 /// The trigger and, while open, its menu. `choices` are the roots the
 /// surface may show, `shown` the one it shows; `menu` re-borrows the
-/// surface's popup, whose current state is `mounted` ([`mounted`]).
+/// surface's popup, whose current state is `mounted` ([`mounted`]). With
+/// fewer than two choices: the label alone, no menu.
 #[allow(clippy::too_many_arguments)]
 pub fn render<V: 'static>(
     id: &'static str,
@@ -35,17 +71,10 @@ pub fn render<V: 'static>(
     theme: &Theme,
     cx: &mut Context<V>,
 ) -> AnyElement {
-    let trigger = div()
-        .id(id)
-        .h(px(24.0))
-        .px(px(7.0))
-        .flex_shrink(1.0)
-        .min_w(px(48.0))
-        .max_w(px(180.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(5.0))
+    if choices.len() < 2 {
+        return frame(id).children(label(shown, theme)).into_any_element();
+    }
+    let trigger = frame(id)
         .rounded(px(6.0))
         .cursor_pointer()
         .bg(motion::hover_blend(
@@ -71,20 +100,7 @@ pub fn render<V: 'static>(
             }
             cx.notify();
         }))
-        .child(
-            icon(glyph(shown))
-                .flex_none()
-                .size(px(12.0))
-                .text_color(theme.text_muted),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_size(px(12.0))
-                .text_color(theme.text)
-                .child(SharedString::from(shown.name.clone())),
-        )
+        .children(label(shown, theme))
         .child(
             icon(icons::ALT_ARROW_DOWN)
                 .flex_none()

@@ -90,6 +90,22 @@ impl AppState {
         }
     }
 
+    /// What Git's header names: the checkouts to choose from and the one it
+    /// shows, whenever the chat has more than one root. With a single
+    /// checkout among them the header still names it (without a menu): Git
+    /// may show another project than Files' pick, and never silently.
+    /// `None` for a session, or a chat with one root.
+    pub fn git_root_choice(&self) -> Option<(Vec<ChatFileRoot>, ChatFileRoot)> {
+        let FileRoots::Ready(list) = self.file_roots() else {
+            return None;
+        };
+        if list.len() < 2 {
+            return None;
+        }
+        let shown = self.git_root()?.clone();
+        Some((self.git_roots().into_iter().cloned().collect(), shown))
+    }
+
     /// A known checkout, or a project its host found git in.
     pub fn root_has_git(&self, root: &ChatFileRoot) -> bool {
         root.checkout_id.is_some()

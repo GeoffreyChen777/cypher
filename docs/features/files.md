@@ -153,8 +153,10 @@ Desktop side (`crates/ui`: `files/roots.rs`, `state/file_roots.rs`,
   answer, an error or an older engine leaves the workspace's folder alone.
 - **Files** and **Git** show one root at a time. A picker at the start of the
   surface's header lists the roots (the workspace's folder with the workspace
-  glyph, projects with a folder) and appears only when there is a choice; Git
-  lists only checkouts (a `checkoutId`, or a project found to have git). Files
+  glyph, projects with a folder) and appears only when the chat has more than
+  one root; Git lists only checkouts (a `checkoutId`, or a project found to
+  have git), and with a single checkout its header names it without a menu,
+  so Git never shows a project other than Files' without saying so. Files
   and Git follow one pick per chat: the root the owner picked or last opened
   a reference in, else the first granted project, else the workspace's folder.
   Git on a pick that is no checkout shows the first checkout. A commit opened
@@ -169,4 +171,6 @@ Desktop side (`crates/ui`: `files/roots.rs`, `state/file_roots.rs`,
   it is missing); a path outside every root never opens in Files: one on this
   device is revealed in Finder.
 - Git's Branch scope names a project root's branch `HEAD` (the chat row
-  carries no branch for it). The terminal runs in the workspace's folder.
+  carries no branch for it). Git offers no Latest turn scope: the engine
+  records a turn's start tree in the chat's own folder only, never in a
+  granted project. The terminal runs in the workspace's folder.

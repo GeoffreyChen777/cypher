@@ -2580,3 +2580,42 @@ fn a_reference_opens_in_the_root_it_resolves_in(cx: &mut gpui::TestAppContext) {
     open_link(&shell, sid, "src/lib.rs", vcx);
     assert_eq!(shown_root(&shell, sid, vcx), None);
 }
+
+#[gpui::test]
+fn git_names_its_project_whenever_the_chat_has_several_roots(cx: &mut gpui::TestAppContext) {
+    let (shell, vcx, sid) = workspace_board(cx);
+    let slot_state = shell.read_with(vcx, |shell, _| shell.tiles.slots[&sid].state.clone());
+    let root = |space: Option<&str>, git: bool| cypher_proto::ChatFileRoot {
+        space_id: space.map(str::to_owned),
+        name: space.unwrap_or("BOB").into(),
+        path: format!("/src/{}", space.unwrap_or("bob")),
+        checkout_id: git.then(|| format!("co-{}", space.unwrap_or("bob"))),
+    };
+    let names = |choice: Option<(Vec<cypher_proto::ChatFileRoot>, cypher_proto::ChatFileRoot)>| {
+        choice.map(|(choices, shown)| {
+            let names: Vec<String> = choices.into_iter().map(|root| root.name).collect();
+            (names, shown.name)
+        })
+    };
+    // Two checkouts: a menu of both.
+    let two = slot_state.read_with(vcx, |s, _| names(s.git_root_choice()));
+    assert_eq!(two, Some((vec!["api".into(), "web".into()], "api".into())));
+    // One checkout among several roots, with Files on the other project:
+    // Git still names the checkout it shows (a label, one choice).
+    slot_state.update(vcx, |s, _| {
+        s.set_file_roots_for_test(vec![
+            root(None, false),
+            root(Some("api"), true),
+            root(Some("web"), false),
+        ]);
+        s.chat_roots_pick_for_test(Some("web"));
+        assert_eq!(s.files_root().map(|r| r.name.as_str()), Some("web"));
+    });
+    let one = slot_state.read_with(vcx, |s, _| names(s.git_root_choice()));
+    assert_eq!(one, Some((vec!["api".into()], "api".into())));
+    // The workspace's folder alone: nothing to name.
+    slot_state.update(vcx, |s, _| {
+        s.set_file_roots_for_test(vec![root(None, false)])
+    });
+    assert_eq!(slot_state.read_with(vcx, |s, _| s.git_root_choice()), None);
+}
