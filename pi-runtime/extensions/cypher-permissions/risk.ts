@@ -34,6 +34,7 @@ import { isUnder } from "./paths.ts";
 import type { CommandView, PackFacts } from "./packs.ts";
 import type { Classification } from "./paths.ts";
 import { UNKNOWN } from "./shell.ts";
+import { TOLD_BY_PLACE } from "./catalogue.ts";
 
 export type Tier = "inspect" | "local" | "danger";
 
@@ -258,7 +259,7 @@ export interface RiskFacts extends PackFacts {
      * this task created or started, the head branch of a pull request it
      * merged. `why`: the lifecycle rules.
      */
-    destroys?(command: RiskCommand): { own: boolean; op: "destroy" | "stop"; why: string[] } | undefined;
+    destroys?(command: RiskCommand): { own: boolean; op: "destroy" | "stop"; why: string[]; kinds: readonly string[] } | undefined;
   };
   /** A canonical path of the permission system itself (config.ts): a change there always asks. */
   permissionSystem?(path: string): boolean;
@@ -887,7 +888,25 @@ function runsNext(view: CommandView): string[] | undefined {
 }
 
 /** The tier of one command seen through its wrappers. */
+/**
+ * The tier of one command seen through its wrappers, held to provenance: a
+ * command the catalogue reads as destroying or stopping something (a
+ * simulator, a container, a repository, a release, …) that this chat's ledger
+ * doesn't hold, and whose kind no place tells the owner of (catalogue.ts
+ * `TOLD_BY_PLACE`), may be another party's: a danger, whatever else says.
+ */
 export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessment {
+  const assessment = assessWords(command, facts);
+  if (assessment.tier === "danger" || command.words.length === 0 || command.words[0] === UNKNOWN) return assessment;
+  const undo = facts.created?.destroys?.(command);
+  if (!undo || undo.own) return assessment;
+  const foreign = undo.kinds.filter((kind) => !(kind in TOLD_BY_PLACE));
+  if (foreign.length === 0) return assessment;
+  const kind = `${undo.op === "stop" ? "stops" : "deletes"} ${foreign.map((item) => (item === "repo" ? "a repository" : item === "pr" ? "a pull request" : `a ${item}`)).join(" or ")} this chat didn't create or start`;
+  return { tier: "danger", kind, key: `foreign-${foreign[0]}` };
+}
+
+function assessWords(command: RiskCommand, facts: RiskFacts): Assessment {
   const words = command.words;
   if (words.length === 0) return { tier: "inspect" };
   const view = viewOf(words);

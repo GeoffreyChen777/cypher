@@ -2047,7 +2047,7 @@ export class Permissions {
         branch: (name) => this.created.branch(name),
         destroys: (command) => {
           const found = this.created.destroys({ ...command, cwd: command.cwd }, this.catalogueFacts());
-          return found ? { own: found.own, op: found.op, why: found.why } : undefined;
+          return found ? { own: found.own, op: found.op, why: found.why, kinds: found.kinds } : undefined;
         },
       },
       permissionSystem: (path) => this.paths.isPermissionSystem(path) !== undefined,

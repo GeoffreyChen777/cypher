@@ -555,9 +555,25 @@ export function settleCreations(
   return out;
 }
 
+/**
+ * Kinds whose ownership is also told by where they are, so a destroyer of one
+ * not in the ledger is not a danger by that alone (risk.ts decides by place):
+ * every other kind is somebody's unless the ledger, a lifecycle follow-up or
+ * the owner's consent says it is this task's.
+ */
+export const TOLD_BY_PLACE: Readonly<Partial<Record<LedgerKind, string>>> = {
+  path: "the chat's project folders and scratch are its own (risk.ts `disposable`)",
+  worktree: "a worktree inside the chat's workspace is its own",
+  branch: "the branch checked out in the chat's workspace is its work; another checkout's is a danger already",
+  tag: "a tag in the chat's own checkout is local; pushing or deleting one remotely is a danger already",
+  process: "this chat's processes carry its marker (core.ts `ownsProcesses`)",
+};
+
 /** What a command deletes or stops: per target, the entities it may be (any one of them). */
 export interface Destruction {
   op: "destroy" | "stop";
+  /** The kinds of entity its rows destroy or stop. */
+  kinds: LedgerKind[];
   targets: LedgerEntity[][];
   /** Some target is known only when it runs. */
   unknown: boolean;
@@ -569,7 +585,8 @@ export function targetsOf(command: CatalogueCommand, facts: Pick<CatalogueFacts,
   for (const { row, args, dir } of rowsFor(command)) {
     const op = row.op === "destroy" || row.op === "stop" ? row.op : row.op === "create" && row.id.from === "refspecs" ? "destroy" : undefined;
     if (op === undefined) continue;
-    found ??= { op, targets: [], unknown: false };
+    found ??= { op, kinds: [], targets: [], unknown: false };
+    if (!found.kinds.includes(row.kind)) found.kinds.push(row.kind);
     if (args.unknown) found.unknown = true;
     if (row.id.from === "refspecs") {
       const push = refspecs(args);

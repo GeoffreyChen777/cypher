@@ -780,3 +780,41 @@ test("consistency: every catalogue row that destroys, stops or merges has a tool
   assert.deepEqual(missing, []);
   for (const [key, why] of Object.entries(LOCAL_ONLY)) assert.ok(why, key);
 });
+
+// --- Provenance holds for every destroyer: what the ledger doesn't hold may be another party's ----------
+
+import { TOLD_BY_PLACE } from "./cypher-permissions/catalogue.ts";
+
+test("property: a catalogue destroyer on a target not in the ledger asks even when the judge approves; on a ledger target it is local", async () => {
+  const rows = CATALOGUE.filter((row) => (row.op === "destroy" || row.op === "stop") && !(row.kind in TOLD_BY_PLACE) && !row.programs.includes("*"));
+  assert.ok(rows.length >= 15, `rows (${rows.length})`);
+  for (const seed of SEEDS.slice(0, 3)) {
+    const rng = prng(seed);
+    for (const row of rows) {
+      const program = rng.pick(row.programs);
+      const name = sampleName(row.kind, rng);
+      const words = [program, ...row.sub, ...(row.requires ? [row.requires[0]] : []), ...(rng.int(2) ? ["-f"] : []), name];
+      const line = words.map((word) => (/^[\w./:@=+-]+$/.test(word) ? word : `'${word}'`)).join(" ");
+      const { permissions } = engineIn(workspace);
+      // A creator only echoed, earlier in the chat, mints nothing.
+      permissions.settleCreated(permissions.planCreated(`echo ${name}`, workspace), { exitCode: 0, output: `${name}\n` });
+      assert.equal(permissions.assess(line, workspace).tier, "danger", `seed ${seed}: ${line}`);
+      let judged = 0;
+      const context = {
+        cwd: workspace,
+        hasUI: true,
+        ui: { async select() { return "Deny"; }, notify() {} },
+        branch: () => [{ type: "message", message: { role: "user", content: "clean up" } }],
+        complete: async () => (judged++, '{"decision":"approve","reason":"its own"}'),
+        abort() {},
+      };
+      const result = await permissions.requestEscalation(line, { label: "x" }, context);
+      assert.equal(result.ok, false, `seed ${seed}: ${line} ran on the judge's word`);
+      assert.equal(permissions.grants.all().length, 0, "nothing remembered");
+      // The same command on what the ledger says this chat made: local work, the judge's to decide.
+      permissions.created.ledger.record([{ kind: row.kind, name }]);
+      assert.equal(permissions.assess(line, workspace).tier, "local", `seed ${seed}: ${line} after the chat made it`);
+      assert.equal((await permissions.requestEscalation(line, { label: "x" }, context)).ok, true, `seed ${seed}: ${line}`);
+    }
+  }
+});

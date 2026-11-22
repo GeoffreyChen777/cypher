@@ -91,11 +91,14 @@ export function createMachine({ judgeTimeoutMs, cases = fixture.cases } = {}) {
    * runner passes the real one, sanitized); `proposal` is the agent's label
    * and reason for an escalation.
    */
+  let replays = 0;
   async function replay(item, probe, { complete, branch: conversation, proposal } = {}) {
     const verdict = probe ? probe.verdict : item.verdict;
     const command = probe?.command ?? item.command;
     const cwd = expand(item.cwd);
-    const permissions = new Permissions({ agentDir, chatId: "chat-replay", cwd, home, landstrip: { available: true, binary: "/nonexistent/landstrip" }, scratch: [tmp] });
+    // A chat of its own: what an earlier case's commands made (its on-disk ledger, created.ts) is never this one's.
+    const chatId = `chat-replay-${++replays}`;
+    const permissions = new Permissions({ agentDir, chatId, cwd, home, landstrip: { available: true, binary: "/nonexistent/landstrip" }, scratch: [tmp] });
     permissions.appendEntry = () => {};
     // The audit record this call writes, kept here so concurrent replays do not read each other's.
     const records = [];
