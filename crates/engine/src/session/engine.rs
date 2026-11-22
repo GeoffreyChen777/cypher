@@ -1242,6 +1242,7 @@ fn chat_origin(
                 .is_some_and(|marker| !marker.is_owner_chat())
             || work.is_some(),
         instruction: work.map(|work| work.instruction.clone()),
+        card: work.and_then(crate::host::doc_host::plan_card),
     }
 }
 
