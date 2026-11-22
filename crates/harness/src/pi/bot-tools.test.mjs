@@ -124,3 +124,12 @@ test("propose_plan's schema carries the engine's caps", () => {
   assert.match(result.description, /^Concise: .*at most 30,000 characters$/);
   assert.match(limit.description, /15 to 4320 \(72 hours\)/);
 });
+
+test("a routine's prompt and a shortcut's request carry their cap", () => {
+  const prompt = tools.get("save_routine").parameters.properties.prompt;
+  const request = tools.get("save_shortcut").parameters.properties.request;
+  for (const field of [prompt, request]) {
+    assert.equal(field.maxLength, PLAN_LIMITS.PROMPT_MAX);
+    assert.match(field.description, /at most 4,000 characters$/);
+  }
+});

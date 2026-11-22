@@ -1088,3 +1088,34 @@ async fn shortcuts_are_made_by_the_workspace_chat_and_go_with_it() {
         .expect("deleteBot");
     assert!(core.workspace.read_bot_records().shortcuts.is_empty());
 }
+
+/// A shortcut's request over `PROMPT_MAX` is refused with the overshoot,
+/// never cut (plan-body.md §9, D8); one at the cap is saved whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shortcut_request_over_its_cap_is_refused_not_cut() {
+    let tmp = tempfile::tempdir().unwrap();
+    let core = support::assemble_mock(&tmp.path().join("data"));
+    seed(&core, tmp.path());
+    let bot = create_bot(&core, billing_only()).await;
+    let save = |request: String| serde_json::json!({ "label": "Brief", "request": request });
+    let refused = bot_tool(
+        &core,
+        &bot.chat_id,
+        "save_shortcut",
+        save("x".repeat(cypher_proto::PROMPT_MAX + 2_500)),
+    )
+    .await;
+    assert_eq!(
+        refused,
+        "The request has 6,500 characters, 2,500 over the 4,000 a shortcut holds. Nothing \
+         is cut: shorten it and save again."
+    );
+    assert!(core.workspace.read_bot_records().shortcuts.is_empty());
+    let whole = format!("{} {{input}}", "x".repeat(cypher_proto::PROMPT_MAX - 8));
+    let added = bot_tool(&core, &bot.chat_id, "save_shortcut", save(whole.clone())).await;
+    assert!(added.starts_with("Added the shortcut \"Brief\""), "{added}");
+    assert_eq!(
+        core.workspace.read_bot_records().shortcuts_of(&bot.id)[0].request,
+        whole
+    );
+}

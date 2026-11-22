@@ -1346,6 +1346,12 @@ impl Shell {
                 .py(px(4.0))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let text = send_input.read(cx).text().trim().to_string();
+                    // Over its cap the engine refuses it; say so and stay here
+                    // with the draft rather than leave for a failed send.
+                    if let Err(refusal) = cypher_proto::check_review_text(&text) {
+                        this.sidebar.notice = Some(refusal.into());
+                        return cx.notify();
+                    }
                     let edited = (text != original.trim()).then_some(text);
                     this.mutate(
                         serde_json::json!({

@@ -105,6 +105,50 @@ pub fn clip(text: &str, max: usize) -> String {
     out
 }
 
+/// `n` with thousands separators, as the refusals write it: 4,000.
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Refuse `text` over `max` characters (counted as [`clip`] counts them),
+/// with the overshoot: "`what` has 4,120 characters, 120 over the 4,000
+/// `holder` holds. Nothing is cut: shorten it and `again`." A text the row
+/// keeps whole is refused, never cut without a word
+/// (docs/design/plan-body.md §9).
+pub fn refuse_over(
+    text: &str,
+    max: usize,
+    what: &str,
+    holder: &str,
+    again: &str,
+) -> Result<(), String> {
+    let len = text.trim().chars().count();
+    if len <= max {
+        return Ok(());
+    }
+    Err(format!(
+        "{what} has {} characters, {} over the {} {holder} holds. Nothing is cut: shorten \
+         it and {again}.",
+        grouped(len),
+        grouped(len - max),
+        grouped(max)
+    ))
+}
+
+/// The owner's edit of an answer to review (`Mutate reviewBotExchange`):
+/// refused over [`ANSWER_MAX`] rather than cut before it is sent.
+pub fn check_review_text(text: &str) -> Result<(), String> {
+    refuse_over(text, ANSWER_MAX, "The answer", "an answer", "send it again")
+}
+
 /// What `c` takes in serde_json's output, in UTF-16 units.
 fn json_units(c: char) -> usize {
     match c {
@@ -1123,6 +1167,13 @@ impl BotRoutine {
         if self.prompt.trim().is_empty() {
             return Err("Say what the routine should do.".into());
         }
+        refuse_over(
+            &self.prompt,
+            PROMPT_MAX,
+            "The prompt",
+            "a routine",
+            "save again",
+        )?;
         if self
             .target
             .space_id()
@@ -1206,7 +1257,13 @@ impl BotShortcut {
         if self.request.trim().is_empty() {
             return Err("Give the shortcut the request it sends.".into());
         }
-        Ok(())
+        refuse_over(
+            &self.request,
+            PROMPT_MAX,
+            "The request",
+            "a shortcut",
+            "save again",
+        )
     }
 
     /// Whether a click asks for text first.
@@ -1756,6 +1813,43 @@ mod tests {
             }
             .validate()
             .is_err()
+        );
+    }
+
+    #[test]
+    fn long_texts_are_refused_with_the_overshoot_not_cut() {
+        assert_eq!(grouped(0), "0");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(4_000), "4,000");
+        assert_eq!(grouped(1_234_567), "1,234,567");
+        // Counted as `clip` counts: trimmed, in characters.
+        let at_cap = format!("  {}\n", "界".repeat(PROMPT_MAX));
+        assert_eq!(
+            refuse_over(&at_cap, PROMPT_MAX, "It", "a row", "go"),
+            Ok(())
+        );
+        assert_eq!(
+            refuse_over(
+                &"x".repeat(4_120),
+                PROMPT_MAX,
+                "The prompt",
+                "a routine",
+                "save again"
+            ),
+            Err(
+                "The prompt has 4,120 characters, 120 over the 4,000 a routine holds. \
+                 Nothing is cut: shorten it and save again."
+                    .into()
+            )
+        );
+        assert!(check_review_text(&"x".repeat(ANSWER_MAX)).is_ok());
+        assert_eq!(
+            check_review_text(&"x".repeat(ANSWER_MAX + 1)),
+            Err(
+                "The answer has 8,001 characters, 1 over the 8,000 an answer holds. \
+                 Nothing is cut: shorten it and send it again."
+                    .into()
+            )
         );
     }
 

@@ -71,12 +71,13 @@ function failure(value: string) {
 }
 
 /**
- * The plan caps the engine enforces (cypher_proto `bot_records.rs` and
- * `plan_body.rs`; a harness test checks they agree). In the schema too, so
- * the model fits them the first time; the engine still refuses what goes
- * over. A plan's details and a result may run long: the row keeps a
- * preview and the full text lives in the workspace chat
- * (docs/design/plan-body.md).
+ * The caps the engine enforces on plans, routines and shortcuts
+ * (cypher_proto `bot_records.rs` and `plan_body.rs`; a harness test checks
+ * they agree). In the schema too, so the model fits them the first time;
+ * the engine still refuses what goes over, and never cuts. A plan's details
+ * and a result may run long: the row keeps a preview and the full text
+ * lives in the workspace chat (docs/design/plan-body.md). A routine's
+ * prompt and a shortcut's request stay whole in their row.
  */
 export const PLAN_LIMITS = {
   TITLE_MAX: 120,
@@ -87,6 +88,7 @@ export const PLAN_LIMITS = {
   PLAN_STEPS_MAX: 10,
   PLAN_TIME_LIMIT_MIN_MINUTES: 15,
   PLAN_TIME_LIMIT_MAX_MINUTES: 4_320,
+  PROMPT_MAX: 4_000,
 } as const;
 const L = PLAN_LIMITS;
 /** A cap as the descriptions write it: 30,000. */
@@ -357,7 +359,7 @@ const TOOLS: ToolDef[] = [
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: "The routine to change; leave out to create one" })),
       name: Type.String({ description: "A short name, e.g. Morning brief" }),
-      prompt: Type.String({ description: "What each run should do and report, written as an instruction to yourself" }),
+      prompt: Type.String({ maxLength: L.PROMPT_MAX, description: `What each run should do and report, written as an instruction to yourself; at most ${n(L.PROMPT_MAX)} characters` }),
       schedule: Type.Object(
         {
           kind: Type.Union([Type.Literal("daily"), Type.Literal("interval"), Type.Literal("once"), Type.Literal("manual")]),
@@ -438,7 +440,7 @@ const TOOLS: ToolDef[] = [
           { description: "The icon on the button" },
         ),
       ),
-      request: Type.String({ description: "What a click sends you; may hold {input}" }),
+      request: Type.String({ maxLength: L.PROMPT_MAX, description: `What a click sends you; may hold {input}; at most ${n(L.PROMPT_MAX)} characters` }),
     }),
   },
   {

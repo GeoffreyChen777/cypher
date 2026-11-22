@@ -486,8 +486,9 @@ impl Bots {
             last_run: None,
             next_run_at: None,
         };
-        routine.clamp();
+        // Before the clamp: a prompt over its cap is refused, not cut.
         routine.validate().map_err(EngineError::Other)?;
+        routine.clamp();
         if matches!(routine.schedule, Schedule::Once { .. })
             && routine.schedule.next_after(&Local::now()).is_none()
         {

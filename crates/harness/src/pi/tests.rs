@@ -827,8 +827,8 @@ fn a_tool_result_carries_how_permission_control_treated_it() {
     );
 }
 
-/// The plan caps the bot tools' schema offers the model are the ones the
-/// engine enforces (`bot-tools.ts` `PLAN_LIMITS`; its own test checks the
+/// The caps the bot tools' schema offers the model (plans, routine prompts,
+/// shortcut requests) are the ones the engine enforces (`bot-tools.ts` `PLAN_LIMITS`; its own test checks the
 /// schema reads them).
 #[test]
 fn bot_tools_plan_limits_match_the_engines() {
@@ -862,6 +862,7 @@ fn bot_tools_plan_limits_match_the_engines() {
             "PLAN_TIME_LIMIT_MAX_MINUTES",
             p::PLAN_TIME_LIMIT_MAX_MINUTES as usize,
         ),
+        ("PROMPT_MAX", p::PROMPT_MAX),
     ]
     .into_iter()
     .collect();

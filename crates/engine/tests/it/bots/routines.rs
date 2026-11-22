@@ -1681,3 +1681,67 @@ async fn a_routine_runs_on_its_own_choice_and_a_run_now_note_applies_once() {
     );
     core.shutdown().await;
 }
+
+/// A routine's prompt over `PROMPT_MAX` is refused with the overshoot, by
+/// the tool and by the owner's Mutate, never cut (plan-body.md §9, D8); one
+/// at the cap is saved whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_routine_prompt_over_its_cap_is_refused_not_cut() {
+    let Rig { core, .. } = rig().await;
+    let bot = create_bot(&core, false).await;
+    let save = |prompt: String| {
+        serde_json::json!({
+            "name": "Long brief",
+            "prompt": prompt,
+            "schedule": { "kind": "manual" },
+        })
+    };
+    let refused = bot_tool(
+        &core,
+        &bot.chat_id,
+        "save_routine",
+        save("x".repeat(p::PROMPT_MAX + 120)),
+    )
+    .await;
+    assert_eq!(
+        refused,
+        "The prompt has 4,120 characters, 120 over the 4,000 a routine holds. Nothing is \
+         cut: shorten it and save again."
+    );
+    assert!(core.workspace.read_bot_records().routines.is_empty());
+    let saved = bot_tool(
+        &core,
+        &bot.chat_id,
+        "save_routine",
+        save("界".repeat(p::PROMPT_MAX)),
+    )
+    .await;
+    assert!(saved.starts_with("Saved routine \"Long brief\""), "{saved}");
+    let records = core.workspace.read_bot_records();
+    assert_eq!(records.routines[0].prompt, "界".repeat(p::PROMPT_MAX));
+
+    // The owner's editor saves through Mutate: the same refusal.
+    let mut def = routine_def("r-long", &bot, "", Schedule::Manual);
+    def.prompt = "y".repeat(p::PROMPT_MAX + 1);
+    let err = cypher_rpc::memory_client(core.rpc_service())
+        .call(
+            cypher_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "saveBotRoutine", "routine": def }),
+        )
+        .await
+        .expect_err("over the cap");
+    assert!(
+        err.to_string()
+            .contains("The prompt has 4,001 characters, 1 over the 4,000 a routine holds."),
+        "{err}"
+    );
+    assert!(
+        core.workspace
+            .record::<BotRoutine>(p::KIND_BOT_ROUTINES, "r-long")
+            .is_none()
+    );
+    def.prompt = "y".repeat(p::PROMPT_MAX);
+    save_routine(&core, &def).await;
+    assert_eq!(routine(&core, "r-long").prompt, def.prompt);
+    core.shutdown().await;
+}
