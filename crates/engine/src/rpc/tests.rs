@@ -33,6 +33,8 @@ fn engine_identity_is_not_forwardable() {
     assert!(!is_stream_method(methods::FAIL_UPLOADS));
     assert!(forwardable(methods::WATCH_DOC_COMMANDS));
     assert!(is_stream_method(methods::WATCH_DOC_COMMANDS));
+    assert!(forwardable(methods::WATCH_PLAN_BODY));
+    assert!(is_stream_method(methods::WATCH_PLAN_BODY));
     assert!(forwardable(methods::SEARCH_FILES));
     assert!(forwardable(methods::SEARCH_GITHUB_ISSUES));
     assert!(forwardable(methods::GET_GITHUB_ISSUE));

@@ -147,6 +147,13 @@ pub mod methods {
     /// The UI projects Queued / Failed / Retrying from these entries — the
     /// authoritative source over the local optimistic overlay.
     pub const WATCH_DOC_COMMANDS: &str = "WatchDocCommands";
+    /// One plan's full text in its workspace chat's doc (forwardable stream,
+    /// params `{chatId, workId}`; docs/design/plan-body.md §5): the doc's
+    /// `planBodies[workId]` as `{plan?, result?}` now, then again whenever it
+    /// changes. The engine opens the chat's doc, joining its room as a
+    /// client when another device hosts the chat; the app shows a part only
+    /// when its rev matches the row's.
+    pub const WATCH_PLAN_BODY: &str = "WatchPlanBody";
     /// Nudge every open room client to verify liveness NOW (window focus,
     /// app foregrounded). No params; IPC-only. Each room ignores the hint
     /// unless it has been broadcast-quiet ≥30s, so this is cheap to spam.
@@ -533,6 +540,7 @@ pub mod methods {
         MethodSpec::unary(FAIL_UPLOADS).forwardable(),
         MethodSpec::stream(WATCH_DOC_MESSAGES).forwardable(),
         MethodSpec::stream(WATCH_DOC_COMMANDS).forwardable(),
+        MethodSpec::stream(WATCH_PLAN_BODY).forwardable(),
         MethodSpec::unary(PROBE_SYNC),
         MethodSpec::unary(NOTIFICATION_ACTIVITY).auth(),
         MethodSpec::unary(SYNC_STATUS),

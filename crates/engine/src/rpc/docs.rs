@@ -1,5 +1,7 @@
 //! Session-doc commands and watches, sync status, and the local-profile import.
 
+use std::sync::Arc;
+
 use serde_json::Value;
 
 use super::*;
@@ -53,6 +55,56 @@ pub(super) fn watch_doc_commands(rpc: &EngineRpc, params: Value) -> Result<RpcRe
     // Same watch_stream shape as the other standing watches: the
     // current command ledger first, then every doc change.
     Ok(RpcReply::Stream(watch_stream(handle.watch_commands())))
+}
+
+/// `WatchPlanBody` (docs/design/plan-body.md §5): `planBodies[workId]` of a
+/// workspace chat's doc as `{plan?, result?}`, now and whenever it changes.
+/// `open` joins the chat's room as a client when another device hosts it,
+/// so a body the host writes there arrives here by sync.
+pub(super) fn watch_plan_body(rpc: &EngineRpc, params: Value) -> Result<RpcReply, RpcError> {
+    let p: PlanBodyParams = parse_params(params)?;
+    let handle = rpc.doc_host.open(&p.chat_id).map_err(failed)?;
+    Ok(RpcReply::Stream(plan_body_stream(
+        handle.doc_arc(),
+        p.work_id,
+    )))
+}
+
+/// The frames of [`watch_plan_body`]: the entry as it is, then once per
+/// change to it. Only `planBodies` is watched, not the whole doc: a
+/// workspace chat commits on every streamed token, and none of those touch
+/// it. A frame equal to the last one (another work item's entry changed) is
+/// not sent.
+fn plan_body_stream(
+    doc: Arc<cypher_doc::SessionDoc>,
+    work_id: String,
+) -> BoxStream<'static, Value> {
+    let (tx, rx) = tokio::sync::watch::channel(0u64);
+    let container = loro::ContainerID::new_root(cypher_doc::PLAN_BODIES, loro::ContainerType::Map);
+    // Kept in the stream's state: dropping it unsubscribes. Holding the doc
+    // keeps it open (pinned against eviction) while the page watches.
+    let sub = doc.doc().subscribe(
+        &container,
+        Arc::new(move |_| {
+            tx.send_modify(|v| *v = v.wrapping_add(1));
+        }),
+    );
+    let state = (doc, work_id, rx, None::<cypher_proto::WorkBodies>, sub);
+    futures::stream::unfold(state, |(doc, work_id, mut rx, last, sub)| async move {
+        loop {
+            if last.is_some() {
+                rx.changed().await.ok()?;
+            }
+            rx.borrow_and_update();
+            let bodies = doc.plan_body(&work_id).unwrap_or_default();
+            if last.as_ref() == Some(&bodies) {
+                continue;
+            }
+            let value = serde_json::to_value(&bodies).ok()?;
+            return Some((value, (doc, work_id, rx, Some(bodies), sub)));
+        }
+    })
+    .boxed()
 }
 
 pub(super) fn sync_status(rpc: &EngineRpc) -> Result<RpcReply, RpcError> {

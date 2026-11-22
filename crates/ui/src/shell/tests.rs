@@ -2217,6 +2217,199 @@ fn the_needs_you_panel_shuts_once_its_last_item_is_decided(cx: &mut gpui::TestAp
     assert_eq!(panel(cx), Some(PanelItem::NeedsYou));
 }
 
+/// A plan whose row was cut (docs/design/plan-body.md §5): its page
+/// watches the workspace chat's body, shows the preview with one
+/// "Loading the full plan…" line until a body of the row's rev arrives
+/// (a stale one is ignored), and lets the owner approve meanwhile. A row
+/// without revs reads as before and watches nothing.
+#[gpui::test]
+fn a_cut_plans_page_shows_the_preview_until_its_body_arrives(cx: &mut gpui::TestAppContext) {
+    use bots::PanelItem;
+    use cypher_proto::{BotWork, PlanBody, StepState, TextSource, WorkBodies, WorkState, WorkStep};
+    let ui = tempfile::tempdir().unwrap().keep();
+    cx.update(|cx| {
+        gpui_tokio::init(cx);
+        cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
+        crate::widgets::text_input::init(cx);
+        crate::terminal::panel::init(cx);
+        // The panel stands at its width at once, so its buttons are where
+        // a click lands.
+        cx.set_reduce_motion(true);
+    });
+    UiSettings {
+        window_mode: crate::prefs::WindowMode::Botboard,
+        botboard_bot: Some("bob".into()),
+        ..Default::default()
+    }
+    .save(&ui)
+    .unwrap();
+    let state = cx.new(|_| AppState::new());
+    let boot = EngineBootConfig {
+        data_dir: ui.clone(),
+        ipc_socket: cypher_env::ipc_socket(&ui).unwrap(),
+        edge_url: "http://127.0.0.1:1".into(),
+        edge_token: None,
+        org_id: None,
+        workos_client_id: None,
+        default_harness: cypher_proto::HarnessId::Mock,
+    };
+    let (shell, vcx) = cx.add_window_view({
+        let state = state.clone();
+        move |_, cx| Shell::new(state, boot, ui, cx)
+    });
+
+    let body = PlanBody::new(
+        "Rewrite the billing exports, every one of them.".into(),
+        [("1".to_string(), "Rewrite each export by hand.".to_string())].into(),
+        0,
+    );
+    let plan = |id: &str, rev: Option<String>| BotWork {
+        id: id.into(),
+        bot_id: "bob".into(),
+        title: "Billing exports".into(),
+        instruction: "Rewrite the billing exports, every…".into(),
+        summary: None,
+        steps: vec![WorkStep {
+            id: "1".into(),
+            title: "Rewrite".into(),
+            project: None,
+            detail: Some("Rewrite each export…".into()),
+            state: StepState::Pending,
+            sessions: vec![],
+            note: None,
+            started_at: None,
+            ended_at: None,
+            session_choice: Default::default(),
+        }],
+        state: WorkState::Proposed,
+        chat_id: "bob-chat".into(),
+        tool_call_id: None,
+        thread_chat_id: None,
+        created_at: 0,
+        started_at: None,
+        ended_at: None,
+        result: None,
+        decision: None,
+        stop_requested_at: None,
+        notify: false,
+        time_limit_minutes: None,
+        time_added_minutes: None,
+        warned_at: None,
+        coordinator_choice: Default::default(),
+        body_rev: rev,
+        result_rev: None,
+    };
+    state.update(vcx, |s, cx| {
+        s.connection = ConnectionStatus::Ready;
+        s.workspace_scope = Some(WorkspaceScope::Local);
+        s.auth = Some(AuthState::SignedOut);
+        s.apply_bots(vec![test_bot("bob")]);
+        s.apply_chats(vec![test_chat("a", false), test_bot_chat("bob")]);
+        s.apply_bot_records(cypher_proto::BotRecords {
+            work: vec![plan("cut", Some(body.rev.clone())), plan("whole", None)],
+            ..Default::default()
+        });
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let draw = |vcx: &mut gpui::VisualTestContext| {
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+    };
+    let text = |vcx: &mut gpui::VisualTestContext, id: &str| {
+        shell.read_with(vcx, |shell, cx| {
+            let work = shell
+                .state
+                .read(cx)
+                .bot_records
+                .work
+                .iter()
+                .find(|w| w.id == id)
+                .cloned()
+                .unwrap();
+            shell.plan_text(&work)
+        })
+    };
+    shell.update(vcx, |shell, cx| {
+        shell.pages.setup_dismissed = true;
+        shell.open_bot("bob", cx);
+        shell.open_panel(PanelItem::WorkItem("cut".into()), cx);
+    });
+    draw(vcx);
+
+    // The page watches the workspace chat's body (no engine here, so no
+    // stream yet) and shows the preview, marked, with the loading line.
+    assert_eq!(
+        shell.read_with(vcx, |shell, _| shell.plan_body_watch()),
+        Some(("cut".into(), "bob-chat".into(), false))
+    );
+    assert_eq!(text(vcx, "cut").plan, TextSource::Preview);
+    assert!(
+        vcx.debug_bounds("bot-work-loading").is_some(),
+        "the loading line"
+    );
+
+    // Approve does not wait for the body: a click sends the decision (here
+    // it finds no engine, so the sidebar says so).
+    let approve = vcx.debug_bounds("bot-plan-approve").expect("Approve");
+    vcx.simulate_click(approve.center(), gpui::Modifiers::none());
+    assert_eq!(
+        shell.read_with(vcx, |shell, _| shell.sidebar.notice.clone()),
+        Some("Engine not connected".into()),
+        "Approve ran while the full plan was loading"
+    );
+
+    // A body of another rev is ignored.
+    let mut stale = body.clone();
+    stale.rev = "0000000000000000".into();
+    shell.update(vcx, |shell, cx| {
+        shell.apply_plan_body(
+            "cut",
+            WorkBodies {
+                plan: Some(stale),
+                result: None,
+            },
+            cx,
+        )
+    });
+    draw(vcx);
+    assert_eq!(text(vcx, "cut").plan, TextSource::Preview);
+    assert!(vcx.debug_bounds("bot-work-loading").is_some());
+
+    // The row's body arrives: the full text, and the line goes.
+    shell.update(vcx, |shell, cx| {
+        shell.apply_plan_body(
+            "cut",
+            WorkBodies {
+                plan: Some(body.clone()),
+                result: None,
+            },
+            cx,
+        )
+    });
+    draw(vcx);
+    let full = text(vcx, "cut");
+    assert_eq!(full.plan, TextSource::Body);
+    assert_eq!(full.detail(0), Some("Rewrite each export by hand."));
+    assert!(vcx.debug_bounds("bot-work-loading").is_none());
+    assert!(vcx.debug_bounds("bot-plan-approve").is_some());
+
+    // A row without revs reads as it is, and nothing is watched.
+    shell.update(vcx, |shell, cx| {
+        shell.open_panel(PanelItem::WorkItem("whole".into()), cx)
+    });
+    draw(vcx);
+    assert_eq!(
+        shell.read_with(vcx, |shell, _| shell.plan_body_watch()),
+        None
+    );
+    let whole = text(vcx, "whole");
+    assert_eq!(whole.plan, TextSource::Row);
+    assert_eq!(whole.detail(0), Some("Rewrite each export…"));
+    assert!(vcx.debug_bounds("bot-work-loading").is_none());
+    assert!(vcx.debug_bounds("bot-plan-approve").is_some());
+}
+
 #[test]
 fn header_buttons_follow_the_mode() {
     use crate::prefs::WindowMode;

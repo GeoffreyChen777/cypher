@@ -18,6 +18,7 @@ mod bots {
     mod file_roots;
     mod memory;
     mod network;
+    mod plan_body_watch;
     mod routines;
     mod work;
 }

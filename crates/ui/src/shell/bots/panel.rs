@@ -45,6 +45,17 @@ pub(in crate::shell) enum PanelItem {
     Invite,
 }
 
+impl PanelItem {
+    /// The work item whose page this is: an orchestration's, or a plan's
+    /// opened from Needs you (the same page).
+    pub(super) fn work_page(&self) -> Option<&str> {
+        match self {
+            Self::WorkItem(id) | Self::Plan(id) => Some(id),
+            _ => None,
+        }
+    }
+}
+
 /// The panel header's glyph and title. Item actions join it through
 /// [`Shell::set_panel_actions`]; there is no subtitle (a panel says where
 /// things stand in its body).
@@ -104,6 +115,15 @@ impl Shell {
         if !matches!(self.board.panel, Some(PanelItem::Review(_))) {
             self.board.review = None;
         }
+        let shown = self.board.panel.as_ref().and_then(PanelItem::work_page);
+        if self
+            .board
+            .plan_body
+            .as_ref()
+            .is_some_and(|watch| Some(watch.work_id()) != shown)
+        {
+            self.board.plan_body = None;
+        }
         if self.board.panel != Some(PanelItem::NeedsYou) {
             self.board.needs_focus = None;
             self.board.needs_decided = false;
@@ -153,6 +173,10 @@ impl Shell {
         self.board.panel_recent =
             (!matches!(item, PanelItem::NewRoutine | PanelItem::Invite)).then(|| item.clone());
         self.board.panel_last = Some(item);
+        // The page keeps the text it has for the slide; nothing follows it.
+        if let Some(watch) = self.board.plan_body.as_mut() {
+            watch.stop();
+        }
         // A live session's slot stays for the slide; the rest goes now.
         self.sync_panel_session(cx);
         cx.notify();

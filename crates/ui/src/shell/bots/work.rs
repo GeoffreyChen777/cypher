@@ -6,6 +6,14 @@
 //! them what was asked, the result once it ended, and the steps on one rail
 //! (each with its state, duration and what it reported, its sessions under
 //! the step that is under way). Its thread opens read-only in the panel.
+//!
+//! A long plan's row holds previews (docs/design/plan-body.md): while the
+//! page shows a row with `bodyRev` or `resultRev` it watches the workspace
+//! chat's `planBodies` entry ([`PlanBodyWatch`], `WatchPlanBody`) and reads
+//! every text through [`PlanText::of`]: the full text once its rev matches,
+//! else the preview (its cut marked by "…") with one quiet line saying the
+//! rest is on its way. Approve does not wait for it (D5). The sidebar's
+//! card and Needs you keep to the row.
 
 use super::board::{card_corner, card_item};
 use super::items::{
@@ -15,9 +23,103 @@ use super::items::{
 use super::panel::{PanelHead, PanelItem};
 use super::*;
 use crate::transcript::bot_plan::{PlanPhase, format_span, phase_line, plan_phase, step_span};
-use cypher_proto::{BotWork, StepState, WorkState};
+use cypher_proto::{BotWork, PlanText, StepState, WorkBodies, WorkState};
 
 use super::board::CARD_SHORT;
+
+/// The line under a preview whose full plan is on its way.
+const PLAN_LOADING: &str = "Loading the full plan…";
+/// The same under a result's preview.
+const RESULT_LOADING: &str = "Loading the full result…";
+/// How long the watch waits before asking again after its stream ended
+/// (an engine restart, an engine too old to answer).
+const PLAN_BODY_RETRY: Duration = Duration::from_secs(2);
+
+/// The work page's watch on one plan's `planBodies` entry
+/// (`WatchPlanBody`), kept while the page shows that work item and its row
+/// names a body. The entry stays for the panel's slide once it shuts; the
+/// stream does not.
+pub(in crate::shell) struct PlanBodyWatch {
+    work_id: String,
+    /// The workspace chat whose doc holds the entry.
+    chat_id: String,
+    /// The entry as last received; `None` until the first frame.
+    bodies: Option<WorkBodies>,
+    /// The stream being followed; `None` without an engine, or once the
+    /// panel shut.
+    task: Option<Task<()>>,
+}
+
+impl PlanBodyWatch {
+    pub(super) fn work_id(&self) -> &str {
+        &self.work_id
+    }
+
+    /// Stop following the stream, keeping what came.
+    pub(super) fn stop(&mut self) {
+        self.task = None;
+    }
+}
+
+/// Whether the page needs `work`'s body: its row was cut to previews.
+fn names_a_body(work: &BotWork) -> bool {
+    work.body_rev.is_some() || work.result_rev.is_some()
+}
+
+/// Whether a text the page shows ends where the row cut it.
+fn is_cut(text: &str) -> bool {
+    text.trim_end().ends_with('…')
+}
+
+/// Where the page says the full plan is still on its way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanLoading {
+    /// Under the quoted request.
+    Request,
+    /// Under this step's detail.
+    Step(usize),
+}
+
+/// The one place for "Loading the full plan…": under the first cut text
+/// the page shows in full, the request first, then the steps' details in
+/// order (`detail_shown`: whether step `ix` shows its detail open). `None`
+/// when the full text is here, or nothing shown was cut (a folded step,
+/// a phase that shows none of the plan's text).
+fn plan_loading_at(
+    text: &PlanText,
+    request_shown: bool,
+    detail_shown: impl Fn(usize) -> bool,
+) -> Option<PlanLoading> {
+    if !text.plan.is_preview() {
+        return None;
+    }
+    if request_shown && is_cut(&text.instruction) {
+        return Some(PlanLoading::Request);
+    }
+    (0..text.details.len())
+        .find(|&ix| detail_shown(ix) && text.detail(ix).is_some_and(is_cut))
+        .map(PlanLoading::Step)
+}
+
+/// The phases that show the plan as proposed: numbered steps with what
+/// each will do.
+fn shows_plan(phase: PlanPhase) -> bool {
+    matches!(
+        phase,
+        PlanPhase::Awaiting | PlanPhase::Starting | PlanPhase::Cancelling | PlanPhase::Cancelled
+    )
+}
+
+/// The quiet line under a preview.
+fn loading_line(text: &'static str, theme: &Theme) -> gpui::Div {
+    div()
+        .debug_selector(|| "bot-work-loading".into())
+        .pt(px(4.0))
+        .text_size(px(11.5))
+        .line_height(px(16.0))
+        .text_color(theme.text_faint)
+        .child(text)
+}
 
 /// A bot's work as its card lists it.
 pub(super) struct WorkCard<'a> {
@@ -486,19 +588,31 @@ impl Shell {
             (work, steps, thread_listed, shared)
         };
         let phase = plan_phase(&work);
+        self.follow_plan_body(&work, cx);
+        let text = self.plan_text(&work);
         let head = PanelHead {
             glyph: icons::HIERARCHY,
             tint: None,
             title: work.title.clone(),
         };
-        self.board.panel_header =
-            Some(self.work_header(&work, phase, shared.as_ref(), thread_listed, theme, cx));
+        self.board.panel_header = Some(self.work_header(
+            &work,
+            &text,
+            phase,
+            shared.as_ref(),
+            thread_listed,
+            theme,
+            cx,
+        ));
 
         let mut body = div().p(px(8.0)).pb(px(14.0)).flex().flex_col();
         // What was asked, as a quote, while the plan is still to judge
         // against it; after that the title stands for it (the request is
         // its tooltip).
         let quoted = phase.awaiting() && shows_request(&work);
+        let loading = plan_loading_at(&text, quoted, |ix| {
+            shows_plan(phase) && self.step_open(&work.id, ix, true)
+        });
         if quoted {
             body = body.child(
                 div()
@@ -509,18 +623,21 @@ impl Shell {
                     .border_l_2()
                     .border_color(crate::kit::theme::hairline(0.2))
                     .child(super::items::panel_markdown(
-                        &work.instruction,
+                        &text.instruction,
                         format!("bot-work-request-{}", work.id),
                         12.5,
                         theme.text_muted,
                         theme,
                         window,
-                    )),
+                    ))
+                    .when(loading == Some(PlanLoading::Request), |el| {
+                        el.child(loading_line(PLAN_LOADING, theme))
+                    }),
             );
         }
         let mut resulted = false;
         // What it produced comes before how it got there.
-        if let Some(result) = work
+        if let Some(result) = text
             .result
             .as_ref()
             .filter(|r| phase.ended() && !r.trim().is_empty())
@@ -547,20 +664,29 @@ impl Shell {
                                 .mr(px(-6.0)),
                             ),
                     )
-                    .child(div().px(px(8.0)).child(super::items::panel_markdown(
-                        result,
-                        format!("{key}-text"),
-                        13.0,
-                        theme.text,
-                        theme,
-                        window,
-                    ))),
+                    .child(
+                        div()
+                            .px(px(8.0))
+                            .child(super::items::panel_markdown(
+                                result,
+                                format!("{key}-text"),
+                                13.0,
+                                theme.text,
+                                theme,
+                                window,
+                            ))
+                            .when(text.result_source.is_preview(), |el| {
+                                el.child(loading_line(RESULT_LOADING, theme))
+                            }),
+                    ),
             );
             resulted = true;
         }
         if !work.steps.is_empty() {
             body = body.child(self.work_flow(
                 &work,
+                &text,
+                loading,
                 steps,
                 phase,
                 resulted,
@@ -573,14 +699,139 @@ impl Shell {
         Some((head, body))
     }
 
+    /// Whether step `ix` of `work_id` shows its details: as the owner
+    /// left it, else as its state says (`opens`).
+    fn step_open(&self, work_id: &str, ix: usize, opens: bool) -> bool {
+        self.board
+            .work_open
+            .get(&(work_id.to_string(), ix))
+            .copied()
+            .unwrap_or(opens)
+    }
+
+    /// Follow `work`'s body while its page shows and its row names one
+    /// ([`PlanBodyWatch`]); a watch already on it is kept, and resumes when
+    /// the panel opens on it again.
+    fn follow_plan_body(&mut self, work: &BotWork, cx: &mut Context<Self>) {
+        if !names_a_body(work) {
+            return;
+        }
+        let shown = self.board.panel.as_ref().and_then(PanelItem::work_page) == Some(&*work.id);
+        let kept = self
+            .board
+            .plan_body
+            .as_ref()
+            .is_some_and(|watch| watch.work_id == work.id && watch.chat_id == work.chat_id);
+        if !shown {
+            // Sliding shut: it draws what it has.
+            return;
+        }
+        if !kept {
+            self.board.plan_body = Some(PlanBodyWatch {
+                work_id: work.id.clone(),
+                chat_id: work.chat_id.clone(),
+                bodies: None,
+                task: None,
+            });
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let Some(watch) = self.board.plan_body.as_mut().filter(|w| w.task.is_none()) else {
+            return;
+        };
+        let work_id = watch.work_id.clone();
+        let params = serde_json::json!({ "chatId": watch.chat_id, "workId": work_id });
+        watch.task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                match engine
+                    .client()
+                    .subscribe(methods::WATCH_PLAN_BODY, params.clone())
+                    .await
+                {
+                    Ok(mut rx) => {
+                        while let Some(value) = rx.recv().await {
+                            let bodies: WorkBodies = match serde_json::from_value(value) {
+                                Ok(bodies) => bodies,
+                                Err(err) => {
+                                    tracing::warn!(error = %err, "dropping malformed plan body frame");
+                                    continue;
+                                }
+                            };
+                            let alive = this.update(cx, |shell, cx| {
+                                shell.apply_plan_body(&work_id, bodies, cx)
+                            });
+                            if alive.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Err(err) => tracing::debug!(error = %err, "plan body watch unavailable; retrying"),
+                }
+                if this.update(cx, |_, _| {}).is_err() {
+                    return;
+                }
+                cx.background_executor().timer(PLAN_BODY_RETRY).await;
+            }
+        }));
+    }
+
+    /// A `WatchPlanBody` frame for `work_id`; ignored once the page moved on.
+    pub(in crate::shell) fn apply_plan_body(
+        &mut self,
+        work_id: &str,
+        bodies: WorkBodies,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(watch) = self
+            .board
+            .plan_body
+            .as_mut()
+            .filter(|watch| watch.work_id == work_id)
+        else {
+            return;
+        };
+        if watch.bodies.as_ref() != Some(&bodies) {
+            watch.bodies = Some(bodies);
+            cx.notify();
+        }
+    }
+
+    /// `work`'s text as its page shows it: with its body when the watch has
+    /// one whose rev matches the row's, else the row's previews.
+    pub(in crate::shell) fn plan_text(&self, work: &BotWork) -> PlanText {
+        let bodies = self
+            .board
+            .plan_body
+            .as_ref()
+            .filter(|watch| watch.work_id == work.id && watch.chat_id == work.chat_id)
+            .and_then(|watch| watch.bodies.as_ref());
+        PlanText::of(work, bodies)
+    }
+
+    /// The work item and workspace chat the page's watch is on, and whether
+    /// it follows the stream now.
+    #[cfg(test)]
+    pub(in crate::shell) fn plan_body_watch(&self) -> Option<(String, String, bool)> {
+        self.board.plan_body.as_ref().map(|watch| {
+            (
+                watch.work_id.clone(),
+                watch.chat_id.clone(),
+                watch.task.is_some(),
+            )
+        })
+    }
+
     /// The work page's header. A bar of controls at the very top: the
     /// status at the left (its mark and a word, the times on hover), every
     /// button at the right. Then the title, and under it only the project
     /// when every step shares one. Counts and times are not repeated here:
     /// the steps show how far it is, the hover card when.
+    #[allow(clippy::too_many_arguments)]
     fn work_header(
         &self,
         work: &BotWork,
+        text: &PlanText,
         phase: PlanPhase,
         shared: Option<&(String, super::items::ProjectLabel)>,
         thread_listed: bool,
@@ -678,8 +929,11 @@ impl Shell {
                     .into_any_element(),
             );
             controls.push(
+                // Enabled from the preview too (D5): the card approves
+                // without the details as well.
                 popover::btn_primary(theme, "Approve")
                     .id("bot-plan-approve")
+                    .debug_selector(|| "bot-plan-approve".into())
                     .flex_none()
                     .py(px(4.0))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -704,7 +958,7 @@ impl Shell {
         // here for whoever wants the exact words.
         let request = (!phase.awaiting() && shows_request(work)).then(|| {
             SharedString::from(clip_request(&super::items::plain_markdown(
-                &work.instruction,
+                &text.instruction,
             )))
         });
         let place = shared.map(|(space, label)| {
@@ -834,6 +1088,8 @@ impl Shell {
     fn work_flow(
         &self,
         work: &BotWork,
+        text: &PlanText,
+        loading: Option<PlanLoading>,
         steps: Vec<FlowStep>,
         phase: PlanPhase,
         heading: bool,
@@ -847,13 +1103,7 @@ impl Shell {
         let md = |text: &str, key: String, size: f32, tone: gpui::Hsla| {
             super::items::panel_markdown(text, key, size, tone, theme, window)
         };
-        let numbered = matches!(
-            phase,
-            PlanPhase::Awaiting
-                | PlanPhase::Starting
-                | PlanPhase::Cancelling
-                | PlanPhase::Cancelled
-        );
+        let numbered = shows_plan(phase);
         // A heading only where a result stands above the steps; alone on
         // the page they need none.
         let mut flow = div().flex().flex_col().pt(px(2.0)).when(heading, |el| {
@@ -942,7 +1192,8 @@ impl Shell {
                     self.known_model_label(id)
                 })
                 .map(|words| format!("Its sessions: {words}."));
-                match (step.detail.clone().filter(|d| !d.trim().is_empty()), runs) {
+                let detail = text.detail(ix).map(str::to_string);
+                match (detail.filter(|d| !d.trim().is_empty()), runs) {
                     (Some(detail), Some(runs)) => Some(format!("{detail}\n\n{runs}")),
                     (detail, runs) => detail.or(runs),
                 }
@@ -964,15 +1215,7 @@ impl Shell {
             let open = match link {
                 // No fold: its note in full while it is under way.
                 Some(_) => step_opens(step.state, numbered),
-                None => {
-                    foldable
-                        && self
-                            .board
-                            .work_open
-                            .get(&toggle)
-                            .copied()
-                            .unwrap_or_else(|| step_opens(step.state, numbered))
-                }
+                None => foldable && self.step_open(&work.id, ix, step_opens(step.state, numbered)),
             };
             let waiting = !numbered && step.state == StepState::Pending;
             let title_key = format!("{key}-title");
@@ -1125,6 +1368,9 @@ impl Shell {
                             theme.text_muted
                         },
                     ));
+                    if loading == Some(PlanLoading::Step(ix)) {
+                        details = details.child(loading_line(PLAN_LOADING, theme));
+                    }
                 }
                 if sessions_n > 0 {
                     details = details.child(
@@ -1438,6 +1684,119 @@ mod tests {
             assert!(!step_opens(state, false), "{state:?}");
             assert!(step_opens(state, true), "{state:?}");
         }
+    }
+
+    /// A proposed plan whose row was cut: the request and step 2's detail
+    /// end in the row's "…", step 1's fits; `bodyRev` names the body.
+    fn cut_plan() -> (BotWork, cypher_proto::WorkBodies) {
+        let mut w = work("w", WorkState::Proposed, 0);
+        w.instruction = "Rewrite the exports, all of th…".into();
+        w.steps = vec![step("1", StepState::Pending), step("2", StepState::Pending)];
+        w.steps[0].detail = Some("In a worktree.".into());
+        w.steps[1].detail = Some("Check every expo…".into());
+        let body = cypher_proto::PlanBody::new(
+            "Rewrite the exports, all of them, in one go.".into(),
+            [
+                ("1".to_string(), "In a worktree.".to_string()),
+                ("2".to_string(), "Check every export by hand.".to_string()),
+            ]
+            .into(),
+            0,
+        );
+        w.body_rev = Some(body.rev.clone());
+        let bodies = cypher_proto::WorkBodies {
+            plan: Some(body),
+            result: None,
+        };
+        (w, bodies)
+    }
+
+    #[test]
+    fn a_row_without_revs_reads_as_it_did() {
+        let (mut w, bodies) = cut_plan();
+        w.body_rev = None;
+        assert!(!names_a_body(&w), "nothing to watch");
+        // Even a body in the doc is ignored: the row is the index.
+        let text = PlanText::of(&w, Some(&bodies));
+        assert_eq!(text.plan, cypher_proto::TextSource::Row);
+        assert_eq!(text.instruction, w.instruction);
+        assert_eq!(text.detail(1), w.steps[1].detail.as_deref());
+        assert_eq!(
+            plan_loading_at(&text, true, |_| true),
+            None,
+            "no loading line"
+        );
+    }
+
+    #[test]
+    fn a_preview_says_once_where_it_was_first_cut() {
+        let (w, _) = cut_plan();
+        assert!(names_a_body(&w));
+        let text = PlanText::of(&w, None);
+        assert_eq!(text.plan, cypher_proto::TextSource::Preview);
+        assert_eq!(
+            text.instruction, w.instruction,
+            "the preview, cut mark and all"
+        );
+        // Under the quoted request when it is cut…
+        assert_eq!(
+            plan_loading_at(&text, true, |_| true),
+            Some(PlanLoading::Request)
+        );
+        // …else under the first cut detail shown open, never under one
+        // that fits or is folded.
+        assert_eq!(
+            plan_loading_at(&text, false, |_| true),
+            Some(PlanLoading::Step(1))
+        );
+        assert_eq!(plan_loading_at(&text, false, |ix| ix != 1), None);
+        // A phase that shows none of it says nothing.
+        assert_eq!(plan_loading_at(&text, false, |_| false), None);
+    }
+
+    #[test]
+    fn the_body_replaces_the_preview_once_its_rev_matches() {
+        let (w, bodies) = cut_plan();
+        let text = PlanText::of(&w, Some(&bodies));
+        assert_eq!(text.plan, cypher_proto::TextSource::Body);
+        assert_eq!(
+            text.instruction,
+            "Rewrite the exports, all of them, in one go."
+        );
+        assert_eq!(text.detail(1), Some("Check every export by hand."));
+        assert_eq!(plan_loading_at(&text, true, |_| true), None);
+
+        // A body of another rev (stale, or not the row's) is not shown.
+        let mut stale = bodies.clone();
+        if let Some(plan) = stale.plan.as_mut() {
+            plan.rev = "0000000000000000".into();
+        }
+        let text = PlanText::of(&w, Some(&stale));
+        assert_eq!(text.plan, cypher_proto::TextSource::Preview);
+        assert_eq!(text.detail(1), Some("Check every expo…"));
+        assert_eq!(
+            plan_loading_at(&text, true, |_| true),
+            Some(PlanLoading::Request)
+        );
+    }
+
+    #[test]
+    fn a_cut_result_waits_for_its_own_body() {
+        let mut w = work("w", WorkState::Done, 0);
+        w.result = Some("Rewrote the expo…".into());
+        let full = cypher_proto::PlanResult::new("Rewrote the exports.".into(), 0);
+        w.result_rev = Some(full.rev.clone());
+        assert!(names_a_body(&w));
+        let text = PlanText::of(&w, None);
+        assert!(text.result_source.is_preview());
+        assert_eq!(text.plan, cypher_proto::TextSource::Row, "the plan fit");
+        let bodies = cypher_proto::WorkBodies {
+            plan: None,
+            result: Some(full),
+        };
+        let text = PlanText::of(&w, Some(&bodies));
+        assert_eq!(text.result.as_deref(), Some("Rewrote the exports."));
+        assert!(!text.is_loading());
     }
 
     #[test]
