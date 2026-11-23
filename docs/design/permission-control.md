@@ -628,8 +628,11 @@ When several paths are requested together, the strictest mode wins.
   characters, earlier ones up to 4,000; a longer one loses its middle, never its end,
   since a long brief often puts the step at hand last), the request (capability:
   `read`, `write`, `network`, `tool` or `escalate`; paths, zone, guard and why, tool,
-  level, workspace roots). For a danger, also the owner's own words (§7.3.2) and what the
-  command acts on as Cypher read it. When some user messages were written by an agent (a
+  level, workspace roots). The owner's own words (§7.3.2, §7.3.4: typed messages, answers to
+  the agent's questions, the plan's instruction and card) for every request since round 2
+  (2026-11-23): all of them for a danger, the latest twelve for anything else, in their own
+  section, so agent-written briefs and notices can never push them out of the window. For a
+  danger, also what the command acts on as Cypher read it. When some user messages were written by an agent (a
   plan's brief, an orchestrator's steering), the prompt says so: they count for local
   development work only.
 - **Untrusted input**, fenced in `<untrusted>` (nested tags stripped): the command, a tool
@@ -662,7 +665,8 @@ When several paths are requested together, the strictest mode wins.
   (§7.3.3), so the model never has to take the agent's word for it.
 - **Output**: `{"decision": "approve" | "approve-once" | "ask-user", "reason"}`, and for
   an approved danger `"consent": {"source", "quote"}` (the older `"userQuote"` still
-  reads) and `"target": {"kind", "value"}` (§7.3.2, §7.3.4). Two
+  reads) and `"target": {"kind", "value"}` (§7.3.2, §7.3.4); for an approved read of the
+  installed app's data `"consent"`; for an ask `"concern"` from a closed list (§7.3.8). Two
   outcomes follow: `approve` or `approve-once` runs the call, `ask-user` puts it to the
   user with the reason. `approve-once` runs the call and keeps nothing: the answer when
   the call is fine but the patterns an approval would keep for the chat are too broad
@@ -682,6 +686,71 @@ When several paths are requested together, the strictest mode wins.
   lifecycle rule and the command that did it), then the rest, labelled trusted because the
   agent can't write it.
 - When the judge asks the user, its reason is shown in the dialog.
+
+#### 7.3.8 Graded risk and the judge's concerns (round 2, 2026-11-23)
+
+Risk is graded by reversibility and audience, as data: `cypher-permissions/grades.ts`
+`GRADES` has one row per danger action with `reversible` (undoable, recoverable,
+irreversible), `audience` (self, team, public), `approver` (judge, consent) and `own`, the
+code-checked fact that makes it this task's. `judgeDecides(action)` is true only for a
+reversible, non-public row whose approver is the judge and that names an `own` fact.
+
+| action | reversible | audience | approver | own fact |
+|---|---|---|---|---|
+| push-branch | undoable | team | judge | branch |
+| pr-open (draft or ready) | undoable | team | judge | branch |
+| pr-update (edit, ready) | undoable | team | judge | pull-request |
+| delete-merged-branch | recoverable | team | judge | branch (lifecycle.ts) |
+| merge-default | recoverable | team | consent | – |
+| push-default | recoverable | team | consent | – |
+| push-foreign | recoverable | team | consent | – |
+| pr-comment | irreversible | team | consent | – |
+| tag | irreversible | public | consent | – |
+| release | irreversible | public | consent | – |
+| deploy | recoverable | public | consent | – |
+| force-push | irreversible | team | consent | – |
+| delete-unmerged | irreversible | self | consent | – |
+| send-data | irreversible | public | consent | – |
+
+`risk.ts` `teamStep` reads the judge's rows off a command: `git push` of branches that are
+all this task's own (the ledger's `branch` entries, or the chat's own workspace branch;
+never a default or protected branch, `HEAD` meaning the current branch), to a remote by
+name, with only plain options (`-u`, `-q`, `--no-verify`, …; no force, tags, delete,
+mirror, push options, no refspec mapping to another name); `gh pr create` in the
+repository at hand (no `--repo`), head this task's own branch (`--head` or the current
+branch, never `owner:branch`), base absent or a default branch; `gh pr edit`/`ready` of
+the current own branch's pull request or one the ledger says this chat opened, without
+changing its base or head. Such a command is `local` with its grade in the kind
+("… (reversible, seen by the team: …)") and `once` (never remembered), so the judge decides
+it with the task's context and no owner quote; anything else of these programs stays a
+danger with the explicit check (§7.3.2). The floor (§7.3.1) is unchanged.
+
+Read-only queries are not dangers: the system-setup programs' read forms
+(`packs.ts` `SYSTEM_QUERIES`: `pmset -g`, `networksetup -get…/-list…`, `csrutil status`, …)
+and a program asked only for its help or version (`asksOnly`: help/version flags alone, or
+a CLI's subcommands then `--help`); running the installed app's program that way reads it.
+AppleScript that only raises a window (`activate`, `set frontmost … to true`) besides reading
+is local: undone by a click, seen by no one else. The project's pinned tools resolve from
+where the command runs, up to the project folder holding it (`npx wrangler` after
+`cd apps/edge`).
+
+The judge's concerns. On a local request (a bash line the classifier graded `local`, or a
+file request outside the sensitive zone) the judge asks only with a concrete concern,
+named in `"concern"` from the closed list `judge.ts` `CONCERNS`: `installed-app`,
+`other-task`, `secret`, `beyond-request`, `irreversible`. An ask that names none (or a
+word off the list) runs once (`core.ts` `asksNeedConcern`, audit reason "named no concrete
+concern"). Dangers, network and tool requests, sensitive files, and requests whose concern
+the classifier itself established (`Assessment.concern`: a secret read, the installed app's
+data) keep every ask. A tool reading its own credentials to do the asked thing (gh, git
+push) is not a secret read (prompt).
+
+The installed app's data (`~/.cypher` outside the worktrees: the owner's real chats,
+journals, databases) is a code-checked fact handed to the judge ("installed app data:
+yes"). Such a read runs only when the judge approves *and* cites the owner's words asking
+for it (`consent.quote`): `core.ts` `installedConsent` checks the quote is at least six
+normalized characters and in one of the owner's words (a reply's proposal only when the
+reply plainly assents, as §7.3.4). A question about how the code works, a bug on another
+device, or a task that could merely use the data is not such a request.
 
 #### 7.3.1 The always-ask floor
 
@@ -1341,7 +1410,8 @@ Commands:
 | `cypher-permissions/grants.ts` | Grants and their persistence |
 | `cypher-permissions/discover.ts` | Concrete paths for Landstrip; the home index |
 | `cypher-permissions/sandbox.ts` | Landstrip status, policy compiler, wrapper, env scrub, denial events |
-| `cypher-permissions/judge.ts` | Judge prompt and verdict parsing |
+| `cypher-permissions/judge.ts` | Judge prompt and verdict parsing; the closed concern list `CONCERNS` (§7.3.8) |
+| `cypher-permissions/grades.ts` | Graded risk: per danger action, reversibility, audience, approver and the own-fact that lets the judge decide (§7.3.8) |
 | `cypher-permissions/risk.ts`, `packs.ts` | The risk classifier: an action's tier, the always-ask floor, what each program does |
 | `cypher-permissions/created.ts` | What this task made, read from the commands it ran: the facts a danger over its own leavings rests on (§7.3.3) |
 | `cypher-permissions/catalogue.ts` | The creator/destroyer catalogue: per tool and subcommand, the entity it creates, destroys, stops, starts or merges and where its name comes from; plan before a run, settle after (§7.3.3) |
