@@ -49,8 +49,8 @@ function fixture(state: DurableObjectState) {
     sent.push((await request.json() as { message: Sent }).message);
     return Response.json({ sent: true });
   }), (kind, id) => rows.get(`${kind}/${id}`), () => {});
-  // One phone, and NO session target for the workspace's chat: neither app
-  // reports it as the chat on screen.
+  // One phone, and NO session target for the workspace's chat: no phone has
+  // opened the workspace yet (the desktop never reports it as on screen).
   state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('recipients',?)",
     JSON.stringify([{ id: "b".repeat(64), lease: "lease", installationId: "phone", epoch: 1 }]));
   const clock = vi.spyOn(Date, "now").mockReturnValue(start);

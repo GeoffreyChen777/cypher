@@ -664,10 +664,10 @@ export class Notifications {
       }
       if (decision === "defer") { this.put(notice, now + 15_000); continue; }
       const target = this.target(notice.chatId);
-      // No client reports a workspace's own chat as the one it is showing
-      // (it lives on the workspace screen, not in the session route), so it
-      // rarely has a target: without one its notices go to every phone, as
-      // after a desktop target lapses.
+      // Only the iPhone reports a workspace's own chat as the one it is
+      // showing (its workspace screen does; the desktop's does not), so the
+      // chat has a target only once a phone has opened it. Without one its
+      // notices go to every phone, as after a desktop target lapses.
       const recipients = target?.platform === "ios"
         ? this.recipients().filter(r => r.installationId === target.clientId)
         : (target?.platform === "desktop" && now - target.at > ACTIVITY_LEASE_MS) || (!target && notice.workspace)
