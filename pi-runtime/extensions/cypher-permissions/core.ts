@@ -19,7 +19,7 @@ import type { CreationFacts, CreationPlan } from "./created.ts";
 import type { CatalogueFacts } from "./catalogue.ts";
 import { genericDestroyer, targetsOf } from "./catalogue.ts";
 import { readTool } from "./tools.ts";
-import { entryCovers, ledgerFile } from "./ledger.ts";
+import { entryCovers, Ledger, ledgerFile, taintFile } from "./ledger.ts";
 import type { LedgerEntity, LedgerEntry } from "./ledger.ts";
 import { Denials, denialsFile, forRecord } from "./denials.ts";
 import type { ActionClass, DenialRecord, DenialScope } from "./denials.ts";
@@ -56,7 +56,7 @@ import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs }
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
 import { benignEnv, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
-import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, lineFlow, normalRefspec, redirectRisk, secretName, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
+import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, lineFlow, normalRefspec, redirectRisk, secretName, secretWrites, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
 import type { PatternFinding } from "./risk.ts";
 import { resolvePattern, resolveText } from "./resolve.ts";
 import { codeOf, INTERPRETERS as INTERPRETER_TABLE, interpreterOf, optionCommands, scanCode, shebangInterpreter } from "./code.ts";
@@ -505,6 +505,10 @@ function readsCode(words: readonly string[]): boolean {
   return codeOf(words, UNKNOWN)?.source.from === "stdin";
 }
 
+/** How many entries and folders deep a folder is searched for a secret inside it (`secretInside`). */
+const SECRET_SCAN_LIMIT = 4000;
+const SECRET_SCAN_DEPTH = 8;
+
 /** Variables bash itself reads: a line that assigns one changes how what follows runs. */
 const SHELL_VARIABLES =
   /^(BASH\w*|LC_\w+|HIST\w*|COMP\w*|READLINE_\w+|EPOCH\w+|PATH|IFS|CDPATH|HOME|PWD|OLDPWD|ENV|GLOBIGNORE|EXECIGNORE|FIGNORE|PS[0-4]|PROMPT_COMMAND|TMPDIR|POSIXLY_CORRECT|SHELLOPTS|LANG|TIMEFORMAT|OPTIND|OPTERR|OPTARG|FUNCNEST|MAIL|MAILPATH|MAILCHECK|TMOUT|SHELL|UID|EUID|PPID|RANDOM|SRANDOM|SECONDS|LINENO|GROUPS|DIRSTACK|PIPESTATUS|HOSTNAME|HOSTTYPE|OSTYPE|MACHTYPE|COLUMNS|LINES|REPLY|INPUTRC|auto_resume|histchars)$/;
@@ -663,6 +667,7 @@ export class Permissions {
     this.audit = new AuditLog(init.agentDir, init.chatId);
     this.grants = new GrantStore(init.chatId);
     this.created = new CreatedStore(init.chatId, ledgerFile(init.agentDir, init.chatId));
+    this.taint = new Ledger(init.agentDir ? taintFile(init.agentDir, init.chatId) : undefined, init.chatId);
     this.denials = new Denials(denialsFile(init.agentDir, init.chatId), init.chatId);
     this.status = init.landstrip ?? landstripStatus();
     this.homeIndex = new HomeIndexCache(join(init.agentDir, "cypher-permissions", "home-index.json"), this.home);
@@ -1620,10 +1625,11 @@ export class Permissions {
    * already (catalogue.ts). Settle it after the run (`settleCreated`).
    * Undefined when nothing is enforced or the line can't be read.
    */
-  planCreated(command: string, cwd: string): CreationPlan | undefined {
+  planCreated(command: string, cwd: string): (CreationPlan & { taints?: LedgerEntity[] }) | undefined {
     if (!this.enforcing) return undefined;
     const commands = this.catalogueCommands(command, cwd);
     if (!commands) return undefined;
+    const taints = this.taintsOf(commands);
     // What it writes by redirection or `tee` is this task's (round 5): code it runs later is read (`taskWrote`).
     for (const item of commands) {
       for (const path of [...item.writes, ...(item.words[0] === "tee" ? item.words.slice(1) : [])]) {
@@ -1631,17 +1637,75 @@ export class Permissions {
       }
     }
     const plan = this.created.plan(command, commands, this.catalogueFacts());
-    return plan.candidates.length ? plan : undefined;
+    return plan.candidates.length || taints.length ? { ...plan, ...(taints.length ? { taints } : {}) } : undefined;
   }
 
-  /**
-   * After it ran: record in the ledger what it surely made (its exit
-   * status; its own output, when it is the line's only command). An
-   * exit status that isn't known (a timeout, an abort) confirms only what
-   * is observed on disk.
-   */
-  settleCreated(plan: CreationPlan | undefined, result: { exitCode?: number; output?: string }): void {
+  /** The chat's taint ledger (ledger.ts `taintFile`): what its commands wrote from a secret. */
+  private readonly taint: Ledger;
+
+  /** What a line writes from a secret (risk.ts `secretWrites`), as taint entries. */
+  private taintsOf(commands: readonly LineCommand[]): LedgerEntity[] {
+    try {
+      const facts = this.riskFacts();
+      const found = secretWrites(commands, facts);
+      return [
+        ...found.paths.map((item) => ({ kind: "path" as const, name: item.path, from: item.from })),
+        ...found.repos.map((item) => ({ kind: "repo" as const, name: this.paths.canonical(item.dir, this.cwd), from: item.from })),
+      ];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Record a line's taints once it ran (a failed line wrote nothing for sure, but may have: kept unless it surely failed). */
+  private settleTaints(plan: { taints?: LedgerEntity[]; command: string } | undefined, exitCode: number | undefined): void {
+    if (!plan?.taints?.length) return;
+    if (exitCode !== undefined && exitCode !== 0 && plan.taints.every((entity) => !existsSync(entity.name))) return;
+    this.taint.record(plan.taints, plan.command);
+  }
+
+  /** The secret a canonical path holds by the taint ledger (it, or a folder holding it, was written from one). */
+  taintedPath(path: string): string | undefined {
+    return this.taint.all().find((entry) => entry.kind === "path" && entryCovers(entry, { kind: "path", name: path }))?.from;
+  }
+
+  /** The secret a repository holds by the taint ledger: one staged where `dir` is, or above or below it. */
+  taintedRepo(dir: string): string | undefined {
+    const at = this.paths.canonical(dir, this.cwd);
+    return this.taint.all().find((entry) => entry.kind === "repo" && (isUnder(at, entry.name) || isUnder(entry.name, at)))?.from;
+  }
+
+  /** The first sensitive file inside an existing folder, hidden ones too (as an archiver reads it): breadth first, bounded. */
+  secretInside(dir: string): string | undefined {
+    const queue: [string, number][] = [[dir, 0]];
+    let visited = 0;
+    while (queue.length) {
+      const [at, depth] = queue.shift()!;
+      let names: string[];
+      try {
+        if (!statSync(at).isDirectory()) return undefined;
+        names = readdirSync(at);
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        if (++visited > SECRET_SCAN_LIMIT) return undefined;
+        const path = join(at, name);
+        if (this.paths.classify(path).zone === "sensitive") return displayPath(path, this.home);
+        if (name === ".git" || depth >= SECRET_SCAN_DEPTH) continue;
+        try {
+          if (lstatSync(path).isDirectory()) queue.push([path, depth + 1]);
+        } catch {
+          // Gone.
+        }
+      }
+    }
+    return undefined;
+  }
+
+  settleCreated(plan: (CreationPlan & { taints?: LedgerEntity[] }) | undefined, result: { exitCode?: number; output?: string }): void {
     if (!plan) return;
+    this.settleTaints(plan, result.exitCode);
     try {
       const made = this.created.settle(plan, result, this.catalogueFacts());
       const legacy = made.filter((entry) => entry.action === undefined && (entry.kind === "path" || entry.kind === "worktree" || (entry.kind === "branch" && entry.remote === undefined)));
@@ -1671,6 +1735,7 @@ export class Permissions {
     if (!this.enforcing) return;
     const commands = this.catalogueCommands(command, cwd);
     if (!commands) return;
+    this.settleTaints({ taints: this.taintsOf(commands), command }, undefined);
     const record = this.created.note(creationsOf(commands, this.creationFacts()), command);
     if (record) this.appendEntry?.(CREATED_ENTRY, record);
   }
@@ -2875,6 +2940,9 @@ export class Permissions {
       },
       permissionSystem: (path) => this.paths.isPermissionSystem(path) !== undefined,
       couldBe: (pattern, cwd, options) => this.couldBe(pattern, cwd, options),
+      tainted: (path) => this.taintedPath(path),
+      taintedRepo: (dir) => this.taintedRepo(dir),
+      secretInside: (dir) => this.secretInside(dir),
       installedApp: (path) => this.installedApp(path),
       git: (dir) => this.gitAt(dir),
       inWorkspace: (dir) => this.paths.inWorkspace(this.paths.canonical(dir, this.cwd)),

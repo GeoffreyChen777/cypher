@@ -143,7 +143,7 @@ function optionsOf(question: string): string[] {
  * the options not picked left out (so a quote of one of them fails).
  */
 export function consentText(word: OwnerWord): string {
-  if (word.source === "reply") return `${word.proposal ?? ""}\n${word.text}`;
+  if (word.source === "reply") return `${word.proposal ?? ""}\n${ownText(word.text)}`;
   if (word.source === "answer") {
     const question = word.question ?? "";
     const at = question.lastIndexOf("\nOptions: ");
@@ -152,7 +152,29 @@ export function consentText(word: OwnerWord): string {
     const kept = optionsOf(question).filter((option) => picked.has(normalize(option)));
     return `${asked}\n${kept.join("\n")}\n${word.text}`;
   }
-  return word.text;
+  return ownText(word.text);
+}
+
+/**
+ * Quoted material in the owner's message (round 5 step 2): a fenced block, a `>` quote, a pasted shell
+ * prompt line (`$ git push --force …`, `% …`, `PS> …`), a CI or tool log. What it holds is what someone
+ * else wrote or ran, not what the owner asks for.
+ */
+const QUOTED = /```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|^[ \t]*(?:>|\$ |% |# |PS[^>\n]*> |❯ |➜ ).*$/gm;
+
+/** Words with which the owner's own text asks for what it quotes (`run this:`, `do it`), besides the actions' own. */
+const RUN_QUOTED = /\b(run|execute|exec|do (?:it|this|that|these)|go ahead|apply|paste|type)\b|执行|运行|跑一下|照做/i;
+
+/**
+ * The part of a message that is the owner's own words: quoted material only counts when the words around
+ * it ask for it (no question among them, an action word or "run this"); otherwise it is left out, so a
+ * pasted log's `git push --force` is no request (rt5-100), while "run this: ```git push```" still is.
+ */
+export function ownText(text: string): string {
+  const outside = text.replace(QUOTED, " ");
+  if (outside === text) return text;
+  const asks = !QUESTION.test(outside) && (RUN_QUOTED.test(outside) || ACTIONS.some((action) => actionWords(action).test(outside)));
+  return asks ? text : outside;
 }
 
 /**

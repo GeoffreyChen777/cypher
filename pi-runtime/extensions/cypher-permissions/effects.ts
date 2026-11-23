@@ -145,6 +145,9 @@ export function classOf(action: string): EffectClass {
   return action.startsWith("tool:") ? (action as EffectClass) : (EFFECT_CLASSES[action] ?? "run");
 }
 
+/** Programs that read their sources' contents while they write something (data, round 5 step 2). */
+export const READS_ITS_SOURCES: ReadonlySet<string> = new Set(["cp", "gcp", "mv", "rsync", "scp", "sftp", "ditto", "install", "ln", "link", "tar", "gtar", "bsdtar", "zip", "7z", "7za", "rar", "cpio", "pax", "gzip", "bzip2", "xz", "zstd", "lz4", "openssl", "gpg", "age", "base64", "xxd", "dd", "tee", "split", "sed", "awk", "sort", "uniq", "tr", "iconv", "pbcopy", "xclip", "xsel", "wl-copy"]);
+
 /** Options of git that take a value before the subcommand. */
 const GIT_GLOBAL_VALUES = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"]);
 
@@ -228,6 +231,9 @@ export function commandEffects(words: readonly string[], options: { sink?: (word
   // What the program does (tools.ts `REMOTE_EFFECTS`, read here for this machine): delete, stop, apply, write.
   const changes = remoteEffect(inner);
   if (changes) effect(classOf(changes.action));
+  // A copy, an archive or an encoding reads what it is given as well as writing (round 5 step 2: a denied
+  // read of a key also covers `cp key ./id.txt`).
+  if (READS_ITS_SOURCES.has(program)) effect("read");
   const sink = options.sink?.(inner);
   if (sink) effect("send");
   if (/^(ssh|mosh)$/.test(program)) {

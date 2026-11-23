@@ -294,6 +294,15 @@ export interface RiskFacts extends PackFacts {
    * `classifyPattern`), relative to `cwd`; `subtree` when the command acts on what lies below it too.
    */
   couldBe?(pattern: string, cwd: string | undefined, options?: { subtree?: boolean }): PatternFinding;
+  /**
+   * Round 5 step 2, the provenance ledger's taint: a canonical path this chat's earlier command wrote
+   * from a secret (`cp .env /tmp/x`, `cat .env >> log`, `tar czf b.tgz .env`): the secret it holds, else undefined.
+   */
+  tainted?(path: string): string | undefined;
+  /** A repository (its top folder, canonical) where this chat staged or committed a secret: the secret, else undefined. */
+  taintedRepo?(dir: string): string | undefined;
+  /** The first sensitive file inside an existing directory (bounded), for an archiver or sender of the whole of it. */
+  secretInside?(dir: string): string | undefined;
 }
 
 /** What every path a glob may stand for could be (`RiskFacts.couldBe`). */
@@ -1872,6 +1881,101 @@ export function exfiltrates(commands: readonly RiskCommand[], facts: RiskFacts, 
   return `sends a secret off this machine (${secret}) through ${sink}`;
 }
 
+/** Programs that read a whole folder they are given (round 5 step 2): an archiver's or copier's directory operand holds what is inside it. */
+const WHOLE_FOLDER: ReadonlySet<string> = new Set(["tar", "gtar", "bsdtar", "zip", "7z", "7za", "rar", "ditto", "rsync", "scp", "cpio", "pax", "xar", "hdiutil", "mksquashfs"]);
+
+/**
+ * The secret a word names, for a command of a line (`lineFlow`): a sensitive file (named in full, there,
+ * made elsewhere in the line, or read by the command for the line: `direct`), or a file this chat wrote
+ * from a secret before (`RiskFacts.tainted`, the ledger's taint).
+ */
+function heldSecret(word: string, command: RiskCommand, direct: boolean, facts: RiskFacts, elsewhere: (word: string, self: RiskCommand) => boolean): string | undefined {
+  const classification = facts.classify(word, operandDir(command, viewOf(command.words)));
+  if (classification === undefined) return undefined;
+  if (classification.zone === "sensitive") return direct || isAbsolute(word) || word.startsWith("~") || present(classification.path) || elsewhere(word, command) ? word : undefined;
+  const from = facts.tainted?.(classification.path);
+  return from === undefined ? undefined : `${word}, which this chat wrote from ${from}`;
+}
+
+/**
+ * What a line writes from a secret (round 5 step 2, the ledger's taint): each file a command of it writes
+ * while it reads a secret, or after one in its pipe (`cp .env /tmp/x`, `cat .env >> log`, `tar czf b.tgz
+ * .env`, `zip -r k.zip ~/.ssh`, `cat .env | gzip > x.gz`), and the repositories where it stages one
+ * (`git add -f .env`). Canonical paths; the secret each holds.
+ */
+export function secretWrites(commands: readonly (RiskCommand & { joint?: string })[], facts: RiskFacts): { paths: { path: string; from: string }[]; repos: { dir: string; from: string }[] } {
+  const paths: { path: string; from: string }[] = [];
+  const repos: { dir: string; from: string }[] = [];
+  const elsewhere = (word: string, self: RiskCommand) => commands.some((other) => other !== self && (other.words.includes(word) || other.writes.includes(word)));
+  let flowing: string | undefined;
+  for (const [index, command] of commands.entries()) {
+    const view = viewOf(command.words);
+    const dir = operandDir(command, view);
+    let from = flowing;
+    for (const path of command.reads) if (path !== UNKNOWN) from ??= heldSecret(path, command, true, facts, elsewhere);
+    const words = command.words.length ? fileWords(command, view) : [];
+    for (const word of words) {
+      from ??= heldSecret(word, command, true, facts, elsewhere);
+      if (from === undefined && WHOLE_FOLDER.has(view.program) && facts.secretInside) {
+        const at = facts.classify(word, dir)?.path;
+        const inside = at === undefined ? undefined : facts.secretInside(at);
+        if (inside !== undefined) from = inside;
+      }
+    }
+    if (from === undefined) from = credentialSource(view) === "the environment" ? "the environment" : undefined;
+    // `git add .env`: the repository holds it once committed.
+    if (view.program === "git" && GIT_STAGES.test(view.positionals[0] ?? "") && from !== undefined) {
+      const repo = gitDirectory(command, view);
+      if (repo !== undefined) repos.push({ dir: repo, from });
+    }
+    if (from !== undefined) {
+      const written: string[] = command.writes.filter((path) => path !== UNKNOWN && !NETWORK_FILES.test(path) && !path.startsWith("/dev/"));
+      const copy = /^(cp|mv|install|ditto|rsync|ln|gcp)$/.test(view.program) ? copyOperands(view.words) : undefined;
+      if (copy && !remoteOperand(copy.dest)) written.push(copy.dest);
+      const archive = archiveOutput(view);
+      if (archive !== undefined && archive !== "-") written.push(archive);
+      if (view.program === "tee") written.push(...view.positionals);
+      for (const word of written) {
+        const at = facts.classify(word, dir);
+        if (!at || at.zone === "sensitive") continue;
+        const target = copy && word === copy.dest && isDirectory(at.path) && copy.sources.length === 1 ? `${at.path}/${basename(copy.sources[0])}` : at.path;
+        paths.push({ path: target, from: from.replace(/, which this chat wrote from .*$/, "") });
+      }
+    }
+    // What a command prints flows on through its pipe.
+    const next = commands[index + 1];
+    flowing = from !== undefined && command.joint === "|" && next !== undefined ? from : undefined;
+  }
+  return { paths, repos };
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** The archive an archiver writes (`tar czf X`, `tar -cf X`, `--file=X`, `zip X …`, `7z a X …`), or undefined. */
+function archiveOutput(view: CommandView): string | undefined {
+  const args = view.args;
+  if (/^(tar|gtar|bsdtar)$/.test(view.program)) {
+    const creates = args.some((word) => /^-?[A-Za-z]*[cru][A-Za-z]*$/.test(word) && !word.startsWith("--")) || args.includes("--create");
+    if (!creates) return undefined;
+    for (let i = 0; i < args.length; i++) {
+      const word = args[i];
+      if (word.startsWith("--file=")) return word.slice("--file=".length);
+      if (word === "--file") return args[i + 1];
+      if (/^-?[A-Za-z]*f[A-Za-z]*$/.test(word) && !word.startsWith("--") && (i === 0 || word.startsWith("-"))) return args[i + 1];
+    }
+    return undefined;
+  }
+  if (view.program === "zip") return view.positionals[0];
+  if (/^7za?$/.test(view.program) && view.positionals[0] === "a") return view.positionals[1];
+  return undefined;
+}
+
 /** A line's data flow (`exfiltrates`): the first network sink it has and the first secret it reads, each when there is one. */
 export function lineFlow(commands: readonly RiskCommand[], facts: RiskFacts, expands: readonly string[] = [], code?: ReadonlyMap<RiskCommand, CodeFlow>): CodeFlow {
   let sink: string | undefined;
@@ -1884,11 +1988,8 @@ export function lineFlow(commands: readonly RiskCommand[], facts: RiskFacts, exp
    * contents for the line (`direct`: a sink's own file, a redirection's input, a content reader such as
    * `cat`): then the name alone says it (`gh gist create .env.production`, `cat .env | nc …`).
    */
-  const holdsSecret = (word: string, command: RiskCommand, direct: boolean): boolean => {
-    const classification = facts.classify(word, operandDir(command, viewOf(command.words)));
-    if (classification?.zone !== "sensitive") return false;
-    return direct || isAbsolute(word) || word.startsWith("~") || present(classification.path) || elsewhere(word, command);
-  };
+  const holdsSecret = (word: string, command: RiskCommand, direct: boolean): boolean => secretOf(word, command, direct) !== undefined;
+  const secretOf = (word: string, command: RiskCommand, direct: boolean): string | undefined => heldSecret(word, command, direct, facts, elsewhere);
   /** Credential commands (`SECRET_SOURCES`): a source for the line's other commands. */
   const printers = new Set<RiskCommand>();
   const sinks = new Set<RiskCommand>();
@@ -1920,7 +2021,16 @@ export function lineFlow(commands: readonly RiskCommand[], facts: RiskFacts, exp
     // Staging a file into a commit (`git add .env`) reads it for the line's push.
     const direct = row !== undefined || CONTENT_READERS.has(view.program) || (view.program === "git" && GIT_STAGES.test(view.positionals[0] ?? ""));
     const globs: string[] = [];
-    for (const word of fileWords(command, view, globs)) if (holdsSecret(word, command, direct)) secret ??= word;
+    for (const word of fileWords(command, view, globs)) {
+      const held = secretOf(word, command, direct);
+      if (held !== undefined) secret ??= held;
+      // An archiver or sender of a whole folder (`tar czf - .`, `rsync -a ./ host:`): the secrets inside it.
+      else if ((row !== undefined || WHOLE_FOLDER.has(view.program)) && facts.secretInside) {
+        const dir = facts.classify(word, operandDir(command, view))?.path;
+        const inside = dir === undefined ? undefined : facts.secretInside(dir);
+        if (inside !== undefined) secret ??= `${word}, which holds ${inside}`;
+      }
+    }
     // A glob with a known start that could be a secret (`cat ~/.ssh/id_* | nc …`): the resolver's reading.
     for (const pattern of globs) {
       const found = facts.couldBe?.(pattern, operandDir(command, view));
@@ -1929,7 +2039,14 @@ export function lineFlow(commands: readonly RiskCommand[], facts: RiskFacts, exp
     // A sink's `@file` and `name=@file` values (`gh api -f body=@.env`, `http x=@f`): files it sends.
     if (row) for (const word of view.args) {
       const file = /^(?:[^=@\s]*=)?@([^;@]+)$/.exec(word)?.[1];
-      if (file && file !== "-" && holdsSecret(file, command, true)) secret ??= file;
+      const held = file && file !== "-" ? secretOf(file, command, true) : undefined;
+      if (held !== undefined) secret ??= held;
+    }
+    // A push from a repository where this chat staged a secret (`git add -f .env && git commit`, earlier).
+    if (row === "git-push" && facts.taintedRepo) {
+      const dir = gitDirectory(command, view);
+      const held = dir === undefined ? undefined : facts.taintedRepo(dir);
+      if (held !== undefined) secret ??= `a commit this chat made, holding ${held}`;
     }
     const printed = credentialSource(view);
     if (printed) {
