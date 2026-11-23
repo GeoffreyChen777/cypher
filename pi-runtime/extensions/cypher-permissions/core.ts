@@ -2074,8 +2074,9 @@ export class Permissions {
       const path = this.classify(word, at ?? cwd).path;
       if (path) add({ kind: "path", name: path, says: [displayPath(path, this.home), word] });
     };
-    for (const item of line.commands) {
-      if (item.inert) continue;
+    for (const [index, item] of line.commands.entries()) {
+      // What only inspects is no part of what the owner denied (`git status && npm publish`: the publish).
+      if (item.inert || (line.assessments?.[index]?.tier === "inspect" && line.commands.length > 1)) continue;
       const program = basename(item.words[0] ?? "");
       const tool = readTool(item.words);
       actions.add(tool && "row" in tool ? [program, ...tool.row.sub].join(" ") : program);

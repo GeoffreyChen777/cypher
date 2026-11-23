@@ -3312,3 +3312,15 @@ test("round 4 install grades: a developer tool into the user's own directory is 
   }
   assert.match(JUDGE_SYSTEM_PROMPT, /a developer tool the work needs, installed into the user's own tool directory .* is not this/);
 });
+
+test("round 4 denials: what only inspects in a denied line is not denied with it", async () => {
+  const { permissions } = engine();
+  const deny = judgedCtx({ decision: "ask-user", reason: "x", concern: "outside-audience" }, { choice: "Deny" });
+  await permissions.requestEscalation(`git -C ${workspace} status && npm publish`, { label: "x" }, deny);
+  const status = judgedCtx({ decision: "approve", reason: "fine" });
+  assert.equal((await permissions.requestEscalation(`git -C ${workspace} log -1 && npm test`, { label: "x" }, status)).ok, true);
+  assert.equal(status.prompts.length, 1, "judged");
+  const publish = judgedCtx({ decision: "approve", reason: "fine" });
+  assert.equal((await permissions.requestEscalation(`git -C ${workspace} status && npm publish`, { label: "x" }, publish)).ok, false);
+  assert.equal(publish.prompts.length, 0, "the denied line itself asks");
+});
