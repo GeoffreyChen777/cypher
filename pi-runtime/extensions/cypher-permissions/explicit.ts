@@ -46,7 +46,7 @@ import { homedir } from "node:os";
 import { remoteOperand, sshHostIndex } from "./commands.ts";
 import { canonical, claimEntity, describeEntity, identifies, namesOf, relation, repoOf } from "./entities.ts";
 import type { Entity, EntityContext, EntityKind, PullRequestFact } from "./entities.ts";
-import { antecedentsFor } from "./lifecycle.ts";
+import { antecedentsFor, IMPLIED_STEPS } from "./lifecycle.ts";
 import type { LedgerEntity } from "./ledger.ts";
 import type { GitFacts } from "./risk.ts";
 import { UNKNOWN } from "./shell.ts";
@@ -793,6 +793,8 @@ export interface ExplicitFacts {
   pullRequestsWithHead?(dir: string | undefined, branch: string): readonly PullRequestFact[];
   /** The branch checked out in a worktree. */
   worktreeBranch?(path: string): string | undefined;
+  /** The branch checked out in the repository at `dir` (lifecycle.ts `IMPLIED_STEPS`). */
+  currentBranch?(dir: string): string | undefined;
   /** This task's own branches and pull requests (core.ts `ownEntities`): what a consent naming no target may mean. */
   own?(): { branches: readonly string[]; prs: readonly PullRequestFact[] };
 }
@@ -1353,7 +1355,7 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
   const followUps: string[] = [];
   for (const target of targets) {
     const why = uncovered(target, said, opened, facts, context);
-    const follow = why ? consentedFollowUp(target, said, opened, facts, context) : undefined;
+    const follow = why ? (consentedFollowUp(target, said, opened, facts, context) ?? impliedStep(target, targets, said, opened, facts, context)) : undefined;
     if (why && !follow) return result(["quote"], why, source);
     if (follow) followUps.push(follow);
     // "open a PR, don't merge it" asks for no merge, though it says the word.
@@ -1519,6 +1521,29 @@ function consentedFollowUp(target: Target, said: string, opened: readonly PullRe
     const before: Target = { kind: "pr", value: entity.name, action: antecedent.action, entity, ...(pr?.repo ? { repo: pr.repo } : {}), ...(target.dir ? { dir: target.dir } : {}) };
     if (uncovered(before, said, opened, facts, context) === undefined && !forbids(said, before)) {
       return `${describeTarget(target)}: ${rule.why} (${describeTarget(before)})`;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A target the consent doesn't name that is the ordinary means of another target of the same line the
+ * consent does cover (lifecycle.ts `IMPLIED_STEPS`): "tag v1.2.0 and push the tag" covers pushing the
+ * branch checked out there, which the tag marks, in the same line. Returns why, or undefined.
+ */
+function impliedStep(target: Target, line: readonly Target[], said: string, opened: readonly PullRequestFact[], facts: ExplicitFacts, context: EntityContext): string | undefined {
+  for (const row of IMPLIED_STEPS) {
+    if (!row.then.kinds.includes(target.kind) || !row.then.actions.includes(target.action)) continue;
+    // Another remote than origin, or another repository, stays the owner's to name.
+    if (target.remote && target.remote !== "origin" && !mentions(said, target.remote)) continue;
+    if (row.checkedOut && target.kind === "branch") {
+      const current = target.dir ? facts.currentBranch?.(target.dir) : undefined;
+      if (current === undefined || target.value !== current) continue;
+    }
+    for (const before of line) {
+      if (before === target || !row.after.kinds.includes(before.kind) || !row.after.actions.includes(before.action)) continue;
+      if ((before.remote ?? "origin") !== (target.remote ?? "origin") || (before.repo && target.repo && before.repo !== target.repo)) continue;
+      if (uncovered(before, said, opened, facts, context) === undefined && !forbids(said, before) && !forbids(said, target)) return `${describeTarget(target)}: ${row.why} (${describeTarget(before)})`;
     }
   }
   return undefined;

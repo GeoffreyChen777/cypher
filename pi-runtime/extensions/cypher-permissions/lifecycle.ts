@@ -57,6 +57,30 @@ export const LIFECYCLE: readonly FollowUp[] = [
   { after: "push", of: ["branch"], then: ["delete"], on: "remote-copy", created: true, why: "a branch this task created and pushed it may delete again" },
 ];
 
+/**
+ * Implied steps (round 4): what a requested action needs done in the same line as its ordinary means,
+ * as data. A consent that covers the antecedent target of a line covers these steps of the same line
+ * too (explicit.ts `impliedStep`), so the reviewing model is told they are part of the request instead
+ * of reading them as beyond it. Only plain steps: a forcing or bypassing attribute still has to be named
+ * (explicit.ts `ATTRIBUTE_FLAGS`), and another remote or repository than the antecedent's never is one.
+ * - `checkedOut`: the step's branch must be the one checked out where the line runs: the branch the new
+ *   tag or release marks (a tag made elsewhere says nothing about which branch it is on).
+ */
+export interface ImpliedStep {
+  after: { kinds: readonly string[]; actions: readonly string[] };
+  then: { kinds: readonly string[]; actions: readonly string[] };
+  checkedOut?: boolean;
+  why: string;
+}
+
+export const IMPLIED_STEPS: readonly ImpliedStep[] = [
+  { after: { kinds: ["tag"], actions: ["push", "create"] }, then: { kinds: ["branch"], actions: ["push"] }, checkedOut: true, why: "pushing a tag publishes the commit it marks, so the branch it was made on is pushed with it" },
+  { after: { kinds: ["tag", "release"], actions: ["release", "publish"] }, then: { kinds: ["tag"], actions: ["push", "create"] }, why: "a release is cut from its tag, which is made and pushed for it" },
+  { after: { kinds: ["tag", "release"], actions: ["release", "publish"] }, then: { kinds: ["branch"], actions: ["push"] }, checkedOut: true, why: "a release is cut from the branch it marks, which is pushed for it" },
+  { after: { kinds: ["pr"], actions: ["create"] }, then: { kinds: ["branch"], actions: ["push"] }, why: "opening a pull request needs its head branch pushed" },
+  { after: { kinds: ["package"], actions: ["publish", "release"] }, then: { kinds: ["tag"], actions: ["push", "create"] }, why: "a package release is tagged with its version" },
+];
+
 /** An action done to an entity: an antecedent, or the target being checked. */
 export interface Acted {
   action: LifeAction | string;

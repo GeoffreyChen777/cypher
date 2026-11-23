@@ -3262,3 +3262,53 @@ test("round 4 other tasks: an entity another chat's ledger made asks unless the 
   const mine = approve();
   assert.equal((await maker.requestEscalation("git push origin --delete feat/payments-v2", { label: "x" }, mine)).ok, true);
 });
+
+test("round 4 implied steps: the ordinary means of an asked action in the same line are covered as follow-ups; other branches aren't", async () => {
+  const repo = gitRepo("implied-steps");
+  const { permissions } = engineAt(repo);
+  permissions.ownerWords = { messages: [{ source: "typed", text: "commit，然后 tag v1.2.0 并 push tag", at: 1 }], agentWritten: false };
+  const run = async (line) => {
+    const c = judgedCtx({ decision: "approve", reason: "asked" }, { cwd: repo });
+    const result = await permissions.requestEscalation(line, { label: "x" }, c);
+    return { result, prompt: c.prompts[0]?.prompt ?? "" };
+  };
+  const asked = await run("git commit -am release && git tag v1.2.0 && git push origin main && git push origin v1.2.0");
+  assert.equal(asked.result.ok, true);
+  assert.match(asked.prompt, /asks for this and names its target: yes; taken back since: no; covers as follow-ups: branch main.*pushing a tag publishes the commit it marks/);
+  // A branch that is neither checked out there nor the default one is no means of the tag: the owner names it or it isn't covered.
+  // With another branch checked out, the default branch is no means of the tag made there.
+  spawnSync("git", ["-C", repo, "checkout", "-q", "feature"]);
+  const fresh = engineAt(repo).permissions;
+  fresh.ownerWords = permissions.ownerWords;
+  const run2 = async (line) => {
+    const c = judgedCtx({ decision: "approve", reason: "asked" }, { cwd: repo });
+    await fresh.requestEscalation(line, { label: "x" }, c);
+    return { prompt: c.prompts[0]?.prompt ?? "" };
+  };
+  const other = await run2("git tag v1.2.0 && git push origin main && git push origin v1.2.0");
+  assert.match(other.prompt, /tag v1\.2\.0 (at HEAD )?on origin/);
+  assert.doesNotMatch(other.prompt, /covers as follow-ups: branch main/);
+  assert.match(other.prompt, /it pushes to main, a branch your message doesn't name/);
+  spawnSync("git", ["-C", repo, "checkout", "-q", "main"]);
+  // Forced: an attribute is never implied.
+  const forced = await run("git push --force origin main && git push origin v1.2.0");
+  assert.doesNotMatch(forced.prompt, /covers as follow-ups/);
+});
+
+test("round 4 install grades: a developer tool into the user's own directory is graded undoable and the user's; a system package manager isn't", async () => {
+  const { permissions } = engine();
+  const prompt = async (line) => {
+    const c = judgedCtx({ decision: "approve", reason: "fine" });
+    await permissions.requestEscalation(line, { label: "x" }, c);
+    return c.prompts[0]?.prompt ?? "";
+  };
+  for (const line of ["go install golang.org/x/tools/cmd/goimports@latest", "cargo install ripgrep", "pipx install black", "uv tool install ruff"]) {
+    const text = await prompt(line);
+    assert.match(text, /- grade: installs a developer tool into this user's own tool directory .*\(undoable, seen by no one else\)/, line);
+  }
+  for (const line of ["brew install jq", "apt-get install -y jq", "npm install -g typescript"]) {
+    const text = await prompt(line);
+    assert.match(text, /- grade: installs or removes software for the whole machine/, line);
+  }
+  assert.match(JUDGE_SYSTEM_PROMPT, /a developer tool the work needs, installed into the user's own tool directory .* is not this/);
+});

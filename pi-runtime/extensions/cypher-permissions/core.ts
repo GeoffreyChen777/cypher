@@ -45,7 +45,7 @@ import { answeredByConsent, conversationContext, judgePrompt, JUDGE_SYSTEM_PROMP
 import type { Concern, JudgeEvidence, JudgeRequest } from "./judge.ts";
 import { floorOf } from "./floor.ts";
 import type { FloorHit } from "./floor.ts";
-import { describeGrade, gradesOf } from "./grades.ts";
+import { describeGrade, gradesOf, kindGrades } from "./grades.ts";
 import { isUnder, PathContext } from "./paths.ts";
 import type { Classification } from "./paths.ts";
 import { decide, describe } from "./policy.ts";
@@ -1866,7 +1866,7 @@ export class Permissions {
         const purpose = [proposal.label && `Purpose: ${proposal.label}`, proposal.reason && `Reason: ${proposal.reason}`].filter(Boolean).join("\n");
         // An approval is remembered for the commands' own categories, never for patterns the agent proposed; a danger's, never.
         const memo = dangerous ? [] : patterns.filter((pattern) => !pattern.proposed);
-        const evidence = this.evidenceFor(targets, data, ctx, denied.similar);
+        const evidence = this.evidenceFor(targets, data, ctx, denied.similar, [line.kind, ...(line.assessments ?? []).map((assessment) => assessment.kind)]);
         const reviewed = await this.review(
           {
             capability: "escalate",
@@ -2030,7 +2030,7 @@ export class Permissions {
    * the grade of what it does (grades.ts), what its flags add, and whether the owner's words name the
    * installed app's data it reads. Evidence, never a gate.
    */
-  private evidenceFor(targets: LineTargets | undefined, data: readonly string[], ctx: RequestContext, denied: readonly DenialRecord[] = []): JudgeEvidence | undefined {
+  private evidenceFor(targets: LineTargets | undefined, data: readonly string[], ctx: RequestContext, denied: readonly DenialRecord[] = [], kinds: readonly (string | undefined)[] = []): JudgeEvidence | undefined {
     const evidence: { -readonly [K in keyof JudgeEvidence]: JudgeEvidence[K] } = {};
     if (targets) {
       const known = "targets" in targets ? targets.targets : (targets.known ?? []);
@@ -2039,6 +2039,9 @@ export class Permissions {
       if (grades.length) evidence.grades = grades;
       if (targets.attributes?.length) evidence.attributes = targets.attributes.map((attribute) => describeAttribute(attribute));
     }
+    // What the classifier says a command does, where its targets don't tell the reach (an install's directory).
+    const byKind = kindGrades(kinds).map(describeGrade).filter((grade) => !evidence.grades?.includes(grade));
+    if (byKind.length) evidence.grades = [...(evidence.grades ?? []), ...byKind];
     if (data.length) evidence.installedData = { paths: [...new Set(data.map((path) => displayPath(path, this.home)))], finding: scanDataConsent(this.ownerWords, data) };
     if (denied.length) evidence.denials = denied.map((denial) => describeDenial(denial));
     if (targets) {
@@ -2199,6 +2202,7 @@ export class Permissions {
       ...(facts.pullRequestsWithHead ? { pullRequestsWithHead: memo(facts.pullRequestsWithHead) } : {}),
       ...(facts.worktreeBranch ? { worktreeBranch: memo(facts.worktreeBranch) } : {}),
       ...(facts.own ? { own: memo(facts.own) } : {}),
+      ...(facts.currentBranch ? { currentBranch: memo(facts.currentBranch) } : {}),
     };
   }
 
@@ -2303,6 +2307,7 @@ export class Permissions {
       release: (dir, commit, version) => this.releaseFacts(dir, commit, version),
       pullRequestsWithHead: (dir, branch) => this.pullRequestsWithHead(dir, branch),
       worktreeBranch: (path) => this.catalogueFacts().worktreeBranch?.(path),
+      currentBranch: (dir) => this.gitAt(dir)?.current,
       own: () => this.ownEntities(),
     };
   }

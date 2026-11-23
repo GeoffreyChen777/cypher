@@ -51,7 +51,31 @@ export const GRADES: readonly Grade[] = [
   { action: "force-push", reversible: "irreversible", audience: "team", approver: "consent", says: "force-pushes or deletes a remote branch" },
   { action: "delete-unmerged", reversible: "irreversible", audience: "self", approver: "consent", says: "deletes work that isn't merged or isn't this task's" },
   { action: "send-data", reversible: "irreversible", audience: "public", approver: "consent", says: "sends data off this machine" },
+  // Installs (round 4): where the software lands decides its reach, not the word "install".
+  { action: "install-user", reversible: "undoable", audience: "self", approver: "judge", says: "installs a developer tool into this user's own tool directory (~/go/bin, ~/.cargo/bin, ~/.local/bin, ~/.dotnet/tools, ~/.rustup); deleting it undoes it, and the work may need it" },
+  { action: "install-system", reversible: "recoverable", audience: "self", approver: "consent", says: "installs or removes software for the whole machine (a system package manager, a global prefix)" },
 ];
+
+/** What the classifier's kinds (packs.ts) say an install reaches: the kind's words, as data. */
+export const USER_INSTALL = "installs a developer tool for this user";
+export const SYSTEM_INSTALL = "installs software for the whole machine";
+
+/** Grades read from what the classifier says a command does (risk.ts `kind`), for commands whose targets don't tell (round 4). */
+export const KIND_GRADES: readonly { kind: string; grade: string }[] = [
+  { kind: USER_INSTALL, grade: "install-user" },
+  { kind: SYSTEM_INSTALL, grade: "install-system" },
+];
+
+/** The grades the classifier's kinds give (`KIND_GRADES`), each once. */
+export function kindGrades(kinds: readonly (string | undefined)[]): Grade[] {
+  const out: Grade[] = [];
+  for (const kind of kinds) {
+    const row = KIND_GRADES.find((item) => kind !== undefined && kind.startsWith(item.kind));
+    const grade = row && BY_ACTION.get(row.grade);
+    if (grade && !out.includes(grade)) out.push(grade);
+  }
+  return out;
+}
 
 const BY_ACTION = new Map(GRADES.map((grade) => [grade.action, grade]));
 

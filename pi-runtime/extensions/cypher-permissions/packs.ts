@@ -23,6 +23,7 @@ import { basename } from "node:path";
 
 import { globalValueOptions } from "./commands.ts";
 import { UNKNOWN } from "./shell.ts";
+import { SYSTEM_INSTALL, USER_INSTALL } from "./grades.ts";
 
 /** One simple command as the entries read it. */
 export interface CommandView {
@@ -237,7 +238,9 @@ export const INSPECT: readonly InspectEntry[] = [
 
 const PUBLISH = "publishes a package";
 const DEPLOY = "deploys or changes a remote service";
-const INSTALL = "installs software for the whole machine";
+const INSTALL = SYSTEM_INSTALL;
+/** Installers that put a tool in this user's own directory (`~/go/bin`, `~/.cargo/bin`, `~/.local/bin`): reversible, seen by no one else (grades.ts `install-user`). */
+const USER_TOOL = `${USER_INSTALL} (into the user's own tool directory: reversible by deleting it)`;
 const SECRET = "reads a secret";
 const SEND = "sends a message or data to other people";
 
@@ -428,22 +431,22 @@ export const DANGER: readonly DangerEntry[] = [
   { pack: "python", program: ["pip", "pip3"], sub: ["install|uninstall"], kind: "changes the system's Python packages", when: (view, facts) => has(view, "--user", "--break-system-packages", "--target", "--prefix", "--root") || !facts.programIsLocal(view.words) },
   { pack: "python", program: ["twine", "flit", "hatch"], sub: ["upload|publish"], kind: PUBLISH },
   { pack: "python", program: ["uv", "poetry", "pdm"], sub: ["publish"], kind: PUBLISH },
-  { pack: "python", program: "uv", sub: ["tool", "install|uninstall|upgrade"], kind: INSTALL },
+  { pack: "python", program: "uv", sub: ["tool", "install|uninstall|upgrade"], kind: USER_TOOL },
   { pack: "python", program: "uv", sub: ["pip", "install|uninstall|sync"], kind: INSTALL, when: (view) => has(view, "--system", "--break-system-packages") },
-  { pack: "python", program: "pipx", sub: ["install|uninstall|upgrade|inject|run|reinstall-all|uninstall-all"], kind: INSTALL },
+  { pack: "python", program: "pipx", sub: ["install|uninstall|upgrade|inject|run|reinstall-all|uninstall-all"], kind: USER_TOOL, when: (view) => (has(view, "--global") ? INSTALL : true) },
   { pack: "python", program: "uvx", kind: "downloads and runs a package", when: (view, facts) => !facts.projectTool(view.positionals[0] ?? UNKNOWN) },
   // Ruby.
   { pack: "ruby", program: "gem", sub: ["install|uninstall|update|push|yank|owner|signin|signout"], kind: INSTALL, when: (view) => (/^(push|yank|owner|signin|signout)$/.test(view.positionals[0] ?? "") ? PUBLISH : true) },
   // Rust, Go, JVM, .NET.
   { pack: "rust", program: "cargo", sub: ["publish|yank|owner|login|logout"], kind: PUBLISH },
-  { pack: "rust", program: "cargo", sub: ["install|uninstall"], kind: INSTALL },
-  { pack: "rust", program: "rustup", sub: ["self|set|default|toolchain"], kind: INSTALL, when: (view) => view.positionals[1] !== "list" },
-  { pack: "go", program: "go", sub: ["install"], kind: INSTALL },
+  { pack: "rust", program: "cargo", sub: ["install|uninstall"], kind: USER_TOOL, when: (view) => (has(view, "--root") ? INSTALL : true) },
+  { pack: "rust", program: "rustup", sub: ["self|set|default|toolchain"], kind: USER_TOOL, when: (view) => view.positionals[1] !== "list" },
+  { pack: "go", program: "go", sub: ["install"], kind: USER_TOOL },
   { pack: "jvm", program: ["mvn", "mvnw", "./mvnw"], kind: PUBLISH, when: (view) => view.positionals.some((word) => word === UNKNOWN || /^(deploy|release:.*|.*:deploy)$/.test(word)) },
   { pack: "jvm", program: ["gradle", "gradlew", "./gradlew"], kind: PUBLISH, when: (view) => view.positionals.some((word) => word === UNKNOWN || (/(^|:)publish/.test(word) && !/MavenLocal$/.test(word)) || /(^|:)(release|uploadArchives)$/.test(word)) },
   { pack: "jvm", program: "sbt", kind: PUBLISH, when: (view) => view.positionals.some((word) => word === UNKNOWN || /publish(Signed)?$|release/.test(word) && !/publishLocal/.test(word)) },
   { pack: "dotnet", program: "dotnet", sub: ["nuget", "push|delete"], kind: PUBLISH },
-  { pack: "dotnet", program: "dotnet", sub: ["tool", "install|uninstall|update"], kind: INSTALL, when: (view) => has(view, "-g", "--global") },
+  { pack: "dotnet", program: "dotnet", sub: ["tool", "install|uninstall|update"], kind: USER_TOOL, when: (view) => has(view, "-g", "--global") },
   // Apple and Android.
   { pack: "apple", program: "xcrun", sub: ["altool|notarytool|iTMSTransporter"], kind: "uploads to Apple", when: (view) => !/^(history|info|log|list)$/.test(view.positionals[1] ?? "") },
   { pack: "apple", program: "fastlane", kind: "uploads or releases an app", when: (view) => view.positionals.some((word) => word === UNKNOWN || /^(deliver|pilot|upload_to_.*|release|beta|appstore|supply|match|cert|sigh|pem)$/.test(word)) },
