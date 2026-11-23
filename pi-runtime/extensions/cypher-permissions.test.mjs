@@ -1156,7 +1156,8 @@ test("escalation: the model decides a danger (once, never remembered), with the 
   process.env.PATH = `${bin}:${path}`;
   try {
     const prompts = [];
-    const judged = (answer, choice = "Deny") => {
+    // Prompts are closed unanswered by default: a Deny click is the owner's denial of the class (round 4, denials.ts).
+    const judged = (answer, choice = undefined) => {
       const c = ctx({ choice });
       c.cwd = repo;
       c.branch = () => [{ type: "message", message: { role: "user", content: "open the PR against recipe/earlvlm" } }];
@@ -1421,7 +1422,8 @@ test("risk tiers: stopping a process this chat started needs no question", async
 test("escalation: the model decides local work first and remembers it for the chat", async () => {
   const { permissions, entries } = engine();
   const prompts = [];
-  const judged = (answer, choice = "Deny") => {
+  // Prompts are closed unanswered by default: a Deny click is the owner's denial of the class (round 4, denials.ts).
+  const judged = (answer, choice = undefined) => {
     const c = ctx({ choice });
     c.complete = async (system, prompt) => {
       prompts.push({ system, prompt });
@@ -2019,7 +2021,8 @@ test("scp and rsync stay dangerous between machines, over local secrets and star
 // --- Fewer questions about checking the work (2026-11-18) -------------------------------
 
 /** A context whose judge answers `answer`, counting the prompts it saw. */
-function judgedCtx(answer, { choice = "Deny", cwd = workspace, user = "fix the bug and test it" } = {}) {
+// Prompts are closed unanswered by default: a Deny click is the owner's denial of the class (round 4, denials.ts).
+function judgedCtx(answer, { choice = undefined, cwd = workspace, user = "fix the bug and test it" } = {}) {
   const c = ctx({ choice });
   c.cwd = cwd;
   c.prompts = [];
@@ -3121,12 +3124,141 @@ test("a prompt closed without an answer is no denial: audited as dismissed, noth
   await permissions.authorize([{ capability: "write", path: join(other, "notes.md") }], { tool: "write" }, asks(undefined));
   assert.deepEqual([lastAuditOf(permissions).decision, lastAuditOf(permissions).choice], ["dismissed", "timeout"]);
   permissions.config.ask.timeoutMs = null;
-  // Nothing remembered either way, and the next request is asked again (no denial on record steers it).
+  // Nothing remembered either way. A dismissal leaves no denial on record: in a chat with only
+  // dismissals the next request reaches the judge again, which is never told the owner refused.
   assert.equal(permissions.grants.all().length, 0);
+  const { permissions: dismissedOnly } = engine();
+  await dismissedOnly.requestEscalation("npm publish", { label: "Publish" }, asks(undefined));
   const again = asks(undefined);
-  await permissions.requestEscalation("npm publish", { label: "Publish" }, again);
+  await dismissedOnly.requestEscalation("npm publish", { label: "Publish" }, again);
   assert.equal(again.asked.length, 1);
+  assert.equal(again.prompts.length, 1, "judged again");
   assert.doesNotMatch(again.prompts[0].prompt, /denied|refused/i, "the judge is never told the owner refused");
+  // The Deny click is (round 4, denials.ts): the same action in this chat asks the owner, no judge.
+  const after = asks(undefined);
+  await permissions.requestEscalation("npm publish", { label: "Publish" }, after);
+  assert.deepEqual([after.prompts.length, after.asked.length], [0, 1]);
+  assert.match(lastAuditOf(permissions).explicit.reason, /you denied `npm publish`/);
   // The stats count them apart.
   assert.match(permissions.audit.stats(), /Answers: 1 denied, \d+ closed without an answer \(not a denial\)\./);
+});
+
+// --- Round 4: the owner's denials are evidence (denials.ts); other tasks' work (core.ts `notThisTask`) ---
+
+test("round 4 denials: classes match by tool, action or concern, and target scope; a newer owner word naming the target lifts", async () => {
+  const { classMatch, scopeMatches, liftedBy, wordHash } = await import("./cypher-permissions/denials.ts");
+  const path = (name) => ({ kind: "path", name });
+  assert.equal(scopeMatches(path("/h/.cypher/orgs/o/u"), path("/h/.cypher/orgs/o/u/db.sqlite")), true, "a file inside a denied directory");
+  assert.equal(scopeMatches(path("/h/.cypher/orgs/o/u/db.sqlite"), path("/h/.cypher/orgs/o/u")), true, "a directory holding the denied file");
+  assert.equal(scopeMatches(path("/h/.cypher/orgs/o/u"), path("/h/.cypher/orgs/o/u2")), false, "a sibling is another target");
+  assert.equal(scopeMatches({ kind: "host", name: "Prod.Example.com" }, { kind: "host", name: "prod.example.com" }), true);
+  assert.equal(scopeMatches({ kind: "branch", name: "feat/a" }, { kind: "tag", name: "feat/a" }), false, "another kind");
+  const denied = { tool: "bash", actions: ["sqlite3"], concern: "installed-app", scopes: [path("/h/.cypher/orgs/o/u/db.sqlite")] };
+  assert.ok(classMatch(denied, { tool: "bash", actions: ["ls"], concern: "installed-app", scopes: [path("/h/.cypher/orgs/o/u")] }), "the same reach by another program");
+  assert.ok(classMatch(denied, { tool: "bash", actions: ["sqlite3"], scopes: [path("/h/.cypher/orgs/o/u/db.sqlite")] }), "the same program on it");
+  assert.equal(classMatch(denied, { tool: "bash", actions: ["sqlite3"], scopes: [path("/h/Developer/app/x.sqlite")] }), undefined, "another target");
+  assert.equal(classMatch(denied, { tool: "read", actions: ["read"], concern: "installed-app", scopes: [path("/h/.cypher/orgs/o/u/db.sqlite")] }), undefined, "another tool");
+  const earlier = { source: "typed", text: "look at db.sqlite in my installed app", at: 1 };
+  const record = { ...denied, at: "2026-11-23T10:00:00Z", what: "sqlite3 …", seen: [wordHash(earlier)] };
+  const scope = path("/h/.cypher/orgs/o/u/db.sqlite");
+  assert.equal(liftedBy(record, scope, { messages: [earlier], agentWritten: false }), undefined, "words the owner had written before their Deny don't lift it");
+  assert.equal(liftedBy(record, scope, { messages: [earlier, { source: "reply", text: "ok db.sqlite", proposal: "read db.sqlite?", at: 2 }], agentWritten: false }), undefined, "a reply to a proposal doesn't");
+  assert.equal(liftedBy(record, scope, { messages: [earlier, { source: "typed", text: "go ahead", at: 2 }], agentWritten: false }), undefined, "words that don't name it don't");
+  assert.equal(liftedBy(record, scope, { messages: [earlier, { source: "typed", text: "ok, read db.sqlite now", at: 2 }], agentWritten: false }), "ok, read db.sqlite now");
+});
+
+test("round 4 denials: an owner's Deny makes the same class ask in that chat (no judge), across a restart; dismissals don't; their words since lift it", async () => {
+  const dir = mkdtempSync(join(scratch, "agent-"));
+  const data = join(home, ".cypher", "orgs", "org_d", "user_d");
+  mkdirSync(join(data, "docs"), { recursive: true });
+  const open = (chatId = "chat-deny") => {
+    const permissions = new Permissions({ agentDir: dir, chatId, cwd: workspace, home, landstrip: { available: true, binary: "/nonexistent/landstrip" }, scratch: [] });
+    permissions.appendEntry = () => {};
+    permissions.ownerWords = { messages: [{ source: "typed", text: "the iOS progress bar is stuck, fix it", at: 1 }], agentWritten: false };
+    return permissions;
+  };
+  const approving = (choice) => judgedCtx({ decision: "approve", reason: "fits the work" }, { choice });
+  const sqlite = `sqlite3 -readonly ${data}/docs/journal.sqlite "select * from t"`;
+  const ls = `ls -la ${data}`;
+  let permissions = open();
+  // A dismissal is no denial: the judge decides the next one.
+  const closed = judgedCtx({ decision: "ask-user", reason: "private data", concern: "installed-app" });
+  assert.equal((await permissions.requestEscalation(sqlite, { label: "x" }, closed)).ok, false);
+  const next = approving();
+  assert.equal((await permissions.requestEscalation(sqlite, { label: "x" }, next)).ok, true);
+  assert.equal(next.prompts.length, 1);
+  // The owner's Deny click on it.
+  const deny = judgedCtx({ decision: "ask-user", reason: "private data", concern: "installed-app" }, { choice: "Deny" });
+  assert.equal((await permissions.requestEscalation(sqlite, { label: "x" }, deny)).ok, false);
+  // The same class asks, whatever the judge would say: the same read, and the directory holding it by another program.
+  for (const line of [sqlite, ls]) {
+    const c = approving();
+    assert.equal((await permissions.requestEscalation(line, { label: "x" }, c)).ok, false, line);
+    assert.deepEqual([c.prompts.length, c.asked.length], [0, 1], line);
+    assert.match(lastAuditOf(permissions).explicit.reason, /only you can approve this: you denied `sqlite3/, line);
+  }
+  // A restart of Pi in the same chat reads the denial; another chat has none.
+  permissions = open();
+  const restarted = approving();
+  assert.equal((await permissions.requestEscalation(ls, { label: "x" }, restarted)).ok, false);
+  assert.equal(restarted.prompts.length, 0);
+  const elsewhere = approving();
+  assert.equal((await open("chat-other").requestEscalation(ls, { label: "x" }, elsewhere)).ok, true);
+  // Another action on another target in the same chat: judged, with the denial as evidence when it is the same action.
+  const unrelated = approving();
+  assert.equal((await permissions.requestEscalation(`sqlite3 ${workspace}/test.db "select 1"`, { label: "x" }, unrelated)).ok, true);
+  assert.match(unrelated.prompts[0].prompt, /- the owner denied a request like it in this chat: sqlite3 /);
+  // The owner's words since, naming it, lift the denial: the judge decides again.
+  permissions.ownerWords = { messages: [...permissions.ownerWords.messages, { source: "typed", text: "ok, you can read journal.sqlite", at: 2 }], agentWritten: false };
+  const lifted = approving();
+  assert.equal((await permissions.requestEscalation(sqlite, { label: "x" }, lifted)).ok, true);
+  assert.equal(lifted.prompts.length, 1);
+});
+
+test("round 4 denials: a file tool's Deny makes the same access ask", async () => {
+  const { permissions } = engine();
+  const target = join(other, "denied-notes.md");
+  const deny = judgedCtx({ decision: "ask-user", reason: "x", concern: "other-task" }, { choice: "Deny" });
+  assert.equal((await permissions.authorize([{ capability: "write", path: target }], { tool: "write" }, deny)).ok, false);
+  const c = judgedCtx({ decision: "approve", reason: "fine" });
+  assert.equal((await permissions.authorize([{ capability: "write", path: target }], { tool: "write" }, c)).ok, false);
+  assert.deepEqual([c.prompts.length, c.asked.length], [0, 1]);
+  const read = judgedCtx({ decision: "approve", reason: "fine" });
+  assert.equal((await permissions.authorize([{ capability: "read", path: target }], { tool: "read" }, read)).ok, true, "another tool and capability: judged");
+});
+
+test("round 4 other tasks: an entity another chat's ledger made asks unless the owner's words name it; this chat's own is the judge's", async () => {
+  const repo = gitRepo("other-task-repo");
+  const dir = mkdtempSync(join(scratch, "agent-"));
+  const { Ledger, ledgerFile } = await import("./cypher-permissions/ledger.ts");
+  // Another chat made the branch feat/payments-v2 and a worktree.
+  const theirs = join(home, "Developer", "their-worktree");
+  mkdirSync(theirs, { recursive: true });
+  new Ledger(ledgerFile(dir, "chat-b"), "chat-b").record([{ kind: "branch", name: "feat/payments-v2" }, { kind: "worktree", name: realpathSync(theirs) }], "git worktree add");
+  const { permissions } = engineAt(repo, { dir, chatId: "chat-a" });
+  permissions.ownerWords = { messages: [{ source: "typed", text: "删掉已经合并的远端分支", at: 1 }], agentWritten: false };
+  const approve = () => judgedCtx({ decision: "approve", reason: "merged branches" }, { cwd: repo });
+  const line = "git push origin --delete fix/old-header feat/payments-v2";
+  const c = approve();
+  assert.equal((await permissions.requestEscalation(line, { label: "x" }, c)).ok, false);
+  assert.deepEqual([c.prompts.length, c.asked.length], [0, 1], "the floor: no judge");
+  assert.match(lastAuditOf(permissions).explicit.reason, /branch feat\/payments-v2 \(another chat \(chat-b\) made it\)/);
+  // A line on what isn't another task's: the judge's.
+  const own = approve();
+  assert.equal((await permissions.requestEscalation("git push origin --delete fix/old-header", { label: "x" }, own)).ok, true);
+  assert.equal(own.prompts.length, 1);
+  // Generic over kinds: another chat's worktree.
+  const wt = approve();
+  assert.equal((await permissions.requestEscalation(`git worktree remove --force ${theirs}`, { label: "x" }, wt)).ok, false);
+  assert.equal(wt.prompts.length, 0);
+  // The owner's words naming it: the judge decides, told it is not this task's.
+  permissions.ownerWords = { messages: [...permissions.ownerWords.messages, { source: "typed", text: "also delete feat/payments-v2, that one is done", at: 2 }], agentWritten: false };
+  const named = approve();
+  assert.equal((await permissions.requestEscalation(line, { label: "x" }, named)).ok, true);
+  assert.match(named.prompts[0].prompt, /- not this task's: branch feat\/payments-v2: another chat \(chat-b\) made it \(the owner's words name it/);
+  // This chat's own branch of the same name is its own (its ledger wins).
+  const { permissions: maker } = engineAt(repo, { dir, chatId: "chat-b" });
+  maker.ownerWords = permissions.ownerWords;
+  const mine = approve();
+  assert.equal((await maker.requestEscalation("git push origin --delete feat/payments-v2", { label: "x" }, mine)).ok, true);
 });

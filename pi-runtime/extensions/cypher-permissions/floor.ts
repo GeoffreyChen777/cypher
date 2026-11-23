@@ -18,6 +18,12 @@
  * - `owner-rule`: the owner's own setting says to ask (a command rule set to `ask` or `deny` that
  *   matches, or a kind of request set to "Ask me"). Not a classifier's call: the owner asked to be
  *   asked, and only they can change it.
+ * - `owner-denied` (round 4): the owner clicked Deny on a request of the same action class in this
+ *   chat (denials.ts: same tool, same action or concern, same target scope), and none of their words
+ *   since asks for that action on that target. A prompt closed or timed out is no denial (§7.4).
+ * - `other-task` (round 4): the request acts on an entity another chat or task made or holds (another
+ *   chat's ledger; a branch that heads an open pull request this chat didn't open; a worktree another
+ *   chat added), and the owner's words don't name that entity.
  * - `no-judge`: no reviewing model could decide — none configured, review paused after failures,
  *   or an error or timeout after its retry (core.ts `JUDGE_ATTEMPTS`).
  *
@@ -25,7 +31,7 @@
  * `after` rows on the judge's outcome.
  */
 
-export type FloorId = "secret-off-machine" | "permission-system" | "owner-rule" | "no-judge";
+export type FloorId = "secret-off-machine" | "permission-system" | "owner-rule" | "owner-denied" | "other-task" | "no-judge";
 
 /** What a request offers the floor's tests. */
 export interface FloorSubject {
@@ -35,6 +41,10 @@ export interface FloorSubject {
   permissionSystemPath?: string;
   /** The owner's own rule or setting that asks, in words. */
   ownerRule?: string;
+  /** The owner's own Deny of a request of the same class in this chat, not lifted by their words since (denials.ts). */
+  ownerDenied?: string;
+  /** What the request acts on that another chat or task made or holds, and the owner's words don't name (core.ts `foreignTargets`). */
+  otherTask?: string;
   /** How the review went (core.ts `Review.state`), and its reason. */
   review?: { state: string; reason: string };
 }
@@ -72,6 +82,18 @@ export const FLOOR: readonly FloorRow[] = [
     stage: "before",
     reason: "your own setting says to ask",
     test: (subject) => subject.ownerRule,
+  },
+  {
+    id: "owner-denied",
+    stage: "before",
+    reason: "you denied a request like it in this chat",
+    test: (subject) => subject.ownerDenied,
+  },
+  {
+    id: "other-task",
+    stage: "before",
+    reason: "it acts on another chat's or task's work, which your words don't name",
+    test: (subject) => subject.otherTask,
   },
   {
     id: "no-judge",

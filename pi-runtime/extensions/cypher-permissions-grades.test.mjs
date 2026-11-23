@@ -245,7 +245,7 @@ test("judge: an ask on a concern the owner's checked words answer runs once; the
 });
 
 test("floor: the only deterministic asks, one table: a secret leaving, the permission system, the owner's own rule, no judge", () => {
-  assert.deepEqual(FLOOR.map((row) => [row.id, row.stage]), [["secret-off-machine", "before"], ["permission-system", "before"], ["owner-rule", "before"], ["no-judge", "after"]]);
+  assert.deepEqual(FLOOR.map((row) => [row.id, row.stage]), [["secret-off-machine", "before"], ["permission-system", "before"], ["owner-rule", "before"], ["owner-denied", "before"], ["other-task", "before"], ["no-judge", "after"]]);
   assert.equal(floorOf({ assessments: [{ tier: "danger", key: "secret-off-machine", floor: true, kind: "sends a secret" }] }, "before")?.id, "secret-off-machine");
   assert.equal(floorOf({ assessments: [{ tier: "danger", key: "permission-system", floor: true, kind: "changes the permission system itself (x)" }] }, "before")?.detail, "changes the permission system itself (x)");
   assert.equal(floorOf({ permissionSystemPath: "/h/.cypher/pi-runtime/agent/permissions.json" }, "before")?.id, "permission-system");

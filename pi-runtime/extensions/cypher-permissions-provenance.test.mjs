@@ -801,7 +801,8 @@ test("property: a catalogue destroyer on a target not in the ledger is a danger 
       const context = {
         cwd: workspace,
         hasUI: true,
-        ui: { async select() { return "Deny"; }, notify() {} },
+        // Prompts are closed unanswered: a Deny click would be the owner's denial of the class (round 4, denials.ts).
+        ui: { async select() { return undefined; }, notify() {} },
         branch: () => [{ type: "message", message: { role: "user", content: "clean up" } }],
         complete: async () => (judged++, '{"decision":"approve","reason":"its own"}'),
         abort() {},

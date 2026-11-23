@@ -88,6 +88,8 @@ export interface PullRequestFact {
   repo?: string;
   head?: string;
   base?: string;
+  /** `open`, `merged` or `closed`, when known (gh's state, lower case). */
+  state?: string;
 }
 
 /** What is known besides the entities themselves. */

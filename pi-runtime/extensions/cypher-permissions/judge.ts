@@ -26,6 +26,10 @@ export interface JudgeEvidence {
   attributes?: readonly string[];
   /** It reads the installed app's own data (not a dev instance's): where, and whether the owner's words name it. */
   installedData?: { paths: readonly string[]; finding: DataFinding };
+  /** The owner's Deny clicks in this chat on the same action with another target (denials.ts), in words. */
+  denials?: readonly string[];
+  /** What the line acts on that another chat or task made or holds (core.ts `notThisTask`), in words. */
+  notThisTask?: readonly string[];
 }
 
 
@@ -256,6 +260,8 @@ function evidenceLines(request: JudgeRequest): string[] {
         : `- the owner's words name that data or the app: no${finding.reason ? ` (${finding.reason})` : ""}`,
     );
   }
+  for (const denial of evidence.denials ?? []) lines.push(`- the owner denied a request like it in this chat: ${denial}. Their Deny is their decision: ask ("retracted") about the same action unless their words since ask for this target`);
+  for (const item of evidence.notThisTask ?? []) lines.push(`- not this task's: ${item}. Ask ("other-task") unless the owner's words name it`);
   return lines;
 }
 
