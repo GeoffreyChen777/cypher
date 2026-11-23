@@ -62,9 +62,21 @@ struct HomeView: View {
     @State private var searchRequests = 0
 
     /// Registry rows a pending notification may be waiting on: the chat and
-    /// its project id, so a late-hydrating row re-triggers the attempt.
+    /// its project id, and each workspace and its chat, so a late-hydrating
+    /// row re-triggers the attempt.
     private var chatsKey: String {
         model.allChats.map { "\($0.id):\($0.spaceId ?? "")" }.joined()
+            + model.bots.map { "|\($0.id):\($0.chatId)" }.joined()
+    }
+
+    /// The chat the top of the stack shows, reported as viewed: a session,
+    /// or a workspace's own chat (whose notices are read there too).
+    private func viewedChat(_ route: Route?) -> String? {
+        switch route {
+        case .chat(let id): id
+        case .bot(let id): model.bot(id: id)?.chatId
+        default: nil
+        }
     }
 
     // `body` is split into layers (list → routing → lifecycle) so each
@@ -198,11 +210,7 @@ struct HomeView: View {
         routedList
             .onChange(of: path) { _, route in
                 lastPathChangeAt = Date().timeIntervalSinceReferenceDate
-                if case .chat(let id) = route.last {
-                    model.notifications.viewing(id)
-                } else {
-                    model.notifications.viewing(nil)
-                }
+                model.notifications.viewing(viewedChat(route.last))
             }
             // Notification taps navigate from `onChange`, NOT a `.task` on
             // this root: `.task` is cancelled while a pushed session covers
@@ -226,11 +234,7 @@ struct HomeView: View {
                 model.preloadSessions()
             }
             .onAppear {
-                if case .chat(let id) = path.last {
-                    model.notifications.viewing(id)
-                } else {
-                    model.notifications.viewing(nil)
-                }
+                model.notifications.viewing(viewedChat(path.last))
                 if let route = model.launchRoute {
                     model.launchRoute = nil
                     // Push the whole stack atomically — appending from a child's
@@ -527,8 +531,9 @@ struct HomeView: View {
 
     // MARK: Notification navigation
 
-    /// Resolve the pending notification into a route, once the chat row is
-    /// known (`chatsKey` re-triggers on late hydration; 12s later it gives
+    /// Resolve the pending notification into a route, once the chat row (a
+    /// workspace's: its bot row) is known (`notificationTarget`; `chatsKey`
+    /// re-triggers on late hydration; 12s later it gives
     /// up with a notice). The request is consumed before `path` changes so
     /// nothing can replay it, and the assignment waits out a push/pop that
     /// is still animating — a path replaced mid-transition is undefined.
@@ -559,16 +564,24 @@ struct HomeView: View {
                 model.notifications.pendingNavigation = nil
                 return
             }
-            if let chat = model.chat(id: pending.chatId), chat.spaceId == pending.projectId {
-                let route = SessionNavigation.openingNotification(chat.id, in: path, split: split)
+            if let target = model.data?.notificationTarget(pending) {
+                let route = SessionNavigation.openingNotification(route: target.route, in: path, split: split)
                 model.notifications.pendingNavigation = nil
                 if route != path { path = route }
-                model.notifications.viewing(chat.id)
+                model.notifications.viewing(target.chatId)
+                // The workspace's screen opens its board at the item once
+                // it is frontmost (SessionView `openRequestedBoard`).
+                if case .workspace(let botId, _, let page?) = target {
+                    model.notifications.pendingBoard = NotificationBoardRequest(botId: botId, page: page)
+                }
             } else {
                 try? await Task.sleep(for: .seconds(12))
                 guard !Task.isCancelled, model.notifications.pendingNavigation?.id == pending.id else { return }
                 model.notifications.pendingNavigation = nil
-                model.notifications.navigationError = "This session isn't available in this account."
+                model.notifications.navigationError =
+                    pending.workspaceId == nil
+                    ? "This session isn't available in this account."
+                    : "This workspace isn't available in this account."
             }
         }
     }

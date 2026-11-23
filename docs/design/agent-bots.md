@@ -5,7 +5,8 @@ from P5, the whole Workspaces (§13.1) and the iPhone and iPad app's (§13.2).**
 them directly, plans work that runs in orchestration threads and worker sessions on any
 owner device (P2), keeps a memory ([memory.md](memory.md)) and runs routines (P3),
 and answers other users' bots by invite (P4). Not built: event triggers for routines,
-groups (§11.7), push notifications for what needs the owner, and end-to-end encrypted
+groups (§11.7), the iPhone app's handling of Needs you push notifications (the Worker
+sends them; see [notifications.md](notifications.md)), and end-to-end encrypted
 exchanges (P6). Where the
 built code differs from the design below, the section says so.
 
@@ -640,9 +641,11 @@ consolidation passes also use the unattended input bridge. The engine hands ever
 to its listeners (`SessionsEngine::add_unattended_listener`); the scheduler's records the
 reason and settles the run `failed` with it.
 
-**Notifications.** There is no new notification path. A failed routine run raises
-attention through its result notice (unread bot chat on every device, and the bot's short
-answer about it) and the mark on its routine, whichever target it ran in.
+**Notifications.** A failed routine run raises attention through its result notice
+(unread bot chat on every device, and the bot's short answer about it) and the mark on its
+routine, whichever target it ran in. A routine (or plan) thread that asks the owner is
+pushed to the phone as a Needs you item of the workspace's chat
+([notifications.md](notifications.md)).
 
 ## 9. Bot runtime on the host device
 
@@ -1157,7 +1160,10 @@ Built:
 
 Planned:
 
-- **Push notifications** for plans, approvals, asking sessions and reviews (P5/P6).
+- **Push notifications** for plans, approvals, asking sessions and reviews: sent by the
+  Worker as `input` notices of the workspace's chat naming the item
+  ([notifications.md](notifications.md)); the iPhone app does not yet open the item
+  from the alert.
 
 ### 13.1 Workspaces
 
@@ -1608,8 +1614,8 @@ As built, `ask_bot` is a `BotTool` call that waits for the answer, so there is n
 | **P2: coordinator** (built) | *Work directly*; *Coordinate: start* with `propose_plan`, orchestration threads from a brief, worktree and session tools, worker marking; the plan card, live progress beside the chat and result notices; Stop; limits including a 4-hour time budget; audit log; approvals for tainted threads. Not built: per-worker turn budgets. |
 | **P3: memory and routines** (built) | The notebook, since replaced by [Memory](memory.md); the scheduler; routines in the workspace (optionally working directly) or as sessions in a project; their result notices in the bot chat; the Routines card; Needs you. Not built: event triggers. |
 | **P4: network** (built) | `BotRoom`, publish, invites, connections, peer threads, `ask_bot`, exchange states, late answers, the Connections card and panels. |
-| **P5: review and control** (built but notifications) | Review mode and the outgoing scrub, reviews in Needs you; *Coordinate: steer* with a per-action approval. Not built: push notifications for reviews, plans and connections. |
-| **P6: groups, iPhone, E2E** | Owner groups, then shared groups; end-to-end encrypted exchanges. The iOS Workspaces surface is built (§13.2); its push notifications are not. |
+| **P5: review and control** (built but notifications) | Review mode and the outgoing scrub, reviews in Needs you; *Coordinate: steer* with a per-action approval. Push notifications for reviews and plans are sent by the Worker; not built: the app opening the item from the alert, notifications for connections. |
+| **P6: groups, iPhone, E2E** | Owner groups, then shared groups; end-to-end encrypted exchanges. The iOS Workspaces surface is built (§13.2); its push notifications arrive (Worker) but do not yet open the item. |
 
 P2 comes before the network because a coordinator is useful to a single user on day one,
 while the network pays off once teammates are on board.

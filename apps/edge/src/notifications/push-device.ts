@@ -4,6 +4,17 @@
 import type { Env } from "../env";
 import { type PushMessage, validBadge, type BadgeSnapshot } from "./apns";
 import { notificationJSON as json, object, identifier, readNotificationJSON } from "./notifications-model";
+import { ID_RE } from "../identifiers";
+
+/** A workspace notice's extra payload fields, when present, are plain ids
+ * and a known Needs you kind. */
+function validWorkspaceFields(message: PushMessage): boolean {
+  if (message.kind === "badge") return true;
+  const id = (value: unknown) => value === undefined || (typeof value === "string" && ID_RE.test(value));
+  return id(message.workspaceId) && id(message.itemId) &&
+    (message.itemKind === undefined || ["plan", "approval", "review", "asking"].includes(message.itemKind)) &&
+    (message.itemKind === undefined) === (message.itemId === undefined);
+}
 
 interface Registration {
   scope: string; installationId: string; epoch: number; lease: string; active: boolean;
@@ -71,7 +82,7 @@ export class PushDevice implements DurableObject {
     if (!message || message.scope !== current.scope || !/^[a-f0-9-]{36}$/.test(message.id) ||
         !["completed", "failed", "input", "badge"].includes(message.kind) ||
         ((message.kind === "badge" || message.badgeCount !== undefined || message.badgeRevision !== undefined) &&
-          !validBadge(message))) return json({ error: "invalid" }, 400);
+          !validBadge(message)) || !validWorkspaceFields(message)) return json({ error: "invalid" }, 400);
     const key = `delivery:${message.id}`;
     const previous = await this.ctx.storage.get<{ state: string; at: number }>(key);
     if (previous?.state === "sent") return json({ sent: true });

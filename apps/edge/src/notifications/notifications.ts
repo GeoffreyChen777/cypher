@@ -5,14 +5,15 @@ import type { BadgeSnapshot } from "./apns";
 import {
   defaultNotificationSettings, identifier, object, parseActivity, parseSettings,
   readNotificationJSON, notificationJSON as json, notificationDecision, iosViewingChat,
-  chatAttention, narrower, attends, type ChatAttention,
+  chatAttention, narrower, attends, type ChatAttention, botIdOf, askingThreadOf, needsOwner, needsStamp,
+  NEEDS_RECORD_KINDS, INPUT_EXPIRY_MS, type NeedsItem,
   NOTICE_DELAY_MS, SHORT_RUN_MS, ACTIVITY_LEASE_MS, SEEN_SLACK_MS, type Activity, type Notice, type NoticeKind, type NotificationSettings
 } from "./notifications-model";
 
 interface Recipient { id: string; lease: string; installationId: string; epoch: number }
 interface SessionTarget { clientId: string; platform: "desktop" | "ios"; at: number }
 interface BadgeJob extends BadgeSnapshot { id: string; due: number; expires: number; attempt: number }
-type UnreadEvent = Pick<Notice, "id" | "chatId" | "projectId" | "kind" | "child" | "eventAt">;
+type UnreadEvent = Pick<Notice, "id" | "chatId" | "projectId" | "kind" | "child" | "eventAt" | "workspace" | "item">;
 
 function asyncChildren(fields: Row["fields"] | undefined) {
   const runs = (Array.isArray(fields?.subagents) ? fields.subagents : []).slice(0, 32)
@@ -67,6 +68,122 @@ export class Notifications {
     const statuses = [this.get<{ status: string }>(`eventState:${chatId}`)?.status,
       this.row("sessions", chatId)?.fields.status].filter(status => typeof status === "string");
     return !statuses.length || statuses.includes("awaitingInput");
+  }
+  /** A workspace's `bots` row and its own chat, while both stand. */
+  private workspaceOf(botId: string | undefined): { bot: Row; chat: Row } | undefined {
+    const bot = botId ? this.row("bots", botId) : undefined;
+    const chatId = bot?.fields.chatId;
+    const chat = typeof chatId === "string" ? this.row("chats", chatId) : undefined;
+    if (!bot || bot.deleted || !chat || chat.deleted || chat.fields.archived) return undefined;
+    return { bot, chat };
+  }
+  /** Where a chat's own notices are filed, for muting and the payload: its
+   * project, or -- for a workspace's own chat, which has none -- the
+   * workspace (`projectId` = bot id, `workspace: true`). Any other chat
+   * without a live project never notifies. */
+  private placeOf(chat: Row): { projectId: string; workspace: boolean } | undefined {
+    const botId = botIdOf(chat.fields);
+    if (botId && chatAttention(chat.fields) === "all") {
+      return this.workspaceOf(botId)?.chat.id === chat.id ? { projectId: botId, workspace: true } : undefined;
+    }
+    const spaceId = chat.fields.spaceId;
+    const space = typeof spaceId === "string" ? this.row("spaces", spaceId) : undefined;
+    return typeof spaceId === "string" && space && !space.deleted ? { projectId: spaceId, workspace: false } : undefined;
+  }
+  private projectAlive(notice: Pick<Notice, "projectId" | "workspace">): boolean {
+    const row = this.row(notice.workspace ? "bots" : "spaces", notice.projectId);
+    return !!row && !row.deleted;
+  }
+  /** Does a Needs you item still wait on the owner of workspace `botId`? */
+  private itemPending(item: NeedsItem, botId: string): boolean {
+    if (item.kind === "asking") {
+      const thread = this.row("chats", item.id);
+      return !!thread && !thread.deleted && !thread.fields.archived &&
+        askingThreadOf(thread.fields) === botId && this.mayBeAsking(item.id);
+    }
+    const rowKind = Object.keys(NEEDS_RECORD_KINDS).find(kind => NEEDS_RECORD_KINDS[kind] === item.kind);
+    const record = rowKind ? this.row(rowKind, item.id) : undefined;
+    return !!rowKind && !!record && !record.deleted && record.fields.botId === botId && needsOwner(rowKind, record.fields);
+  }
+  /** The item was decided (or its thread moved on): withdraw its alert, and
+   * the workspace chat's unread mark when that mark is the item's -- as a
+   * workspace's session counts only while it asks. */
+  private settleItem(item: NeedsItem): void {
+    for (const { notice } of this.events()) {
+      if (notice.item?.kind === item.kind && notice.item.id === item.id) this.remove(notice.id);
+    }
+    for (const unread of this.unread()) {
+      if (unread.item?.kind === item.kind && unread.item.id === item.id) this.clearUnread(unread.chatId, unread.id);
+    }
+  }
+  /** A record row (plan, approval, review) changed. It is announced once,
+   * when it starts waiting on the owner: on its creation by the workspace's
+   * host, or on its host moving it into that state. Every later sync of the
+   * unchanged item is not news; the claim key survives until it is decided,
+   * so even a re-created row stays quiet. */
+  private observeItem(before: Row | undefined, after: Row, sourceDevice: string): void {
+    const kind = NEEDS_RECORD_KINDS[after.kind];
+    if (!kind) return;
+    const item: NeedsItem = { kind, id: after.id }, claim = `needs:${kind}:${after.id}`;
+    const was = !!before && !before.deleted && needsOwner(after.kind, before.fields);
+    if (after.deleted || !needsOwner(after.kind, after.fields)) {
+      // Decided, expired or pruned. One that was not waiting has nothing left.
+      if (was) {
+        this.settleItem(item);
+        this.ctx.storage.sql.exec("DELETE FROM notify_kv WHERE key=?", claim);
+      }
+      return;
+    }
+    if (was) return;
+    const botId = after.fields.botId;
+    const workspace = typeof botId === "string" ? this.workspaceOf(botId) : undefined;
+    if (!workspace || workspace.bot.fields.hostDeviceId !== sourceDevice) return;
+    const now = Date.now();
+    if (!before || before.deleted) {
+      // A row first seen long after it was made is a baseline, not news.
+      const stamp = needsStamp(after.kind, after.fields);
+      if (stamp === undefined || now - stamp > INPUT_EXPIRY_MS) return;
+    }
+    if (!this.recipients().length || this.get<number>(claim) !== undefined) return;
+    this.set(claim, now);
+    // Records carry no transition stamp: the Worker's clock is when it was
+    // first seen waiting.
+    this.queueItem(workspace.chat, botId as string, item, now);
+  }
+  /** One `input` notice for a Needs you item, filed under its workspace's own
+   * chat (where the owner answers it) with the item named for the app. */
+  private queueItem(chat: Row, botId: string, item: NeedsItem, eventAt: number): ReturnType<Notifications["enqueue"]> | undefined {
+    const recipients = this.recipients().map(({ id, lease }) => ({ id, lease }));
+    if (!recipients.length) return undefined;
+    const now = Date.now();
+    return this.enqueue({
+      id: crypto.randomUUID(), chatId: chat.id, projectId: botId, kind: "input", child: false,
+      run: `${item.kind}/${item.id}`, at: now, expires: now + INPUT_EXPIRY_MS, recipients, attempt: 0,
+      eventAt, workspace: true, item
+    });
+  }
+  /** Make `notice` its chat's one pending alert and unread mark, replacing
+   * superseded state rather than accumulating alerts during flapping. A
+   * workspace's turn usually ends as it proposes a plan or asks for an
+   * approval: the item is the news, so a "completed" never displaces it. */
+  private enqueue(notice: Notice): "queued" | "read" | "superseded" {
+    const pending = this.events().filter(e => e.notice.chatId === notice.chatId);
+    if (notice.kind === "completed" && pending.some(e => e.notice.item)) return "superseded";
+    for (const e of pending) this.remove(e.notice.id);
+    // An event arriving while the session is already visible is read too.
+    // Remember the dedupe marker even if the viewer leaves before flush.
+    // Already opened on another device after the host stamped the event
+    // (the desktop marks a session it is showing seen immediately).
+    if (iosViewingChat(notice.chatId, this.get<Activity[]>("activity") ?? [], notice.at) ||
+        this.seenSince(notice.chatId, notice.eventAt)) {
+      this.clearUnread(notice.chatId);
+      return "read";
+    }
+    const queued = this.events();
+    if (queued.length >= 256 && queued[0]) this.remove(queued[0].notice.id);
+    this.put(notice, notice.at + NOTICE_DELAY_MS);
+    this.markUnread(notice);
+    return "queued";
   }
   private recipients(): Recipient[] { return this.get<Recipient[]>("recipients") ?? []; }
   private settings(): NotificationSettings { return this.get<NotificationSettings>("settings") ?? defaultNotificationSettings(); }
@@ -153,7 +270,8 @@ export class Notifications {
   private markUnread(notice: Notice): void {
     if (notificationDecision(notice, this.settings(), [], Date.now()) === "drop") return;
     const unread: UnreadEvent = { id: notice.id, chatId: notice.chatId, projectId: notice.projectId,
-      kind: notice.kind, child: notice.child, eventAt: notice.eventAt };
+      kind: notice.kind, child: notice.child, eventAt: notice.eventAt,
+      ...(notice.workspace ? { workspace: true } : {}), ...(notice.item ? { item: notice.item } : {}) };
     this.ctx.storage.sql.exec("INSERT INTO notify_unread(chat_id,value) VALUES(?,?) ON CONFLICT(chat_id) DO UPDATE SET value=excluded.value",
       notice.chatId, JSON.stringify(unread));
     this.badgeChanged(Date.now() + NOTICE_DELAY_MS);
@@ -221,10 +339,11 @@ export class Notifications {
   private pruneUnread(): void {
     const prefs = this.settings();
     for (const notice of this.unread()) {
-      const chat = this.row("chats", notice.chatId), project = this.row("spaces", notice.projectId);
-      if (!chat || chat.deleted || chat.fields.archived || !project || project.deleted ||
+      const chat = this.row("chats", notice.chatId);
+      if (!chat || chat.deleted || chat.fields.archived || !this.projectAlive(notice) ||
           !attends(this.attention(chat), notice.kind) ||
           (this.attention(chat) === "input" && !this.mayBeAsking(notice.chatId)) ||
+          (notice.item && !this.itemPending(notice.item, notice.projectId)) ||
           !prefs[notice.kind] || prefs.mutedProjects.includes(notice.projectId) ||
           (notice.child && notice.kind !== "input" && !prefs.subagents)) {
         this.clearUnread(notice.chatId);
@@ -266,22 +385,28 @@ export class Notifications {
             typeof body.updatedAt !== "number" || !Number.isSafeInteger(body.updatedAt) ||
             Math.abs(Date.now() - body.updatedAt) > 300_000) throw new Error();
         const chat = this.row("chats", chatId);
+        const attention = chat ? this.attention(chat) : "none";
+        // A hidden plan or routine thread is not the owner's to open, but its
+        // question is theirs: it waits in its workspace's Needs you.
+        const asking = chat && attention === "none" ? askingThreadOf(chat.fields) : undefined;
+        const place = chat && attention !== "none" ? this.placeOf(chat) : undefined;
         if (!chat || chat.deleted || chat.fields.archived || chat.fields.deviceId !== deviceId ||
-            typeof chat.fields.spaceId !== "string" || !this.row("spaces", chat.fields.spaceId)) {
+            (attention !== "none" && !place) || (asking && !this.workspaceOf(asking))) {
           // Name the rule that fired, in the order above: it lets a host tell a
           // registry row that has not arrived yet from a chat that will never
           // notify, and makes an ignored chat diagnosable from the host's log.
+          // `space`: neither a live project nor (for a workspace's own chat
+          // or thread) a live workspace.
           const reason = !chat || chat.deleted ? "chat"
             : chat.fields.archived ? "archived"
             : chat.fields.deviceId !== deviceId ? "device"
             : "space";
           return json({ ok: true, ignored: true, reason });
         }
-        // Hidden threads and memory passes never reach the owner. Their
+        // Other hidden threads and memory passes never reach the owner. Their
         // markers are written at birth and never change, so the host may
         // back off as for any other ignored chat.
-        const attention = this.attention(chat);
-        if (attention === "none") return json({ ok: true, ignored: true, reason: "hidden" });
+        if (attention === "none" && !asking) return json({ ok: true, ignored: true, reason: "hidden" });
         const subagents = (Array.isArray(body.subagents) ? body.subagents : []).slice(0, 32).map(value => {
           const run = object(value);
           if (!["async", "sync", "message"].includes(String(run.mode)) ||
@@ -305,6 +430,7 @@ export class Notifications {
           this.resumed(chatId, body.updatedAt);
           this.set(`run:${chatId}`, typeof body.startedAt === "number" ? String(body.startedAt) : crypto.randomUUID());
           if (attention === "input") { this.settle(chatId); this.schedule(); }
+          if (asking) { this.settleItem({ kind: "asking", id: chatId }); this.schedule(); }
           return json({ ok: true });
         }
         let kind: NoticeKind | undefined;
@@ -315,6 +441,17 @@ export class Notifications {
           kind = children.failed ? "failed" : "completed";
         }
         if (!kind) return json({ ok: true });
+        if (asking) {
+          const item: NeedsItem = { kind: "asking", id: chatId };
+          if (kind !== "input") { this.settleItem(item); this.schedule(); return json({ ok: true, hidden: true }); }
+          const run = this.get<string>(`run:${chatId}`) ?? crypto.randomUUID();
+          if (!this.recipients().length) return json({ ok: true, noRecipients: true });
+          // The thread's own dedupe state: each question of a run, once.
+          if (!this.claim(chatId, run, kind, body.updatedAt)) return json({ ok: true, duplicate: true });
+          const outcome = this.queueItem(this.workspaceOf(asking)!.chat, asking, item, body.updatedAt);
+          this.schedule();
+          return json({ ok: true, [outcome ?? "noRecipients"]: true });
+        }
         if (!attends(attention, kind)) { this.settle(chatId); this.schedule(); return json({ ok: true, hidden: true }); }
         const run = this.get<string>(`run:${chatId}`) ?? crypto.randomUUID();
         const startedAt = typeof body.startedAt === "number" ? body.startedAt : Number(run);
@@ -324,30 +461,16 @@ export class Notifications {
         const recipients = this.recipients().map(({ id, lease }) => ({ id, lease }));
         if (!recipients.length) return json({ ok: true, noRecipients: true });
         const notice: Notice = {
-          id: crypto.randomUUID(), chatId, projectId: chat.fields.spaceId, kind,
+          id: crypto.randomUUID(), chatId, projectId: place!.projectId, kind,
           child: !!chat.fields.child, run, at: Date.now(),
-          expires: Date.now() + (kind === "input" ? 8 * 3_600_000 : 600_000),
-          recipients, attempt: 0, sessionStatus: status, source: "event", eventAt: body.updatedAt
+          expires: Date.now() + (kind === "input" ? INPUT_EXPIRY_MS : 600_000),
+          recipients, attempt: 0, sessionStatus: status, source: "event", eventAt: body.updatedAt,
+          ...(place!.workspace ? { workspace: true } : {})
         };
         if (!this.claim(chatId, run, kind, body.updatedAt)) return json({ ok: true, duplicate: true });
-        for (const pending of this.events()) if (pending.notice.chatId === chatId) this.remove(pending.notice.id);
-        // An event arriving while the session is already visible is read too.
-        // Remember the dedupe marker even if the viewer leaves before flush.
-        // Already opened on another device after the host stamped the event
-        // (the desktop marks a session it is showing seen immediately).
-        if (iosViewingChat(chatId, this.get<Activity[]>("activity") ?? [], Date.now()) ||
-            this.seenSince(chatId, body.updatedAt)) {
-          this.clearUnread(chatId);
-          this.schedule();
-          return json({ ok: true, read: true });
-        }
-        const queued = this.events();
-        const oldest = queued[0];
-        if (queued.length >= 256 && oldest) this.remove(oldest.notice.id);
-        this.put(notice, Date.now() + NOTICE_DELAY_MS);
-        this.markUnread(notice);
+        const outcome = this.enqueue(notice);
         this.schedule();
-        return json({ ok: true, queued: true });
+        return json({ ok: true, [outcome]: true });
       }
       if (path === "register" && request.method === "POST") {
         if (!notificationsAvailable(this.env)) return json({ error: "push_unavailable" }, 503);
@@ -402,6 +525,7 @@ export class Notifications {
       // including iOS-started runs. Only that host's mutations are eligible.
       // Any device may move the seen marker; it reads, never notifies.
       if (after.kind === "chats") { this.observeSeen(before, after); continue; }
+      if (NEEDS_RECORD_KINDS[after.kind]) { this.observeItem(before, after, sourceDevice); continue; }
       if (after.kind !== "sessions" || after.deleted || after.fields.deviceId !== sourceDevice) continue;
       const chatId = after.fields.chatId;
       if (typeof chatId !== "string") continue;
@@ -426,6 +550,9 @@ export class Notifications {
         this.resumed(chatId, eventAt);
         const chat = this.row("chats", chatId);
         if (chat && this.attention(chat) === "input") this.settle(chatId);
+        if (chat && this.attention(chat) === "none" && askingThreadOf(chat.fields)) {
+          this.settleItem({ kind: "asking", id: chatId });
+        }
         continue;
       }
       let kind: NoticeKind;
@@ -441,36 +568,50 @@ export class Notifications {
         if (kind === "completed" && Number.isFinite(began) && now - began < SHORT_RUN_MS) continue;
       } else continue;
       const chat = this.row("chats", chatId);
-      if (!chat || chat.deleted || chat.fields.archived || typeof chat.fields.spaceId !== "string" ||
-          chat.fields.deviceId !== after.fields.deviceId) continue;
-      if (!attends(this.attention(chat), kind)) { this.settle(chatId); continue; }
-      const project = this.row("spaces", chat.fields.spaceId);
-      if (!project || project.deleted) continue;
+      if (!chat || chat.deleted || chat.fields.archived || chat.fields.deviceId !== after.fields.deviceId) continue;
+      const attention = this.attention(chat);
+      const asking = attention === "none" ? askingThreadOf(chat.fields) : undefined;
+      if (asking) {
+        const item: NeedsItem = { kind: "asking", id: chatId };
+        const workspace = this.workspaceOf(asking);
+        if (kind !== "input") { this.settleItem(item); continue; }
+        if (!workspace) continue;
+        if (!run) { run = crypto.randomUUID(); this.set(key, run); }
+        if (!this.recipients().length || !this.claim(chatId, run, kind, eventAt)) continue;
+        this.queueItem(workspace.chat, asking, item, eventAt);
+        continue;
+      }
+      if (!attends(attention, kind)) { this.settle(chatId); continue; }
+      const place = this.placeOf(chat);
+      if (!place) continue;
       if (!run) { run = crypto.randomUUID(); this.set(key, run); }
       const recipients = this.recipients().map(({ id, lease }) => ({ id, lease }));
       if (!recipients.length) continue;
       if (!this.claim(chatId, run, kind, eventAt)) continue;
-      const notice: Notice = {
-        id: crypto.randomUUID(), chatId, projectId: chat.fields.spaceId, kind,
-        child: !!chat.fields.child, run, at: now, expires: now + (kind === "input" ? 8 * 3_600_000 : 600_000),
-        recipients, attempt: 0, sessionStatus: String(status), eventAt
-      };
-      // Replace superseded state for this chat, rather than accumulating
-      // completion/input/error alerts during flapping.
-      for (const pending of this.events()) {
-        if (pending.notice.chatId === chatId) this.remove(pending.notice.id);
-      }
-      if (iosViewingChat(chatId, this.get<Activity[]>("activity") ?? [], now) || this.seenSince(chatId, eventAt)) {
-        this.clearUnread(chatId); continue;
-      }
-      if (this.events().length >= 256) {
-        const oldest = this.events()[0]; if (oldest) this.remove(oldest.notice.id);
-      }
-      this.put(notice, now + NOTICE_DELAY_MS);
-      this.markUnread(notice);
+      this.enqueue({
+        id: crypto.randomUUID(), chatId, projectId: place.projectId, kind,
+        child: !!chat.fields.child, run, at: now, expires: now + (kind === "input" ? INPUT_EXPIRY_MS : 600_000),
+        recipients, attempt: 0, sessionStatus: String(status), eventAt,
+        ...(place.workspace ? { workspace: true } : {})
+      });
     }
     this.pruneUnread();
     this.schedule();
+  }
+
+  /** Is a session notice's chat still in the state it announced, in the
+   * same run? */
+  private sessionStillAt(notice: Notice): boolean {
+    const session = notice.source === "event"
+      ? (() => {
+        const state = this.get<{ status: string; updatedAt: number }>(`eventState:${notice.chatId}`);
+        return state ? { fields: state, deleted: false } : undefined;
+      })()
+      : this.row("sessions", notice.chatId);
+    const expected = notice.sessionStatus ?? { completed: "idle", failed: "errored", input: "awaitingInput" }[notice.kind];
+    return !!session && !session.deleted && session.fields.status === expected &&
+      this.get<string>(`run:${notice.chatId}`) === notice.run &&
+      !(expected === "idle" && asyncChildren(session.fields).live);
   }
 
   private events(): { notice: Notice; due: number }[] {
@@ -505,21 +646,10 @@ export class Notifications {
     // subrequest budget. Remaining due work gets another alarm.
     for (const { notice, due } of this.events().slice(0, 2)) {
       if (due > now) break;
-      const chat = this.row("chats", notice.chatId), project = this.row("spaces", notice.projectId);
-      const session = notice.source === "event"
-        ? (() => {
-          const state = this.get<{ status: string; updatedAt: number }>(`eventState:${notice.chatId}`);
-          return state ? { fields: state, deleted: false } : undefined;
-        })()
-        : this.row("sessions", notice.chatId);
-      const expected = notice.sessionStatus ?? { completed: "idle", failed: "errored", input: "awaitingInput" }[notice.kind];
-      if (!chat || chat.deleted || chat.fields.archived || !project || project.deleted ||
+      const chat = this.row("chats", notice.chatId);
+      if (!chat || chat.deleted || chat.fields.archived || !this.projectAlive(notice) ||
           !attends(this.attention(chat), notice.kind) ||
-          !session || session.deleted || session.fields.status !== expected ||
-          this.get<string>(`run:${notice.chatId}`) !== notice.run) {
-        this.remove(notice.id); this.clearUnread(notice.chatId, notice.id); continue;
-      }
-      if (expected === "idle" && asyncChildren(session.fields).live) {
+          (notice.item ? !this.itemPending(notice.item, notice.projectId) : !this.sessionStillAt(notice))) {
         this.remove(notice.id); this.clearUnread(notice.chatId, notice.id); continue;
       }
       const decision = notificationDecision(notice, this.settings(), this.get<Activity[]>("activity") ?? [], Date.now());
@@ -534,9 +664,13 @@ export class Notifications {
       }
       if (decision === "defer") { this.put(notice, now + 15_000); continue; }
       const target = this.target(notice.chatId);
+      // Only the iPhone reports a workspace's own chat as the one it is
+      // showing (its workspace screen does; the desktop's does not), so the
+      // chat has a target only once a phone has opened it. Without one its
+      // notices go to every phone, as after a desktop target lapses.
       const recipients = target?.platform === "ios"
         ? this.recipients().filter(r => r.installationId === target.clientId)
-        : target?.platform === "desktop" && now - target.at > ACTIVITY_LEASE_MS
+        : (target?.platform === "desktop" && now - target.at > ACTIVITY_LEASE_MS) || (!target && notice.workspace)
           ? this.recipients()
           : [];
       if (!recipients.length) {
@@ -566,7 +700,9 @@ export class Notifications {
         try {
           const response = await this.deviceCall(recipient, "/send", { message: {
             id: notice.id, scope: this.scope(), chatId: notice.chatId, projectId: notice.projectId,
-            kind: notice.kind, expires: notice.expires, ...this.badge()
+            kind: notice.kind, expires: notice.expires, ...this.badge(),
+            ...(notice.workspace ? { workspaceId: notice.projectId } : {}),
+            ...(notice.item ? { itemKind: notice.item.kind, itemId: notice.item.id } : {})
           } });
           const outcome = await response.json() as { sent?: boolean; permanent?: boolean };
           if (!outcome.sent && !outcome.permanent) retry = true;

@@ -291,7 +291,7 @@ test("file tools: a sensitive read asks a human; symlinks resolve to their targe
   assert.match(dialogs[2].title, /\.ssh\/id_ed25519/);
 });
 
-test("assisted: the judge approves an external write without a dialog; protected writes go to the human", async () => {
+test("assisted: the judge approves an external write without a dialog; a protected write it asks about with a concern goes to the human", async () => {
   const allowed = await turn(
     [{ tool: "write", args: { path: join(other, "from-judge.md"), content: "ok\n" } }],
     { judge: '{"decision":"approve","reason":"the user asked for it"}' },
@@ -302,7 +302,7 @@ test("assisted: the judge approves an external write without a dialog; protected
 
   const escalated = await turn(
     [{ tool: "edit", args: { path: ".git/config", edits: [{ oldText: "[core]", newText: "[core]\n\tfsmonitor = touch /tmp/pwned" }] } }],
-    { judge: '{"decision":"ask-user","reason":"fsmonitor runs a program"}', answers: ["Deny"] },
+    { judge: '{"decision":"ask-user","reason":"fsmonitor runs a program","concern":"system-change"}', answers: ["Deny"] },
   );
   assert.equal(escalated.dialogs.length, 1);
   assert.match(escalated.dialogs[0].title, /fsmonitor/);
@@ -319,16 +319,18 @@ test("explicit request: the owner's own words, passed by the engine, let the mod
   git("-C", repo, "commit", "-q", "--allow-empty", "-m", "ship it");
   git("-C", repo, "remote", "add", "origin", remote);
   const step = [{ tool: "bash", args: { command: "git push -q origin main", escalate: { label: "Push main", reason: "the owner asked" } } }];
-  const approve = JSON.stringify({ decision: "approve", reason: "The owner asked to push main.", userQuote: "把 main 推到 origin", target: { kind: "branch", value: "main" } });
+  // Round 3: the judge asks with a concern ("seen by the team, and the owner didn't ask for that"); the owner's own
+  // words, which the code checks against the line, answer it.
+  const asks = JSON.stringify({ decision: "ask-user", reason: "Pushing main is seen by the team.", concern: "outside-audience", userQuote: "把 main 推到 origin", target: { kind: "branch", value: "main" } });
 
-  // Without the owner's words, the same approval asks.
-  const without = await turn(step, { cwd: repo, judge: approve, answers: ["Deny"] });
+  // Without the owner's words, the concern stands: the owner is asked.
+  const without = await turn(step, { cwd: repo, judge: asks, answers: ["Deny"] });
   assert.equal(without.dialogs.length, 1);
-  assert.match(without.dialogs[0].title, /didn't pass your own words/);
+  assert.match(without.dialogs[0].title, /Pushing main is seen by the team/);
   assert.notEqual(git("--git-dir", remote, "rev-parse", "-q", "--verify", "main").status, 0, "nothing pushed");
 
   // With them, it runs once, without a dialog.
-  const owned = await turn(step, { cwd: repo, judge: approve, ownerWords: { messages: [{ text: "把 main 推到 origin", source: "typed" }], agentWritten: false } });
+  const owned = await turn(step, { cwd: repo, judge: asks, ownerWords: { messages: [{ text: "把 main 推到 origin", source: "typed" }], agentWritten: false } });
   assert.equal(owned.dialogs.length, 0);
   assert.equal(owned.results[0].isError, false, owned.results[0].text);
   assert.match(owned.results[0].text, /Ran outside the sandbox \(approved once by the reviewing model/);
@@ -337,7 +339,7 @@ test("explicit request: the owner's own words, passed by the engine, let the mod
   assert.deepEqual(audit.at(-1).explicit, { ok: true, quote: "把 main 推到 origin", targets: ["branch main on origin"], passed: ["quote", "target", "current"], quoteSource: "typed" });
 });
 
-test("model first: the judge runs local work outside the sandbox and may read a sensitive file; dangerous commands skip it", { skip }, async () => {
+test("model first: the judge runs local work outside the sandbox and may read a sensitive file; its listed concern on a danger asks", { skip }, async () => {
   const approve = '{"decision":"approve","reason":"the user asked for it"}';
   const outside = await turn(
     [{ tool: "bash", args: { command: "echo judged > ../other/judged.txt", escalate: { label: "Note it in the other repo", reason: "the user asked" } } }],
@@ -364,13 +366,12 @@ test("model first: the judge runs local work outside the sandbox and may read a 
   assert.match(key.results[0].text, /PRIVATE KEY/);
   assert.equal(key.results[1].isError, true, "nothing was remembered");
 
-  // A danger asks even when the model would approve it: the owner's own words
-  // must say so, and nothing here quotes them.
+  // A danger the model asks about with a listed concern no owner's words answer: the owner decides.
   const held = await turn(
     [{ tool: "bash", args: { command: `rm -rf ${join(other, "everything")}`, escalate: { label: "Clean up", reason: "x" } } }],
-    { judge: approve, answers: ["Deny"] },
+    { judge: '{"decision":"ask-user","reason":"not this task\'s files","concern":"destroys-data"}', answers: ["Deny"] },
   );
-  assert.equal(held.dialogs.length, 1, "a dangerous command asks even when the model would approve");
+  assert.equal(held.dialogs.length, 1, "a listed concern asks");
   assert.match(held.dialogs[0].title, /Dangerous: it deletes files outside the project folders/);
   assert.equal(held.results[0].isError, true);
 });
@@ -390,7 +391,7 @@ test("apply_patch goes through the same checks", async () => {
       { tool: "apply_patch", args: { patch: patch("src/added.ts") } },
       { tool: "apply_patch", args: { patch: patch(join(other, "patched.md")) } },
     ],
-    { extraExtensions: [codex], answers: ["Deny"], judge: '{"decision":"ask-user","reason":"unclear"}', api: "openai-responses" },
+    { extraExtensions: [codex], answers: ["Deny"], judge: '{"decision":"ask-user","reason":"another project","concern":"other-task"}', api: "openai-responses" },
   );
   assert.equal(results[0].isError, false, results[0].text);
   assert.equal(readFileSync(join(workspace, "src", "added.ts"), "utf8"), "patched\n");
@@ -413,7 +414,7 @@ test("filtered network: a new domain asks; a denied one never connects", { skip 
           },
         },
       ],
-      { answers: ["Deny"], judge: '{"decision":"ask-user","reason":"not part of the task"}' },
+      { answers: ["Deny"], judge: '{"decision":"ask-user","reason":"not part of the task","concern":"outside-audience"}' },
     );
     assert.equal(dialogs.length, 1);
     assert.match(dialogs[0].title, /^Allow the agent to reach example\.com\?/);

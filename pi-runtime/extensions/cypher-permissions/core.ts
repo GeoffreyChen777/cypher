@@ -7,7 +7,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { constants, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { open, mkdir, access as fsAccess, stat as fsStat, readdir as fsReaddir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
@@ -15,7 +15,16 @@ import { AuditLog } from "./audit.ts";
 import type { AuditRecord } from "./audit.ts";
 import { appendCommandRule, appendRule, approvalMode as approvalModeFor, CONFIG_FILE, editUserConfig, loadConfig, ownFolders, readUserConfig, resolveLevel } from "./config.ts";
 import { CREATED_ENTRY, CreatedStore, creationsOf } from "./created.ts";
-import type { CreationFacts } from "./created.ts";
+import type { CreationFacts, CreationPlan } from "./created.ts";
+import type { CatalogueFacts } from "./catalogue.ts";
+import { genericDestroyer, targetsOf } from "./catalogue.ts";
+import { readTool } from "./tools.ts";
+import { entryCovers, ledgerFile } from "./ledger.ts";
+import type { LedgerEntity, LedgerEntry } from "./ledger.ts";
+import { Denials, denialsFile } from "./denials.ts";
+import type { ActionClass, DenialRecord, DenialScope } from "./denials.ts";
+import type { LifecycleFacts } from "./lifecycle.ts";
+import type { PullRequestFact } from "./entities.ts";
 import type { Capability, LevelName, PermissionsConfig } from "./config.ts";
 import {
   anchorDirectories,
@@ -30,10 +39,13 @@ import {
 import { globBase, hasGlob } from "./glob.ts";
 import { GRANT_ENTRY, GrantStore, newGrant, REVOKE_ENTRY, ROOT_ENTRY } from "./grants.ts";
 import type { Grant, GrantScope } from "./grants.ts";
-import { checkExplicit, describeTarget, lineTargets, repoName } from "./explicit.ts";
-import type { ExplicitClaim, ExplicitFacts, ExplicitResult, LineTargets, OwnerWords, TargetFacts } from "./explicit.ts";
-import { conversationContext, judgePrompt, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
-import type { JudgeRequest } from "./judge.ts";
+import { checkDataConsent, checkExplicit, consentText, describeAttribute, describeTarget, lineTargets, mentions, repoName, scanConsents, scanDataConsent } from "./explicit.ts";
+import type { ExplicitClaim, ExplicitFacts, ExplicitResult, LineTargets, OwnerWords, Target, TargetFacts } from "./explicit.ts";
+import { answeredByConsent, conversationContext, judgePrompt, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
+import type { Concern, JudgeEvidence, JudgeRequest } from "./judge.ts";
+import { floorOf } from "./floor.ts";
+import type { FloorHit } from "./floor.ts";
+import { describeGrade, gradesOf, kindGrades } from "./grades.ts";
 import { isUnder, PathContext } from "./paths.ts";
 import type { Classification } from "./paths.ts";
 import { decide, describe } from "./policy.ts";
@@ -42,7 +54,7 @@ import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs }
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
 import { benignEnv, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
-import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, redirectRisk, TIER_RANK } from "./risk.ts";
+import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, normalRefspec, redirectRisk, TIER_RANK } from "./risk.ts";
 import type { Assessment, GitFacts, KillTarget, ProcessFacts, RiskFacts, Tier } from "./risk.ts";
 import { INSPECT, inspectMatches, viewOf } from "./packs.ts";
 import { parseShell, UNKNOWN } from "./shell.ts";
@@ -174,6 +186,22 @@ const ALWAYS_IN = "Always in ";
 /** Dangerous work: until the user's next message. */
 const TASK = "Allow for this task";
 
+/**
+ * A prompt that came back without a button: closed, timed out, or cut off by the turn ending. It is
+ * not a refusal (round 3): only Deny (and Deny and stop) is. It is audited as `dismissed` (never
+ * `deny`), keeps nothing, and the agent is told it was not answered rather than refused.
+ */
+function unanswered(choice: string | undefined, started: number, timeoutMs: number | null | undefined, signal: AbortSignal | undefined): "dismissed" | "timeout" | "aborted" | undefined {
+  if (choice !== undefined && choice !== "") return undefined;
+  if (signal?.aborted) return "aborted";
+  if (typeof timeoutMs === "number" && Date.now() - started >= timeoutMs) return "timeout";
+  return "dismissed";
+}
+
+/** What the agent is told about an unanswered prompt. */
+const UNANSWERED = "Not run: the owner closed the permission prompt without answering. That is not a refusal; don't repeat it on your own. Ask them whether they want it, or continue without it.";
+
+
 /** A reviewing model that failed to sign in (an expired session, a missing key). */
 const AUTH_FAILURE = /authenticat|unauthori[sz]ed|\b401\b|\b403\b|expired|log ?in|sign ?in|credential|api key|forbidden/i;
 
@@ -192,6 +220,34 @@ interface Review {
   audit?: Pick<AuditRecord, "judgeVerdict">;
   /** What the model quoted and named, for a danger (explicit.ts checks it). */
   claim?: ExplicitClaim;
+  /** The concern an ask named (judge.ts `CONCERNS`). */
+  concern?: Concern;
+}
+
+/**
+ * Whether the owner's own words, as the code checked them (`JudgeEvidence`), answer a concern the judge
+ * asked with (judge.ts `CONCERN_TABLE` `answeredByConsent`): a consent of a kind the code vouches for by
+ * itself (typed, a plan, its card or an answer; a reply's assent is the judge's call), covering every
+ * target the line names, not taken back since; for the installed app's data, owner words naming it.
+ * Returns the words, or undefined. Round 3: "what the owner's previous turn already asked for, the judge
+ * must let through".
+ */
+/** A denial, for the judge's evidence. */
+function describeDenial(denial: DenialRecord): string {
+  return `${denial.what} (denied ${denial.at.slice(0, 16).replace("T", " ")} UTC; same action, on ${denial.scopes.slice(0, 3).map((scope) => (scope.kind === "line" ? "the line itself" : `${scope.kind} ${scope.says?.[0] ?? scope.name}`)).join(", ")})`;
+}
+
+/** A file, domain or tool request in words, for a denial's record. */
+function describeRequest(request: { capability: string; tool: string; domain?: string; toolInput?: string }, paths: readonly string[], home: string): string {
+  if (request.domain !== undefined) return `reaching ${request.domain}`;
+  if (request.toolInput !== undefined) return `the ${request.tool} tool (${request.toolInput.length > 120 ? `${request.toolInput.slice(0, 120)}…` : request.toolInput})`;
+  return `${request.tool} ${request.capability} of ${paths.map((path) => displayPath(path, home)).join(", ")}`;
+}
+
+export function consentAnswers(concern: Concern | undefined, evidence: JudgeEvidence | undefined): string | undefined {
+  if (concern === undefined || !answeredByConsent(concern) || !evidence) return undefined;
+  if (concern === "installed-app" && evidence.installedData) return evidence.installedData.finding.ok ? evidence.installedData.finding.quote : undefined;
+  return evidence.consents?.find((finding) => finding.ok && !finding.unread && finding.source !== "reply")?.quote;
 }
 
 type ElevateOutcome = { allowed: true; scope: Scope; by: Grant["approvedBy"] } | { allowed: false; reason: string; abort?: boolean };
@@ -322,6 +378,9 @@ function processPlace(pid: number): { program?: string; cwd?: string } {
   return { program: program && isAbsolute(program) ? program : undefined, cwd };
 }
 
+/** How often the reviewing model is asked before its silence or failure goes to the user: once, and one retry. */
+const JUDGE_ATTEMPTS = 2;
+
 const ESCALATE_HINT =
   "If the command needs what the sandbox withholds (files outside the project folders, credentials, keys, the keychain, other processes, system services), run it again with `escalate`: a reviewing model or the user decides whether it runs outside the sandbox.";
 
@@ -337,6 +396,8 @@ export type CommandCheck =
 /** One command of a bash line, seen through its wrappers, with the directory it runs in (undefined: not known). */
 interface LineCommand extends SimpleCommand {
   cwd: string | undefined;
+  /** It runs code from its input that is known only when it runs (risk.ts). */
+  stdinCode?: boolean;
   inert: boolean;
   /** The wrappers that only run it (`nohup`, `timeout 30`). */
   wrappers: string[];
@@ -345,6 +406,28 @@ interface LineCommand extends SimpleCommand {
 }
 
 const DIRECTORY_BUILTINS: ReadonlySet<string> = new Set(["cd", "pushd", "popd"]);
+
+/** A danger's kind or key, by the action class a consent must ask for (lexicon.ts words). */
+const UNREAD_ACTIONS: readonly [string, RegExp][] = [
+  ["delete", /delet|remov|discard|destroy|wipe|prune|erase|\brm\b|undoes/i],
+  ["stop", /stop|kill/i],
+  ["push", /push|publish to|force/i],
+  ["publish", /publish|release/i],
+  ["merge", /merge|pull request/i],
+  ["install", /install/i],
+  ["apply", /deploy|appl|scale|chang/i],
+  ["write", /write|writes/i],
+  ["reach", /send|reach|upload/i],
+];
+
+/** Shells and interpreters that run code from their input: no script, no `-c`/`-e`, only options (or `-`). */
+const CODE_READERS = /^(sh|bash|zsh|dash|ksh|fish|python\d*(\.\d+)?|node|deno|bun|ruby|perl|php|lua|osascript|tclsh|Rscript)$/;
+function readsCode(words: readonly string[]): boolean {
+  const program = words[0];
+  if (program === undefined || program === UNKNOWN || !CODE_READERS.test(basename(program))) return false;
+  const shell = /^(sh|bash|zsh|dash|ksh|fish)$/.test(basename(program));
+  return words.slice(1).every((word) => word === "-" || (word !== UNKNOWN && /^[-+][A-Za-z]+$/.test(word) && !(shell ? /^-[A-Za-z]*c/ : /^-[A-Za-z]*[ce]/).test(word)) || /^--(login|noprofile|norc|posix)$/.test(word));
+}
 
 /** Variables bash itself reads: a line that assigns one changes how what follows runs. */
 const SHELL_VARIABLES =
@@ -445,6 +528,8 @@ export class Permissions {
   readonly grants: GrantStore;
   /** What this task made (created.ts): the facts a danger over its own leavings rests on. */
   readonly created: CreatedStore;
+  /** The owner's Deny clicks in this chat, by action class (denials.ts). */
+  readonly denials: Denials;
   readonly status: LandstripStatus;
   config!: PermissionsConfig;
   level!: LevelName;
@@ -501,7 +586,8 @@ export class Permissions {
     this.cwd = init.cwd;
     this.audit = new AuditLog(init.agentDir, init.chatId);
     this.grants = new GrantStore(init.chatId);
-    this.created = new CreatedStore(init.chatId);
+    this.created = new CreatedStore(init.chatId, ledgerFile(init.agentDir, init.chatId));
+    this.denials = new Denials(denialsFile(init.agentDir, init.chatId), init.chatId);
     this.status = init.landstrip ?? landstripStatus();
     this.homeIndex = new HomeIndexCache(join(init.agentDir, "cypher-permissions", "home-index.json"), this.home);
     this.reload(init.cwd, []);
@@ -866,9 +952,12 @@ export class Permissions {
   }
 
   /**
-   * Ask the reviewing model about one request. It approves, or says why it
-   * could not; a model that cannot run (none here, paused, an error, a
-   * timeout) never approves.
+   * Ask the reviewing model about one request. Its verdict decides: an
+   * approval runs the call, and an ask stands only with a concern from the
+   * closed list (judge.ts `CONCERN_TABLE`); an ask without one runs once.
+   * A model that cannot decide (none here, paused, an error, a timeout or
+   * an unreadable answer after the retry) is the floor's `no-judge` row:
+   * the owner is asked, with the reason.
    */
   private async review(
     request: Omit<JudgeRequest, "level" | "workspaceRoots" | "userMessages" | "recentToolCalls">,
@@ -879,29 +968,37 @@ export class Permissions {
     if (paused) return { decision: "ask-user", once: false, reason: paused, state: "paused" };
     const { userMessages, recentToolCalls } = conversationContext(ctx.branch());
     const judgeRequest: JudgeRequest = { ...request, level: this.level, workspaceRoots: this.roots, userMessages, recentToolCalls, ownerWords: this.ownerWords };
-    const controller = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, this.config.judge.timeoutMs);
-    const onAbort = () => controller.abort();
-    ctx.signal?.addEventListener("abort", onAbort, { once: true });
+    // One attempt, then one retry when it timed out, gave no readable answer, or failed for a reason other than signing in.
     let text: string | undefined;
     let failure: string | undefined;
-    try {
-      text = await ctx.complete(JUDGE_SYSTEM_PROMPT, judgePrompt(judgeRequest), controller.signal);
-    } catch (error) {
-      text = undefined;
-      failure = error instanceof Error ? error.message.trim() : undefined;
-    } finally {
-      clearTimeout(timer);
-      ctx.signal?.removeEventListener("abort", onAbort);
+    let timedOut = false;
+    let verdict: ReturnType<typeof parseVerdict> | undefined;
+    for (let attempt = 0; attempt < JUDGE_ATTEMPTS; attempt++) {
+      const controller = new AbortController();
+      timedOut = false;
+      failure = undefined;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, this.config.judge.timeoutMs);
+      const onAbort = () => controller.abort();
+      ctx.signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        text = await ctx.complete(JUDGE_SYSTEM_PROMPT, judgePrompt(judgeRequest), controller.signal);
+      } catch (error) {
+        text = undefined;
+        failure = error instanceof Error ? error.message.trim() : undefined;
+      } finally {
+        clearTimeout(timer);
+        ctx.signal?.removeEventListener("abort", onAbort);
+      }
+      verdict = text === undefined ? undefined : parseVerdict(text);
+      if ((verdict && verdict.kind !== "unreadable") || ctx.signal?.aborted || (failure && AUTH_FAILURE.test(failure))) break;
     }
     if (text === undefined) {
       if (timedOut) {
         this.noteReview("timeout");
-        return { decision: "ask-user", once: false, reason: `The reviewing model did not answer within ${Math.round(this.config.judge.timeoutMs / 1000)} seconds.`, state: "unavailable" };
+        return { decision: "ask-user", once: false, reason: `The reviewing model did not answer within ${Math.round(this.config.judge.timeoutMs / 1000)} seconds, twice.`, state: "unavailable" };
       }
       const short = failure && failure.length > 200 ? `${failure.slice(0, 200)}…` : failure;
       if (failure && AUTH_FAILURE.test(failure)) this.noteReview("auth", short);
@@ -909,15 +1006,40 @@ export class Permissions {
       return { decision: "ask-user", once: false, reason: `The reviewing model failed${why}`, state: "unavailable" };
     }
     this.noteReview("ok");
-    const verdict = parseVerdict(text);
+    verdict ??= parseVerdict(text);
+    // No readable verdict, twice: no judge decided.
+    if (verdict.kind === "unreadable") return { decision: "ask-user", once: false, reason: `${verdict.reason} (twice)`, state: "unavailable", audit: { judgeVerdict: "unreadable" } };
+    // An ask with no concern from the closed list runs once: caution without a concrete concern is no reason to interrupt the owner.
+    if (verdict.kind === "ask-user" && verdict.concern === undefined) {
+      return {
+        decision: "approve",
+        once: true,
+        reason: `${verdict.reason} (it named no concrete concern, so it runs once)`,
+        state: "approved",
+        audit: { judgeVerdict: "ask-user" },
+        ...(verdict.quote || verdict.targets ? { claim: { quote: verdict.quote, ...(verdict.source ? { source: verdict.source } : {}), targets: verdict.targets } } : {}),
+      };
+    }
     return {
       decision: verdict.decision,
       once: verdict.once,
       reason: verdict.reason,
       state: verdict.decision === "approve" ? "approved" : "asked",
       audit: { judgeVerdict: verdict.kind },
-      ...(verdict.quote || verdict.targets ? { claim: { quote: verdict.quote, targets: verdict.targets } } : {}),
+      ...(verdict.quote || verdict.targets ? { claim: { quote: verdict.quote, ...(verdict.source ? { source: verdict.source } : {}), targets: verdict.targets } } : {}),
+      ...(verdict.concern ? { concern: verdict.concern } : {}),
     };
+  }
+
+  /**
+   * An ask on a concern the owner's own words answer (`consentAnswers`) runs once instead: the review's
+   * new decision, or the review as it was.
+   */
+  private answered(review: Review, evidence: JudgeEvidence | undefined): Review {
+    if (review.decision !== "ask-user" || review.state !== "asked") return review;
+    const words = consentAnswers(review.concern, evidence);
+    if (words === undefined) return review;
+    return { ...review, decision: "approve", once: true, state: "approved", reason: `${review.reason} (but your own words ask for it, "${words.length > 120 ? `${words.slice(0, 120)}…` : words}", so it runs once)` };
   }
 
   private async elevate(
@@ -944,13 +1066,30 @@ export class Permissions {
     const self = request.classifications.some((item) => item.guard === "self");
     const guarded = request.classifications.some((item) => item.guard === "protected");
     const file = request.domain === undefined && request.toolInput === undefined;
-    // A protected write runs code later: dangerous, a human's alone.
-    const tier: Tier = file && guarded && !sensitive && !self ? "danger" : "local";
-    // The always-ask floor: a write to the permission system's own files.
-    const floor =
-      file && request.capability === "write"
-        ? request.classifications.map((item) => this.paths.isPermissionSystem(item.path) && item.path).find((path): path is string => typeof path === "string")
-        : undefined;
+    // A protected write runs code later, and a write to Cypher's own data changes the installed app: dangers, for the judge, never remembered.
+    const tier: Tier = file && request.capability === "write" && (guarded || self) && !sensitive ? "danger" : "local";
+    // The floor (floor.ts): a write to the permission system's own files; the owner's own "Ask me" setting.
+    // The owner's own Deny of a request like it in this chat (denials.ts): same tool, capability, target scope.
+    const actionClass: ActionClass = {
+      tool: request.tool,
+      actions: [request.domain !== undefined ? "network" : request.toolInput !== undefined ? `tool:${request.tool}` : request.capability],
+      ...(sensitive ? { concern: "secret" } : file && paths.some((path) => this.installedApp(path) && !installedProgram(path)) ? { concern: "installed-app" } : {}),
+      scopes:
+        request.domain !== undefined
+          ? [{ kind: "host", name: request.domain }]
+          : request.toolInput !== undefined
+            ? [{ kind: "line", name: `${request.tool} ${request.toolInput}` }]
+            : paths.map((path) => ({ kind: "path" as const, name: path, says: [displayPath(path, this.home)] })),
+    };
+    const denied = await this.deniedLike(actionClass);
+    const floor = floorOf(
+      {
+        permissionSystemPath: file && request.capability === "write" ? request.classifications.map((item) => this.paths.isPermissionSystem(item.path) && item.path).find((path): path is string => typeof path === "string") : undefined,
+        ownerRule: request.mode === "ask" ? "this kind of request is set to Ask me" : undefined,
+        ...(denied.active ? { ownerDenied: `you denied ${denied.active.denial.what} and haven't asked for it since` } : {}),
+      },
+      "before",
+    );
     const base: AuditRecord = {
       decision: "deny",
       decidedBy: "user",
@@ -963,13 +1102,21 @@ export class Permissions {
       tier,
     };
     const finish = (record: Partial<AuditRecord>) => this.audit.write({ ...base, latencyMs: Date.now() - started, ...record } as AuditRecord);
-    // Model first: the judge either approves automatically or puts the
-    // question to the user with its reason.
+    // Model first: the judge decides; only the floor asks without it.
     let judgeNote: string | undefined;
-    if (floor !== undefined) judgeNote = `Only you can approve this: ${displayPath(floor, this.home)} is part of the permission system itself.`;
-    if (request.mode === "assisted" && tier !== "danger" && floor === undefined) {
+    if (floor?.id === "permission-system") judgeNote = `Only you can approve this: ${displayPath(floor.detail, this.home)} is part of the permission system itself.`;
+    if (floor === undefined) {
       const first = request.classifications[0];
-      const verdict = await this.review(
+      // The installed app's data (the owner's chats, journals, databases): evidence, and whether the owner's words name it.
+      const data = file ? paths.filter((path) => this.installedApp(path) && !installedProgram(path)) : [];
+      if (data.length) await this.refreshOwnerWords();
+      const denials = denied.similar.length ? { denials: denied.similar.map((denial) => describeDenial(denial)) } : {};
+      const evidence: JudgeEvidence | undefined = data.length
+        ? { installedData: { paths: data.map((path) => displayPath(path, this.home)), finding: scanDataConsent(this.ownerWords, data) }, ...denials }
+        : denied.similar.length
+          ? denials
+          : undefined;
+      const reviewed = await this.review(
         {
           // A domain reads as "network" with the domain as its path; a tool call as "tool".
           capability: request.domain !== undefined ? "network" : request.toolInput !== undefined ? "tool" : request.capability,
@@ -983,14 +1130,17 @@ export class Permissions {
           input: request.toolInput,
           justification: request.justification,
           tier,
+          ...(tier === "danger" ? { tierReason: self ? "writes Cypher's own data" : "writes a file that runs code later" } : {}),
+          ...(evidence ? { evidence } : {}),
         },
         ctx,
       );
+      const verdict = this.answered(reviewed, evidence);
       base.judge = verdict.state;
       Object.assign(base, verdict.audit);
       if (verdict.decision === "approve") {
-        // Remembered for the chat, so the same access is not reviewed again; a secret, or an approval of this call alone, only once.
-        const scope = sensitive || verdict.once ? "once" : "chat";
+        // Remembered for the chat, so the same access is not reviewed again; a secret, a danger, the installed app's data, or an approval of this call alone, only once.
+        const scope = sensitive || verdict.once || tier === "danger" || data.length > 0 ? "once" : "chat";
         finish({ decision: "allow", decidedBy: "judge", reason: verdict.reason, scope, prompted: false });
         return { allowed: true, scope, by: "judge" };
       }
@@ -1011,11 +1161,13 @@ export class Permissions {
     else options = [projectOption, ONCE, HUMAN.deny, HUMAN.stop];
     const kind = request.domain !== undefined ? "network" : request.toolInput !== undefined ? "tool" : "access";
     const title = approvalTitle(request, judgeNote, this.home, tier === "danger") + promptLine(kind, ctx.toolCallId);
+    const shown = Date.now();
     const choice = await ctx.ui.select(title, options, {
       signal: ctx.signal,
       timeout: this.config.ask.timeoutMs ?? undefined,
     });
-    const asked = { prompted: true, choice: choice ?? "dismissed" };
+    const nobody = unanswered(choice, shown, this.config.ask.timeoutMs, ctx.signal);
+    const asked = { prompted: true, choice: nobody ?? choice };
     switch (choice) {
       case HUMAN.once:
       case ONCE:
@@ -1035,14 +1187,20 @@ export class Permissions {
         finish({ decision: "allow", scope: "project", ...asked });
         return { allowed: true, scope: "project", by: "user" };
       case HUMAN.stop:
+        this.denials.record(actionClass, describeRequest(request, paths, this.home), this.ownerWords);
         finish({ decision: "abort", ...asked });
         ctx.abort?.();
         return { allowed: false, reason: "The user denied this and stopped the turn.", abort: true };
-      default: {
-        const reason = choice === HUMAN.deny ? "The user denied this request." : "No approval was given (the request was dismissed or timed out).";
+      case HUMAN.deny: {
+        this.denials.record(actionClass, describeRequest(request, paths, this.home), this.ownerWords);
+        const reason = "The user denied this request.";
         finish({ reason, ...asked });
         return { allowed: false, reason: `${reason} Do not retry the same access; continue without it or ask the user.` };
       }
+      default:
+        // Closed, timed out, or an answer that is none of the buttons: no decision, and no denial.
+        finish({ decision: "dismissed", reason: `No answer (${nobody ?? "not one of the options"}).`, ...asked });
+        return { allowed: false, reason: UNANSWERED };
     }
   }
 
@@ -1205,6 +1363,9 @@ export class Permissions {
     return parseShell(command, this.home, {
       assignable: (name) => this.assignable(name),
       prefixAllowed: benignEnv,
+      // Read as an evaluator (shell.ts): loops over literal words, functions, scripts in heredocs, `PATH=… cmd`.
+      evaluate: true,
+      resolveProgram: (program, assignments) => this.resolveWithPath(program, assignments),
       // An exported value is followed for later words; `export` itself never runs outside by a rule (`ruleCannotVouch`).
       exportable: (name) => !SHELL_VARIABLES.test(name) && !/proxy/i.test(name),
       // `$PWD` is where the line starts, unless a command prefix from the settings could move it first.
@@ -1228,7 +1389,7 @@ export class Permissions {
     // A subshell starts where the line's shell is, and its `cd` stays in it.
     let outside: string | undefined = cwd;
     let group: number | undefined;
-    for (const command of commands) {
+    for (const [index, command] of commands.entries()) {
       if (command.subshell !== group) {
         // Entering one from the line's shell, or leaving one (for the line, or the next subshell).
         if (group === undefined) outside = here;
@@ -1249,7 +1410,10 @@ export class Permissions {
         carried: [...(command.envValues ?? []), ...(wrapped ? command.words.slice(0, command.words.length - words.length) : [])],
         wrappers: wrapped?.wrappers ?? [],
         cwd: here,
-        inert: isInert(words) || this.harmlessFilter(words, here),
+        // A system shell whose script the reader read (`bash -c '…'`, `bash <<'EOF'`) only runs the commands that follow it.
+        inert: isInert(words) || this.harmlessFilter(words, here) || (command.script === true && this.systemProgram(words[0], here)),
+        // A shell or interpreter reading code from its input, when the reader couldn't read that code.
+        ...(command.script !== true && readsCode(words) && (command.reads.length > 0 || command.inputUnknown === true || commands[index - 1]?.joint === "|") ? { stdinCode: true } : {}),
       });
       if (!moves(command)) continue;
       const [program, target, ...rest] = command.words;
@@ -1276,6 +1440,15 @@ export class Permissions {
 
   // --- What this task made ---------------------------------------------------
 
+  /** Whether a path may ever be recorded as made: not sensitive, protected, the permission system's, the installed app's, a home or root. */
+  private recordablePath(path: string): boolean {
+    if (path === "/" || path === this.home || dirname(path) === path) return false;
+    const classification = this.paths.classify(path);
+    if (classification.zone === "sensitive" || classification.guard !== undefined) return false;
+    if (this.paths.isPermissionSystem(path) !== undefined) return false;
+    return !this.installedApp(path);
+  }
+
   /** What `creationsOf` needs: canonical paths, and what may never be recorded. */
   private creationFacts(): CreationFacts {
     return {
@@ -1284,37 +1457,148 @@ export class Permissions {
         if (cwd === undefined && !isAbsolute(path) && !path.startsWith("~")) return undefined;
         return this.paths.canonical(path, cwd ?? this.cwd);
       },
-      recordable: (path) => {
-        if (path === "/" || path === this.home || dirname(path) === path) return false;
-        const classification = this.paths.classify(path);
-        if (classification.zone === "sensitive" || classification.guard !== undefined) return false;
-        if (this.paths.isPermissionSystem(path) !== undefined) return false;
-        if (this.installedApp(path)) return false;
-        // Already there: naming it (`mkdir -p ~/Developer/other`) does not make
-        // it this task's, and a command the sandbox refused made nothing at all.
-        return !existsSync(path);
-      },
+      // Already there: naming it (`mkdir -p ~/Developer/other`) does not make
+      // it this task's, and a command the sandbox refused made nothing at all.
+      recordable: (path) => this.recordablePath(path) && !existsSync(path),
     };
   }
 
+  /** Repositories (shared git directories) by directory, for the catalogue. */
+  private readonly repositories = new Map<string, string | undefined>();
+
+  /** What the catalogue (catalogue.ts) and the lifecycle table (lifecycle.ts) need from this machine. */
+  catalogueFacts(): CatalogueFacts & LifecycleFacts {
+    const git = (args: string[]) => {
+      const result = spawnSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000 });
+      return result.status === 0 ? result.stdout.trim() : undefined;
+    };
+    return {
+      ...this.creationFacts(),
+      // What is the chat's anyway (its workspace, scratch) needs no entry.
+      recordable: (path) => this.recordablePath(path) && !this.paths.inWorkspace(path) && !this.paths.inScratch(path),
+      exists: (path) => {
+        try {
+          lstatSync(path);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      repository: (dir) => {
+        if (dir === undefined) return undefined;
+        if (!this.repositories.has(dir)) {
+          const common = git(["-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
+          let canonical: string | undefined;
+          try {
+            canonical = common ? realpathSync.native(common) : undefined;
+          } catch {
+            canonical = undefined;
+          }
+          this.repositories.set(dir, canonical);
+        }
+        return this.repositories.get(dir);
+      },
+      refExists: (repo, ref) => git(["--git-dir", repo, "rev-parse", "-q", "--verify", ref]) !== undefined,
+      trusted: (program, cwd) => this.systemProgram(program, cwd),
+      prHead: (pr) => this.prHead(pr),
+      worktreeBranch: (path) => git(["-C", path, "symbolic-ref", "--short", "-q", "HEAD"]),
+    };
+  }
+
+  /** Pull requests' head branches, by `repo#number`, as gh last said. */
+  private readonly prHeads = new Map<string, string | undefined>();
+
+  /** A pull request's head branch: its entity's, else gh's (once per pull request). */
+  private prHead(pr: LedgerEntity): string | undefined {
+    if (pr.head) return pr.head;
+    if (!/^\d+$/.test(pr.name)) return undefined;
+    const key = `${pr.repo ?? ""}#${pr.name}`;
+    if (!this.prHeads.has(key)) {
+      const args = ["pr", "view", pr.name, "--json", "headRefName", "-q", ".headRefName", ...(pr.repo && pr.repo.includes("/") && !pr.repo.startsWith("/") ? ["-R", pr.repo] : [])];
+      const result = spawnSync("gh", args, { cwd: this.cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 8000 });
+      this.prHeads.set(key, result.status === 0 && result.stdout.trim() ? result.stdout.trim() : undefined);
+    }
+    return this.prHeads.get(key);
+  }
+
+  /** The line's commands as the catalogue reads them; undefined when it can't be read. */
+  private catalogueCommands(command: string, cwd: string): LineCommand[] | undefined {
+    try {
+      const parsed = this.parse(command, cwd);
+      if (parsed.kind === "opaque") return undefined;
+      return this.commandsOf(parsed.commands, cwd);
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
-   * Record what a command this chat runs creates: the worktrees, branches,
-   * directories, dev instances and scratch files it may later undo without
-   * asking anyone (created.ts). Called where the command actually runs, in
-   * the sandbox or outside it, never for one that was refused.
+   * Before a command this chat runs: what it may create, and what is there
+   * already (catalogue.ts). Settle it after the run (`settleCreated`).
+   * Undefined when nothing is enforced or the line can't be read.
+   */
+  planCreated(command: string, cwd: string): CreationPlan | undefined {
+    if (!this.enforcing) return undefined;
+    const commands = this.catalogueCommands(command, cwd);
+    if (!commands) return undefined;
+    const plan = this.created.plan(command, commands, this.catalogueFacts());
+    return plan.candidates.length ? plan : undefined;
+  }
+
+  /**
+   * After it ran: record in the ledger what it surely made (its exit
+   * status; its own output, when it is the line's only command). An
+   * exit status that isn't known (a timeout, an abort) confirms only what
+   * is observed on disk.
+   */
+  settleCreated(plan: CreationPlan | undefined, result: { exitCode?: number; output?: string }): void {
+    if (!plan) return;
+    try {
+      const made = this.created.settle(plan, result, this.catalogueFacts());
+      const legacy = made.filter((entry) => entry.action === undefined && (entry.kind === "path" || entry.kind === "worktree" || (entry.kind === "branch" && entry.remote === undefined)));
+      // The session keeps its own record too, for a Runtime that reads only that.
+      if (legacy.length) {
+        this.appendEntry?.(CREATED_ENTRY, {
+          ...(legacy.some((entry) => entry.kind === "path") ? { paths: legacy.filter((entry) => entry.kind === "path").map((entry) => entry.name) } : {}),
+          ...(legacy.some((entry) => entry.kind === "worktree") ? { worktrees: legacy.filter((entry) => entry.kind === "worktree").map((entry) => entry.name) } : {}),
+          ...(legacy.some((entry) => entry.kind === "branch") ? { branches: legacy.filter((entry) => entry.kind === "branch").map((entry) => entry.name) } : {}),
+          ...(this.chatId ? { chatId: this.chatId } : {}),
+          createdAt: new Date().toISOString(),
+        });
+      }
+    } catch {
+      // Recording is best effort: a command that ran stays run.
+    }
+  }
+
+  /**
+   * Record what a command creates without its result: the worktrees,
+   * branches, directories, dev instances and scratch files it names that
+   * are not there yet (created.ts `creationsOf`). For replays and tests;
+   * a real run plans and settles around the command (`planCreated`,
+   * `settleCreated`).
    */
   noteCreated(command: string, cwd: string): void {
     if (!this.enforcing) return;
-    let commands: LineCommand[];
-    try {
-      const parsed = this.parse(command, cwd);
-      if (parsed.kind === "opaque") return;
-      commands = this.commandsOf(parsed.commands, cwd);
-    } catch {
-      return;
-    }
-    const record = this.created.note(creationsOf(commands, this.creationFacts()));
+    const commands = this.catalogueCommands(command, cwd);
+    if (!commands) return;
+    const record = this.created.note(creationsOf(commands, this.creationFacts()), command);
     if (record) this.appendEntry?.(CREATED_ENTRY, record);
+  }
+
+  /** `PATH=… cmd` with literal values: the program the assignments make it, when it is the system's. */
+  private resolveWithPath(program: string, assignments: readonly { name: string; value: string | undefined }[]): string | undefined {
+    if (program.includes("/")) return undefined;
+    if (!assignments.every((item) => item.name === "PATH" && item.value !== undefined && item.value !== "")) return undefined;
+    const path = assignments.at(-1)!.value!;
+    for (const dir of path.split(":")) {
+      if (!dir || !isAbsolute(dir)) return undefined;
+      const candidate = join(dir, program);
+      if (!existsSync(candidate)) continue;
+      // Only a program in a place the agent can't write.
+      return this.systemProgram(candidate, this.cwd) ? candidate : undefined;
+    }
+    return undefined;
   }
 
   /**
@@ -1358,7 +1642,7 @@ export class Permissions {
   /** The risk tier of a whole line: its most dangerous command (risk.ts). */
   assess(command: string, cwd: string): LineAssessment {
     const parsed = this.parse(command, cwd);
-    if (parsed.kind === "opaque") return { ...assessOpaque(command, this.riskFacts()), commands: [], parsed };
+    if (parsed.kind === "opaque") return { ...assessOpaque(command, this.riskFacts(), false, cwd), commands: [], parsed };
     const commands = this.commandsOf(parsed.commands, cwd);
     const facts = this.riskFacts();
     // An inert builtin or a filter needs no rule, but its redirections can still be dangerous (`echo x >> ~/.zshrc`).
@@ -1426,15 +1710,15 @@ export class Permissions {
   }
 
   /**
-   * The agent asks to run a bash call outside the sandbox. Who decides
-   * depends on the line's risk tier (risk.ts):
+   * The agent asks to run a bash call outside the sandbox. The floor
+   * (floor.ts) goes to a human; everything else to the reviewing model
+   * first (round 3), with the code's evidence:
    *
-   * - dangerous: a human, every task: run once, or allow its patterns until
-   *   the user's next message. A danger short of the most sensitive
-   *   (risk.ts `reviewable`) goes to the reviewing model first, which may run
-   *   it once when the user's own message asks for exactly it;
-   * - local: the reviewing model, which remembers its approval for the chat;
-   *   else a human: once, or always in this project by patterns for similar
+   * - dangerous: its approval runs the line once, never remembered; when it
+   *   asks with a listed concern, a human decides: run once, or allow its
+   *   patterns until the user's next message;
+   * - local: its approval is remembered for the chat; when it asks, a human
+   *   decides: once, or always in this project by patterns for similar
    *   commands (the agent's, then each other command's category).
    *
    * `onceOnly` says why no pattern could be offered.
@@ -1545,33 +1829,45 @@ export class Permissions {
         finish({ decision: "allow", decidedBy: "rule", prompted: false });
         return { ok: true, scope: "rule", by: "rule" } as const;
       }
-      // The reviewing model decides, with one exception each way. The
-      // always-ask floor (a secret leaving the machine, a change to the
-      // permission system, a rule set to ask) never reaches it. A danger
-      // reaches it, but may only run when the owner's own words ask for
-      // exactly it, which explicit.ts checks against the model's quote and
-      // the target Cypher read from the line; a line whose target can't be
-      // read asks. Everything the line only does to what this task made is
-      // not a danger in the first place (risk.ts `facts.created`).
-      const floor = this.alwaysAsk(line);
-      const targets: LineTargets | undefined = dangerous && floor === undefined ? this.lineTargets(line) : undefined;
-      const unknownTarget =
-        targets && "unknown" in targets
-          ? targets.unknown
-          : dangerous && floor === undefined && line.parsed.kind === "opaque"
-            ? `it uses ${line.parsed.reason}, which Cypher can't read`
-            : undefined;
-      const reviewable = !dangerous || (floor === undefined && unknownTarget === undefined);
-      if (floor !== undefined) audit.explicit = { ok: false, reason: `only you can approve this: ${floor}`, targets: [], passed: [] };
-      else if (unknownTarget) audit.explicit = { ok: false, reason: `${unknownTarget}, so Cypher can't check it against your words`, targets: [], passed: [] };
+      // The reviewing model decides (round 3). Only the floor (floor.ts) asks without it: a secret leaving
+      // the machine, a change to the permission system, the owner's own rule set to ask; and, after it, no
+      // judge that could decide. Everything else reaches it, dangers and lines whose target can't be read
+      // included, with what the code checked as evidence (`evidenceFor`): the owner's words against the
+      // line's targets, the grade, the installed app's data, the ledger. Its approval runs the line (a
+      // danger once, never remembered); an ask stands only with a concern from the closed list that the
+      // owner's own words don't answer (`answered`).
+      // What the line acts on, read once: for the judge, the owner's denials and other tasks' work.
+      const read = dangerous && line.parsed.kind !== "opaque" ? this.lineTargets(line) : undefined;
+      // The owner's own Deny of a request like it (denials.ts), and another chat's or task's work it touches.
+      const actionClass = this.lineClass(line, command, ctx.cwd, read);
+      const denied = await this.deniedLike(actionClass);
+      const foreign = read ? await this.foreignTargets("targets" in read ? read.targets : (read.known ?? [])) : undefined;
+      const floor = this.alwaysAsk(line, {
+        ...(denied.active ? { ownerDenied: `you denied \`${denied.active.denial.what}\` (${denied.active.denial.at.slice(0, 16).replace("T", " ")} UTC) and haven't asked for it since` } : {}),
+        ...(foreign ? { otherTask: foreign } : {}),
+      });
+      const targets: LineTargets | undefined =
+        dangerous && floor === undefined
+          ? line.parsed.kind === "opaque"
+            ? { unknown: `it uses ${line.parsed.reason}, which Cypher can't read`, known: [] }
+            : read
+          : undefined;
+      // What the line says, as written and with the evaluator's known expansions: an unreadable target the model claims must occur in it.
+      if (targets && "unknown" in targets) targets.text = [command, ...line.commands.map((item) => item.words.filter((word) => word !== UNKNOWN).join(" "))].join("\n");
+      const unknownTarget = targets && "unknown" in targets ? targets.unknown : undefined;
+      // The installed app's data the line reads (risk.ts `concern`): whether the owner's words name it is evidence too.
+      const data = [line, ...(line.assessments ?? [])].flatMap((assessment) => (assessment.concern === "installed-app" && assessment.data ? [assessment.data] : []));
+      const installedRead = !dangerous && data.length > 0;
+      if (floor !== undefined) audit.explicit = { ok: false, reason: `only you can approve this: ${floor.detail}`, targets: [], passed: [] };
       let review: string | undefined;
-      if (mode === "assisted" && floor === undefined && reviewable) {
-        // A danger runs on the owner's own words: the ones they have written by now.
-        if (dangerous) await this.refreshOwnerWords();
+      if (mode === "assisted" && floor === undefined) {
+        // The owner's words as they have written them by now: the evidence is checked against them.
+        if (dangerous || installedRead) await this.refreshOwnerWords();
         const purpose = [proposal.label && `Purpose: ${proposal.label}`, proposal.reason && `Reason: ${proposal.reason}`].filter(Boolean).join("\n");
         // An approval is remembered for the commands' own categories, never for patterns the agent proposed; a danger's, never.
         const memo = dangerous ? [] : patterns.filter((pattern) => !pattern.proposed);
-        const verdict = await this.review(
+        const evidence = this.evidenceFor(targets, data, ctx, denied.similar, [line.kind, ...(line.assessments ?? []).map((assessment) => assessment.kind)]);
+        const reviewed = await this.review(
           {
             capability: "escalate",
             paths: [],
@@ -1583,27 +1879,34 @@ export class Permissions {
             tierReason: line.kind,
             remembers: memo.map((pattern) => describePattern(pattern.match)),
             ...(targets && "targets" in targets ? { targets: targets.targets.map((target) => describeTarget(target)) } : {}),
-            created: this.createdSummary(),
+            ...(targets && "unknown" in targets ? { targets: (targets.known ?? []).map((target) => describeTarget(target)), unknownTarget: targets.unknown } : {}),
+            created: this.createdSummary(line),
+            evidence,
           },
           ctx,
         );
+        audit.judge = reviewed.state;
+        Object.assign(audit, reviewed.audit);
+        // No reviewing model could decide: the floor's last row.
+        const noJudge = floorOf({ review: reviewed }, "after");
+        const verdict = noJudge ? reviewed : this.answered(reviewed, evidence);
         audit.judge = verdict.state;
-        Object.assign(audit, verdict.audit);
-        let explicit: ExplicitResult | undefined;
-        if (dangerous && targets && (verdict.decision === "approve" || verdict.claim)) {
-          explicit = checkExplicit(verdict.claim ?? {}, targets, this.ownerWords, ctx.branch(), this.explicitFacts());
-          audit.explicit = explicit;
+        // The code's check of what the model cited, for the audit: it no longer gates (round 3).
+        if (!noJudge && dangerous && targets && (verdict.decision === "approve" || verdict.claim)) audit.explicit = checkExplicit(verdict.claim ?? {}, targets, this.ownerWords, ctx.branch(), this.explicitFacts());
+        else if (!noJudge && installedRead && verdict.decision === "approve") {
+          const cited = this.installedConsent(verdict.claim, data);
+          audit.explicit = cited.ok ? { ok: true, quote: cited.quote, targets: [], passed: ["quote", "current"] } : { ok: false, reason: cited.reason, targets: [], passed: [] };
         }
-        if (verdict.decision === "approve" && (!dangerous || explicit?.ok)) {
-          // `approve-once`: this call runs, and nothing is remembered; so does
-          // an approval of a line that reads a secret (risk.ts `once`).
-          const kept = verdict.once || line.once === true || line.assessments?.some((assessment) => assessment.once === true) ? [] : memo;
+        if (verdict.decision === "approve") {
+          // `approve-once`: this call runs, and nothing is remembered; so does an approval of a danger, of a
+          // line that reads a secret (risk.ts `once`) or the installed app's data, or of an ask the owner's words answered.
+          const kept = verdict.once || dangerous || installedRead || line.once === true || line.assessments?.some((assessment) => assessment.once === true) ? [] : memo;
           for (const pattern of kept) this.addCommandGrant(pattern, "chat", "judge", label);
-          const reason = explicit?.ok ? `${verdict.reason} (your words: "${explicit.quote}")` : verdict.reason;
-          finish({ decision: "allow", decidedBy: "judge", reason, scope: kept.length ? "chat" : "once", prompted: false });
+          const quoted = audit.explicit?.ok && audit.explicit.quote ? ` (your words: "${audit.explicit.quote}")` : "";
+          finish({ decision: "allow", decidedBy: "judge", reason: `${verdict.reason}${quoted}`, scope: kept.length ? "chat" : "once", prompted: false });
           return { ok: true, scope: "once", by: "judge", ...(onceOnly ? { onceOnly } : {}) } as const;
         }
-        review = verdict.decision === "approve" && explicit && !explicit.ok ? `It found your request, but Cypher couldn't confirm it: ${explicit.reason}.` : verdict.reason;
+        review = verdict.reason;
         audit.reviewer = review;
       }
       if (!ctx.hasUI) {
@@ -1613,10 +1916,10 @@ export class Permissions {
       }
       const lines: string[] = [];
       if (dangerous && line.kind) {
-        const asks = floor !== undefined ? " This always asks." : unknownTarget ? ` It asks: ${unknownTarget}.` : "";
+        const asks = floor !== undefined ? " This always asks." : unknownTarget ? ` Cypher can't read all it acts on: ${unknownTarget}.` : "";
         lines.push(fact("Note", `Dangerous: it ${homeRelative(line.kind, this.home)}.${asks}`));
       }
-      if (!dangerous && floor !== undefined) lines.push(fact("Note", `This always asks: ${homeRelative(floor, this.home)}.`));
+      if (!dangerous && floor !== undefined) lines.push(fact("Note", `This always asks: ${homeRelative(floor.detail, this.home)}.`));
       if (proposal.label) lines.push(fact("Purpose", proposal.label));
       lines.push(fact("Command", command));
       for (const pattern of patterns) lines.push(fact("Pattern", describePattern(pattern.match)));
@@ -1630,8 +1933,10 @@ export class Permissions {
       const title = `${question}\n\nContext:\n${lines.join("\n")}${promptLine("escalate", ctx.toolCallId)}`;
       const projectOption = `${ALWAYS_IN}${this.projectName}`;
       const options = patterns.length === 0 ? [RUN_ONCE, HUMAN.deny, HUMAN.stop] : dangerous ? [TASK, HUMAN.deny, HUMAN.stop] : [projectOption, ONCE, HUMAN.deny, HUMAN.stop];
+      const shown = Date.now();
       const choice = await ctx.ui.select(title, options, { signal: ctx.signal, timeout: this.config.ask.timeoutMs ?? undefined });
-      const asked = { prompted: true, choice: choice ?? "dismissed", decidedBy: "user" as const };
+      const nobody = unanswered(choice, shown, this.config.ask.timeoutMs, ctx.signal);
+      const asked = { prompted: true, choice: nobody ?? choice, decidedBy: "user" as const };
       switch (choice) {
         case RUN_ONCE:
         case ONCE:
@@ -1659,16 +1964,31 @@ export class Permissions {
           finish({ decision: "allow", scope: "project", ...asked });
           return { ok: true, scope: "project", by: "user" } as const;
         case HUMAN.stop:
+          this.denials.record(actionClass, command, this.ownerWords);
           finish({ decision: "abort", ...asked });
           ctx.abort?.();
           return { ok: false, reason: "The user denied this and stopped the turn.", abort: true } as const;
-        default: {
-          const reason = choice === HUMAN.deny ? "The user denied running this outside the sandbox." : "No approval was given (the request was dismissed or timed out).";
+        case HUMAN.deny: {
+          this.denials.record(actionClass, command, this.ownerWords);
+          const reason = "The user denied running this outside the sandbox.";
           finish({ ...asked, reason });
           return { ok: false, reason: `${reason} Continue in the sandbox or ask the user.` } as const;
         }
+        default:
+          // Closed, timed out, or an answer that is none of the buttons: no decision, and no denial.
+          finish({ ...asked, decision: "dismissed", reason: `No answer (${nobody ?? "not one of the options"}).` });
+          return { ok: false, reason: UNANSWERED } as const;
       }
     });
+  }
+
+  /**
+   * Whether the model cited owner words that ask for reading the installed app's data (explicit.ts
+   * `checkDataConsent`): a consent of a kind, its quote in that owner word, naming the data or the
+   * app, not taken back or moved on from. The quote is the model's; that it holds is the code's.
+   */
+  installedConsent(claim: ExplicitClaim | undefined, data: readonly string[]): { ok: true; quote: string } | { ok: false; reason: string } {
+    return checkDataConsent(claim, this.ownerWords, data);
   }
 
   /** Ask the engine for the owner's words as of now; a failure keeps the ones at hand. */
@@ -1683,31 +2003,289 @@ export class Permissions {
   }
 
   /**
-   * The always-ask floor: why no rule, grant or reviewing model may approve
-   * this line, whatever the owner wrote. Only two things are here (risk.ts
-   * `floor`): a secret or credential leaving this machine, and a change to
-   * the permission system itself. A rule the user set to ask or deny counts
-   * too: they asked to be asked. (The third floor case, no reviewing model,
-   * is `review`'s: it asks with the reason.)
+   * The floor (floor.ts `FLOOR`, the rows tested before the judge): why no
+   * rule, grant or reviewing model may approve this line, whatever the
+   * owner wrote — a secret or credential leaving this machine, a change to
+   * the permission system itself (risk.ts sets `floor` on both), or the
+   * owner's own command rule set to ask or deny. The last row, no reviewing
+   * model, is tested on the review's outcome (`requestEscalation`).
    */
-  private alwaysAsk(line: LineAssessment): string | undefined {
-    if (line.floor === true) return line.kind ?? "it always asks";
+  private alwaysAsk(line: LineAssessment, extra: { ownerDenied?: string; otherTask?: string } = {}): FloorHit | undefined {
     const rules = this.commandRules();
-    for (const [index, item] of line.commands.entries()) {
-      if (line.assessments![index].floor === true) return line.assessments![index].kind ?? "it always asks";
+    let ownerRule: string | undefined;
+    for (const item of line.commands) {
       if (item.inert) continue;
       const held = rules.find((rule) => rule.decision !== "allow" && matchesQuietly(rule.match, item.words, true));
-      if (held) return `\`${describePattern(held.match)}\` is set to ${held.decision === "deny" ? "never run" : "always ask"}`;
+      if (held) {
+        ownerRule = `\`${describePattern(held.match)}\` is set to ${held.decision === "deny" ? "never run" : "always ask"}`;
+        break;
+      }
+    }
+    return floorOf({ assessments: [line, ...(line.assessments ?? [])], ownerRule, ...extra }, "before");
+  }
+
+  /**
+   * What the code established about a line, for the judge (round 3): each owner word checked as a
+   * consent for the line's targets (the same checks a cited consent gets: explicit.ts `scanConsents`),
+   * the grade of what it does (grades.ts), what its flags add, and whether the owner's words name the
+   * installed app's data it reads. Evidence, never a gate.
+   */
+  private evidenceFor(targets: LineTargets | undefined, data: readonly string[], ctx: RequestContext, denied: readonly DenialRecord[] = [], kinds: readonly (string | undefined)[] = []): JudgeEvidence | undefined {
+    const evidence: { -readonly [K in keyof JudgeEvidence]: JudgeEvidence[K] } = {};
+    if (targets) {
+      const known = "targets" in targets ? targets.targets : (targets.known ?? []);
+      evidence.consents = scanConsents(targets, this.ownerWords, ctx.branch(), this.memoFacts());
+      const grades = gradesOf(known, targets.attributes ?? []).map(describeGrade);
+      if (grades.length) evidence.grades = grades;
+      if (targets.attributes?.length) evidence.attributes = targets.attributes.map((attribute) => describeAttribute(attribute));
+    }
+    // What the classifier says a command does, where its targets don't tell the reach (an install's directory).
+    const byKind = kindGrades(kinds).map(describeGrade).filter((grade) => !evidence.grades?.includes(grade));
+    if (byKind.length) evidence.grades = [...(evidence.grades ?? []), ...byKind];
+    if (data.length) evidence.installedData = { paths: [...new Set(data.map((path) => displayPath(path, this.home)))], finding: scanDataConsent(this.ownerWords, data) };
+    if (denied.length) evidence.denials = denied.map((denial) => describeDenial(denial));
+    if (targets) {
+      const notOurs = this.notThisTask("targets" in targets ? targets.targets : (targets.known ?? []));
+      if (notOurs.length) evidence.notThisTask = notOurs.map((item) => `${item.what}: ${item.why}${item.named ? ` (the owner's words name it: "${item.named.length > 100 ? `${item.named.slice(0, 100)}…` : item.named}")` : ""}`);
+    }
+    return Object.keys(evidence).length ? evidence : undefined;
+  }
+
+  /**
+   * A bash line's action class (denials.ts): each command's action by the tool table (program and
+   * subcommand) or its program, the classifier's concern (a secret, the installed app's data, a
+   * danger's key), and what it acts on — the targets read from the line, the paths its words, its
+   * redirections and its data findings name; the line itself when it names nothing.
+   */
+  private lineClass(line: LineAssessment, command: string, cwd: string, read: LineTargets | undefined): ActionClass {
+    const actions = new Set<string>();
+    const scopes: DenialScope[] = [];
+    const seen = new Set<string>();
+    const add = (scope: DenialScope) => {
+      const key = `${scope.kind}\u0000${scope.name}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        scopes.push(scope);
+      }
+    };
+    const addPath = (word: string, at: string | undefined) => {
+      if (word === UNKNOWN || word.startsWith("-") || /^[a-z][\w+.-]*:\/\//i.test(word)) return;
+      if (!(word.startsWith("/") || word.startsWith("~") || word.startsWith("./") || word.startsWith("../") || word.includes("/") || /^\.[\w-]/.test(word))) return;
+      const path = this.classify(word, at ?? cwd).path;
+      if (path) add({ kind: "path", name: path, says: [displayPath(path, this.home), word] });
+    };
+    for (const [index, item] of line.commands.entries()) {
+      // What only inspects is no part of what the owner denied (`git status && npm publish`: the publish).
+      if (item.inert || (line.assessments?.[index]?.tier === "inspect" && line.commands.length > 1)) continue;
+      const program = basename(item.words[0] ?? "");
+      const tool = readTool(item.words);
+      actions.add(tool && "row" in tool ? [program, ...tool.row.sub].join(" ") : program);
+      for (const word of item.words.slice(1)) addPath(word, item.cwd);
+      for (const path of [...item.reads, ...item.writes]) addPath(path, item.cwd);
+    }
+    const assessments = [line, ...(line.assessments ?? [])];
+    for (const assessment of assessments) if (assessment.data) addPath(assessment.data, cwd);
+    for (const target of read ? ("targets" in read ? read.targets : (read.known ?? [])) : []) {
+      if (target.kind === "path" || target.kind === "worktree") addPath(target.value, target.dir);
+      else add({ kind: target.kind, name: target.value, says: [target.value] });
+    }
+    const concern = assessments.find((assessment) => assessment.concern)?.concern ?? (line.tier === "danger" ? line.key : undefined);
+    if (!scopes.length) add({ kind: "line", name: command });
+    return { tool: "bash", actions: [...actions], ...(concern ? { concern } : {}), scopes };
+  }
+
+  /** The owner's denials of `cls` (denials.ts), checked against their words as of now. */
+  private async deniedLike(cls: ActionClass): Promise<{ active?: { denial: DenialRecord; scope: DenialScope }; similar: DenialRecord[] }> {
+    if (!this.denials.any()) return { similar: [] };
+    await this.refreshOwnerWords();
+    return this.denials.check(cls, this.ownerWords);
+  }
+
+  /** The newest owner word (typed, plan, card or answer) that names `names`, if any. */
+  private ownerNames(names: readonly string[]): string | undefined {
+    for (const word of [...(this.ownerWords?.messages ?? [])].reverse()) {
+      if (word.source === "reply") continue;
+      const text = consentText(word);
+      if (names.some((name) => name.length >= 2 && mentions(text, name))) return word.text;
     }
     return undefined;
   }
 
+  /** Other chats' ledgers (`<agentDir>/cypher-permissions/ledger/*.jsonl`, not this chat's): what they made. Read once per minute at most. */
+  private othersMade(): readonly LedgerEntry[] {
+    const now = Date.now();
+    if (this.othersCache && now - this.othersCache.at < 60_000) return this.othersCache.entries;
+    const entries: LedgerEntry[] = [];
+    const own = ledgerFile(this.agentDir, this.chatId);
+    const dir = join(this.agentDir, "cypher-permissions", "ledger");
+    try {
+      const files = readdirSync(dir).filter((name) => name.endsWith(".jsonl") && join(dir, name) !== own);
+      for (const name of files.slice(0, 200)) {
+        const text = readFileSync(join(dir, name), "utf8");
+        for (const line of text.split("\n").slice(-2000)) {
+          if (!line.trim()) continue;
+          try {
+            const entry = JSON.parse(line) as LedgerEntry;
+            if (entry && typeof entry.kind === "string" && typeof entry.name === "string" && (entry.action ?? "create") !== "merge") entries.push({ ...entry, chatId: entry.chatId ?? name.replace(/\.jsonl$/, "") });
+          } catch {
+            // A torn line: skipped.
+          }
+        }
+      }
+    } catch {
+      // No other chat has a ledger.
+    }
+    this.othersCache = { at: now, entries };
+    return entries;
+  }
+  private othersCache: { at: number; entries: LedgerEntry[] } | undefined;
+
+  /**
+   * What a line acts on that is not this task's (round 4, design §7.3.11): an entity another chat's
+   * ledger says it made or started, or a branch that heads an open pull request this chat didn't open
+   * (another task's work in review), and that this chat's own ledger and workspace don't hold. Each
+   * with the owner's words that name it, if any. Generic over entity kinds: the ledger's matching
+   * (ledger.ts `entryCovers`) decides what "the same" is.
+   */
+  private notThisTask(targets: readonly Target[]): { what: string; why: string; named?: string }[] {
+    if (!targets.length) return [];
+    const own = this.ownEntities();
+    const out: { what: string; why: string; named?: string }[] = [];
+    const others = this.othersMade();
+    for (const target of targets) {
+      const entity: LedgerEntity =
+        target.kind === "branch"
+          ? { kind: "branch", name: target.value, ...(target.remote ? { remote: target.remote } : {}) }
+          : { kind: target.kind as LedgerEntity["kind"], name: target.kind === "path" || target.kind === "worktree" ? (this.classify(target.value, target.dir ?? this.cwd).path ?? target.value) : target.value };
+      if (this.created.ledger.covers(entity) || (target.kind === "branch" && own.branches.includes(target.value))) continue;
+      const bare = { ...entity, remote: undefined, repo: undefined };
+      let why: string | undefined;
+      const made = others.find((entry) => entryCovers({ ...entry, repo: undefined, remote: undefined }, bare));
+      if (made) why = `another chat (${made.chatId ?? "unknown"}) ${made.action === "start" ? "started" : "made"} it`;
+      if (!why && target.kind === "branch" && target.value !== UNKNOWN) {
+        const open = this.pullRequestsWithHead(target.dir ?? this.cwd, target.value).find((pr) => pr.state === "open" && !own.prs.some((mine) => mine.number === pr.number));
+        if (open) why = `it heads pull request #${open.number}, which is open and this chat didn't open`;
+      }
+      if (!why) continue;
+      const named = this.ownerNames([target.value, basename(target.value)]);
+      out.push({ what: `${target.kind} ${target.value}`, why, ...(named ? { named } : {}) });
+    }
+    return out;
+  }
+
+  /** The floor's `other-task` detail: what the line acts on that is another task's and the owner's words don't name. */
+  private async foreignTargets(targets: readonly Target[]): Promise<string | undefined> {
+    const unnamed = this.notThisTask(targets).filter((item) => !item.named);
+    if (!unnamed.length) return undefined;
+    if (this.ownerWordsNow) {
+      await this.refreshOwnerWords();
+      const still = this.notThisTask(targets).filter((item) => !item.named);
+      if (!still.length) return undefined;
+      return still.map((item) => `${item.what} (${item.why})`).join("; ");
+    }
+    return unnamed.map((item) => `${item.what} (${item.why})`).join("; ");
+  }
+
+  /** The explicit check's facts, each machine fact asked once (a scan checks every owner word against them). */
+  private memoFacts(): ExplicitFacts {
+    const facts = this.explicitFacts();
+    const memo = <A extends unknown[], R>(fn: (...args: A) => R) => {
+      const seen = new Map<string, R>();
+      return (...args: A): R => {
+        const key = JSON.stringify(args);
+        if (!seen.has(key)) seen.set(key, fn(...args));
+        return seen.get(key)!;
+      };
+    };
+    return {
+      originRepo: memo(facts.originRepo),
+      release: memo(facts.release),
+      ...(facts.pullRequestsWithHead ? { pullRequestsWithHead: memo(facts.pullRequestsWithHead) } : {}),
+      ...(facts.worktreeBranch ? { worktreeBranch: memo(facts.worktreeBranch) } : {}),
+      ...(facts.own ? { own: memo(facts.own) } : {}),
+      ...(facts.currentBranch ? { currentBranch: memo(facts.currentBranch) } : {}),
+    };
+  }
+
   /** What a dangerous line's commands act on (explicit.ts), or why that is known only when it runs. */
   lineTargets(line: LineAssessment): LineTargets {
-    return lineTargets(
-      line.commands.map((item, index) => ({ words: item.words, cwd: item.cwd, danger: line.assessments![index].tier === "danger" })),
-      this.targetFacts(),
-    );
+    const facts = this.riskFacts();
+    const commands = line.commands.map((item, index) => {
+      const danger = line.assessments![index].tier === "danger";
+      // A dangerous redirection's file is a target of its own; the command's words, only when they are dangerous too.
+      const fromWrites = danger && redirectRisk(item, facts)?.tier === "danger";
+      const wordsDanger = danger && (!fromWrites || (!item.inert && assessCommand({ ...item, writes: [] }, facts).tier === "danger"));
+      const writes = fromWrites ? item.writes.map((path) => (path === UNKNOWN ? UNKNOWN : (this.classify(path, item.cwd ?? this.cwd).path ?? path))) : [];
+      return { words: this.shortRefspecs(item.words, item.cwd), cwd: item.cwd, danger: wordsDanger, ...(writes.length ? { writes } : {}) };
+    });
+    const read = lineTargets(commands, this.targetFacts());
+    if (!("unknown" in read)) return read;
+    // A destroyer whose owner Cypher can't tell still names what it destroys: the catalogue's rows, or the
+    // generic destroy verb's operands, read as entities for the owner's words to name (explicit.ts `uncovered`).
+    const own: Target[] = [];
+    const named = commands.map((command) => {
+      if (!command.danger || basename(command.words[0] ?? "") === "git") return command;
+      const alone = lineTargets([command], this.targetFacts());
+      if (!("unknown" in alone)) return command;
+      const found = this.destroyedEntities(command.words, command.cwd);
+      if (!found) return command;
+      own.push(...found);
+      return { ...command, danger: false };
+    });
+    if (own.length === 0) return { ...read, actions: this.unreadActions(line) };
+    // The attributes are the line's (its dangerous commands' flags), whichever commands are read as entities.
+    const again = { ...lineTargets(named, this.targetFacts()), ...(read.attributes ? { attributes: read.attributes } : {}) };
+    return "unknown" in again ? { ...again, known: [...(again.known ?? []), ...own], actions: this.unreadActions(line) } : { ...again, targets: [...again.targets, ...own], ...(read.attributes ? { attributes: read.attributes } : {}) };
+  }
+
+  /** What a destroyer the target reader has no row for destroys, as entities: undefined when a name is known only when it runs. */
+  private destroyedEntities(words: readonly string[], cwd: string | undefined): Target[] | undefined {
+    if (words.includes(UNKNOWN)) return undefined;
+    const destruction = targetsOf({ words, cwd, writes: [] }, this.catalogueFacts());
+    if (destruction) {
+      if (destruction.unknown || destruction.targets.length === 0) return undefined;
+      const action = destruction.op === "stop" ? "stop" : "delete";
+      return destruction.targets.map(([entity]) => ({ kind: entity.kind as Target["kind"], value: entity.name, action, entity: { ...entity } as Target["entity"], ...(cwd ? { dir: cwd } : {}) }));
+    }
+    const generic = genericDestroyer(words);
+    if (!generic || generic.operands.length === 0 || generic.operands.includes(UNKNOWN)) return undefined;
+    const action = /^(kill|stop|terminate)$/i.test(generic.verb) ? "stop" : "delete";
+    const type = basename(words[0]);
+    return generic.operands.map((name) => ({ kind: "resource" as Target["kind"], value: name, action, entity: { kind: "resource", name, type } as Target["entity"], ...(cwd ? { dir: cwd } : {}) }));
+  }
+
+  /** The action classes the line's unreadable dangers could be, for a consent to say (explicit.ts): the danger keys' families. */
+  private unreadActions(line: LineAssessment): string[] {
+    const actions = new Set<string>();
+    for (const [index, item] of line.commands.entries()) {
+      const assessment = line.assessments?.[index];
+      if (assessment?.tier !== "danger") continue;
+      const tool = readTool(item.words);
+      if (tool && !("unknown" in tool)) actions.add(tool.action);
+      const kind = `${assessment.kind ?? ""} ${assessment.key ?? ""}`;
+      for (const [action, pattern] of UNREAD_ACTIONS) if (pattern.test(kind)) actions.add(action);
+    }
+    if (line.parsed.kind === "opaque" && /\b(push|publish|release|tag)\b/.test(line.kind ?? "")) actions.add("push");
+    return [...actions];
+  }
+
+  /** A `git push`'s refspecs in their short spelling (risk.ts `normalRefspec`), so every spelling names the same target. */
+  private shortRefspecs(words: readonly string[], cwd: string | undefined): readonly string[] {
+    if (basename(words[0] ?? "") !== "git") return words;
+    const at = words.indexOf("push");
+    if (at < 0) return words;
+    let remote = false;
+    const current = cwd === undefined ? undefined : this.gitAt(cwd)?.current;
+    return words.map((word, index) => {
+      if (index <= at || word === UNKNOWN || word.startsWith("-")) return word;
+      if (!remote) {
+        remote = true;
+        return word;
+      }
+      const forced = word.startsWith("+");
+      const short = normalRefspec(forced ? word.slice(1) : word, current);
+      return forced ? `+${short}` : short;
+    });
   }
 
   private targetFacts(): TargetFacts {
@@ -1725,7 +2303,69 @@ export class Permissions {
   }
 
   private explicitFacts(): ExplicitFacts {
-    return { originRepo: (dir) => this.originRepo(dir), release: (dir, commit, version) => this.releaseFacts(dir, commit, version) };
+    return {
+      originRepo: (dir) => this.originRepo(dir),
+      release: (dir, commit, version) => this.releaseFacts(dir, commit, version),
+      pullRequestsWithHead: (dir, branch) => this.pullRequestsWithHead(dir, branch),
+      worktreeBranch: (path) => this.catalogueFacts().worktreeBranch?.(path),
+      currentBranch: (dir) => this.gitAt(dir)?.current,
+      own: () => this.ownEntities(),
+    };
+  }
+
+  /**
+   * This task's own branches and pull requests, by code-checked facts: the
+   * branch checked out in each of the chat's project folders (not a default
+   * one), the branches the ledger says it made, the heads of pull requests
+   * it opened; the pull requests it opened, and those gh lists with its one
+   * branch as their head. A consent that names an action and no target binds
+   * to the one of these that fits (explicit.ts `ownTarget`).
+   */
+  private ownEntities(): { branches: string[]; prs: PullRequestFact[] } {
+    const entries = this.created.ledger.all();
+    const prs: PullRequestFact[] = entries
+      .filter((entry) => entry.kind === "pr" && (entry.action ?? "create") === "create")
+      .map((entry) => ({ number: entry.name, ...(entry.head ? { head: entry.head } : {}), ...(entry.repo && !entry.repo.startsWith("/") ? { repo: entry.repo.toLowerCase() } : {}) }));
+    const branches = new Set<string>([
+      ...this.workspaceBranches(),
+      ...entries.filter((entry) => entry.kind === "branch" && entry.remote === undefined && (entry.action ?? "create") === "create").map((entry) => entry.name),
+      ...prs.flatMap((pr) => (pr.head ? [pr.head] : [])),
+    ]);
+    if (branches.size === 1) for (const pr of this.pullRequestsWithHead(this.cwd, [...branches][0])) if (!prs.some((known) => known.number === pr.number)) prs.push(pr);
+    return { branches: [...branches], prs };
+  }
+
+  /** Pull requests by head branch, as gh last said (per directory and branch). */
+  private readonly prsByHead = new Map<string, PullRequestFact[]>();
+
+  /** The pull requests whose head is `branch`: the ledger's, and gh's for the repository at `dir`. */
+  private pullRequestsWithHead(dir: string | undefined, branch: string): PullRequestFact[] {
+    const own = this.created.ledger
+      .all()
+      .filter((entry) => entry.kind === "pr" && entry.head === branch)
+      .map((entry): PullRequestFact => ({ number: entry.name, head: branch, ...(entry.repo ? { repo: entry.repo.toLowerCase() } : {}) }));
+    // gh only where origin is a hosted repository it can ask.
+    if (branch === UNKNOWN || branch.startsWith("-") || this.originRepo(dir ?? this.cwd) === undefined) return own;
+    const key = `${dir ?? this.cwd}\0${branch}`;
+    if (!this.prsByHead.has(key)) {
+      const result = spawnSync("gh", ["pr", "list", "--head", branch, "--state", "all", "--limit", "5", "--json", "number,headRefName,baseRefName,state"], {
+        cwd: dir ?? this.cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 8000,
+      });
+      let listed: PullRequestFact[] = [];
+      try {
+        const parsed = result.status === 0 ? (JSON.parse(result.stdout) as { number?: unknown; headRefName?: unknown; baseRefName?: unknown; state?: unknown }[]) : [];
+        listed = parsed
+          .filter((item) => typeof item.number === "number" && item.headRefName === branch)
+          .map((item) => ({ number: String(item.number), head: branch, ...(typeof item.baseRefName === "string" ? { base: item.baseRefName } : {}), ...(typeof item.state === "string" ? { state: item.state.toLowerCase() } : {}) }));
+      } catch {
+        listed = [];
+      }
+      this.prsByHead.set(key, listed);
+    }
+    return [...own, ...(this.prsByHead.get(key) ?? [])];
   }
 
   /** A tag of that name exists in the repository at `dir`. */
@@ -1854,6 +2494,12 @@ export class Permissions {
         has: (path) => this.created.has(path),
         worktree: (path) => this.created.worktree(path),
         branch: (name) => this.created.branch(name),
+        named: (name) => this.created.named(name),
+        pullRequest: (number) => this.created.all().entities.some((entry) => entry.kind === "pr" && (entry.action ?? "create") === "create" && entry.name === number),
+        destroys: (command) => {
+          const found = this.created.destroys({ ...command, cwd: command.cwd }, this.catalogueFacts());
+          return found ? { own: found.own, op: found.op, why: found.why, kinds: found.kinds } : undefined;
+        },
       },
       permissionSystem: (path) => this.paths.isPermissionSystem(path) !== undefined,
       installedApp: (path) => this.installedApp(path),
@@ -1865,11 +2511,28 @@ export class Permissions {
         const resolved = this.resolveIn(words[0] ?? "", this.cwd);
         return resolved !== undefined && this.writableRoots().some((root) => isUnder(resolved, root));
       },
-      projectTool: (name) =>
+      projectTool: (name, cwd) =>
         name !== UNKNOWN &&
         /^[@\w./-]+$/.test(name) &&
-        [this.cwd, ...this.roots].some((root) => [join(root, "node_modules", ".bin", basename(name)), join(root, ".venv", "bin", basename(name))].some((path) => existsSync(path))),
+        this.toolDirs(cwd).some((root) => [join(root, "node_modules", ".bin", basename(name)), join(root, ".venv", "bin", basename(name))].some((path) => existsSync(path))),
     };
+  }
+
+  /**
+   * Where a project tool may resolve from (`npx` walks up from where it runs): the chat's cwd and
+   * project folders, and every directory from `cwd` up to the project folder holding it.
+   */
+  private toolDirs(cwd: string | undefined): string[] {
+    const dirs = [this.cwd, ...this.roots];
+    if (cwd === undefined) return dirs;
+    let dir = this.paths.canonical(cwd, this.cwd);
+    const root = this.roots.find((candidate) => isUnder(dir, candidate));
+    if (root === undefined) return dirs;
+    for (let depth = 0; depth < 32 && dir !== root && isUnder(dir, root); depth++) {
+      dirs.push(dir);
+      dir = dirname(dir);
+    }
+    return dirs;
   }
 
   private gitAt(dir: string): GitFacts | undefined {
@@ -2013,14 +2676,55 @@ export class Permissions {
   }
 
   /** What this task made, for the reviewing model's prompt (newest last, bounded). */
-  private createdSummary(): string[] {
-    const made = this.created.all();
-    const lines = [
-      ...made.worktrees.map((path) => `the worktree ${displayPath(path, this.home)}`),
-      ...made.branches.map((name) => `the branch ${name}`),
-      ...made.paths.map((path) => displayPath(path, this.home)),
-    ];
-    return lines.slice(-24);
+  /** A ledger entity, in words. */
+  private describeLedger(entity: LedgerEntity & { action?: string }): string {
+    const where = entity.remote ? ` on ${entity.remote}` : "";
+    switch (entity.kind) {
+      case "path":
+        return displayPath(entity.name, this.home);
+      case "worktree":
+        return `the worktree ${displayPath(entity.name, this.home)}`;
+      case "pr":
+        return `${entity.action === "merge" ? "the merged " : ""}pull request #${entity.name}${entity.repo && !entity.repo.startsWith("/") ? ` of ${entity.repo}` : ""}${entity.head ? ` (head ${entity.head})` : ""}`;
+      default:
+        return `${entity.action === "start" ? "the started " : "the "}${entity.kind} ${entity.name}${where}`;
+    }
+  }
+
+  /**
+   * What the ledger says, for the reviewing model: first how this line's
+   * targets follow from what this chat did (lifecycle.ts), then the rest,
+   * newest first. Cypher recorded it from the results of the chat's own
+   * commands; the agent can't write it.
+   */
+  private createdSummary(line?: LineAssessment): string[] {
+    const lines: string[] = [];
+    if (line?.parsed.kind === "simple") {
+      const facts = this.catalogueFacts();
+      for (const command of line.commands) {
+        let found;
+        try {
+          found = this.created.destroys(command, facts);
+        } catch {
+          found = undefined;
+        }
+        if (!found) continue;
+        for (const alternatives of found.targets) {
+          for (const entity of alternatives) {
+            const follow = this.created.followUp(found.op === "stop" ? "stop" : "delete", entity, facts);
+            if (!follow) continue;
+            const by = (follow.antecedent.entity as { by?: string }).by;
+            lines.push(`\`${command.words.join(" ").slice(0, 160)}\` ${found.op === "stop" ? "stops" : "removes"} ${this.describeLedger(entity)}: ${follow.rule.why}; this chat did ${this.describeLedger(follow.antecedent.entity)}${by ? ` (\`${by.slice(0, 120)}\`)` : ""}`);
+            break;
+          }
+        }
+      }
+    }
+    for (const entry of [...this.created.ledger.all()].reverse()) {
+      if (lines.length >= 30) break;
+      lines.push(this.describeLedger(entry));
+    }
+    return [...new Set(lines)];
   }
 
   /** The data directory a process says it uses (`CYPHER_DATA_DIR`), canonical; undefined when it names none. */
@@ -2344,7 +3048,7 @@ function approvalTitle(
         : first?.guard === "protected"
           ? "write a protected file"
           : `${request.capability} outside the project folders`;
-  if (dangerous) lines.push("Note: Dangerous: a write here runs code later. This always asks.");
+  if (dangerous) lines.push(first?.guard === "self" ? "Note: Dangerous: it changes Cypher's own data." : "Note: Dangerous: a write here runs code later.");
   for (const item of request.classifications) lines.push(fact("Path", displayPath(item.path, home)));
   const matches = [...new Set(request.classifications.map((item) => item.match).filter((match): match is string => Boolean(match)))];
   if (matches.length) lines.push(fact("Matches", matches.join(", ")));

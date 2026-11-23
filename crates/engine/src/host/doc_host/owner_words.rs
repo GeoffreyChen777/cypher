@@ -8,21 +8,61 @@
 //! peer's question sit as user messages like any other. Here each message
 //! command says who wrote it ([`SessionCommandEntry::author`], set only by
 //! the engine's own agents), and only what a person sent counts, plus the
-//! instruction a plan carries out, from its record.
+//! instruction a plan carries out and the card of the approved plan, from
+//! its record. Each word says its kind ([`source`]): a message the owner
+//! typed, a short one answering the agent message right before it (a
+//! `reply`, with that message from the transcript), the owner's answer to
+//! an agent's question (an `answer`, with the question; never a permission
+//! dialog's), the plan's instruction or card
+//! (docs/design/permission-control.md §7.3.4).
 //!
 //! The words reach Pi in its environment, which the agent can't change.
 
-use cypher_doc::{SessionCommandEntry, SessionCommandPayload, SessionCommandStatus};
+use cypher_doc::{
+    MessagePart, MessageRole, SessionCommandEntry, SessionCommandPayload, SessionCommandStatus,
+    SessionMessageEntry, join_continuation_entries,
+};
+use cypher_proto::BotWork;
 use serde::Serialize;
 
 use super::DocHost;
 
-/// How many of the owner's messages a run carries, newest last.
+/// How many of the owner's messages a run carries, newest last (typed
+/// messages, replies and answers together; the plan's instruction and card
+/// take their places from these).
 pub(crate) const OWNER_MESSAGES_MAX: usize = 10;
 /// The most of one message a run carries.
 pub(crate) const OWNER_MESSAGE_MAX: usize = 2_000;
-/// The most a run carries in all (it rides an environment variable).
+/// The most of an approved plan's card a run carries.
+pub(crate) const OWNER_CARD_MAX: usize = 3_000;
+/// The most of the agent message a reply answers, and of a question an
+/// answer answers: their latest part, which holds what was proposed or
+/// asked last.
+pub(crate) const OWNER_CONTEXT_MAX: usize = 1_200;
+/// The most a run carries in all, every field counted (it rides an
+/// environment variable).
 pub(crate) const OWNER_WORDS_MAX: usize = 12_000;
+/// A message no longer than this (letters and digits, a CJK character
+/// counting twice, punctuation and spaces not at all) that directly follows
+/// an agent message is a reply to it: "做", "按照建议", "yes, the second
+/// one". A longer one stands on its own words. The bound is language
+/// independent and says nothing about what the reply means; whether it
+/// agrees is the reviewing model's call.
+pub(crate) const REPLY_MAX_WEIGHT: usize = 60;
+
+/// Where an owner word comes from (`OwnerWord::source`).
+pub(crate) mod source {
+    /// A message the owner typed in this chat.
+    pub const TYPED: &str = "typed";
+    /// The owner's instruction a plan carries out, from the plan's record.
+    pub const PLAN: &str = "plan";
+    /// The owner's answer to a question an agent asked (ask_user).
+    pub const ANSWER: &str = "answer";
+    /// An approved plan's card, from the plan's record.
+    pub const CARD: &str = "card";
+    /// A short message answering the agent message right before it.
+    pub const REPLY: &str = "reply";
+}
 
 /// How a chat began: whether an agent started it, and the instruction a
 /// plan it belongs to carries out.
@@ -34,22 +74,61 @@ pub(crate) struct ChatOrigin {
     /// The owner's message the plan was proposed from, verbatim (the work's
     /// `instruction`).
     pub instruction: Option<String>,
+    /// The card of the approved plan the chat belongs to ([`plan_card`]):
+    /// what the owner approved, from the work's record.
+    pub card: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OwnerWords {
-    /// Oldest first.
+    /// Oldest first (the plan's instruction and card ahead of the rest).
     pub messages: Vec<OwnerWord>,
     /// Some of the chat's messages were written by an agent.
     pub agent_written: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct OwnerWord {
+    /// What the owner said: a typed message, a plan's instruction, the
+    /// option(s) or words an answer gave, an approved card.
     pub text: String,
-    /// `typed` in this chat, or the `plan`'s instruction.
+    /// One of [`source`].
     pub source: &'static str,
+    /// `answer`: the question as it was shown (header, question, options).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    /// `reply`: the agent message it answers (its latest part).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<String>,
+    /// Epoch millis the owner said it, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<i64>,
+}
+
+impl OwnerWord {
+    fn new(text: String, source: &'static str) -> Self {
+        Self {
+            text,
+            source,
+            question: None,
+            proposal: None,
+            at: None,
+        }
+    }
+
+    fn size(&self) -> usize {
+        [
+            Some(&self.text),
+            self.question.as_ref(),
+            self.proposal.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|t| t.chars().count())
+        .sum()
+    }
 }
 
 impl OwnerWords {
@@ -68,11 +147,52 @@ impl DocHost {
             return None;
         }
         let commands = handle.doc.read_commands().ok()?;
+        // The transcript only adds context (what a reply answers, what a
+        // question asked): unreadable, the words stand without it.
+        let entries = join_continuation_entries(handle.doc.read_entries().unwrap_or_default());
         let ran = |command: &SessionCommandEntry| {
             self.inner.store.is_processed(&command.id).unwrap_or(false)
         };
-        Some(owner_words(&commands, ran, origin).to_env())
+        Some(owner_words(&commands, &entries, ran, origin).to_env())
     }
+}
+
+/// An approved plan's card as the owner saw it when they approved it:
+/// title, summary, and each step with its details, from the work's record
+/// (never from a session's brief, which an agent wrote). `None` for a plan
+/// nobody approved.
+pub(crate) fn plan_card(work: &BotWork) -> Option<String> {
+    if !work
+        .decision
+        .as_ref()
+        .is_some_and(|decision| decision.approve)
+    {
+        return None;
+    }
+    let mut card = work.title.trim().to_string();
+    if let Some(summary) = work
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        card.push('\n');
+        card.push_str(summary);
+    }
+    for (index, step) in work.steps.iter().enumerate() {
+        card.push_str(&format!("\n{}. {}", index + 1, step.title.trim()));
+        if let Some(detail) = step
+            .detail
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+        {
+            card.push('\n');
+            card.push_str(detail);
+        }
+    }
+    let card = card.trim();
+    (!card.is_empty()).then(|| clip(card, OWNER_CARD_MAX))
 }
 
 /// Message ids the engine's agents minted before commands said who wrote
@@ -84,6 +204,7 @@ fn legacy_agent_id(message_id: &str) -> bool {
         || message_id.ends_with("-brief")
 }
 
+/// The start of `text`, at most `max` characters.
 fn clip(text: &str, max: usize) -> String {
     let text = text.trim();
     if text.chars().count() <= max {
@@ -94,12 +215,127 @@ fn clip(text: &str, max: usize) -> String {
     out
 }
 
+/// The end of `text`, at most `max` characters: what an agent proposed or
+/// asked last.
+fn clip_tail(text: &str, max: usize) -> String {
+    let text = text.trim();
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let mut out = String::from("…");
+    out.extend(text.chars().skip(count - max));
+    out
+}
+
+/// How much a message says: its letters and digits, a CJK character
+/// counting twice; spaces, punctuation and symbols not at all.
+fn weight(text: &str) -> usize {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .map(|c| {
+            let wide = matches!(c as u32,
+                0x1100..=0x11FF | 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF
+                | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0x20000..=0x2FFFF);
+            if wide { 2 } else { 1 }
+        })
+        .sum()
+}
+
+/// The text an agent message shows: its text parts, in order.
+fn shown_text(entry: &SessionMessageEntry) -> String {
+    entry
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text { text, .. } => Some(text.trim()),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The agent message a message answers: the transcript entry right before
+/// the message's own, when that is the agent's and shows text. Only that
+/// one binds, never an earlier one.
+fn proposal_before(entries: &[SessionMessageEntry], message_id: &str) -> Option<String> {
+    let at = entries.iter().position(|entry| entry.id == message_id)?;
+    let before = entries.get(at.checked_sub(1)?)?;
+    if before.role != MessageRole::Assistant {
+        return None;
+    }
+    let text = shown_text(before);
+    (!text.is_empty()).then(|| clip_tail(&text, OWNER_CONTEXT_MAX))
+}
+
+/// The owner's answers in a `RespondInput`: each question an agent asked
+/// (never a permission prompt: "Run once" consents to nothing else) with
+/// what they picked or wrote.
+fn answers(
+    entries: &[SessionMessageEntry],
+    request_id: &str,
+    given: &[cypher_proto::UserInputAnswer],
+    at: i64,
+) -> Vec<OwnerWord> {
+    let questions = entries
+        .iter()
+        .rev()
+        .flat_map(|entry| &entry.parts)
+        .find_map(|part| match part {
+            MessagePart::Input {
+                request_id: id,
+                questions,
+                ..
+            } if id == request_id => Some(questions),
+            _ => None,
+        });
+    let Some(questions) = questions else {
+        return Vec::new();
+    };
+    given
+        .iter()
+        .filter_map(|answer| {
+            let question = questions.iter().find(|q| q.id == answer.question_id)?;
+            if question.permission.is_some() {
+                return None;
+            }
+            let picked: Vec<&str> = answer
+                .labels
+                .iter()
+                .map(|label| label.trim())
+                .filter(|label| !label.is_empty())
+                .collect();
+            if picked.is_empty() {
+                return None;
+            }
+            let mut shown = [question.header.trim(), question.question.trim()]
+                .into_iter()
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !question.options.is_empty() {
+                shown.push_str("\nOptions: ");
+                shown.push_str(&question.options.join(" | "));
+            }
+            Some(OwnerWord {
+                question: Some(clip_tail(&shown, OWNER_CONTEXT_MAX)),
+                at: Some(at),
+                ..OwnerWord::new(clip(&picked.join("; "), OWNER_MESSAGE_MAX), source::ANSWER)
+            })
+        })
+        .collect()
+}
+
 /// The owner's words in a chat's commands: the messages a person sent that
-/// the host ran (or is running), oldest first, with the plan's instruction
-/// ahead of them. `ran` says whether a pending command was taken for
-/// execution (the processed ledger).
+/// the host ran (or is running) and the answers they gave, oldest first,
+/// with the plan's instruction and approved card ahead of them. A short
+/// message right after an agent message is a `reply` carrying that message
+/// (`entries`, the transcript, continuations joined). `ran` says whether a
+/// pending command was taken for execution (the processed ledger).
 pub(crate) fn owner_words(
     commands: &[SessionCommandEntry],
+    entries: &[SessionMessageEntry],
     ran: impl Fn(&SessionCommandEntry) -> bool,
     origin: &ChatOrigin,
 ) -> OwnerWords {
@@ -108,8 +344,15 @@ pub(crate) fn owner_words(
     // even when written before commands said so (its retries share the id).
     let mut first: Option<&str> = None;
     let mut seen = std::collections::HashSet::new();
-    let mut typed: Vec<String> = Vec::new();
+    let mut said: Vec<OwnerWord> = Vec::new();
     for command in commands {
+        let taken = match command.status {
+            SessionCommandStatus::Applied => true,
+            SessionCommandStatus::Pending => ran(command),
+            SessionCommandStatus::Rejected
+            | SessionCommandStatus::Expired
+            | SessionCommandStatus::Superseded => false,
+        };
         let (text, message_id) = match &command.payload {
             SessionCommandPayload::Run {
                 request,
@@ -119,7 +362,16 @@ pub(crate) fn owner_words(
             SessionCommandPayload::Steer {
                 prompt, message_id, ..
             } => (prompt.as_str(), message_id.as_deref()),
-            _ => continue,
+            SessionCommandPayload::RespondInput {
+                request_id,
+                answers: given,
+            } => {
+                if command.author.is_none() && taken {
+                    said.extend(answers(entries, request_id, given, command.issued_at));
+                }
+                continue;
+            }
+            SessionCommandPayload::Interrupt {} => continue,
         };
         let first_id = *first.get_or_insert(message_id.unwrap_or(command.id.as_str()));
         let agents = command.author.is_some()
@@ -129,13 +381,6 @@ pub(crate) fn owner_words(
             agent_written = true;
             continue;
         }
-        let taken = match command.status {
-            SessionCommandStatus::Applied => true,
-            SessionCommandStatus::Pending => ran(command),
-            SessionCommandStatus::Rejected
-            | SessionCommandStatus::Expired
-            | SessionCommandStatus::Superseded => false,
-        };
         if !taken || text.trim().is_empty() {
             continue;
         }
@@ -144,37 +389,48 @@ pub(crate) fn owner_words(
         {
             continue;
         }
-        typed.push(clip(text, OWNER_MESSAGE_MAX));
+        let proposal = message_id
+            .filter(|_| weight(text) <= REPLY_MAX_WEIGHT)
+            .and_then(|id| proposal_before(entries, id));
+        let source = if proposal.is_some() {
+            source::REPLY
+        } else {
+            source::TYPED
+        };
+        said.push(OwnerWord {
+            proposal,
+            at: Some(command.issued_at),
+            ..OwnerWord::new(clip(text, OWNER_MESSAGE_MAX), source)
+        });
     }
-    let instruction = origin
-        .instruction
-        .as_deref()
-        .filter(|text| !text.trim().is_empty())
-        .map(|text| clip(text, OWNER_MESSAGE_MAX));
-    let room = OWNER_MESSAGES_MAX - usize::from(instruction.is_some());
-    if typed.len() > room {
-        typed.drain(..typed.len() - room);
+    let fixed: Vec<OwnerWord> = [
+        origin
+            .instruction
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| OwnerWord::new(clip(text, OWNER_MESSAGE_MAX), source::PLAN)),
+        origin
+            .card
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| OwnerWord::new(clip(text, OWNER_CARD_MAX), source::CARD)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let room = OWNER_MESSAGES_MAX.saturating_sub(fixed.len());
+    if said.len() > room {
+        said.drain(..said.len() - room);
     }
-    // Within the size: the oldest typed messages go first, the plan's
-    // instruction last.
-    let size = |typed: &[String]| {
-        typed.iter().map(|t| t.chars().count()).sum::<usize>()
-            + instruction.as_deref().map_or(0, |t| t.chars().count())
-    };
-    while !typed.is_empty() && size(&typed) > OWNER_WORDS_MAX {
-        typed.remove(0);
+    // Within the size: the oldest messages go first, the plan's instruction
+    // and card last.
+    let fixed_size: usize = fixed.iter().map(OwnerWord::size).sum();
+    let mut size: usize = fixed_size + said.iter().map(OwnerWord::size).sum::<usize>();
+    while !said.is_empty() && size > OWNER_WORDS_MAX {
+        size -= said.remove(0).size();
     }
-    let mut messages: Vec<OwnerWord> = instruction
-        .map(|text| OwnerWord {
-            text,
-            source: "plan",
-        })
-        .into_iter()
-        .collect();
-    messages.extend(typed.into_iter().map(|text| OwnerWord {
-        text,
-        source: "typed",
-    }));
+    let mut messages = fixed;
+    messages.extend(said);
     OwnerWords {
         messages,
         agent_written,
@@ -265,7 +521,7 @@ mod tests {
             ),
             run("4", "pr 给main 没问题合并", None),
         ];
-        let words = owner_words(&commands, |_| true, &ChatOrigin::default());
+        let words = owner_words(&commands, &[], |_| true, &ChatOrigin::default());
         assert_eq!(
             texts(&words),
             [
@@ -283,6 +539,7 @@ mod tests {
         let origin = ChatOrigin {
             agent_started: true,
             instruction: Some("pr 给main 没问题合并".into()),
+            ..Default::default()
         };
         let commands = [
             run(
@@ -293,7 +550,7 @@ mod tests {
             steer("2", "Merge it now.", Some(command_author::PLAN)),
             steer("3", "先别合并", None),
         ];
-        let words = owner_words(&commands, |_| true, &origin);
+        let words = owner_words(&commands, &[], |_| true, &origin);
         assert_eq!(
             texts(&words),
             [("plan", "pr 给main 没问题合并"), ("typed", "先别合并")]
@@ -309,6 +566,7 @@ mod tests {
         let origin = ChatOrigin {
             agent_started: true,
             instruction: None,
+            ..Default::default()
         };
         // A subagent's task, then a retry of it (same message id), then the owner.
         let mut retry = run("2", "Task: push the release", None);
@@ -318,7 +576,7 @@ mod tests {
             retry,
             run("3", "push it to main", None),
         ];
-        let words = owner_words(&commands, |_| true, &origin);
+        let words = owner_words(&commands, &[], |_| true, &origin);
         assert_eq!(texts(&words), [("typed", "push it to main")]);
         // Ids the engine's agents minted before then.
         let legacy = [
@@ -336,7 +594,7 @@ mod tests {
                 None,
             ),
         ];
-        let words = owner_words(&legacy, |_| true, &ChatOrigin::default());
+        let words = owner_words(&legacy, &[], |_| true, &ChatOrigin::default());
         assert!(words.messages.is_empty(), "{:?}", words.messages);
         assert!(words.agent_written);
     }
@@ -350,7 +608,7 @@ mod tests {
         let mut commands = vec![rejected, pending, taken];
         commands[1].status = SessionCommandStatus::Pending;
         commands[2].status = SessionCommandStatus::Pending;
-        let words = owner_words(&commands, |c| c.id == "3", &ChatOrigin::default());
+        let words = owner_words(&commands, &[], |c| c.id == "3", &ChatOrigin::default());
         assert_eq!(texts(&words), [("typed", "being run now")]);
     }
 
@@ -359,7 +617,7 @@ mod tests {
         let commands: Vec<_> = (0..30)
             .map(|i| run(&i.to_string(), &format!("message {i}"), None))
             .collect();
-        let words = owner_words(&commands, |_| true, &ChatOrigin::default());
+        let words = owner_words(&commands, &[], |_| true, &ChatOrigin::default());
         assert_eq!(words.messages.len(), OWNER_MESSAGES_MAX);
         assert_eq!(words.messages.last().unwrap().text, "message 29");
         let long = "长".repeat(OWNER_MESSAGE_MAX + 50);
@@ -367,8 +625,9 @@ mod tests {
         let origin = ChatOrigin {
             agent_started: false,
             instruction: Some(long.clone()),
+            ..Default::default()
         };
-        let words = owner_words(&commands, |_| true, &origin);
+        let words = owner_words(&commands, &[], |_| true, &origin);
         assert!(
             words
                 .messages
@@ -378,5 +637,254 @@ mod tests {
         let total: usize = words.messages.iter().map(|m| m.text.chars().count()).sum();
         assert!(total <= OWNER_WORDS_MAX + words.messages.len(), "{total}");
         assert_eq!(words.messages[0].source, "plan", "the instruction stays");
+    }
+
+    fn said(id: &str, role: MessageRole, parts: Vec<MessagePart>) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts,
+            created_at: 0,
+            device_id: "mac".into(),
+            status: None,
+            continuation_of: None,
+            completed_at: None,
+            comments: Vec::new(),
+            models: Vec::new(),
+            turn_changes: None,
+            recovery: None,
+        }
+    }
+
+    fn text(text: &str) -> MessagePart {
+        MessagePart::Text {
+            id: "t0".into(),
+            text: text.into(),
+            agent_text: None,
+        }
+    }
+
+    fn question(id: &str, options: &[&str], permission: bool) -> cypher_proto::UserInputQuestion {
+        cypher_proto::UserInputQuestion {
+            id: id.into(),
+            header: "Repository".into(),
+            question: "How should the new repository be created?".into(),
+            options: options.iter().map(|o| o.to_string()).collect(),
+            multi_select: false,
+            permission: permission.then_some(cypher_proto::PermissionPrompt {
+                kind: cypher_proto::PermissionPromptKind::Escalate,
+                tool_call_id: None,
+            }),
+            asked_by: None,
+        }
+    }
+
+    fn respond(id: &str, request_id: &str, answers: &[(&str, &str)]) -> SessionCommandEntry {
+        entry(
+            id,
+            SessionCommandPayload::RespondInput {
+                request_id: request_id.into(),
+                answers: answers
+                    .iter()
+                    .map(|(q, label)| cypher_proto::UserInputAnswer {
+                        question_id: q.to_string(),
+                        labels: vec![label.to_string()],
+                    })
+                    .collect(),
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn a_short_message_right_after_an_agent_message_is_a_reply_to_it() {
+        let commands = [
+            run("1", "look into the flaky test", None),
+            run("2", "做", None),
+            run("3", "ok", None),
+            run(
+                "4",
+                &"a long message that says what to do on its own ".repeat(4),
+                None,
+            ),
+        ];
+        let entries = [
+            said(
+                "m-1",
+                MessageRole::User,
+                vec![text("look into the flaky test")],
+            ),
+            said(
+                "a1",
+                MessageRole::Assistant,
+                vec![
+                    text("Earlier idea."),
+                    text("I propose: open a PR to main and merge it."),
+                ],
+            ),
+            said("m-2", MessageRole::User, vec![text("做")]),
+            // Two owner messages in a row: the second answers no agent message.
+            said("m-3", MessageRole::User, vec![text("ok")]),
+            said(
+                "a2",
+                MessageRole::Assistant,
+                vec![text("Shall I delete the branch?")],
+            ),
+            said("m-4", MessageRole::User, vec![text("long")]),
+        ];
+        let words = owner_words(&commands, &entries, |_| true, &ChatOrigin::default());
+        let sources: Vec<_> = words.messages.iter().map(|m| m.source).collect();
+        assert_eq!(sources, ["typed", "reply", "typed", "typed"]);
+        let reply = &words.messages[1];
+        assert_eq!(reply.text, "做");
+        assert_eq!(
+            reply.proposal.as_deref(),
+            Some("Earlier idea.\n\nI propose: open a PR to main and merge it.")
+        );
+        assert!(
+            words.messages[3].proposal.is_none(),
+            "a long message stands on its own words"
+        );
+        // A long proposal keeps its latest part.
+        let long = format!("{}the last proposal", "x".repeat(OWNER_CONTEXT_MAX * 2));
+        let entries = [
+            said("a", MessageRole::Assistant, vec![text(&long)]),
+            said("m-2", MessageRole::User, vec![text("做")]),
+        ];
+        let words = owner_words(&commands[1..2], &entries, |_| true, &ChatOrigin::default());
+        let proposal = words.messages[0].proposal.as_deref().unwrap();
+        assert!(proposal.ends_with("the last proposal"), "{proposal}");
+        assert_eq!(proposal.chars().count(), OWNER_CONTEXT_MAX + 1);
+    }
+
+    #[test]
+    fn the_owners_answers_to_questions_count_with_the_question_never_a_permission_dialogs() {
+        let entries = [
+            said("m-1", MessageRole::User, vec![text("set up the repo")]),
+            said(
+                "a1",
+                MessageRole::Assistant,
+                vec![MessagePart::Input {
+                    id: "i0".into(),
+                    request_id: "r1".into(),
+                    questions: vec![question(
+                        "q1",
+                        &["Create a private repo", "Create a public repo"],
+                        false,
+                    )],
+                    resolved: true,
+                }],
+            ),
+            said(
+                "a2",
+                MessageRole::Assistant,
+                vec![MessagePart::Input {
+                    id: "i1".into(),
+                    request_id: "r2".into(),
+                    questions: vec![question("q1", &["Run once", "Deny"], true)],
+                    resolved: true,
+                }],
+            ),
+        ];
+        let mut forged = respond("5", "r1", &[("q1", "Create a public repo")]);
+        forged.author = Some(cypher_doc::command_author::PLAN.into());
+        let commands = [
+            run("1", "set up the repo", None),
+            respond("2", "r1", &[("q1", "Create a private repo")]),
+            respond("3", "r2", &[("q1", "Run once")]),
+            respond("4", "missing", &[("q1", "Create a public repo")]),
+            forged,
+        ];
+        let words = owner_words(&commands, &entries, |_| true, &ChatOrigin::default());
+        assert_eq!(
+            texts(&words),
+            [
+                ("typed", "set up the repo"),
+                ("answer", "Create a private repo")
+            ]
+        );
+        let question = words.messages[1].question.as_deref().unwrap();
+        assert!(
+            question.contains("How should the new repository be created?"),
+            "{question}"
+        );
+        assert!(
+            question.contains("Create a private repo | Create a public repo"),
+            "{question}"
+        );
+        let json = words.to_env();
+        assert!(
+            json.contains(r#""source":"answer""#) && json.contains(r#""question":"#),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn an_approved_plans_card_counts_from_its_record() {
+        let mut work: BotWork = serde_json::from_value(serde_json::json!({
+            "id": "w1", "botId": "b", "title": "Ship the fix", "instruction": "fix and ship",
+            "summary": "Fix the badge and open a PR", "state": "running", "chatId": "c",
+            "createdAt": 0,
+            "steps": [{"id": "s1", "title": "Open a PR into main", "detail": "then merge it"}]
+        }))
+        .unwrap();
+        assert_eq!(plan_card(&work), None, "nobody approved it");
+        work.decision = Some(cypher_proto::PlanDecision {
+            approve: true,
+            at: 1,
+        });
+        let card = plan_card(&work).unwrap();
+        assert_eq!(
+            card,
+            "Ship the fix\nFix the badge and open a PR\n1. Open a PR into main\nthen merge it"
+        );
+        let origin = ChatOrigin {
+            agent_started: true,
+            instruction: Some("fix and ship".into()),
+            card: Some(card.clone()),
+        };
+        let words = owner_words(
+            &[run("1", "brief", Some(cypher_doc::command_author::PLAN))],
+            &[],
+            |_| true,
+            &origin,
+        );
+        assert_eq!(
+            texts(&words),
+            [("plan", "fix and ship"), ("card", card.as_str())]
+        );
+    }
+
+    #[test]
+    fn every_field_counts_toward_the_size() {
+        let proposal = "p".repeat(OWNER_CONTEXT_MAX * 3);
+        let mut commands = Vec::new();
+        let mut entries = Vec::new();
+        for i in 0..20 {
+            commands.push(run(
+                &i.to_string(),
+                &format!("{} {i}", "长".repeat(1_500)),
+                None,
+            ));
+            entries.push(said(
+                &format!("a{i}"),
+                MessageRole::Assistant,
+                vec![text(&proposal)],
+            ));
+            entries.push(said(&format!("m-{i}"), MessageRole::User, vec![text("x")]));
+        }
+        let words = owner_words(&commands, &entries, |_| true, &ChatOrigin::default());
+        let total: usize = words.messages.iter().map(OwnerWord::size).sum();
+        assert!(total <= OWNER_WORDS_MAX, "{total}");
+        assert!(
+            words.messages.last().unwrap().text.ends_with(" 19"),
+            "newest kept"
+        );
+        // Short ones are replies and carry their proposals.
+        let commands: Vec<_> = (0..20).map(|i| run(&i.to_string(), "好", None)).collect();
+        let words = owner_words(&commands, &entries, |_| true, &ChatOrigin::default());
+        assert!(words.messages.iter().all(|m| m.source == "reply"));
+        let total: usize = words.messages.iter().map(OwnerWord::size).sum();
+        assert!(total <= OWNER_WORDS_MAX, "{total}");
     }
 }

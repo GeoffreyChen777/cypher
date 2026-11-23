@@ -23,6 +23,7 @@ import { basename } from "node:path";
 
 import { globalValueOptions } from "./commands.ts";
 import { UNKNOWN } from "./shell.ts";
+import { SYSTEM_INSTALL, USER_INSTALL } from "./grades.ts";
 
 /** One simple command as the entries read it. */
 export interface CommandView {
@@ -41,8 +42,8 @@ export interface PackFacts {
   kubeContext(args: readonly string[]): string | undefined;
   /** The program resolves inside a place the agent can write (a virtualenv, `node_modules/.bin`). */
   programIsLocal(words: readonly string[]): boolean;
-  /** A tool of that name is installed in the project (`node_modules/.bin`, `.venv/bin`). */
-  projectTool(name: string): boolean;
+  /** A tool of that name is installed in the project (`node_modules/.bin`, `.venv/bin`), seen from `cwd` (where the command runs) up to the project folders. */
+  projectTool(name: string, cwd?: string): boolean;
 }
 
 export interface InspectEntry {
@@ -237,7 +238,9 @@ export const INSPECT: readonly InspectEntry[] = [
 
 const PUBLISH = "publishes a package";
 const DEPLOY = "deploys or changes a remote service";
-const INSTALL = "installs software for the whole machine";
+const INSTALL = SYSTEM_INSTALL;
+/** Installers that put a tool in this user's own directory (`~/go/bin`, `~/.cargo/bin`, `~/.local/bin`): reversible, seen by no one else (grades.ts `install-user`). */
+const USER_TOOL = `${USER_INSTALL} (into the user's own tool directory: reversible by deleting it)`;
 const SECRET = "reads a secret";
 const SEND = "sends a message or data to other people";
 
@@ -295,7 +298,7 @@ function ghApiWrites(view: CommandView): boolean {
  * activates, changes a property or runs a shell command. Then it changes
  * nothing, like `ps`.
  */
-function osascriptReadsOnly(view: CommandView): boolean {
+function osascriptReadsOnly(view: CommandView, raise = false): boolean {
   const scripts: string[] = [];
   for (let i = 0; i < view.args.length; i++) {
     const word = view.args[i];
@@ -314,7 +317,48 @@ function osascriptReadsOnly(view: CommandView): boolean {
     return false;
   }
   if (scripts.length === 0) return false;
-  return scripts.every((script) => !CONTROLS_APPS.test(script) && !CHANGES_PROPERTY.test(script) && !/\bset\b(?!\s+[A-Za-z_]\w*\s+to\b)/.test(script));
+  // Raising a window (`activate`, `set frontmost … to true`) changes only what is in front: undone by a click, seen by no one else.
+  const asked = raise ? scripts.map((script) => script.replace(RAISES, " ")) : scripts;
+  return asked.every((script) => !CONTROLS_APPS.test(script) && !CHANGES_PROPERTY.test(script) && !/\bset\b(?!\s+[A-Za-z_]\w*\s+to\b)/.test(script));
+}
+
+/** AppleScript that only brings an app or a process to the front. */
+const RAISES = /\bset\s+(?:the\s+)?frontmost\b(?:\s+of\s+(?:\([^()]*\)|[^"()]*?))?\s+to\s+true\b|\bactivate\b/gi;
+
+/**
+ * Read-only forms of the programs that change the machine's setup (data): the first argument
+ * that only prints the setting. Anything else of theirs stays a danger.
+ */
+export const SYSTEM_QUERIES: Readonly<Record<string, RegExp>> = {
+  pmset: /^-g$/,
+  networksetup: /^-(get|list|show|print|version|help)/i,
+  systemsetup: /^-(get|help|print)/i,
+  spctl: /^(--status|--assess|-a|--test-devid-status)$/,
+  csrutil: /^status$/,
+  nvram: /^(-p|-x)$/,
+  kmutil: /^(showloaded|inspect|print-diagnostics)$/,
+};
+
+/** Options that only ask a program for its help or version. */
+const HELP_ARG = /^(-h|--help|-help|help|--version|-V|version|--usage)$/;
+
+/**
+ * A command that only asks a program about itself: its arguments are help/version flags alone
+ * (`pi --help`, `pmset --version`), or a CLI's subcommands followed by `--help` (`gh pr create --help`).
+ */
+export function asksOnly(view: CommandView): boolean {
+  const args = view.args.filter((word) => !/^\d?>&?\d?$/.test(word));
+  if (args.length === 0 || args.includes(UNKNOWN)) return false;
+  if (args.every((word) => HELP_ARG.test(word))) return true;
+  const last = args[args.length - 1];
+  return /^(-h|--help)$/.test(last) && args.slice(0, -1).every((word) => /^[a-z][a-z-]*$/.test(word));
+}
+
+/** A system-setup program asked only to print (SYSTEM_QUERIES), or about itself. */
+function systemQuery(view: CommandView): boolean {
+  if (asksOnly(view)) return true;
+  const form = SYSTEM_QUERIES[view.program];
+  return form !== undefined && view.args.length > 0 && form.test(view.args[0]) && !view.args.includes(UNKNOWN);
 }
 
 /** What an AppleScript or JXA does when it is more than a question. */
@@ -332,7 +376,7 @@ export const DANGER: readonly DangerEntry[] = [
   { pack: "core", program: "systemctl", sub: ["enable|disable|mask|unmask|daemon-reload|edit|set-default|reboot|poweroff|halt|suspend"], kind: SYSTEM },
   { pack: "core", program: "crontab", kind: "changes scheduled jobs", when: (view) => !(view.args.length === 1 && view.args[0] === "-l") },
   { pack: "core", program: "defaults", sub: ["write|delete|import|rename"], kind: SYSTEM },
-  { pack: "core", program: ["chsh", "dscl", "scutil", "networksetup", "pmset", "spctl", "csrutil", "nvram", "tccutil", "systemsetup", "kextload", "kmutil", "mkfs", "fdisk", "parted", "shutdown", "reboot", "halt"], kind: SYSTEM, when: (view) => view.program !== "scutil" || has(view, "--set") },
+  { pack: "core", program: ["chsh", "dscl", "scutil", "networksetup", "pmset", "spctl", "csrutil", "nvram", "tccutil", "systemsetup", "kextload", "kmutil", "mkfs", "fdisk", "parted", "shutdown", "reboot", "halt"], kind: SYSTEM, when: (view) => !systemQuery(view) && (view.program !== "scutil" || has(view, "--set")) },
   { pack: "core", program: "diskutil", sub: ["erase*|partition*|reformat|zeroDisk|randomDisk|secureErase|apfs"], kind: "erases or changes a disk" },
   { pack: "core", program: "dd", kind: "writes raw data", when: (view) => view.args.some((word) => word === UNKNOWN || word.startsWith("of=")) },
   // Secrets.
@@ -353,7 +397,7 @@ export const DANGER: readonly DangerEntry[] = [
   // Send.
   { pack: "core", program: ["mail", "mailx", "sendmail", "mutt", "msmtp", "neomutt"], kind: SEND },
   { pack: "core", program: ["slack", "slackcat", "slack-cli", "telegram-send", "signal-cli", "matrix-commander", "discord-send", "twilio", "ntfy", "apprise", "pushover"], kind: SEND, when: (view) => !view.args.every((word) => /^(-h|--help|--version|help)$/.test(word)) || view.args.length === 0 },
-  { pack: "core", program: "osascript", kind: "controls apps on this machine (it can send mail and messages)", when: (view) => !osascriptReadsOnly(view) },
+  { pack: "core", program: "osascript", kind: "controls apps on this machine (it can send mail and messages)", when: (view) => !osascriptReadsOnly(view, true) },
   { pack: "core", program: ["open", "xdg-open"], kind: "opens a link, which can send data to a site", when: (view) => view.positionals.some((word) => word === UNKNOWN || (/^[a-z][\w+.-]*:/i.test(word) && !/^file:/i.test(word) && !/^(https?:\/\/)?(localhost|127\.\d+\.\d+\.\d+|\[::1\])([:/]|$)/i.test(word))) },
   { pack: "core", program: ["curl", "wget"], kind: "sends data to a server", when: sendsData },
   // scp and rsync are decided in risk.ts: by the machines and local files they copy between.
@@ -387,22 +431,22 @@ export const DANGER: readonly DangerEntry[] = [
   { pack: "python", program: ["pip", "pip3"], sub: ["install|uninstall"], kind: "changes the system's Python packages", when: (view, facts) => has(view, "--user", "--break-system-packages", "--target", "--prefix", "--root") || !facts.programIsLocal(view.words) },
   { pack: "python", program: ["twine", "flit", "hatch"], sub: ["upload|publish"], kind: PUBLISH },
   { pack: "python", program: ["uv", "poetry", "pdm"], sub: ["publish"], kind: PUBLISH },
-  { pack: "python", program: "uv", sub: ["tool", "install|uninstall|upgrade"], kind: INSTALL },
+  { pack: "python", program: "uv", sub: ["tool", "install|uninstall|upgrade"], kind: USER_TOOL },
   { pack: "python", program: "uv", sub: ["pip", "install|uninstall|sync"], kind: INSTALL, when: (view) => has(view, "--system", "--break-system-packages") },
-  { pack: "python", program: "pipx", sub: ["install|uninstall|upgrade|inject|run|reinstall-all|uninstall-all"], kind: INSTALL },
+  { pack: "python", program: "pipx", sub: ["install|uninstall|upgrade|inject|run|reinstall-all|uninstall-all"], kind: USER_TOOL, when: (view) => (has(view, "--global") ? INSTALL : true) },
   { pack: "python", program: "uvx", kind: "downloads and runs a package", when: (view, facts) => !facts.projectTool(view.positionals[0] ?? UNKNOWN) },
   // Ruby.
   { pack: "ruby", program: "gem", sub: ["install|uninstall|update|push|yank|owner|signin|signout"], kind: INSTALL, when: (view) => (/^(push|yank|owner|signin|signout)$/.test(view.positionals[0] ?? "") ? PUBLISH : true) },
   // Rust, Go, JVM, .NET.
   { pack: "rust", program: "cargo", sub: ["publish|yank|owner|login|logout"], kind: PUBLISH },
-  { pack: "rust", program: "cargo", sub: ["install|uninstall"], kind: INSTALL },
-  { pack: "rust", program: "rustup", sub: ["self|set|default|toolchain"], kind: INSTALL, when: (view) => view.positionals[1] !== "list" },
-  { pack: "go", program: "go", sub: ["install"], kind: INSTALL },
+  { pack: "rust", program: "cargo", sub: ["install|uninstall"], kind: USER_TOOL, when: (view) => (has(view, "--root") ? INSTALL : true) },
+  { pack: "rust", program: "rustup", sub: ["self|set|default|toolchain"], kind: USER_TOOL, when: (view) => view.positionals[1] !== "list" },
+  { pack: "go", program: "go", sub: ["install"], kind: USER_TOOL },
   { pack: "jvm", program: ["mvn", "mvnw", "./mvnw"], kind: PUBLISH, when: (view) => view.positionals.some((word) => word === UNKNOWN || /^(deploy|release:.*|.*:deploy)$/.test(word)) },
   { pack: "jvm", program: ["gradle", "gradlew", "./gradlew"], kind: PUBLISH, when: (view) => view.positionals.some((word) => word === UNKNOWN || (/(^|:)publish/.test(word) && !/MavenLocal$/.test(word)) || /(^|:)(release|uploadArchives)$/.test(word)) },
   { pack: "jvm", program: "sbt", kind: PUBLISH, when: (view) => view.positionals.some((word) => word === UNKNOWN || /publish(Signed)?$|release/.test(word) && !/publishLocal/.test(word)) },
   { pack: "dotnet", program: "dotnet", sub: ["nuget", "push|delete"], kind: PUBLISH },
-  { pack: "dotnet", program: "dotnet", sub: ["tool", "install|uninstall|update"], kind: INSTALL, when: (view) => has(view, "-g", "--global") },
+  { pack: "dotnet", program: "dotnet", sub: ["tool", "install|uninstall|update"], kind: USER_TOOL, when: (view) => has(view, "-g", "--global") },
   // Apple and Android.
   { pack: "apple", program: "xcrun", sub: ["altool|notarytool|iTMSTransporter"], kind: "uploads to Apple", when: (view) => !/^(history|info|log|list)$/.test(view.positionals[1] ?? "") },
   { pack: "apple", program: "fastlane", kind: "uploads or releases an app", when: (view) => view.positionals.some((word) => word === UNKNOWN || /^(deliver|pilot|upload_to_.*|release|beta|appstore|supply|match|cert|sigh|pem)$/.test(word)) },

@@ -18,7 +18,11 @@ export interface AuditRecord {
   zone?: string;
   guard?: string;
   paths?: string[];
-  decision: "allow" | "deny" | "abort";
+  /**
+   * `deny`: refused by a rule, the policy or the owner's Deny; `abort`: Deny and stop; `dismissed`: a prompt
+   * that came back without an answer (closed, timed out, the turn ended), which is no refusal (round 3).
+   */
+  decision: "allow" | "deny" | "abort" | "dismissed";
   decidedBy: "policy" | "grant" | "judge" | "user" | "rule" | "sandbox" | "inspect";
   reason?: string;
   /** Model first: why the reviewing model asked the user instead of approving. */
@@ -37,7 +41,7 @@ export interface AuditRecord {
   onceOnly?: string;
   /** The patterns the dialog offered. */
   offered?: string[];
-  /** The button pressed, `dismissed` or `timeout`. */
+  /** The button pressed; or, unanswered, `dismissed`, `timeout` or `aborted`. */
   choice?: string;
   /** The reviewing model: approved, asked, or unavailable. */
   judge?: "approved" | "asked" | "unavailable" | "paused";
@@ -52,7 +56,8 @@ export interface AuditRecord {
     ok: boolean;
     reason?: string;
     quote?: string;
-    quoteSource?: "typed" | "plan";
+    /** Which consent: `typed`, `plan`, `card`, `answer` or `reply`. */
+    quoteSource?: "typed" | "plan" | "card" | "answer" | "reply";
     targets: string[];
     passed: string[];
   };
@@ -122,6 +127,9 @@ export class AuditLog {
     if (kinds.length) lines.push("Why they asked:", ...kinds.map(([kind, n]) => `  ${String(n).padStart(4)}  ${kind}`));
     const once = count(asked, (record) => record.onceOnly?.replace(/`[^`]+`/g, "`…`")).slice(0, 5);
     if (once.length) lines.push("Why no rule could be kept:", ...once.map(([why, n]) => `  ${String(n).padStart(4)}  ${why}`));
+    const unanswered = asked.filter((record) => record.decision === "dismissed" || (record.decision === "deny" && (record.choice === "dismissed" || record.choice === "timeout"))).length;
+    const refused = asked.filter((record) => record.decision === "abort" || (record.decision === "deny" && record.choice !== "dismissed" && record.choice !== "timeout")).length;
+    if (unanswered || refused) lines.push(`Answers: ${refused} denied, ${unanswered} closed without an answer (not a denial).`);
     const judge = count(records, (record) => record.judge);
     if (judge.length) lines.push(`Reviewing model: ${judge.map(([state, n]) => `${state} ${n}`).join(", ")}.`);
     const answers = count(records, (record) => record.judgeVerdict);

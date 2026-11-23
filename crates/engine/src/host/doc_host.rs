@@ -49,7 +49,7 @@ mod open;
 mod owner_words;
 mod persist;
 
-pub(crate) use owner_words::ChatOrigin;
+pub(crate) use owner_words::{ChatOrigin, plan_card};
 pub(crate) use persist::DocPersister;
 
 use cache::{DOC_RESIDENT_FLOOR_BYTES, RESIDENT_BYTES_PER_SNAPSHOT_BYTE};

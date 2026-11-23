@@ -23,6 +23,52 @@ final class NotificationTests: XCTestCase {
         bad["kind"] = "tool-output"
         XCTAssertNil(PushPayload.parse(["cypher": bad]))
     }
+    func testWorkspaceFieldsParseStrictlyAndNeverTurnIntoASessionNotice() throws {
+        var fields = info["cypher"] as! [String: Any]
+        fields["chatId"] = "chat-atlas"
+        fields["projectId"] = "bot-atlas"
+        fields["workspaceId"] = "bot-atlas"
+        let plain = try XCTUnwrap(PushPayload.parse(["cypher": fields]))
+        XCTAssertEqual(plain.workspaceId, "bot-atlas")
+        XCTAssertNil(plain.item)
+        for (kind, item) in [
+            ("plan", PushItem.plan("work-1")), ("approval", .approval("work-1")), ("review", .review("work-1")),
+            ("asking", .asking("work-1")),
+        ] {
+            fields["itemKind"] = kind
+            fields["itemId"] = "work-1"
+            XCTAssertEqual(PushPayload.parse(["cypher": fields])?.item, item, kind)
+        }
+        // A kind this build doesn't know, a malformed id or half an item:
+        // the tap still opens the workspace.
+        let partial: [(Any, Any?)] = [
+            ("routine", "work-1"), ("plan", "https://example.com"), ("plan", ""), ("plan", nil), (7, "work-1"),
+            ("plan", 7),
+        ]
+        for (kind, id) in partial {
+            fields["itemKind"] = kind
+            fields["itemId"] = id
+            let payload = try XCTUnwrap(PushPayload.parse(["cypher": fields]), "\(kind) \(String(describing: id))")
+            XCTAssertEqual(payload.workspaceId, "bot-atlas")
+            XCTAssertNil(payload.item)
+        }
+        fields["itemId"] = nil
+        fields["itemKind"] = nil
+        // A workspace id that isn't a plain id is a foreign shape: dropped,
+        // never routed as a session notice.
+        let malformed: [Any] = ["https://example.com", "", String(repeating: "b", count: 129), "a/b", 7, ["x"]]
+        for bad in malformed {
+            fields["workspaceId"] = bad
+            XCTAssertNil(PushPayload.parse(["cypher": fields]), "\(bad)")
+        }
+        // Item fields without a workspace mean nothing: a session notice.
+        var session = info["cypher"] as! [String: Any]
+        session["itemKind"] = "plan"
+        session["itemId"] = "work-1"
+        let parsed = try XCTUnwrap(PushPayload.parse(["cypher": session]))
+        XCTAssertNil(parsed.workspaceId)
+        XCTAssertNil(parsed.item)
+    }
     func testDefaultPolicyIsSmartAndDoesNotEnableIndependentSubagentResults() throws {
         var prefs = NotificationPreferences()
         let payload = try XCTUnwrap(PushPayload.parse(info))

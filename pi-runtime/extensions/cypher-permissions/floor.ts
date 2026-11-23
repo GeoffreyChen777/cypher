@@ -1,0 +1,120 @@
+/**
+ * The always-ask floor, as one table (design: docs/design/permission-control.md §7.3.1, round 3).
+ *
+ * These rows are the only things that put a question to the owner without the reviewing model
+ * deciding it. Everything else — every tier and grade, pushes, merges, releases, deletes, the
+ * installed app, lines the reader can't follow, other hosts — goes to the judge, and its verdict
+ * decides (core.ts). The classifier's other findings are evidence in the judge's prompt, never a gate.
+ *
+ * - `secret-off-machine`: a secret or credential leaving this machine, by data flow (round 4): a
+ *   line that reads a sensitive source and has any network sink (risk.ts `exfiltrates`). Both sides
+ *   are tables: sources are the sensitive file patterns (config.ts `DEFAULT_SENSITIVE`, `.env*`),
+ *   credential commands (`SECRET_SOURCES`: the keychain, `gh auth token`, `printenv`, …) and
+ *   credential-named variables (`secretName`); sinks are `NETWORK_SINKS` and `TRANSFERS`. The data may
+ *   go by an argument, `@file`, `< file`, a pipe or `$(…)`; a file a sink reads is a secret by its name.
+ * - `permission-system`: a change to the permission system itself (§3.6: its policy files, the
+ *   settings that load it, its extension's code, its audit log and ledger, the session files a grant
+ *   is restored from), by a command or a file tool.
+ * - `owner-rule`: the owner's own setting says to ask (a command rule set to `ask` or `deny` that
+ *   matches, or a kind of request set to "Ask me"). Not a classifier's call: the owner asked to be
+ *   asked, and only they can change it.
+ * - `owner-denied` (round 4): the owner clicked Deny on a request of the same action class in this
+ *   chat (denials.ts: same tool, same action or concern, same target scope), and none of their words
+ *   since asks for that action on that target. A prompt closed or timed out is no denial (§7.4).
+ * - `other-task` (round 4): the request acts on an entity another chat or task made or holds (another
+ *   chat's ledger; a branch that heads an open pull request this chat didn't open; a worktree another
+ *   chat added), and the owner's words don't name that entity.
+ * - `no-judge`: no reviewing model could decide — none configured, review paused after failures,
+ *   or an error or timeout after its retry (core.ts `JUDGE_ATTEMPTS`).
+ *
+ * `stage`: `before` rows are tested before the judge is asked (and the judge isn't asked at all);
+ * `after` rows on the judge's outcome.
+ */
+
+export type FloorId = "secret-off-machine" | "permission-system" | "owner-rule" | "owner-denied" | "other-task" | "no-judge";
+
+/** What a request offers the floor's tests. */
+export interface FloorSubject {
+  /** The classifier's findings for the request: a bash line's own and each command's (risk.ts `Assessment`). */
+  assessments?: readonly { key?: string; kind?: string; floor?: true }[];
+  /** A file tool's write into the permission system: the path (config.ts `isPermissionSystem`). */
+  permissionSystemPath?: string;
+  /** The owner's own rule or setting that asks, in words. */
+  ownerRule?: string;
+  /** The owner's own Deny of a request of the same class in this chat, not lifted by their words since (denials.ts). */
+  ownerDenied?: string;
+  /** What the request acts on that another chat or task made or holds, and the owner's words don't name (core.ts `foreignTargets`). */
+  otherTask?: string;
+  /** How the review went (core.ts `Review.state`), and its reason. */
+  review?: { state: string; reason: string };
+}
+
+export interface FloorRow {
+  id: FloorId;
+  stage: "before" | "after";
+  /** What the owner is told, before the detail. */
+  reason: string;
+  /** The detail when the row applies, else undefined. */
+  test(subject: FloorSubject): string | undefined;
+}
+
+/** The risk.ts finding a row reads: its key, set only with `floor: true`. */
+function finding(subject: FloorSubject, key: string): string | undefined {
+  const hit = subject.assessments?.find((assessment) => assessment.floor === true && assessment.key === key);
+  return hit ? (hit.kind ?? key) : undefined;
+}
+
+export const FLOOR: readonly FloorRow[] = [
+  {
+    id: "secret-off-machine",
+    stage: "before",
+    reason: "a secret or credential would leave this machine",
+    test: (subject) => finding(subject, "secret-off-machine"),
+  },
+  {
+    id: "permission-system",
+    stage: "before",
+    reason: "it changes the permission system itself",
+    test: (subject) => subject.permissionSystemPath ?? finding(subject, "permission-system"),
+  },
+  {
+    id: "owner-rule",
+    stage: "before",
+    reason: "your own setting says to ask",
+    test: (subject) => subject.ownerRule,
+  },
+  {
+    id: "owner-denied",
+    stage: "before",
+    reason: "you denied a request like it in this chat",
+    test: (subject) => subject.ownerDenied,
+  },
+  {
+    id: "other-task",
+    stage: "before",
+    reason: "it acts on another chat's or task's work, which your words don't name",
+    test: (subject) => subject.otherTask,
+  },
+  {
+    id: "no-judge",
+    stage: "after",
+    reason: "no reviewing model could decide",
+    test: (subject) => (subject.review && (subject.review.state === "unavailable" || subject.review.state === "paused") ? subject.review.reason : undefined),
+  },
+];
+
+export interface FloorHit {
+  id: FloorId;
+  reason: string;
+  detail: string;
+}
+
+/** The first floor row of `stage` that applies, with its detail; undefined when none does. */
+export function floorOf(subject: FloorSubject, stage: FloorRow["stage"]): FloorHit | undefined {
+  for (const row of FLOOR) {
+    if (row.stage !== stage) continue;
+    const detail = row.test(subject);
+    if (detail !== undefined) return { id: row.id, reason: row.reason, detail };
+  }
+  return undefined;
+}

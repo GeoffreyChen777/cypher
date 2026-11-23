@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "cypher"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -1792,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-doc"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "chrono",
  "cypher-proto",
@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-engine"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1849,7 +1849,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-env"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "libc",
  "sha2 0.10.9",
@@ -1858,7 +1858,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-harness"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1878,7 +1878,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-net"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "futures",
  "tokio",
@@ -1888,7 +1888,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-proto"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "chrono",
  "serde",
@@ -1898,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-rpc"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "async-trait",
  "cypher-doc",
@@ -1922,7 +1922,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-secrets"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "security-framework",
  "tempfile",
@@ -1930,7 +1930,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-sync"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "chrono",
  "cypher-doc",
@@ -1953,7 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-syntax"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "thiserror 2.0.21",
  "tree-sitter",
@@ -1987,7 +1987,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-trust"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
@@ -2004,7 +2004,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-ui"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -2049,7 +2049,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-update"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "cypher-env",

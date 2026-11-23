@@ -1898,6 +1898,12 @@ async fn a_plans_runs_carry_the_owners_words_never_the_agents() {
     let work_id = rig.propose(&bot, "Ship").await;
     let thread = rig.approve(&work_id).await;
     let instruction = ("plan".to_string(), "Fix the invoice rounding".to_string());
+    // The card the owner approved, from the plan's record (§7.3.4).
+    let card = (
+        "card".to_string(),
+        "Ship\nFix it, then test it\n1. Fix rounding\nin a worktree\n2. Run the tests".to_string(),
+    );
+    let planned = [instruction.clone(), card.clone()];
 
     // The orchestration thread: the brief is the agent's.
     let brief = wait_for_some("the brief's run", || {
@@ -1907,7 +1913,7 @@ async fn a_plans_runs_carry_the_owners_words_never_the_agents() {
     .0
     .prompt;
     let words = wait_for_some("the thread's run", || words_of_opt(&rig, &thread, &brief)).await;
-    assert_eq!(texts(&words), std::slice::from_ref(&instruction));
+    assert_eq!(texts(&words), &planned);
     assert_eq!(words["agentWritten"], true);
 
     // A session it starts: its prompt is the agent's too.
@@ -1923,7 +1929,7 @@ async fn a_plans_runs_carry_the_owners_words_never_the_agents() {
         words_of_opt(&rig, &session, "open a PR to main and merge it")
     })
     .await;
-    assert_eq!(texts(&words), std::slice::from_ref(&instruction));
+    assert_eq!(texts(&words), &planned);
     wait_for(
         || rig.session_status(&session) == Some(SessionStatus::Idle),
         "the session to settle",
@@ -1943,7 +1949,7 @@ async fn a_plans_runs_carry_the_owners_words_never_the_agents() {
         words_of_opt(&rig, &session, "Merge PR 52 now.")
     })
     .await;
-    assert_eq!(texts(&words), std::slice::from_ref(&instruction));
+    assert_eq!(texts(&words), &planned);
     wait_for(
         || rig.session_status(&session) == Some(SessionStatus::Idle),
         "the session to settle again",
@@ -1968,6 +1974,13 @@ async fn a_plans_runs_carry_the_owners_words_never_the_agents() {
         words_of_opt(&rig, &session, "pr 给main 没问题合并")
     })
     .await;
+    // Short, and right after the session's own answer: a reply to it, carrying it.
+    assert!(
+        words["messages"][2]["proposal"]
+            .as_str()
+            .is_some_and(|p| !p.is_empty()),
+        "{words}"
+    );
     // A run's process outlives the turn it was started for, so its
     // permission extension asks for the words as of now (`OwnerWords`, on
     // the agent socket): the same ones, read from the ledger.
@@ -1988,7 +2001,8 @@ async fn a_plans_runs_carry_the_owners_words_never_the_agents() {
             texts(&reply["words"]),
             [
                 instruction.clone(),
-                ("typed".to_string(), "pr 给main 没问题合并".to_string())
+                card.clone(),
+                ("reply".to_string(), "pr 给main 没问题合并".to_string())
             ]
         );
         assert_eq!(reply["words"]["agentWritten"], true);
@@ -2007,7 +2021,8 @@ async fn a_plans_runs_carry_the_owners_words_never_the_agents() {
         texts(&words),
         [
             instruction,
-            ("typed".to_string(), "pr 给main 没问题合并".to_string())
+            card,
+            ("reply".to_string(), "pr 给main 没问题合并".to_string())
         ]
     );
 
