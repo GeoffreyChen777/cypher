@@ -81,7 +81,18 @@ const context = {};
 for (const file of (args.context ?? "").split(",").filter(Boolean)) Object.assign(context, JSON.parse(readFileSync(file, "utf8")));
 
 const extensions = resolve(args.extensions);
-const machine = await createMachine({ extensions, cases, ownerWords: args["owner-words"], judgeTimeoutMs: Number(args["timeout-ms"]) });
+const machineOptions = { extensions, ownerWords: args["owner-words"], judgeTimeoutMs: Number(args["timeout-ms"]) };
+// A case marked `isolate` (blind.mjs: it sets up refs and runs its creators for real) gets a fake machine of its own per replay.
+const machine = await createMachine({ ...machineOptions, cases: cases.filter((c) => !c.isolate) });
+async function replayOn(item, options) {
+  if (!item.isolate) return machine.replay(item, options);
+  const own = await createMachine({ ...machineOptions, cases: [item] });
+  try {
+    return await own.replay(item, options);
+  } finally {
+    own.cleanup();
+  }
+}
 const out = args.out ?? join(process.cwd(), `${args.label}.json`);
 let live;
 if (args.live) {
@@ -112,7 +123,7 @@ async function runOne(item) {
   const conversation = withUserMessages(context[String(item.base ?? item.id)]?.branch, item.user);
   const useContext = args.live && conversation && !item.adversarial && !item.mutation?.owner;
   const complete = live ? live.complete : stubbed;
-  const got = await machine.replay(item, { complete, ...(useContext ? { branch: conversation } : {}) });
+  const got = await replayOn(item, { complete, ...(useContext ? { branch: conversation } : {}) });
   const row = {
     id: item.id,
     file: item.file,
@@ -122,6 +133,8 @@ async function runOne(item) {
     // How the case's conversation was found (build_corpus.py), and why it can't be scored when it can't.
     ...(item.context ? { context: item.context } : {}),
     ...(item.unscorable ? { unscorable: item.unscorable } : {}),
+    ...(item.expect ? { expect: item.expect.outcome } : {}),
+    ...(item.conversion?.unexpressible ? { unexpressible: item.conversion.unexpressible } : {}),
     outcome: got.outcome,
     mechanism: mechanismOf(got),
     tier: got.tier,
@@ -138,7 +151,7 @@ async function runOne(item) {
     recorded: item.recorded ? { tier: item.recorded.tier, decidedBy: item.recorded.decidedBy, decision: item.recorded.decision } : undefined,
   };
   if (live && item.adversarial) {
-    const forced = await machine.replay(item, { complete: stubbed });
+    const forced = await replayOn(item, { complete: stubbed });
     row.adversarialStub = { outcome: forced.outcome, mechanism: mechanismOf(forced), explicit: forced.explicit };
   }
   rows.push(row);
@@ -163,7 +176,7 @@ await Promise.all(
 );
 process.stderr.write("\n");
 machine.cleanup();
-rows.sort((a, b) => String(a.file).localeCompare(String(b.file)) || a.id - b.id);
+rows.sort((a, b) => String(a.file).localeCompare(String(b.file)) || (typeof a.id === "number" && typeof b.id === "number" ? a.id - b.id : String(a.id).localeCompare(String(b.id))));
 
 const count = (list, key) => list.reduce((acc, row) => ({ ...acc, [key(row)]: (acc[key(row)] ?? 0) + 1 }), {});
 const asks = (row) => row.outcome === "ask";

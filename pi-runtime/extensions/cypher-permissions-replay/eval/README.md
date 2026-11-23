@@ -28,6 +28,7 @@ Data never goes into the repository. Everything below lives under
 | `mechanism.mjs` | which mechanism made an outcome, from the decision's reasons (shared by run and report) |
 | `report.mjs` | before/after tables as Markdown (`RESULTS.md` is its output, plus notes) |
 | `merge.py` | merges results of one case file, the later file winning per case (rerun only the cases a corpus fix changed) |
+| `blind.mjs` | blind sets (`blind-N/cases.json`, written from the design doc only) → run.mjs case files, and their scores (`--score`) |
 | `rootcause.py` | the root-cause table of RESULTS.md from a hand-made class map (kept in the data dir) and the live/stub results |
 
 ## Rebuilding the corpus
@@ -158,6 +159,37 @@ After a corpus fix that changes some held-out cases, rerun only those (a subset 
 $D/results/<earlier>-live.json $D/results/<subset>-live.json` (later files win per case).
 
 `before-live*.json` are the corrected (`withUserMessages`) runs; the uncorrected ones are kept as `*-v1.json`.
+
+## Blind sets
+
+A blind set is written by a session that saw only the design doc, in a neutral format: the owner's words, the
+agent's text, the line, and a `setup` block of task facts (chatBranch, planBranch, created branches/tags/worktrees/dirs,
+openedPRs, mergedBranches, startedProcesses, foreign, spoof, repo, defaultBranch). `blind.mjs` converts it; its
+header says how each fact becomes a fake-machine fact. It never changes an expected outcome: a fact the harness
+can't express marks the case `conversion.unexpressible` (scored apart; a benign one is also `unscorable`).
+
+Each converted case runs on a fake machine of its own (`isolate`: run.mjs makes one per replay), because the
+chat's earlier creators run for real there (`ranRun`: `git branch`, `git tag -a`, `mkdir -p`, `git worktree add`,
+and a spoof's `echo`), between plan and settle, so the ledger observes what they made, and refs one case makes
+must not exist for another. `EVAL_DEBUG=1` prints each such run with the ledger.
+
+```sh
+node $EVAL/blind.mjs --cases $D/blind-1/cases.json --out $D/blind-corpus/blind-1.json
+node $EVAL/run.mjs --extensions <ext> --owner-words full --cases $D/blind-corpus/blind-1.json \
+  --stub approve [--consent-claim] | --live  --label … --out $D/results/<label>.json
+node $EVAL/blind.mjs --score $D/results/<label>.json --corpus $D/blind-corpus/blind-1.json
+```
+
+The score: benign (expect allow) prompt rate, false approvals of adversarial (expect ask) cases, and live, the
+same with the forced (adversarial-verdict) replay.
+
+## Fresh audit (`audit-new/`)
+
+Prompted records written after the held-out set was read (2026-11-22T18:27Z), untouched by any fixer. Snapshot the
+audit, blank every older line (`{}`, so record ids stay the audit's line numbers), and build as above:
+`build_corpus.py --audit $D/audit-new/audit-after.jsonl … --out $D/audit-new/corpus --regression 0`.
+All of them are held out by the split rule; score `audit-new/corpus/heldout.json` with `--context
+audit-new/corpus/context-heldout.json`.
 
 ## Metrics (in the summary)
 

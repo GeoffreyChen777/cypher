@@ -65,20 +65,37 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
   const expand = (text) => text.replace(/(^|[^\w.~-])\/tmp(?=\/|\b)/g, `$1${tmp}`).replaceAll("@HOME@", home);
   const plain = (text) => (typeof text === "string" ? text.replaceAll(home, "@HOME@").replaceAll(tmp, "/tmp") : text);
   const made = new Set();
-  function repo(path) {
+  function repo(path, branch = "main") {
     if (made.has(path)) return;
     made.add(path);
     mkdirSync(path, { recursive: true });
-    spawnSync("git", ["init", "-q", "-b", "main", path]);
+    spawnSync("git", ["init", "-q", "-b", branch, path]);
     spawnSync("git", ["-C", path, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "init"]);
   }
-  for (const cwd of new Set(cases.map((item) => item.cwd))) {
+  // `noRepo`: the case's folder is no git checkout (blind.mjs); `defaultBranch`: the branch `git init` makes.
+  for (const item of cases) {
     try {
-      repo(expand(cwd));
+      if (item.noRepo) mkdirSync(expand(item.cwd), { recursive: true });
+      else repo(expand(item.cwd), item.defaultBranch);
     } catch {}
   }
   for (const item of cases) if (item.checkout) spawnSync("git", ["-C", expand(item.cwd), "switch", "-q", "-c", item.checkout]);
+  // `fake` (blind.mjs; only for a case run on a machine of its own, `isolate`): what is on the machine
+  // before the chat's own commands, and not made by them: directories, local tags and branches.
+  for (const item of cases) {
+    for (const dir of item.fake?.dirs ?? []) mkdirSync(expand(dir), { recursive: true });
+    for (const ref of item.fake?.refs ?? []) spawnSync("git", ["-C", expand(item.cwd), ref.kind === "tag" ? "tag" : "branch", ref.name], { stdio: "ignore" });
+  }
   const resolveIn = findProgram(UNKNOWN);
+
+  /** Run a blind case's earlier creator for real: only git/mkdir/echo/printf/touch, every absolute path inside the scratch dir. */
+  function runInside(line, cwd) {
+    const outside = [...line.matchAll(/(?:^|[\s='"])(\/[^\s'"]*)/g)].map((m) => m[1]).filter((path) => !path.startsWith(scratch));
+    if (!/^(git|mkdir|echo|printf|touch)\s/.test(line) || /[;&|`$<>]/.test(line.replace(/'[^']*'/g, "")) || outside.length) throw new Error(`eval: won't run ${line}`);
+    const env = { HOME: home, TMPDIR: tmp, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "a", GIT_AUTHOR_EMAIL: "a@b", GIT_COMMITTER_NAME: "a", GIT_COMMITTER_EMAIL: "a@b" };
+    const result = spawnSync("/bin/bash", ["-c", line], { cwd, env, encoding: "utf8", timeout: 10000 });
+    return { exitCode: result.status ?? undefined, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
+  }
 
   let replays = 0;
   async function replay(item, { complete, branch: conversation, proposal } = {}) {
@@ -95,6 +112,17 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
     // real run records it, so a lone creator's printed name counts), else noted from the command alone.
     for (const [index, earlier] of (item.ran ?? []).entries()) {
       try {
+        if (item.ranRun?.[index] === true) {
+          // Run it for real on the fake machine, between plan and settle, as a real run does (so refs
+          // and directories are observed). Only harmless creators inside the scratch dir.
+          const line = expand(earlier);
+          const plan = typeof permissions.planCreated === "function" ? permissions.planCreated(line, cwd) : undefined;
+          const run = runInside(line, cwd);
+          if (plan) permissions.settleCreated(plan, run);
+          else permissions.noteCreated(line, cwd);
+          if (process.env.EVAL_DEBUG) console.error("ran", JSON.stringify({ line: plain(line), planned: plan?.candidates?.map((c) => [c.entity, c.confirm, c.before]), run: { ...run, output: plain(run.output) }, ledger: permissions.created?.ledger?.all?.() }));
+          continue;
+        }
         const output = item.ranOutputs?.[index];
         if (typeof output === "string" && typeof permissions.planCreated === "function") {
           const plan = permissions.planCreated(expand(earlier), cwd);
