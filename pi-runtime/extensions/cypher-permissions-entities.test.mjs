@@ -581,6 +581,10 @@ test("own targets: an action with no target binds to the task's one branch or pu
   assert.equal(ownCheck("merge it into main once the checks pass", MERGE52, { kind: "pr", value: "52" }).ok, true);
   assert.equal(ownCheck("commit，然后pr 给main", PUSH_OWN, { kind: "branch", value: "fix-badge" }).ok, true, "a PR asked for covers pushing its head");
   assert.equal(ownCheck("然后删除 remote branch", DELETE_OWN, { kind: "branch", value: "fix-badge" }).ok, true);
+  // A conditional clause ("if it's unclear, ask me") is no deferral of what the words ask for.
+  const shortcut = "Create a PR to main from the branch we just finished in this chat, and merge it if the checks pass and nothing looks wrong. If it's unclear which branch I mean, ask me.";
+  assert.equal(ownCheck(shortcut, MERGE52, { kind: "pr", value: "52" }).ok, true);
+  assert.equal(ownCheck(shortcut, PUSH_OWN, { kind: "branch", value: "fix-badge" }).ok, true);
   // Without own facts the same words name nothing.
   assert.equal(checkExplicit({ quote: "ci 没问题就merge", targets: [{ kind: "pr", value: "52" }] }, targetsOf(MERGE52), typedSays("ci 没问题就merge"), [], explicitFacts).ok, false);
 });
