@@ -209,7 +209,7 @@ test("queries: npx of the project's pinned tool resolves from where the command 
 });
 
 test("judge: the closed concern list is one table; every row is in the prompt; old names read as today's", () => {
-  assert.deepEqual([...CONCERNS], ["retracted", "other-target", "not-owner", "other-task", "destroys-data", "outside-audience", "installed-app", "secret", "system-change"]);
+  assert.deepEqual([...CONCERNS], ["retracted", "other-target", "not-owner", "other-task", "destroys-data", "outside-audience", "installed-app", "secret", "opaque-code", "system-change"]);
   for (const row of CONCERN_TABLE) {
     assert.ok(JUDGE_SYSTEM_PROMPT.includes(`- "${row.id}": ${row.means};`), row.id);
     assert.equal(answeredByConsent(row.id), row.answeredByConsent, row.id);

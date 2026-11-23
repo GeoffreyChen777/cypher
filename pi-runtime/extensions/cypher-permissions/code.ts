@@ -1,0 +1,452 @@
+/**
+ * Code as data (round 5, design §7.3.1 row 1): what an interpreter runs is read like the shell line around
+ * it. `python3 -c`, `node -e`, `ruby -e`, `perl -e`, `osascript -e`, `deno eval`, `bun -e`, `php -r`, a
+ * heredoc, here-string or pipe fed to an interpreter, and a script this task wrote and then runs are code
+ * the floor's tables apply to: a sensitive source (a secret file it reads, a credential variable, a
+ * credential command it runs) together with any network capability in the same code — or in the line
+ * around it — is a secret leaving this machine (floor.ts `secret-off-machine`).
+ *
+ * Three tables, no per-case rules:
+ * - `INTERPRETERS`: interpreter → the flags that take inline code, its subcommands, how it reads code
+ *   from its input, its scripts' extensions;
+ * - `CAPABILITIES`: per language, the names that reach the network, run a program, read a file, read the
+ *   environment, find the home folder, or build code at run time (`exec(base64.b64decode(…))`);
+ * - the shell's own tables for what code runs through a program (`subprocess.run(["curl", …])` is read
+ *   as the shell line `curl …`, risk.ts `NETWORK_SINKS`/`SECRET_SOURCES`).
+ *
+ * Code the scanner can't read — built or decoded at run time, obfuscated, a binary, a script that isn't
+ * there — goes to the judge with the evidence "opaque code" (judge.ts `opaqueCode`, concern
+ * `opaque-code`), never as local work.
+ */
+
+export type Language = "python" | "javascript" | "ruby" | "perl" | "php" | "applescript" | "lua" | "r" | "tcl" | "shell";
+
+export interface Interpreter {
+  language: Language;
+  /** Program names (basename of the first word). */
+  programs: RegExp;
+  /** Options whose value is inline code (`-c`, `-e`, `--eval`); `--eval=CODE` and `-cCODE` too. */
+  inline: readonly string[];
+  /** One-letter flags that, ending a cluster, take inline code (`perl -ne`, `ruby -we`). */
+  clusters?: string;
+  /** Subcommands: their next word is inline code, or a script (`deno eval`, `deno run`, `bun run`). */
+  subcommands?: Readonly<Record<string, "inline" | "script">>;
+  /** Options that take a value (so it is no script). */
+  values: readonly string[];
+  /** Options after which it runs a module or a named program, not a script it reads (`python -m`). */
+  modules?: readonly string[];
+  /** Options whose value is a module the code loads (`perl -MLWP::Simple`, `ruby -rnet/http`, `node -r`): part of the code read. */
+  loads?: readonly string[];
+  /** With no script (or `-`), it reads its program from its input. */
+  stdin: boolean;
+  /** Its scripts' extensions, for a script run as `./x` without a `#!` line. */
+  extensions: readonly string[];
+}
+
+export const INTERPRETERS: readonly Interpreter[] = [
+  { language: "python", programs: /^(python|python\d(\.\d+)?|pypy\d?)$/, inline: ["-c"], clusters: "c", values: ["-W", "-X", "--check-hash-based-pycs"], modules: ["-m"], stdin: true, extensions: [".py"] },
+  { language: "javascript", programs: /^(node|nodejs)$/, inline: ["-e", "--eval", "-p", "--print"], clusters: "ep", loads: ["-r", "--require", "--import"], values: ["-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--env-file", "--title", "--max-old-space-size"], stdin: true, extensions: [".js", ".mjs", ".cjs"] },
+  { language: "javascript", programs: /^deno$/, inline: [], subcommands: { eval: "inline", run: "script" }, values: ["--config", "-c", "--import-map", "--location", "--seed", "--v8-flags", "--env-file"], stdin: false, extensions: [".ts", ".js", ".mjs", ".tsx"] },
+  { language: "javascript", programs: /^bun$/, inline: ["-e", "--eval", "-p", "--print"], subcommands: { run: "script" }, values: ["--cwd", "--config", "-c", "--env-file", "-r", "--preload"], stdin: false, extensions: [".ts", ".js", ".mjs", ".tsx"] },
+  { language: "javascript", programs: /^(tsx|ts-node)$/, inline: ["-e", "--eval", "-p", "--print"], values: ["-r", "--require", "--tsconfig"], stdin: false, extensions: [".ts", ".tsx", ".js", ".mjs"] },
+  { language: "ruby", programs: /^(ruby|jruby)$/, inline: ["-e"], clusters: "e", loads: ["-r"], values: ["-I", "-r", "-C", "-E", "--encoding"], stdin: true, extensions: [".rb"] },
+  { language: "perl", programs: /^perl(\d[\d.]*)?$/, inline: ["-e", "-E"], clusters: "eE", loads: ["-M", "-m"], values: ["-I", "-M", "-m", "-x"], stdin: true, extensions: [".pl", ".pm"] },
+  { language: "php", programs: /^php(\d[\d.]*)?$/, inline: ["-r"], values: ["-c", "-d", "-z"], stdin: true, extensions: [".php"] },
+  { language: "applescript", programs: /^osascript$/, inline: ["-e"], values: ["-l", "-s"], stdin: true, extensions: [".applescript", ".scpt", ".js"] },
+  { language: "lua", programs: /^(lua|luajit|lua5\.\d)$/, inline: ["-e"], values: ["-l"], stdin: true, extensions: [".lua"] },
+  { language: "r", programs: /^Rscript$/, inline: ["-e"], values: [], stdin: true, extensions: [".r", ".R"] },
+  { language: "tcl", programs: /^(tclsh|wish)(\d[\d.]*)?$/, inline: [], values: ["-encoding"], stdin: true, extensions: [".tcl"] },
+  // A shell's `-c` is read by the shell evaluator itself (shell.ts); its scripts and its input are code here.
+  { language: "shell", programs: /^(sh|bash|zsh|dash|ksh|fish)$/, inline: ["-c"], clusters: "c", values: ["-o", "+o", "-O", "+O", "--rcfile", "--init-file"], stdin: true, extensions: [".sh", ".bash", ".zsh"] },
+];
+
+/** The interpreter a program is, by `INTERPRETERS`. */
+export function interpreterOf(program: string): Interpreter | undefined {
+  const name = program.split("/").pop() ?? program;
+  return INTERPRETERS.find((row) => row.programs.test(name));
+}
+
+/** What stands for the shell's words known only when they run, in code read with them (`patternText`). */
+export const UNKNOWN_TEXT = "__cypher_unknown__";
+
+/**
+ * A word known only when it runs, as the code text it surely is (shell.ts `patterns`): its literal text,
+ * the rest (substitutions, variables) as `UNKNOWN_TEXT`. Undefined when nothing of it is known.
+ */
+export function patternText(pattern: string | undefined): string | undefined {
+  if (pattern === undefined) return undefined;
+  const text = pattern
+    // The environment's values are no code anyone can read here either.
+    .replace(/\u0002[^\u0003]*\u0003/g, UNKNOWN_TEXT)
+    .replaceAll("\u0001", UNKNOWN_TEXT)
+    .replace(/\\(.)/gs, "$1");
+  return text.split(UNKNOWN_TEXT).join("").trim() ? text : undefined;
+}
+
+/** The interpreter a script's `#!` line names (`#!/usr/bin/env python3`, `#!/bin/bash`). */
+export function shebangInterpreter(text: string): Interpreter | undefined {
+  const line = /^#!\s*(\S+)(?:\s+(?:-\S+\s+)*(\S+))?/.exec(text);
+  if (!line) return undefined;
+  const program = (line[1].split("/").pop() ?? "") === "env" ? line[2] : line[1];
+  return program ? interpreterOf(program) : undefined;
+}
+
+/** Where a command's code comes from (`codeOf`). */
+export type CodeSource =
+  | { from: "inline"; text: string }
+  | { from: "inline-unknown" }
+  | { from: "stdin" }
+  | { from: "script"; path: string }
+  | { from: "script-unknown" };
+
+/**
+ * The code an interpreter command runs, by `INTERPRETERS`: its inline code, its script's path, or its
+ * input. Undefined when it is no interpreter, or runs no code it reads (`python -m http.server`,
+ * `node --version`).
+ */
+export function codeOf(words: readonly string[], unknown: string, patterns?: readonly (string | undefined)[]): { interpreter: Interpreter; source: CodeSource } | undefined {
+  const interpreter = interpreterOf(words[0] ?? "");
+  if (!interpreter || words[0] === unknown) return undefined;
+  const args = words.slice(1);
+  const offset = words.length - (patterns?.length ?? words.length);
+  const inline: string[] = [];
+  let unknownInline = false;
+  let at = -1;
+  const take = (value: string | undefined) => {
+    // Code with words of the shell's known only when it runs (`-c "…open('$F')…"`): its known text, read
+    // with a placeholder; code that is all of that (`-c "$CODE"`) can't be read.
+    const known = value === unknown ? patternText(patterns?.[at + 1 - offset]) : value;
+    if (known === undefined) unknownInline = true;
+    else inline.push(known);
+  };
+  /** The modules its options load (`-MLWP::Simple`): read with its code. */
+  const loaded: string[] = [];
+  const withLoads = (source: CodeSource): CodeSource => (loaded.length && source.from === "inline" ? { from: "inline", text: `${loaded.map((module) => `use ${module};`).join("\n")}\n${source.text}` } : source);
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i];
+    const load = interpreter.loads?.find((flag) => word === flag || (word.startsWith(flag) && !word.startsWith("--") && word.length > flag.length) || word.startsWith(`${flag}=`));
+    if (load) {
+      const value = word === load ? args[++i] : word.slice(load.length).replace(/^=/, "");
+      if (value !== undefined && value !== unknown) loaded.push(value.replace(/=.*$/, ""));
+      continue;
+    }
+    if (word === unknown) {
+      // A word known only when it runs where a script or flag could be: its code can't be read.
+      return { interpreter, source: inline.length ? { from: "inline", text: inline.join("\n") } : { from: "inline-unknown" } };
+    }
+    if (word === "--") {
+      const script = args[i + 1];
+      if (inline.length) break;
+      if (script === undefined) return interpreter.stdin ? { interpreter, source: { from: "stdin" } } : undefined;
+      return { interpreter, source: script === unknown ? { from: "script-unknown" } : { from: "script", path: script } };
+    }
+    if (word.startsWith("-") && word !== "-") {
+      if (interpreter.inline.includes(word)) {
+        at = ++i;
+        take(args[i]);
+        continue;
+      }
+      const long = /^(--[\w-]+)=(.*)$/s.exec(word);
+      if (long && interpreter.inline.includes(long[1])) {
+        take(long[2]);
+        continue;
+      }
+      if (long) continue;
+      // `-cCODE` (attached), or a cluster ending in a code flag (`-le CODE`).
+      const short = interpreter.inline.find((flag) => /^-[A-Za-z]$/.test(flag) && word.startsWith(flag) && word.length > 2 && !word.startsWith("--"));
+      if (short && !/^-[A-Za-z]+$/.test(word)) {
+        take(word.slice(2));
+        continue;
+      }
+      if (interpreter.clusters && /^-[A-Za-z]+$/.test(word) && interpreter.clusters.includes(word.at(-1)!)) {
+        at = ++i;
+        take(args[i]);
+        continue;
+      }
+      if (interpreter.modules?.includes(word) || interpreter.modules?.some((flag) => word.startsWith(flag) && word.length > flag.length)) return inline.length ? { interpreter, source: { from: "inline", text: inline.join("\n") } } : undefined;
+      if (interpreter.values.includes(word)) i++;
+      // `--version`, `-h`: no code.
+      if (/^(-v|-V|--version|-h|--help)$/.test(word) && !inline.length) return undefined;
+      continue;
+    }
+    if (inline.length || unknownInline) break;
+    const sub = interpreter.subcommands?.[word];
+    if (sub === "inline") {
+      at = i + 1;
+      take(args[i + 1]);
+      break;
+    }
+    if (sub === "script") {
+      // `deno run [flags] x.ts`: the first word after its flags.
+      for (let j = i + 1; j < args.length; j++) {
+        const next = args[j];
+        if (next === unknown) return { interpreter, source: { from: "script-unknown" } };
+        if (next.startsWith("-")) {
+          if (interpreter.values.includes(next)) j++;
+          continue;
+        }
+        return { interpreter, source: { from: "script", path: next } };
+      }
+      return undefined;
+    }
+    if (interpreter.subcommands && !interpreter.inline.length) return undefined;
+    if (word === "-") return interpreter.stdin ? { interpreter, source: { from: "stdin" } } : undefined;
+    return { interpreter, source: { from: "script", path: word } };
+  }
+  if (inline.length) return { interpreter, source: withLoads({ from: "inline", text: inline.join("\n") }) };
+  if (unknownInline) return { interpreter, source: { from: "inline-unknown" } };
+  // No script: its input is its program (`python3 <<EOF`, `echo … | node`), when it reads one.
+  if (interpreter.subcommands && !interpreter.inline.length) return undefined;
+  return interpreter.stdin ? { interpreter, source: { from: "stdin" } } : undefined;
+}
+
+// --- What code can do --------------------------------------------------------------------
+
+export type Capability = "network" | "spawn" | "read" | "env" | "home" | "dynamic";
+
+/**
+ * Per language, the names that give code a capability (data). A name is matched as an identifier
+ * (`requests`, `http.client`, `Net::HTTP`, `curl_init`); `(` at its end asks for a call. `"*"` rows
+ * hold for every language.
+ */
+export const CAPABILITIES: readonly { capability: Capability; languages: readonly Language[] | "*"; names: readonly string[] }[] = [
+  // Reaching the network.
+  { capability: "network", languages: ["python"], names: ["urllib", "urllib2", "urllib3", "urlopen", "requests", "httpx", "aiohttp", "http.client", "httplib", "socket", "smtplib", "ftplib", "telnetlib", "xmlrpc", "paramiko", "pycurl", "websocket", "websockets", "grpc", "boto3", "botocore", "asyncssh", "fabric"] },
+  { capability: "network", languages: ["javascript"], names: ["fetch(", "XMLHttpRequest", "WebSocket", "EventSource", "sendBeacon", "node:http", "node:https", "node:http2", "node:net", "node:tls", "node:dgram", "require('http')", "require('https')", "require('net')", "require('tls')", "require('dgram')", 'require("http")', 'require("https")', 'require("net")', 'require("tls")', 'require("dgram")', "http.request", "https.request", "http.get", "https.get", "net.connect", "net.createConnection", "tls.connect", "axios", "node-fetch", "undici", "superagent", "needle", "got(", "ky(", "Deno.connect", "Deno.connectTls", "Bun.connect", "Bun.fetch", "socket.io-client"] },
+  { capability: "network", languages: ["ruby"], names: ["Net::HTTP", "Net::SMTP", "Net::FTP", "Net::SSH", "open-uri", "URI.open", "TCPSocket", "UDPSocket", "Socket.tcp", "HTTParty", "Faraday", "RestClient", "Excon", "Typhoeus", "HTTP.post", "HTTP.get"] },
+  { capability: "network", languages: ["perl"], names: ["LWP", "LWP::UserAgent", "LWP::Simple", "HTTP::Tiny", "HTTP::Request", "IO::Socket", "IO::Socket::INET", "IO::Socket::SSL", "Net::HTTP", "Net::SMTP", "Net::FTP", "Socket", "Mojo::UserAgent", "WWW::Mechanize", "Furl"] },
+  { capability: "network", languages: ["php"], names: ["curl_init", "curl_exec", "fsockopen", "pfsockopen", "stream_socket_client", "socket_create", "socket_connect", "mail(", "GuzzleHttp", "ftp_connect", "SoapClient"] },
+  { capability: "network", languages: ["applescript"], names: ["open location", "NSURLSession", "NSURLConnection", "NSURLRequest", "NSMutableURLRequest", "dataWithContentsOfURL", "stringWithContentsOfURL"] },
+  { capability: "network", languages: ["lua"], names: ["socket.http", "ssl.https", "require('socket')", 'require("socket")', "luasocket", "http.request"] },
+  { capability: "network", languages: ["r"], names: ["httr", "httr2", "RCurl", "curl::", "download.file", "url(", "POST(", "GET(", "socketConnection", "req_perform"] },
+  { capability: "network", languages: ["tcl"], names: ["socket", "http::geturl", "tls::socket"] },
+  // Running a program (its words are read as a shell line).
+  { capability: "spawn", languages: ["python"], names: ["subprocess", "os.system", "os.popen", "os.exec", "os.execv", "os.execvp", "os.spawn", "os.spawnv", "pty.spawn", "commands.getoutput", "sh.", "plumbum", "Popen"] },
+  { capability: "spawn", languages: ["javascript"], names: ["child_process", "node:child_process", "execSync", "exec(", "execFile", "execFileSync", "spawn(", "spawnSync", "Deno.Command", "Deno.run", "Bun.spawn", "Bun.spawnSync", "Bun.$", "$`", "execa", "zx"] },
+  { capability: "spawn", languages: ["ruby"], names: ["system(", "exec(", "spawn(", "Open3", "IO.popen", "Kernel.exec", "Kernel.system", "%x", "`", "Process.spawn", "PTY.spawn"] },
+  { capability: "spawn", languages: ["perl"], names: ["system(", "system ", "exec(", "exec ", "qx", "`", "open3", "IPC::Open3", "IPC::Run", "Capture::Tiny"] },
+  { capability: "spawn", languages: ["php"], names: ["shell_exec", "exec(", "system(", "passthru", "proc_open", "popen(", "`", "pcntl_exec"] },
+  { capability: "spawn", languages: ["applescript"], names: ["do shell script", "doShellScript", "NSTask", "Application('Terminal')"] },
+  { capability: "spawn", languages: ["lua"], names: ["os.execute", "io.popen"] },
+  { capability: "spawn", languages: ["r"], names: ["system(", "system2(", "shell(", "processx"] },
+  { capability: "spawn", languages: ["tcl"], names: ["exec", "open |"] },
+  // Reading a file.
+  { capability: "read", languages: ["python"], names: ["open(", "io.open", "read_text", "read_bytes", "Path(", "pathlib", "codecs.open", "fileinput", "shutil.copy", "dotenv", "load_dotenv", "dotenv_values", "configparser", "json.load", "yaml.safe_load", "toml.load", "np.load", "pd.read_csv", "linecache", "mmap"] },
+  { capability: "read", languages: ["javascript"], names: ["readFileSync", "readFile(", "createReadStream", "fs.read", "fs/promises", "node:fs", "require('fs')", 'require("fs")', "Deno.readTextFile", "Deno.readTextFileSync", "Deno.readFile", "Deno.readFileSync", "Deno.open", "Deno.openSync", "Bun.file", "dotenv", "require(", "import("] },
+  { capability: "read", languages: ["ruby"], names: ["File.read", "File.open", "File.readlines", "File.foreach", "IO.read", "IO.readlines", "Dotenv", "YAML.load_file", "JSON.load_file", "Pathname", "open("] },
+  { capability: "read", languages: ["perl"], names: ["open(", "open ", "File::Slurp", "Path::Tiny", "read_file", "slurp", "<STDIN>", "do "] },
+  { capability: "read", languages: ["php"], names: ["file_get_contents", "fopen", "file(", "readfile", "fread", "parse_ini_file", "include", "require", "Dotenv", "SplFileObject"] },
+  { capability: "read", languages: ["applescript"], names: ["read file", "read POSIX file", "read (POSIX file", "stringWithContentsOfFile", "contentsOfFile", "NSFileManager"] },
+  { capability: "read", languages: ["lua"], names: ["io.open", "io.lines", "io.read", "dofile", "loadfile"] },
+  { capability: "read", languages: ["r"], names: ["readLines", "read.csv", "read.table", "readRDS", "scan(", "file(", "readRenviron", "readChar", "readBin", "source("] },
+  { capability: "read", languages: ["tcl"], names: ["open", "read", "fcopy", "source"] },
+  // The environment (a credential variable read by its name; or the whole of it).
+  { capability: "env", languages: ["python"], names: ["os.environ", "os.getenv", "environ.get", "getenv("] },
+  { capability: "env", languages: ["javascript"], names: ["process.env", "Deno.env", "Bun.env"] },
+  { capability: "env", languages: ["ruby"], names: ["ENV"] },
+  { capability: "env", languages: ["perl"], names: ["$ENV", "%ENV"] },
+  { capability: "env", languages: ["php"], names: ["getenv(", "$_ENV", "$_SERVER"] },
+  { capability: "env", languages: ["applescript"], names: ["system attribute"] },
+  { capability: "env", languages: ["lua"], names: ["os.getenv"] },
+  { capability: "env", languages: ["r"], names: ["Sys.getenv"] },
+  { capability: "env", languages: ["tcl"], names: ["$env", "$::env", "env("] },
+  // The home folder (a path joined to it: `os.path.expanduser('~') + '/.ssh/id_rsa'`).
+  { capability: "home", languages: ["python"], names: ["expanduser", "Path.home", "os.environ['HOME']", 'os.environ["HOME"]', "getenv('HOME')", 'getenv("HOME")'] },
+  { capability: "home", languages: ["javascript"], names: ["homedir(", "os.homedir", "process.env.HOME", "Deno.env.get('HOME')", 'Deno.env.get("HOME")'] },
+  { capability: "home", languages: ["ruby"], names: ["Dir.home", "ENV['HOME']", 'ENV["HOME"]', "File.expand_path"] },
+  { capability: "home", languages: ["perl"], names: ["$ENV{HOME}", "File::HomeDir", "glob('~"] },
+  { capability: "home", languages: ["php"], names: ["getenv('HOME')", 'getenv("HOME")', "$_SERVER['HOME']"] },
+  { capability: "home", languages: ["applescript"], names: ["path to home folder", "NSHomeDirectory", "system attribute \"HOME\""] },
+  { capability: "home", languages: ["lua"], names: ["os.getenv('HOME')", 'os.getenv("HOME")'] },
+  { capability: "home", languages: ["r"], names: ["path.expand", "Sys.getenv('HOME')", 'Sys.getenv("HOME")', "normalizePath('~"] },
+  // Code built or decoded at run time: what runs can't be read here.
+  { capability: "dynamic", languages: ["python"], names: ["exec(", "eval(", "compile(", "__import__(", "importlib", "b64decode", "b32decode", "a85decode", "b85decode", "codecs.decode", "marshal.loads", "pickle.loads", "zlib.decompress", "bytes.fromhex", "rot13", "getattr(__builtins__"] },
+  { capability: "dynamic", languages: ["javascript"], names: ["eval(", "Function(", "new Function", "vm.runIn", "vm.Script", "runInThisContext", "atob(", "'base64')", '"base64")', "fromCharCode", "require(process", "import(process"] },
+  { capability: "dynamic", languages: ["ruby"], names: ["eval(", "eval ", "instance_eval", "class_eval", "module_eval", "send(", "public_send", "Base64.decode64", "unpack1", "Marshal.load", "const_get"] },
+  { capability: "dynamic", languages: ["perl"], names: ["eval ", "eval(", "eval{", "decode_base64", "MIME::Base64", "pack(", "unpack("] },
+  { capability: "dynamic", languages: ["php"], names: ["eval(", "base64_decode", "gzinflate", "gzuncompress", "str_rot13", "create_function", "assert(", "call_user_func", "preg_replace_callback", "hex2bin"] },
+  { capability: "dynamic", languages: ["applescript"], names: ["run script", "load script"] },
+  { capability: "dynamic", languages: ["lua"], names: ["load(", "loadstring", "string.char"] },
+  { capability: "dynamic", languages: ["r"], names: ["eval(", "parse(text", "base64enc", "rawToChar"] },
+  { capability: "dynamic", languages: ["tcl"], names: ["eval", "uplevel", "binary decode", "subst"] },
+];
+
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** A name of `CAPABILITIES` as a regex: an identifier, not part of a longer one; `(` at its end allows spaces before it. */
+function nameRegex(name: string): RegExp {
+  const call = name.endsWith("(");
+  const body = escapeRegex(call ? name.slice(0, -1) : name);
+  const start = /^[\w$]/.test(name) ? "(?<![\\w$.])" : "";
+  const end = call ? "\\s*\\(" : /[\w$]$/.test(name) ? "(?![\\w$])" : "";
+  return new RegExp(`${start}${body}${end}`);
+}
+
+const NAME_CACHE = new Map<string, RegExp>();
+function nameMatches(name: string, text: string): boolean {
+  let regex = NAME_CACHE.get(name);
+  if (!regex) NAME_CACHE.set(name, (regex = nameRegex(name)));
+  return regex.test(text);
+}
+
+/** The names of `capability` for `language` the code uses. */
+export function capabilityNames(text: string, language: Language, capability: Capability): string[] {
+  const names: string[] = [];
+  for (const row of CAPABILITIES) {
+    if (row.capability !== capability || (row.languages !== "*" && !row.languages.includes(language))) continue;
+    for (const name of row.names) if (nameMatches(name, text) && !names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+/** A string literal of code: its text, where it starts, and whether it is a group's member (`["curl", "-d", …]`). */
+export interface Literal {
+  text: string;
+  at: number;
+  end: number;
+}
+
+/** The string literals of code (single, double, backtick, triple quotes), escapes read. */
+export function literalsOf(code: string): Literal[] {
+  const out: Literal[] = [];
+  for (let i = 0; i < code.length; i++) {
+    const char = code[i];
+    if (char !== "'" && char !== '"' && char !== "`") continue;
+    const triple = code.startsWith(char.repeat(3), i);
+    const quote = triple ? char.repeat(3) : char;
+    let text = "";
+    let j = i + quote.length;
+    for (; j < code.length; j++) {
+      if (code[j] === "\\" && j + 1 < code.length) {
+        const next = code[j + 1];
+        text += next === "n" ? "\n" : next === "t" ? "\t" : next;
+        j++;
+        continue;
+      }
+      if (code.startsWith(quote, j)) break;
+      if (!triple && char !== "`" && code[j] === "\n") break;
+      text += code[j];
+    }
+    out.push({ text, at: i, end: j + quote.length });
+    i = j + quote.length - 1;
+  }
+  return out;
+}
+
+/** Literals next to each other in one list or call (`["curl", "-d", "@.env", url]`, `"a", "b"`): one argv each. */
+export function argvGroups(code: string, literals: readonly Literal[]): string[][] {
+  const groups: string[][] = [];
+  let current: Literal[] = [];
+  for (const literal of literals) {
+    const last = current.at(-1);
+    if (last && /^\s*,\s*$/.test(code.slice(last.end, literal.at))) current.push(literal);
+    else {
+      if (current.length > 1) groups.push(current.map((item) => item.text));
+      current = [literal];
+    }
+  }
+  if (current.length > 1) groups.push(current.map((item) => item.text));
+  return groups;
+}
+
+/** Literals joined into one path (`'~' + '/.ssh/id_rsa'`, `os.path.join(home, '.aws', 'credentials')`, `Path.home() / '.netrc'`). */
+export function joinedPaths(code: string, literals: readonly Literal[]): string[] {
+  const out: string[] = [];
+  let current: Literal[] = [];
+  const flush = () => {
+    if (current.length > 1) {
+      const parts = current.map((item) => item.text.replace(/^\/+|\/+$/g, "")).filter(Boolean);
+      out.push(`${current[0].text.startsWith("/") ? "/" : ""}${parts.join("/")}`);
+    }
+    current = [];
+  };
+  for (const literal of literals) {
+    const last = current.at(-1);
+    if (last && /^\s*(?:,|\+|\/|\.\.|\.|&)\s*$/.test(code.slice(last.end, literal.at))) current.push(literal);
+    else {
+      flush();
+      current = [literal];
+    }
+  }
+  flush();
+  return out;
+}
+
+/** How much escaped or computed text makes code obfuscated: more than this many escapes, or computed characters. */
+const MAX_ESCAPES = 8;
+
+/** What reading code found (`scanCode`). */
+export interface CodeScan {
+  /** Names that reach the network (`requests`, `urlopen`). */
+  network: string[];
+  /** Names that run a program; with `commands`, the shell lines they run. */
+  spawn: string[];
+  /** Shell lines the code runs (each literal of a spawning call, each argv list), to read as lines of their own. */
+  commands: string[];
+  /** Literals that may name files it reads (paths, joined paths, from home). */
+  paths: string[];
+  /** Whether it reads files at all (`open(`, `readFileSync`). */
+  reads: boolean;
+  /** Credential variables it reads by name, or "the environment" for all of it. */
+  env: string[];
+  /** Why it can't be read: names that build code at run time, obfuscation. */
+  opaque: string[];
+  /** URL literals (`https://…`): with a reader, a way to reach the network. */
+  urls: string[];
+}
+
+/** After an environment name, what it reads: a variable's name, or nothing (all of it). */
+const ENV_NAME = /^\s*(?:\[\s*|\.get\s*\(\s*|\.fetch\s*\(\s*|\(\s*|\{\s*|\.|->\s*)?['"]?([A-Za-z_][A-Za-z0-9_]*)/;
+/** Reading the whole environment: passing it on, serialising it, iterating it. */
+const ENV_ALL = /^\s*(?:[),;}\]]|$|\.(?:items|keys|values|copy|to_h|to_a|each|entries|toObject)\b)/;
+
+/**
+ * What code does, by `CAPABILITIES`: its network names, the programs it runs (as shell lines), the paths
+ * its literals may name, the credential variables it reads, and what makes it unreadable.
+ * `secretName` decides what a credential's variable is called (risk.ts).
+ */
+export function scanCode(code: string, language: Language, secretName: (name: string) => boolean): CodeScan {
+  const literals = literalsOf(code);
+  const scan: CodeScan = { network: [], spawn: [], commands: [], paths: [], reads: false, env: [], opaque: [], urls: [] };
+  scan.network = capabilityNames(code, language, "network");
+  scan.spawn = capabilityNames(code, language, "spawn");
+  scan.reads = capabilityNames(code, language, "read").length > 0;
+  const dynamic = capabilityNames(code, language, "dynamic");
+  if (dynamic.length) scan.opaque.push(`it builds or decodes code at run time (${dynamic.slice(0, 3).join(", ")})`);
+  const escapes = (code.match(/\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\[0-7]{3}|\bchr\s*\(|\bString\.fromCharCode|\\u\{[0-9a-fA-F]+\}/g) ?? []).length;
+  if (escapes > MAX_ESCAPES) scan.opaque.push(`its text is escaped or computed (${escapes} escapes)`);
+  // Credential variables, and the whole environment.
+  for (const row of CAPABILITIES) {
+    if (row.capability !== "env" || (row.languages !== "*" && !row.languages.includes(language))) continue;
+    for (const name of row.names) {
+      const regex = new RegExp(nameRegex(name).source, "g");
+      for (const match of code.matchAll(regex)) {
+        const rest = code.slice((match.index ?? 0) + match[0].length, (match.index ?? 0) + match[0].length + 60);
+        const variable = ENV_NAME.exec(rest)?.[1];
+        if (variable && secretName(variable)) scan.env.push(variable);
+        else if (!variable || ENV_ALL.test(rest)) {
+          if (ENV_ALL.test(rest) || name.startsWith("%")) scan.env.push("the environment");
+        }
+      }
+    }
+  }
+  // Paths its literals may name: as written, joined, and from home when it finds the home folder.
+  const home = capabilityNames(code, language, "home").length > 0;
+  for (const text of [...literals.map((literal) => literal.text), ...joinedPaths(code, literals)]) {
+    if (/^[a-z][\w+.-]*:\/\//i.test(text)) {
+      scan.urls.push(text);
+      continue;
+    }
+    if (!text || text.length > 400 || /\s{2,}|\n/.test(text)) continue;
+    scan.paths.push(text);
+    if (home && !text.startsWith("/") && !text.startsWith("~")) scan.paths.push(`~/${text.replace(/^\.\//, "")}`);
+  }
+  // What it runs: each literal of the code that reads as a command line, and each argv list.
+  if (scan.spawn.length) {
+    for (const literal of literals) if (/\s/.test(literal.text.trim()) || /^[\w./-]+$/.test(literal.text)) scan.commands.push(literal.text);
+    for (const group of argvGroups(code, literals)) scan.commands.push(group.map((word) => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`)).join(" "));
+  }
+  return scan;
+}

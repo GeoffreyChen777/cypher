@@ -30,6 +30,10 @@ export interface JudgeEvidence {
   denials?: readonly string[];
   /** What the line acts on that another chat or task made or holds (core.ts `notThisTask`), in words. */
   notThisTask?: readonly string[];
+  /** Code it runs that Cypher can't read (round 5, code.ts): built or decoded at run time, obfuscated, a binary, a script not there. */
+  opaqueCode?: readonly string[];
+  /** Paths it writes whose start is known only when it runs and that could be the permission system (round 5, risk.ts `unresolvedWrites`). */
+  unresolved?: readonly string[];
 }
 
 
@@ -92,6 +96,7 @@ export const CONCERN_TABLE = [
   { id: "outside-audience", answeredByConsent: true, means: "it publishes, sends or shows something beyond this machine (a push, pull request, comment, release, deploy, message, upload, a command on another host) and the owner didn't ask for that" },
   { id: "installed-app", answeredByConsent: true, means: "it reads the installed Cypher app's private data (the owner's real chats, journals, databases), or writes to or restarts the installed app (/Applications/Cypher.app, ~/.cypher outside ~/.cypher/worktrees), and the owner didn't ask for that" },
   { id: "secret", answeredByConsent: false, means: "it reads or uses a secret or credential file the owner didn't ask about (a tool reading its own credentials to do the asked thing, as gh or git push do, is not this)" },
+  { id: "opaque-code", answeredByConsent: false, means: "it runs code Cypher can't read (opaque code: built or decoded at run time, obfuscated, a binary, a script that isn't there), or writes a path known only when it runs that could be the permission system, and nothing the owner wrote accounts for what that code does" },
   { id: "system-change", answeredByConsent: true, means: "it changes the machine beyond this task (system settings, a system-wide install by a system package manager or into a global prefix, shell startup files, git hooks or config, launch agents) or downloads and runs code from outside the project, and the owner didn't ask for that; a developer tool the work needs, installed into the user's own tool directory (grade: installs a developer tool into this user's own tool directory), is not this" },
 ] as const;
 
@@ -262,6 +267,8 @@ function evidenceLines(request: JudgeRequest): string[] {
   }
   for (const denial of evidence.denials ?? []) lines.push(`- the owner denied a request like it in this chat: ${denial}. Their Deny is their decision: ask ("retracted") about the same action unless their words since ask for this target`);
   for (const item of evidence.notThisTask ?? []) lines.push(`- not this task's: ${item}. Ask ("other-task") unless the owner's words name it`);
+  for (const item of evidence.opaqueCode ?? []) lines.push(`- opaque code: ${item}. Cypher can't tell what it does: approve only when the owner's words account for running it; else ask ("opaque-code")`);
+  for (const item of evidence.unresolved ?? []) lines.push(`- path known only when it runs: ${item}. Approve when the line or the conversation shows where it goes (a variable it sets, this task's own folders); else ask ("opaque-code")`);
   return lines;
 }
 

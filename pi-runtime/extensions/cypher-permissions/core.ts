@@ -21,8 +21,10 @@ import { genericDestroyer, targetsOf } from "./catalogue.ts";
 import { readTool } from "./tools.ts";
 import { entryCovers, ledgerFile } from "./ledger.ts";
 import type { LedgerEntity, LedgerEntry } from "./ledger.ts";
-import { Denials, denialsFile } from "./denials.ts";
+import { Denials, denialsFile, forRecord } from "./denials.ts";
 import type { ActionClass, DenialRecord, DenialScope } from "./denials.ts";
+import { commandEffects, unwrapped } from "./effects.ts";
+import type { EffectClass } from "./effects.ts";
 import type { LifecycleFacts } from "./lifecycle.ts";
 import type { PullRequestFact } from "./entities.ts";
 import type { Capability, LevelName, PermissionsConfig } from "./config.ts";
@@ -54,10 +56,14 @@ import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs }
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
 import { benignEnv, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
-import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, normalRefspec, redirectRisk, TIER_RANK } from "./risk.ts";
+import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, lineFlow, normalRefspec, redirectRisk, secretName, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
+import type { PatternFinding } from "./risk.ts";
+import { resolvePattern, resolveText } from "./resolve.ts";
+import { codeOf, INTERPRETERS as INTERPRETER_TABLE, interpreterOf, scanCode, shebangInterpreter } from "./code.ts";
+import type { Interpreter } from "./code.ts";
 import type { Assessment, GitFacts, KillTarget, ProcessFacts, RiskFacts, Tier } from "./risk.ts";
 import { INSPECT, inspectMatches, viewOf } from "./packs.ts";
-import { parseShell, UNKNOWN } from "./shell.ts";
+import { literalOutput, parseShell, UNKNOWN } from "./shell.ts";
 import type { ParsedLine, SimpleCommand } from "./shell.ts";
 
 export const UNAVAILABLE_ENTRY = "cypher-permissions.unavailable";
@@ -274,6 +280,43 @@ export interface LineAssessment extends Assessment {
   commands: LineCommand[];
   /** One per command, in order. */
   assessments?: Assessment[];
+  /** Code it runs that Cypher can't read (code.ts), in words: evidence "opaque code" for the judge. */
+  opaqueCode?: string[];
+  /** Paths it writes whose start is known only when it runs and that could be the permission system (risk.ts `unresolvedWrites`). */
+  unresolved?: string[];
+}
+
+/** What the code a command runs does (code.ts, `Permissions.codeFindings`). */
+interface CodeFinding {
+  language: string;
+  /** Where the code is: "its inline code", "the code on its input", "the script x.py". */
+  origin: string;
+  sink?: string;
+  secret?: string;
+  /** Why it can't be read. */
+  opaque?: string;
+  /** A line it runs is on the floor (`subprocess.run("cat .env | nc …")`): that line's finding. */
+  floor?: Assessment;
+  /** The most dangerous line it runs (`subprocess.run(["git", "push", "--force"])`), when one is. */
+  worst?: Assessment;
+}
+
+/** How deep code inside code is read (a script that runs a shell line that runs python …). */
+const MAX_CODE_DEPTH = 3;
+/** The most of a script that is read as code. */
+const MAX_SCRIPT_BYTES = 512 * 1024;
+/** The most shell lines one piece of code is read as running. */
+const MAX_CODE_COMMANDS = 32;
+
+/** A command's assessment with what its code does: unreadable code is a danger for the judge; a secret it reads and doesn't send, a secret read. */
+function withCode(own: Assessment, found: CodeFinding): Assessment {
+  if (own.tier === "danger") return own;
+  if (found.floor) return { tier: "danger", kind: found.floor.kind, key: found.floor.key, floor: true };
+  if (found.sink && found.secret) return { tier: "danger", kind: `sends a secret off this machine (${found.secret}) through ${found.sink}`, key: "secret-off-machine", floor: true };
+  if (found.worst) return { ...found.worst, kind: `${found.origin} runs a command that ${found.worst.kind ?? "is dangerous"}` };
+  if (found.opaque) return { tier: "danger", kind: `runs code Cypher can't read (${found.origin}: ${found.opaque})`, key: "opaque-code" };
+  if (found.secret && !found.sink) return { tier: "local", kind: `reads a secret (${found.secret}) in ${found.language} code`, once: true, concern: "secret" };
+  return own;
 }
 
 /** The scope Cypher's row shows: a project rule lasts like "always", a task grant like "once". */
@@ -420,13 +463,46 @@ const UNREAD_ACTIONS: readonly [string, RegExp][] = [
   ["reach", /send|reach|upload/i],
 ];
 
-/** Shells and interpreters that run code from their input: no script, no `-c`/`-e`, only options (or `-`). */
-const CODE_READERS = /^(sh|bash|zsh|dash|ksh|fish|python\d*(\.\d+)?|node|deno|bun|ruby|perl|php|lua|osascript|tclsh|Rscript)$/;
+/** The command a command runs (effects.ts `unwrapped`: `sudo`, `env`, `xargs`, …; and what `find -exec` runs). */
+function runWords(words: readonly string[]): string[] {
+  const inner = unwrapped(words);
+  if (/^(find|fd)$/.test(basename(inner[0] ?? ""))) {
+    const at = inner.findIndex((word) => /^-(exec|execdir|ok|okdir|x|X)$|^--exec/.test(word));
+    if (at >= 0) {
+      const run = inner.slice(at + 1);
+      const end = run.findIndex((word) => word === ";" || word === "+");
+      return unwrapped(end < 0 ? run : run.slice(0, end));
+    }
+  }
+  return inner;
+}
+
+/** A script's text (round 5), or why it can't be read: not there, too large, a binary. */
+function readScript(path: string): { text?: string; why?: string } {
+  try {
+    const stat = statSync(path);
+    if (!stat.isFile()) return { why: "it isn't a file" };
+    if (stat.size > MAX_SCRIPT_BYTES) return { why: `it is too large to read (${stat.size} bytes)` };
+    const buffer = readFileSync(path);
+    if (buffer.subarray(0, 8000).includes(0)) return { why: "it is a binary" };
+    return { text: buffer.toString("utf8") };
+  } catch {
+    return { why: "it isn't there to read" };
+  }
+}
+
+/** The interpreter a script's extension names (`.py` → python3), by code.ts `INTERPRETERS`. */
+function extensionInterpreter(path: string): string | undefined {
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) return undefined;
+  const extension = path.slice(dot);
+  const row = INTERPRETER_TABLE.find((candidate) => candidate.extensions.includes(extension));
+  return row ? (row.language === "python" ? "python3" : row.language === "javascript" ? "node" : row.language === "shell" ? "sh" : row.language === "applescript" ? "osascript" : row.language === "r" ? "Rscript" : row.language === "tcl" ? "tclsh" : row.language) : undefined;
+}
+
+/** Shells and interpreters that run code from their input (code.ts `INTERPRETERS`): no script, no inline code. */
 function readsCode(words: readonly string[]): boolean {
-  const program = words[0];
-  if (program === undefined || program === UNKNOWN || !CODE_READERS.test(basename(program))) return false;
-  const shell = /^(sh|bash|zsh|dash|ksh|fish)$/.test(basename(program));
-  return words.slice(1).every((word) => word === "-" || (word !== UNKNOWN && /^[-+][A-Za-z]+$/.test(word) && !(shell ? /^-[A-Za-z]*c/ : /^-[A-Za-z]*[ce]/).test(word)) || /^--(login|noprofile|norc|posix)$/.test(word));
+  return codeOf(words, UNKNOWN)?.source.from === "stdin";
 }
 
 /** Variables bash itself reads: a line that assigns one changes how what follows runs. */
@@ -811,6 +887,8 @@ export class Permissions {
       used(recordScope(outcome.scope));
       if (outcome.scope !== "once" && outcome.scope !== "rule") this.persistGrant(request.capability, [classification], outcome.scope, outcome.by);
     }
+    // What this chat's file tools write is this task's (round 5): code it runs later is read (`taskWrote`).
+    if (call.tool === "write" || call.tool === "edit") for (const request of requests) if (request.capability === "write") this.noteWritten(this.classify(request.path, ctx.cwd).path);
     return { ok: true, approved, ...(scope ? { record: { outcome: "allowed", scope } } : {}) };
   }
 
@@ -1070,16 +1148,20 @@ export class Permissions {
     const tier: Tier = file && request.capability === "write" && (guarded || self) && !sensitive ? "danger" : "local";
     // The floor (floor.ts): a write to the permission system's own files; the owner's own "Ask me" setting.
     // The owner's own Deny of a request like it in this chat (denials.ts): same tool, capability, target scope.
+    const scopes: DenialScope[] =
+      request.domain !== undefined
+        ? [{ kind: "host", name: request.domain }]
+        : request.toolInput !== undefined
+          ? [{ kind: "line", name: `${request.tool} ${request.toolInput}` }]
+          : paths.map((path) => ({ kind: "path" as const, name: path, says: [displayPath(path, this.home)] }));
+    const action = request.domain !== undefined ? "network" : request.toolInput !== undefined ? `tool:${request.tool}` : request.capability;
     const actionClass: ActionClass = {
       tool: request.tool,
-      actions: [request.domain !== undefined ? "network" : request.toolInput !== undefined ? `tool:${request.tool}` : request.capability],
+      actions: [action],
       ...(sensitive ? { concern: "secret" } : file && paths.some((path) => this.installedApp(path) && !installedProgram(path)) ? { concern: "installed-app" } : {}),
-      scopes:
-        request.domain !== undefined
-          ? [{ kind: "host", name: request.domain }]
-          : request.toolInput !== undefined
-            ? [{ kind: "line", name: `${request.tool} ${request.toolInput}` }]
-            : paths.map((path) => ({ kind: "path" as const, name: path, says: [displayPath(path, this.home)] })),
+      scopes,
+      // Its effect class (effects.ts): a file tool reads or changes, a domain is reached, a tool is its own.
+      units: [{ effects: [request.domain !== undefined ? "send" : request.toolInput !== undefined ? (`tool:${request.tool}` as EffectClass) : request.capability === "write" ? "change" : "read"], scopes }],
     };
     const denied = await this.deniedLike(actionClass);
     const floor = floorOf(
@@ -1403,8 +1485,9 @@ export class Permissions {
       out.push({
         ...command,
         words,
-        // The wrappers' words are gone from the front: so are their hints.
+        // The wrappers' words are gone from the front: so are their hints and globs.
         ...(command.hints ? { hints: command.hints.slice(command.words.length - words.length) } : {}),
+        ...(command.patterns ? { patterns: command.patterns.slice(command.words.length - words.length) } : {}),
         env: [...command.env, ...(wrapped?.env ?? [])],
         // The values in front of it and its wrappers' words: they can name the installed app too (`CYPHER_DATA_DIR=~/.cypher cmd`).
         carried: [...(command.envValues ?? []), ...(wrapped ? command.words.slice(0, command.words.length - words.length) : [])],
@@ -1541,6 +1624,12 @@ export class Permissions {
     if (!this.enforcing) return undefined;
     const commands = this.catalogueCommands(command, cwd);
     if (!commands) return undefined;
+    // What it writes by redirection or `tee` is this task's (round 5): code it runs later is read (`taskWrote`).
+    for (const item of commands) {
+      for (const path of [...item.writes, ...(item.words[0] === "tee" ? item.words.slice(1) : [])]) {
+        if (path !== UNKNOWN && !path.startsWith("-") && (item.cwd !== undefined || isAbsolute(path))) this.noteWritten(this.classify(path, item.cwd).path);
+      }
+    }
     const plan = this.created.plan(command, commands, this.catalogueFacts());
     return plan.candidates.length ? plan : undefined;
   }
@@ -1640,23 +1729,230 @@ export class Permissions {
   }
 
   /** The risk tier of a whole line: its most dangerous command (risk.ts). */
-  assess(command: string, cwd: string): LineAssessment {
+  assess(command: string, cwd: string, depth = 0): LineAssessment {
     const parsed = this.parse(command, cwd);
     if (parsed.kind === "opaque") return { ...assessOpaque(command, this.riskFacts(), false, cwd), commands: [], parsed };
     const commands = this.commandsOf(parsed.commands, cwd);
     const facts = this.riskFacts();
+    // Code an interpreter runs (code.ts): read like the line around it, before its commands are judged.
+    const code = this.codeFindings(commands, depth);
     // An inert builtin or a filter needs no rule, but its redirections can still be dangerous (`echo x >> ~/.zshrc`).
     const assessments = commands.map((item): Assessment => {
-      if (!item.inert) return assessCommand(item, facts);
+      if (!item.inert) {
+        const own = assessCommand(item, facts);
+        const found = code.get(item);
+        return found ? withCode(own, found) : own;
+      }
       return redirectRisk(item, facts) ?? { tier: "inspect" };
     });
     let worst: Assessment = { tier: "inspect" };
     for (const assessment of assessments) if (TIER_RANK[assessment.tier] > TIER_RANK[worst.tier]) worst = assessment;
     if (downloadsAndRuns(commands)) worst = { tier: "danger", kind: "downloads code and runs it", key: "download-run" };
-    // A secret leaving the machine: the always-ask floor, for the line as a whole.
-    const exfiltration = exfiltrates(commands, facts, parsed.expands);
+    // A secret leaving the machine: the always-ask floor, for the line as a whole — the code it runs included.
+    const exfiltration = exfiltrates(commands, facts, parsed.expands, code);
+    const nested = [...code.values()].find((found) => found.floor)?.floor;
     if (exfiltration) worst = { tier: "danger", kind: exfiltration, key: "secret-off-machine", floor: true };
-    return { ...worst, commands, assessments, parsed };
+    else if (nested) worst = { tier: "danger", kind: nested.kind, key: nested.key, floor: true };
+    const opaqueCode = [...code.values()].flatMap((found) => (found.opaque ? [`${found.origin} (${found.language}): ${found.opaque}`] : []));
+    const unresolved = commands.flatMap((item) => unresolvedWrites(item, facts));
+    return { ...worst, commands, assessments, parsed, ...(opaqueCode.length ? { opaqueCode } : {}), ...(unresolved.length ? { unresolved } : {}) };
+  }
+
+  /**
+   * The code each command of a line runs (code.ts `codeOf`): an interpreter's inline code, its input (a
+   * heredoc, a here-string, what `echo`/`printf` or a script's `cat` pipes into it), or a script this task
+   * wrote (in this line, by its file tools, or by an earlier command: `taskWrote`). Read by language
+   * (`scanCode`): what reaches the network is a sink, a secret it reads a source; the shell lines it runs
+   * are read as lines of their own (`assess`). Code that can't be read is `opaque`.
+   */
+  private codeFindings(commands: readonly LineCommand[], depth: number): Map<LineCommand, CodeFinding> {
+    const out = new Map<LineCommand, CodeFinding>();
+    if (depth > MAX_CODE_DEPTH) return out;
+    /** What earlier commands of the line wrote, with its text (undefined: known only when it runs). */
+    const written = new Map<string, string | undefined>();
+    for (const [index, item] of commands.entries()) {
+      const found = this.codeFinding(item, commands[index - 1], written, depth);
+      if (found) out.set(item, found);
+      const text = item.input ?? (/^(echo|printf)$/.test(item.words[0] ?? "") && !item.words.includes(UNKNOWN) ? `${item.words.slice(1).join(" ")}\n` : undefined);
+      for (const path of item.writes) if (path !== UNKNOWN && (item.cwd !== undefined || isAbsolute(path))) written.set(this.classify(path, item.cwd).path, text);
+      if (item.words[0] === "tee") for (const path of item.words.slice(1)) if (path !== UNKNOWN && !path.startsWith("-") && (item.cwd !== undefined || isAbsolute(path))) written.set(this.classify(path, item.cwd).path, item.input);
+    }
+    return out;
+  }
+
+  private codeFinding(item: LineCommand, before: LineCommand | undefined, written: ReadonlyMap<string, string | undefined>, depth: number): CodeFinding | undefined {
+    let interpreter: Interpreter | undefined;
+    let text: string | undefined;
+    let origin = "its inline code";
+    let opaque: string | undefined;
+    /** A script: what this line wrote there, else its file when this task wrote it; undefined when it isn't this task's. */
+    const script = (path: string, cwd: string | undefined): { text?: string; why?: string; shown: string } | undefined => {
+      if (path === UNKNOWN) return undefined;
+      if (cwd === undefined && !isAbsolute(path) && !path.startsWith("~")) return undefined;
+      const canonical = this.classify(path, cwd).path;
+      const shown = displayPath(canonical, this.home);
+      if (written.has(canonical)) {
+        const content = written.get(canonical);
+        return content === undefined ? { why: "this line writes it with text known only when it runs", shown } : { text: content, shown };
+      }
+      if (!this.taskWrote(canonical)) return undefined;
+      return { ...readScript(canonical), shown };
+    };
+    // Through what runs it (`sudo`, `xargs`, `find -exec`): the interpreter is the command it runs.
+    const runs = runWords(item.words);
+    const read = codeOf(runs, UNKNOWN, runs.length === item.words.length ? item.patterns : undefined);
+    if (read) {
+      interpreter = read.interpreter;
+      const source = read.source;
+      // A shell's `-c` and the scripts it reads from its input are read by the shell evaluator itself.
+      if (interpreter.language === "shell" && (source.from === "inline" || source.from === "inline-unknown" || item.script === true)) return undefined;
+      if (source.from === "inline") text = source.text;
+      else if (source.from === "inline-unknown") opaque = "it is known only when it runs";
+      else if (source.from === "script") {
+        const found = script(source.path, item.cwd);
+        if (!found) return undefined;
+        origin = `the script ${found.shown}`;
+        text = found.text;
+        opaque = found.why;
+      } else if (source.from === "stdin") {
+        origin = "the code on its input";
+        if (item.input !== undefined) text = item.input;
+        else if (item.inputUnknown) opaque = "it is known only when it runs";
+        else if (item.reads.length) {
+          const found = script(item.reads[0], item.cwd);
+          if (!found) return undefined;
+          origin = `the script ${found.shown} on its input`;
+          text = found.text;
+          opaque = found.why;
+        } else if (before?.joint === "|") {
+          text = this.pipedCode(before, written);
+          // What it reads is known only when it runs: the stdin-code danger (risk.ts) stands.
+          if (text === undefined) return undefined;
+        } else return undefined;
+      } else return undefined;
+    } else {
+      // A script run as a program (`./x`): its `#!` line, or its extension, says what reads it.
+      const program = item.words[0];
+      if (program === undefined || program === UNKNOWN || !program.includes("/")) return undefined;
+      const found = script(program, item.cwd);
+      if (!found) return undefined;
+      interpreter = (found.text !== undefined ? shebangInterpreter(found.text) : undefined) ?? interpreterOf(extensionInterpreter(program) ?? "sh");
+      if (!interpreter) return undefined;
+      origin = `the script ${found.shown}`;
+      text = found.text;
+      opaque = found.why;
+    }
+    if (text !== undefined && item.stdinCode) item.stdinCode = false;
+    const language = interpreter.language;
+    if (opaque !== undefined || text === undefined) return { language, origin, opaque: opaque ?? "it can't be read" };
+    return this.scanFinding(text, language, item.cwd, depth, origin);
+  }
+
+  /** What a command pipes into an interpreter as its program: `echo`/`printf` of literal words (shell.ts `literalOutput`), or `cat` of a script this task wrote. */
+  private pipedCode(before: LineCommand, written: ReadonlyMap<string, string | undefined>): string | undefined {
+    const [program, ...args] = before.words;
+    if (program === undefined || before.words.includes(UNKNOWN)) return undefined;
+    const printed = literalOutput(before.words);
+    if (printed !== undefined) return printed;
+    if (program === "cat" && args.length === 1 && !args[0].startsWith("-") && (before.cwd !== undefined || isAbsolute(args[0]))) {
+      const path = this.classify(args[0], before.cwd).path;
+      if (written.has(path)) return written.get(path);
+      return this.taskWrote(path) ? readScript(path).text : undefined;
+    }
+    if (before.input !== undefined && (program === "cat" || program === "tee") && args.every((word) => word.startsWith("-"))) return before.input;
+    return undefined;
+  }
+
+  /** Code's findings (code.ts `scanCode`), or a shell script's (read as a line). */
+  private scanFinding(text: string, language: string, cwd: string | undefined, depth: number, origin: string): CodeFinding {
+    const facts = this.riskFacts();
+    const at = cwd ?? this.cwd;
+    const finding: CodeFinding = { language, origin };
+    const nested = (line: string) => {
+      let assessed: LineAssessment;
+      try {
+        assessed = this.assess(line, at, depth + 1);
+      } catch {
+        return;
+      }
+      if (assessed.floor) finding.floor ??= assessed;
+      else if (assessed.tier === "danger" && !finding.worst) finding.worst = { tier: "danger", kind: assessed.kind, key: assessed.key };
+      if (assessed.parsed.kind !== "simple") return;
+      const flow = lineFlow(assessed.commands, facts, assessed.parsed.expands);
+      finding.sink ??= flow.sink;
+      finding.secret ??= flow.secret;
+      if (assessed.opaqueCode?.length) finding.opaque ??= assessed.opaqueCode[0];
+    };
+    if (language === "shell") {
+      nested(text);
+      return finding;
+    }
+    const scan = scanCode(text, language as Parameters<typeof scanCode>[1], secretName);
+    if (scan.opaque.length) finding.opaque = scan.opaque.join("; ");
+    if (scan.network.length) finding.sink = `${language} code (${scan.network.slice(0, 3).map((name) => name.replace(/\($/, "")).join(", ")})`;
+    else if (scan.urls.length && scan.reads) finding.sink = `${language} code (it opens ${scan.urls[0].slice(0, 80)})`;
+    if (scan.reads || scan.spawn.length) {
+      for (const path of scan.paths) {
+        if (!/[/.~]/.test(path) || /^[a-z][\w+.-]*:\/\//i.test(path)) continue;
+        const classification = this.classify(resolveText(path, this.home), at);
+        if (classification.zone === "sensitive") {
+          finding.secret ??= path;
+          break;
+        }
+      }
+    }
+    if (scan.env.length) finding.secret ??= scan.env[0] === "the environment" ? "the environment" : `$${scan.env[0]}`;
+    for (const line of scan.commands.slice(0, MAX_CODE_COMMANDS)) nested(line);
+    return finding;
+  }
+
+  /** Canonical paths this chat's file tools wrote, and its bash lines' redirections (this process); `taskWrote` reads the transcript too. */
+  private readonly written = new Set<string>();
+
+  /** The chat's own transcript, for what its tools wrote before this process (the extension sets it). */
+  transcript?: () => readonly Entry[];
+
+  /** Record a path this chat's write or edit tool wrote. */
+  noteWritten(path: string): void {
+    this.written.add(path);
+  }
+
+  /**
+   * Whether this task wrote a file (round 5, provenance for code it runs): its file tools or bash lines in
+   * this process, the ledger (what its commands made), or its transcript's write/edit calls and the bash
+   * lines that write it (a restart reads the same transcript).
+   */
+  taskWrote(path: string): boolean {
+    if (this.written.has(path) || this.created.has(path)) return true;
+    const entries = this.transcript?.() ?? [];
+    // The transcript only grows: a path read against as many entries as before reads the same.
+    const cached = this.wroteCache.get(path);
+    if (cached && cached.entries === entries.length) return cached.wrote;
+    const wrote = this.transcriptWrote(path, entries);
+    this.wroteCache.set(path, { entries: entries.length, wrote });
+    return wrote;
+  }
+  private readonly wroteCache = new Map<string, { entries: number; wrote: boolean }>();
+
+  private transcriptWrote(path: string, entries: readonly Entry[]): boolean {
+    const name = basename(path);
+    for (const entry of entries) {
+      const message = (entry as { type?: string; message?: { role?: string; content?: unknown } }).message;
+      if ((entry as { type?: string }).type !== "message" || message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+      for (const part of message.content as { type?: string; name?: string; arguments?: Record<string, unknown> }[]) {
+        if (part?.type !== "toolCall") continue;
+        const args = part.arguments ?? {};
+        if ((part.name === "write" || part.name === "edit") && typeof args.path === "string" && this.classify(args.path, this.cwd).path === path) return true;
+        if (part.name === "bash" && typeof args.command === "string" && args.command.includes(name)) {
+          const commands = this.catalogueCommands(args.command, this.cwd) ?? [];
+          for (const item of commands) {
+            const targets = [...item.writes, ...(item.words[0] === "tee" ? item.words.slice(1) : []), ...(/^(cp|mv|install|ln)$/.test(item.words[0] ?? "") ? item.words.slice(-1) : [])];
+            if (targets.some((target) => target !== UNKNOWN && !target.startsWith("-") && (item.cwd !== undefined || isAbsolute(target)) && this.classify(target, item.cwd).path === path)) return true;
+          }
+        }
+      }
+    }
+    return false;
   }
 
   /**
@@ -1683,7 +1979,8 @@ export class Permissions {
     let inspected = false;
     /** An inspection here needs to leave the sandbox, or the agent asked to. */
     let needed = options.escalated === true;
-    const lineDanger = line.key === "download-run";
+    // No rule vouches for a line that downloads and runs code, or for one on the floor (round 5: a floor the line's code reaches too).
+    const lineDanger = line.key === "download-run" || line.floor === true;
     for (const [index, item] of commands.entries()) {
       if (this.redirectProblem(item)) outside = false;
       if (item.inert) continue;
@@ -1839,8 +2136,10 @@ export class Permissions {
       // What the line acts on, read once: for the judge, the owner's denials and other tasks' work.
       const read = dangerous && line.parsed.kind !== "opaque" ? this.lineTargets(line) : undefined;
       // The owner's own Deny of a request like it (denials.ts), and another chat's or task's work it touches.
-      const actionClass = this.lineClass(line, command, ctx.cwd, read);
-      const denied = await this.deniedLike(actionClass);
+      // Read when there is a denial to check it against, or one to record (its targets may ask git and the catalogue).
+      let classOfLine: ActionClass | undefined;
+      const actionClass = () => (classOfLine ??= this.lineClass(line, command, ctx.cwd, read));
+      const denied = this.denials.any() ? await this.deniedLike(actionClass()) : { similar: [] };
       const foreign = read ? await this.foreignTargets("targets" in read ? read.targets : (read.known ?? [])) : undefined;
       const floor = this.alwaysAsk(line, {
         ...(denied.active ? { ownerDenied: `you denied \`${denied.active.denial.what}\` (${denied.active.denial.at.slice(0, 16).replace("T", " ")} UTC) and haven't asked for it since` } : {}),
@@ -1866,7 +2165,7 @@ export class Permissions {
         const purpose = [proposal.label && `Purpose: ${proposal.label}`, proposal.reason && `Reason: ${proposal.reason}`].filter(Boolean).join("\n");
         // An approval is remembered for the commands' own categories, never for patterns the agent proposed; a danger's, never.
         const memo = dangerous ? [] : patterns.filter((pattern) => !pattern.proposed);
-        const evidence = this.evidenceFor(targets, data, ctx, denied.similar, [line.kind, ...(line.assessments ?? []).map((assessment) => assessment.kind)]);
+        const evidence = this.evidenceFor(targets, data, ctx, denied.similar, [line.kind, ...(line.assessments ?? []).map((assessment) => assessment.kind)], line);
         const reviewed = await this.review(
           {
             capability: "escalate",
@@ -1964,12 +2263,12 @@ export class Permissions {
           finish({ decision: "allow", scope: "project", ...asked });
           return { ok: true, scope: "project", by: "user" } as const;
         case HUMAN.stop:
-          this.denials.record(actionClass, command, this.ownerWords);
+          this.denials.record(forRecord(actionClass()), command, this.ownerWords);
           finish({ decision: "abort", ...asked });
           ctx.abort?.();
           return { ok: false, reason: "The user denied this and stopped the turn.", abort: true } as const;
         case HUMAN.deny: {
-          this.denials.record(actionClass, command, this.ownerWords);
+          this.denials.record(forRecord(actionClass()), command, this.ownerWords);
           const reason = "The user denied running this outside the sandbox.";
           finish({ ...asked, reason });
           return { ok: false, reason: `${reason} Continue in the sandbox or ask the user.` } as const;
@@ -2030,8 +2329,11 @@ export class Permissions {
    * the grade of what it does (grades.ts), what its flags add, and whether the owner's words name the
    * installed app's data it reads. Evidence, never a gate.
    */
-  private evidenceFor(targets: LineTargets | undefined, data: readonly string[], ctx: RequestContext, denied: readonly DenialRecord[] = [], kinds: readonly (string | undefined)[] = []): JudgeEvidence | undefined {
+  private evidenceFor(targets: LineTargets | undefined, data: readonly string[], ctx: RequestContext, denied: readonly DenialRecord[] = [], kinds: readonly (string | undefined)[] = [], line?: LineAssessment): JudgeEvidence | undefined {
     const evidence: { -readonly [K in keyof JudgeEvidence]: JudgeEvidence[K] } = {};
+    // Code it runs that can't be read, and paths known only when it runs that could be the permission system (round 5).
+    if (line?.opaqueCode?.length) evidence.opaqueCode = line.opaqueCode;
+    if (line?.unresolved?.length) evidence.unresolved = line.unresolved;
     if (targets) {
       const known = "targets" in targets ? targets.targets : (targets.known ?? []);
       evidence.consents = scanConsents(targets, this.ownerWords, ctx.branch(), this.memoFacts());
@@ -2052,46 +2354,112 @@ export class Permissions {
   }
 
   /**
-   * A bash line's action class (denials.ts): each command's action by the tool table (program and
-   * subcommand) or its program, the classifier's concern (a secret, the installed app's data, a
-   * danger's key), and what it acts on — the targets read from the line, the paths its words, its
-   * redirections and its data findings name; the line itself when it names nothing.
+   * A bash line's action class (denials.ts, round 5): one unit per pipeline (effects.ts
+   * `commandEffects`, read through wrappers and `find -exec`): its effect classes, and the typed things it
+   * acts on — the tool table's entities, git's refs and refspecs (a branch, never a path), the
+   * catalogue's targets, the paths its words, redirections and data findings name (canonical, through the
+   * resolver: a glob by its fixed directory), the targets read from the line. The line itself when it
+   * names nothing.
    */
   private lineClass(line: LineAssessment, command: string, cwd: string, read: LineTargets | undefined): ActionClass {
     const actions = new Set<string>();
-    const scopes: DenialScope[] = [];
+    const all: DenialScope[] = [];
+    const units: { effects: EffectClass[]; scopes: DenialScope[] }[] = [];
     const seen = new Set<string>();
-    const add = (scope: DenialScope) => {
-      const key = `${scope.kind}\u0000${scope.name}`;
+    const scopeOf = (scope: DenialScope): DenialScope => {
+      const key = `${scope.kind}\u0000${scope.name}\u0000${scope.remote ?? ""}`;
       if (!seen.has(key)) {
         seen.add(key);
-        scopes.push(scope);
+        all.push(scope);
       }
+      return scope;
     };
-    const addPath = (word: string, at: string | undefined) => {
-      if (word === UNKNOWN || word.startsWith("-") || /^[a-z][\w+.-]*:\/\//i.test(word)) return;
-      if (!(word.startsWith("/") || word.startsWith("~") || word.startsWith("./") || word.startsWith("../") || word.includes("/") || /^\.[\w-]/.test(word))) return;
+    const pathScope = (word: string, at: string | undefined, pattern?: string): DenialScope | undefined => {
+      if (word === UNKNOWN) {
+        // A glob or a word known only when it runs: what its fixed directory holds (resolve.ts), when that is known.
+        if (pattern === undefined) return undefined;
+        const found = this.couldBe(pattern, at);
+        if (found.anywhere || !found.fixed.length) return undefined;
+        const path = found.fixed[0];
+        return scopeOf({ kind: "path", name: path, says: [displayPath(path, this.home)] });
+      }
+      if (/^[a-z][\w+.-]*:\/\//i.test(word) || word.startsWith("-")) return undefined;
+      if (at === undefined && !isAbsolute(word) && !word.startsWith("~")) return undefined;
       const path = this.classify(word, at ?? cwd).path;
-      if (path) add({ kind: "path", name: path, says: [displayPath(path, this.home), word] });
+      return scopeOf({ kind: "path", name: path, says: [displayPath(path, this.home), word] });
     };
+    let unit: { effects: EffectClass[]; scopes: DenialScope[] } | undefined;
+    const effect = (value: EffectClass) => {
+      if (unit && !unit.effects.includes(value)) unit.effects.push(value);
+    };
+    const facts = this.riskFacts();
     for (const [index, item] of line.commands.entries()) {
-      // What only inspects is no part of what the owner denied (`git status && npm publish`: the publish).
-      if (item.inert || (line.assessments?.[index]?.tier === "inspect" && line.commands.length > 1)) continue;
+      // A pipeline is one unit: what `| xargs rm` deletes is what the command before it named.
+      if (!unit || line.commands[index - 1]?.joint !== "|") {
+        unit = { effects: [], scopes: [] };
+        units.push(unit);
+      }
+      const add = (scope: DenialScope | undefined) => {
+        if (scope && unit && !unit.scopes.includes(scope)) unit.scopes.push(scope);
+      };
+      for (const [at, path] of item.writes.entries()) {
+        effect("change");
+        add(pathScope(path, item.cwd, item.writePatterns?.[at]));
+      }
+      for (const [at, path] of item.reads.entries()) {
+        effect("read");
+        add(pathScope(path, item.cwd, item.readPatterns?.[at]));
+      }
+      // What only runs what follows it (a shell whose script was read) or moves the shell (`cd`) is no part of it;
+      // an inert filter still reads what it names (`cat f`, `head f`).
+      if (!item.words.length || item.script === true || DIRECTORY_BUILTINS.has(item.words[0] ?? "")) continue;
       const program = basename(item.words[0] ?? "");
       const tool = readTool(item.words);
       actions.add(tool && "row" in tool ? [program, ...tool.row.sub].join(" ") : program);
-      for (const word of item.words.slice(1)) addPath(word, item.cwd);
-      for (const path of [...item.reads, ...item.writes]) addPath(path, item.cwd);
+      const found = commandEffects(item.words, {
+        sink: (words) => sinkOf(viewOf(words)),
+        current: program === "git" ? this.gitAt(item.cwd ?? cwd)?.current : undefined,
+      });
+      for (const value of found.effects) effect(value);
+      for (const target of found.targets) {
+        if (target.kind === "path" || target.kind === "worktree") add(pathScope(target.name, item.cwd));
+        else add(scopeOf({ kind: target.kind, name: target.name, ...(target.remote ? { remote: target.remote } : {}), ...(target.repo ? { repo: target.repo } : {}), says: [target.name] }));
+      }
+      const offset = item.words.length - (item.patterns?.length ?? item.words.length);
+      for (const word of found.paths) {
+        const at = item.words.indexOf(word);
+        add(pathScope(word, item.cwd, word === UNKNOWN ? undefined : item.patterns?.[at - offset]));
+      }
+      // Globs and words known only when it runs, by their fixed directory.
+      for (const [at, pattern] of (item.patterns ?? []).entries()) if (pattern !== undefined && item.words[at + offset] === UNKNOWN && at + offset > 0) add(pathScope(UNKNOWN, item.cwd, pattern));
+      // What the catalogue says it destroys or stops (a simulator, a container, a worktree).
+      const destroyed = targetsOf(item, this.catalogueFacts());
+      for (const group of destroyed?.targets ?? []) {
+        const entity = group[0];
+        if (!entity) continue;
+        if (entity.kind === "path" || entity.kind === "worktree") add(pathScope(entity.name, undefined));
+        else add(scopeOf({ kind: entity.kind, name: entity.name, says: [entity.name], ...(entity.remote ? { remote: entity.remote } : {}) }));
+        effect(destroyed!.op === "stop" ? "stop" : "change");
+      }
     }
     const assessments = [line, ...(line.assessments ?? [])];
-    for (const assessment of assessments) if (assessment.data) addPath(assessment.data, cwd);
+    for (const assessment of assessments) if (assessment.data && unit) unit.scopes.push(...[pathScope(assessment.data, cwd)].filter((scope): scope is DenialScope => scope !== undefined));
+    // The targets the line was read for (a danger's), typed.
     for (const target of read ? ("targets" in read ? read.targets : (read.known ?? [])) : []) {
-      if (target.kind === "path" || target.kind === "worktree") addPath(target.value, target.dir);
-      else add({ kind: target.kind, name: target.value, says: [target.value] });
+      const scope = target.kind === "path" || target.kind === "worktree" ? pathScope(target.value, target.dir) : scopeOf({ kind: target.kind, name: target.value, says: [target.value], ...(target.remote ? { remote: target.remote } : {}) });
+      if (scope && units.length && !units.some((item) => item.scopes.includes(scope))) units.at(-1)!.scopes.push(scope);
     }
     const concern = assessments.find((assessment) => assessment.concern)?.concern ?? (line.tier === "danger" ? line.key : undefined);
-    if (!scopes.length) add({ kind: "line", name: command });
-    return { tool: "bash", actions: [...actions], ...(concern ? { concern } : {}), scopes };
+    const named = units.filter((item) => item.scopes.length);
+    const effects = [...new Set(units.flatMap((item) => item.effects))];
+    const lineScope = (): DenialScope => scopeOf({ kind: "line", name: command });
+    return {
+      tool: "bash",
+      actions: [...actions],
+      ...(concern ? { concern } : {}),
+      scopes: all.length ? all : [lineScope()],
+      units: named.length ? named.map((item) => ({ effects: item.effects.length ? item.effects : ["run"], scopes: item.scopes })) : [{ effects: effects.length ? effects : ["run"], scopes: [lineScope()] }],
+    };
   }
 
   /** The owner's denials of `cls` (denials.ts), checked against their words as of now. */
@@ -2502,6 +2870,7 @@ export class Permissions {
         },
       },
       permissionSystem: (path) => this.paths.isPermissionSystem(path) !== undefined,
+      couldBe: (pattern, cwd, options) => this.couldBe(pattern, cwd, options),
       installedApp: (path) => this.installedApp(path),
       git: (dir) => this.gitAt(dir),
       inWorkspace: (dir) => this.paths.inWorkspace(this.paths.canonical(dir, this.cwd)),
@@ -2522,6 +2891,29 @@ export class Permissions {
    * Where a project tool may resolve from (`npx` walks up from where it runs): the chat's cwd and
    * project folders, and every directory from `cwd` up to the project folder holding it.
    */
+  /**
+   * What a word known only when it runs could be (round 5): every glob it stands for (resolve.ts
+   * `resolvePattern`: braces, the environment, `~`, the directory, `..`, symlinks), classified by what it
+   * matches now and by the patterns it could match (paths.ts `classifyPattern`).
+   */
+  couldBe(pattern: string, cwd: string | undefined, options: { subtree?: boolean } = {}): PatternFinding {
+    const at = cwd === undefined ? undefined : this.paths.canonical(cwd, this.cwd);
+    const resolved = resolvePattern(pattern, { home: this.home, cwd: at });
+    const finding: PatternFinding & { matches: Classification[]; fixed: string[] } = { anywhere: resolved.anywhere, fixed: [], matches: [] };
+    for (const glob of resolved.globs) {
+      const fixed = globBase(glob.replace(/\\(.)/g, "$1"));
+      if (!finding.fixed.includes(fixed)) finding.fixed.push(fixed);
+      const found = this.paths.classifyPattern(glob, { ...options, unknownText: resolved.unknownText });
+      finding.matches.push(...found.matches);
+      finding.sensitive ??= found.sensitive;
+      finding.permissionSystem ??= found.permissionSystem;
+      if (found.guard === "self" || (found.guard && !finding.guard)) finding.guard = found.guard;
+      const installed = [...found.matches.map((item) => item.path), ...(resolved.anywhere ? [] : [fixed])].find((path) => this.installedApp(path) && !installedProgram(path));
+      finding.installed ??= installed;
+    }
+    return finding;
+  }
+
   private toolDirs(cwd: string | undefined): string[] {
     const dirs = [this.cwd, ...this.roots];
     if (cwd === undefined) return dirs;

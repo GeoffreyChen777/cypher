@@ -172,7 +172,7 @@ export function citedIn(word: OwnerWord, wanted: string, quote = wanted): { sour
 }
 
 /** A question mark in any script. */
-const QUESTION = /[?？¿؟;՞፧⸮⁇⁈⁉꘏]/u;
+export const QUESTION = /[?？¿؟;՞፧⸮⁇⁈⁉꘏]/u;
 /** Things a reply may name of its own: numbers, `#12`, `v1.2`, `a/b`, `x-y`, `a_b`. */
 const OWN_NAME = /[\p{L}\p{N}_]*(?:[#!]\d+|\d[\p{L}\p{N}._/-]*|[\p{L}\p{N}]+[/_-][\p{L}\p{N}._/-]+)/gu;
 

@@ -17,7 +17,7 @@
 
 export type ActionKey =
   | "create" | "delete" | "merge" | "close" | "comment" | "review" | "edit" | "ready" | "reopen" | "push" | "publish" | "release"
-  | "unpublish" | "install" | "stop" | "erase" | "apply" | "rename" | "write" | "archive" | "reach";
+  | "unpublish" | "install" | "stop" | "erase" | "apply" | "rename" | "write" | "archive" | "reach" | "read";
 
 export type NounKey =
   | "pr" | "branch" | "tag" | "version" | "package" | "host" | "repo" | "remote" | "path" | "worktree" | "process" | "simulator" | "container" | "image" | "resource";
@@ -71,6 +71,7 @@ export const LANGUAGES: readonly Language[] = [
       write: ["writ*", "add*", "append*", "edit*", "chang*", "updat*", "set", "put", "sav*"],
       archive: ["archiv*"],
       reach: ["deploy*", "ssh", "connect*", "log in", "login", "run*"],
+      read: ["read*", "look at", "look into", "inspect*", "show me", "view*", "open the", "check the", "cat"],
     },
     nouns: {
       pr: ["pr", "prs", "pull request*", "pull-request*", "pullrequest*", "mr", "mrs", "merge request*"],
@@ -121,6 +122,7 @@ export const LANGUAGES: readonly Language[] = [
       write: ["写", "加", "添加", "追加", "修改", "改", "更新", "保存"],
       archive: ["归档"],
       reach: ["登录", "连接", "部署", "执行"],
+      read: ["读", "看", "查看", "看看", "打开", "检查", "读取"],
     },
     nouns: {
       pr: ["合并请求", "拉取请求"],
@@ -168,6 +170,7 @@ export const LANGUAGES: readonly Language[] = [
       write: ["書き込", "追加", "保存", "更新"],
       archive: ["アーカイブ"],
       reach: ["接続", "ログイン", "実行"],
+      read: ["読", "見", "確認", "開い", "チェック"],
     },
     nouns: {
       pr: ["プルリク", "プルリクエスト", "マージリクエスト"],
@@ -213,6 +216,7 @@ export const LANGUAGES: readonly Language[] = [
       write: ["쓰기", "추가", "저장", "업데이트"],
       archive: ["보관"],
       reach: ["접속", "연결", "로그인", "실행"],
+      read: ["읽", "보여", "확인", "열어"],
     },
     nouns: {
       pr: ["풀 리퀘스트", "풀리퀘스트", "풀리퀘", "병합 요청", "머지 리퀘스트"],
@@ -259,6 +263,7 @@ export const LANGUAGES: readonly Language[] = [
       write: ["schreib*", "hinzufüg*", "speicher*"],
       archive: ["archivier*"],
       reach: ["verbind*", "einlogg*", "anmeld*", "ausführ*"],
+      read: ["les*", "lies*", "anseh*", "anschau*", "zeig*", "öffn*", "prüf*"],
     },
     nouns: {
       pr: ["pull-request*", "merge-request*", "zusammenführungsanfrage*"],
@@ -302,6 +307,7 @@ export const LANGUAGES: readonly Language[] = [
       write: ["écri*", "ajoute*", "enregistre*"],
       archive: ["archive*"],
       reach: ["connecte*", "exécute*"],
+      read: ["lire", "lis*", "regard*", "montr*", "ouvr*", "vérifi*", "consult*"],
     },
     nouns: {
       pr: ["demande de fusion", "demande de tirage", "demande d'extraction", "pull request*"],
@@ -345,6 +351,7 @@ export const LANGUAGES: readonly Language[] = [
       write: ["escribe*", "añade*", "agrega*", "guarda*"],
       archive: ["archiva*"],
       reach: ["conecta*", "ejecuta*"],
+      read: ["leer", "lee*", "mira*", "muestr*", "mostr*", "abr*", "revis*"],
     },
     nouns: {
       pr: ["solicitud de extracción", "solicitud de fusión", "solicitud de cambios", "pull request*"],
@@ -387,6 +394,7 @@ export const LANGUAGES: readonly Language[] = [
       write: ["escrev*", "adicion*", "salv*"],
       archive: ["arquiv*"],
       reach: ["conect*", "execut*"],
+      read: ["ler", "leia*", "olh*", "mostr*", "abr*", "verifi*"],
     },
     nouns: {
       pr: ["pull request*", "solicitação de pull", "solicitação de merge", "pedido de merge"],
@@ -428,6 +436,7 @@ export const LANGUAGES: readonly Language[] = [
       write: ["scriv*", "aggiung*", "salva*"],
       archive: ["archivia*"],
       reach: ["connett*", "esegui*"],
+      read: ["legg*", "guard*", "mostr*", "apr*", "controll*"],
     },
     nouns: {
       pr: ["pull request*", "richiesta di pull", "richiesta di merge"],
@@ -469,6 +478,7 @@ export const LANGUAGES: readonly Language[] = [
       write: ["запиши", "добавь", "сохрани"],
       archive: ["архивир*"],
       reach: ["подключи*", "зайди", "выполни"],
+      read: ["прочит*", "чита*", "посмотр*", "покаж*", "открой*", "провер*"],
     },
     nouns: {
       pr: ["пулл-реквест*", "пул-реквест*", "пулреквест*", "пул реквест*", "пулл реквест*", "запрос на слияние", "мерж-реквест*", "пр"],
@@ -493,6 +503,7 @@ export const LANGUAGES: readonly Language[] = [
   {
     code: "nl",
     actions: {
+      read: ["lees*", "lezen", "bekijk*", "toon*", "controleer*"],
       create: ["maak*", "open*", "aanmak*"],
       delete: ["verwijder*", "wis*", "ruim op"],
       merge: ["merg*", "samenvoeg*", "voeg samen"],
@@ -515,6 +526,7 @@ export const LANGUAGES: readonly Language[] = [
   {
     code: "pl",
     actions: {
+      read: ["przeczyt*", "czyta*", "pokaż*", "otwórz*", "sprawdź*", "zobacz*"],
       create: ["utwórz", "stwórz", "otwórz", "załóż", "zrób"],
       delete: ["usuń", "skasuj", "wyczyść"],
       merge: ["zmerguj", "scal*", "połącz", "merg*"],
@@ -537,6 +549,7 @@ export const LANGUAGES: readonly Language[] = [
   {
     code: "tr",
     actions: {
+      read: ["oku*", "göster*", "kontrol*"],
       create: ["oluştur*", "aç", "açın"],
       delete: ["sil*", "kaldır*", "temizle*"],
       merge: ["birleştir*", "merge*"],

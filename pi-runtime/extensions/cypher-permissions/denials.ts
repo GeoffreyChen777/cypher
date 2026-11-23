@@ -1,18 +1,25 @@
 /**
- * The owner's denials as evidence (round 4, design §7.4.1): an explicit Deny click on a request
- * makes later requests of the same action class in that chat ask, until the owner's own words since
- * ask for that very action on that target.
+ * The owner's denials as evidence (round 4, design §7.4.1; scope by effect and target since round 5): an
+ * explicit Deny click on a request makes later requests that do the same to the same thing ask in that
+ * chat, until the owner's own words since ask for that very action on that target.
  *
- * An action class is three things, read generally (no per-command rules):
- * - `tool`: the tool that asked (`bash`, `read`, `write`, an MCP tool's name);
- * - `actions`: what each command does, by the tool table (tools.ts `readTool`: program and
- *   subcommand, `gh pr merge`), else the program (`sqlite3`); a file tool's capability (`read`); and
- *   `concern`: what the classifier says the request does when it names it (risk.ts `concern`:
- *   reading a secret or the installed app's data; a danger's key), so the same reach by another
- *   program (`ls` after a denied `sqlite3`) is the same class;
- * - `scopes`: what it acts on, as entities (entities.ts kinds): a path covers its subtree (either
- *   way: a directory read holds the file the owner denied), a host or branch its own name; a line
- *   that names nothing is its own scope (`line`).
+ * A request is read as units (effects.ts): what it does — its effect class (`EFFECT_CLASSES`: the tool
+ * table's action, the catalogue's operation, the program's effect, the file tool's capability) — and to
+ * what — typed entities (entities.ts kinds: a canonical path, a branch, a tag, a pull request, a host…).
+ * A bash line has one unit per pipeline (what `| xargs rm` deletes is what the command before it named);
+ * wrappers (`sudo`, `env`, `xargs`, `bash -c`, `find -exec`) are read through.
+ *
+ * A later request matches a denial when one of its units has an effect class of a denied unit and a target
+ * that is the same entity as a denied target, holds it or is held by it (entities.ts `relation`), whatever
+ * tool or program asks: `find data/fixtures -delete` after a denied `rm -rf data/fixtures`, `head` of a
+ * file after a denied `cat` of it, `ls` of the folder holding it, the write tool on a file under a
+ * folder whose deletion was denied. A branch never matches a path (`release/2.0`), a read never matches a
+ * push. A line that names nothing is its own scope (`line`).
+ *
+ * The denial is lifted only by the owner's own words since (typed, a plan, its card, an answer: not a
+ * reply to a proposal) that ask for that effect on that target: they name it, say one of the effect's
+ * action words (lexicon.ts, `CLASS_WORDS`), and are no question, negation or "wait" (`liftedBy`). Naming
+ * it alone ("PR 44 怎么样了？") lifts nothing.
  *
  * Only a Deny click counts (and Deny and stop); a prompt closed, timed out or aborted (`dismissed`)
  * is no denial (§7.4). Kept per chat in `<agentDir>/cypher-permissions/denials/<chat>.jsonl`, part
@@ -24,9 +31,13 @@ import { createHash } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
+import { CLASS_WORDS, classOf } from "./effects.ts";
+import type { EffectClass } from "./effects.ts";
+import { relation } from "./entities.ts";
 import type { EntityKind } from "./entities.ts";
-import { consentText, mentions } from "./explicit.ts";
+import { consentText, mentions, QUESTION } from "./explicit.ts";
 import type { OwnerWords } from "./explicit.ts";
+import { actionWords, listWords } from "./lexicon.ts";
 
 export type ScopeKind = EntityKind | "line";
 
@@ -36,16 +47,30 @@ export interface DenialScope {
   name: string;
   /** How the owner would name it, besides `name` (a home-relative path, a file's name). */
   says?: readonly string[];
+  /** A branch's or tag's remote; a pull request's repository. */
+  remote?: string;
+  repo?: string;
+}
+
+/** What one part of a request does, to what (a bash pipeline; a file tool's access). */
+export interface DenialUnit {
+  effects: readonly EffectClass[];
+  scopes: readonly DenialScope[];
 }
 
 export interface ActionClass {
   tool: string;
+  /** What each command does by the tool table, else its program (for the evidence). */
   actions: readonly string[];
   concern?: string;
+  /** Every scope of every unit (for the evidence and records before round 5). */
   scopes: readonly DenialScope[];
+  units: readonly DenialUnit[];
 }
 
-export interface DenialRecord extends ActionClass {
+export interface DenialRecord extends Omit<ActionClass, "units"> {
+  /** Absent in records from before round 5: read from `actions` and `scopes` (`unitsOf`). */
+  units?: readonly DenialUnit[];
   at: string;
   /** The request in words (its command, or its paths), for the evidence. */
   what: string;
@@ -54,9 +79,8 @@ export interface DenialRecord extends ActionClass {
   chatId?: string;
 }
 
-/** Kinds whose names are matched as paths (a subtree), and kinds matched without case. */
+/** Kinds whose names are matched as paths (a subtree). */
 const PATH_KINDS: ReadonlySet<ScopeKind> = new Set(["path", "worktree"]);
-const CASELESS: ReadonlySet<ScopeKind> = new Set(["host", "repo", "simulator"]);
 /** Consent kinds that can lift a denial: the owner's own words, not a reply to a proposal (§7.3.4). */
 const LIFTING_SOURCES: ReadonlySet<string> = new Set(["typed", "plan", "card", "answer"]);
 const MAX_SEEN = 200;
@@ -67,25 +91,33 @@ export function wordHash(word: { text: string; at?: number }): string {
   return createHash("sha256").update(`${word.at ?? ""}\u0000${word.text}`).digest("hex").slice(0, 16);
 }
 
-function under(child: string, parent: string): boolean {
-  return child === parent || child.startsWith(parent.endsWith("/") ? parent : `${parent}/`);
-}
-
-/** Whether a denied scope and a requested one are the same thing, or one holds the other. */
+/** Whether a denied scope and a requested one are the same thing, or one holds the other (entities.ts `relation`), typed. */
 export function scopeMatches(denied: DenialScope, asked: DenialScope): boolean {
-  if (PATH_KINDS.has(denied.kind) && PATH_KINDS.has(asked.kind)) return under(asked.name, denied.name) || under(denied.name, asked.name);
-  if (denied.kind !== asked.kind) return false;
-  if (CASELESS.has(denied.kind)) return denied.name.toLowerCase() === asked.name.toLowerCase();
-  if (denied.kind === "line") return denied.name.replace(/\s+/g, " ").trim() === asked.name.replace(/\s+/g, " ").trim();
-  return denied.name === asked.name;
+  if (denied.kind === "line" || asked.kind === "line") return denied.kind === asked.kind && denied.name.replace(/\s+/g, " ").trim() === asked.name.replace(/\s+/g, " ").trim();
+  const entity = (scope: DenialScope) => ({ kind: scope.kind as EntityKind, name: scope.name, ...(scope.remote ? { remote: scope.remote } : {}), ...(scope.repo ? { repo: scope.repo } : {}) });
+  const how = relation(entity(denied), entity(asked));
+  if (how === "same" || how === "contains" || how === "contained") return true;
+  // What can't be told apart (a branch with its remote unsaid on one side) is the same name of the same kind.
+  return how === "unknown" && denied.kind === asked.kind && denied.name === asked.name;
 }
 
-/** The scope of `asked` a denial covers when the two are the same class, else undefined. */
-export function classMatch(denied: ActionClass, asked: ActionClass): DenialScope | undefined {
-  if (denied.tool !== asked.tool) return undefined;
-  const sameAction = denied.actions.some((action) => asked.actions.includes(action)) || (denied.concern !== undefined && denied.concern === asked.concern);
-  if (!sameAction) return undefined;
-  return asked.scopes.find((scope) => denied.scopes.some((other) => scopeMatches(other, scope)));
+/** A record's units; one from before round 5 is read from its actions (as effect classes) and scopes. */
+export function unitsOf(record: Pick<DenialRecord, "units" | "actions" | "scopes" | "tool">): readonly DenialUnit[] {
+  if (record.units?.length) return record.units;
+  const effects = [...new Set(record.actions.map((action) => (action === "read" ? "read" : action === "write" ? "change" : action === "network" ? "send" : classOf(action.split(" ").pop() ?? action))))];
+  return [{ effects: effects.length ? effects : ["run"], scopes: record.scopes }];
+}
+
+/** The denied unit and the scope of `asked` a denial covers: the same effect class on the same thing, or one holding the other. */
+export function classMatch(denied: Pick<DenialRecord, "units" | "actions" | "scopes" | "tool">, asked: ActionClass): { unit: DenialUnit; scope: DenialScope } | undefined {
+  for (const unit of unitsOf(denied)) {
+    for (const other of asked.units) {
+      if (!unit.effects.some((effect) => other.effects.includes(effect))) continue;
+      const scope = other.scopes.find((candidate) => unit.scopes.some((scope) => scopeMatches(scope, candidate)));
+      if (scope) return { unit, scope };
+    }
+  }
+  return undefined;
 }
 
 /** The names the owner's words may use for a scope. */
@@ -98,21 +130,42 @@ function namesOf(scope: DenialScope): string[] {
   return [...new Set(names.filter((name) => name.length >= 2))];
 }
 
+const NEGATION = listWords("negate");
+const RETRACTION = listWords("retract");
+
 /**
- * The owner word newer than the denial (not among those seen when they denied it), of a lifting
- * kind, that names the scope: the owner asked for that very action since. Undefined: still denied.
+ * The owner word newer than the denial (not among those seen when they denied it), of a lifting kind,
+ * that asks for the denied effect on the scope: it names the scope, says an action word of the effect
+ * (`CLASS_WORDS`), and is no question, negation or "wait". Undefined: still denied.
  */
-export function liftedBy(denial: DenialRecord, scope: DenialScope, owner: OwnerWords | undefined): string | undefined {
+export function liftedBy(denial: DenialRecord, scope: DenialScope, owner: OwnerWords | undefined, unit?: DenialUnit): string | undefined {
   if (!owner) return undefined;
   const seen = new Set(denial.seen);
-  const names = [...new Set([...namesOf(scope), ...denial.scopes.filter((other) => scopeMatches(other, scope)).flatMap(namesOf)])];
+  const units = unit ? [unit] : unitsOf(denial);
+  const names = [...new Set([...namesOf(scope), ...units.flatMap((item) => item.scopes.filter((other) => scopeMatches(other, scope)).flatMap(namesOf))])];
+  const actions = [...new Set(units.flatMap((item) => item.effects.flatMap((effect) => CLASS_WORDS[effect] ?? [])))];
   for (const word of [...owner.messages].reverse()) {
     if (seen.has(wordHash(word))) continue;
     if (!LIFTING_SOURCES.has(word.source ?? "typed")) continue;
     const text = consentText(word);
-    if (scope.kind === "line" ? text.includes(scope.name) : names.some((name) => mentions(text, name))) return word.text;
+    const named = scope.kind === "line" ? text.includes(scope.name) : names.some((name) => mentions(text, name));
+    if (!named) continue;
+    if (QUESTION.test(text) || NEGATION.test(text) || RETRACTION.test(text)) continue;
+    // A line the owner quotes whole asks for it; anything else must say what it asks for.
+    if (scope.kind !== "line" && !actions.some((action) => actionWords(action).test(text))) continue;
+    return word.text;
   }
   return undefined;
+}
+
+/**
+ * What a Deny of `cls` records: a line that changes, pushes or sends something records that, not the reads
+ * beside it (`git status && npm publish`: the publish); a line that only reads records its reads.
+ */
+export function forRecord(cls: ActionClass): ActionClass {
+  const strong = cls.units.filter((unit) => unit.effects.some((effect) => effect !== "read"));
+  if (!strong.length || strong.length === cls.units.length) return cls;
+  return { ...cls, units: strong, scopes: [...new Set(strong.flatMap((unit) => unit.scopes))] };
 }
 
 export function denialsFile(agentDir: string, chatId: string | undefined): string | undefined {
@@ -131,7 +184,8 @@ function valid(value: unknown): value is DenialRecord {
     record.scopes.every((scope) => scope && typeof scope.kind === "string" && typeof scope.name === "string") &&
     typeof record.at === "string" &&
     typeof record.what === "string" &&
-    Array.isArray(record.seen)
+    Array.isArray(record.seen) &&
+    (record.units === undefined || (Array.isArray(record.units) && record.units.every((unit) => unit && Array.isArray(unit.effects) && Array.isArray(unit.scopes))))
   );
 }
 
@@ -171,11 +225,13 @@ export class Denials {
   /** Record the owner's Deny click on a request of `cls`. */
   record(cls: ActionClass, what: string, owner: OwnerWords | undefined): DenialRecord {
     this.load();
+    const scope = (item: DenialScope): DenialScope => ({ kind: item.kind, name: item.name, ...(item.says?.length ? { says: [...item.says] } : {}), ...(item.remote ? { remote: item.remote } : {}), ...(item.repo ? { repo: item.repo } : {}) });
     const record: DenialRecord = {
       tool: cls.tool,
       actions: [...cls.actions],
       ...(cls.concern ? { concern: cls.concern } : {}),
-      scopes: cls.scopes.map((scope) => ({ kind: scope.kind, name: scope.name, ...(scope.says?.length ? { says: [...scope.says] } : {}) })),
+      scopes: cls.scopes.map(scope),
+      units: cls.units.map((unit) => ({ effects: [...unit.effects], scopes: unit.scopes.map(scope) })),
       at: new Date().toISOString(),
       what: what.length > 300 ? `${what.slice(0, 300)}…` : what,
       seen: (owner?.messages ?? []).slice(-MAX_SEEN).map((word) => wordHash(word)),
@@ -200,19 +256,22 @@ export class Denials {
   }
 
   /**
-   * The newest denial of `asked`'s class that the owner's words since haven't lifted, with the scope
-   * it covers; and the denials of the same action on other targets (evidence for the judge).
+   * The newest denial that does what `asked` does to what it acts on (`classMatch`) and that the owner's
+   * words since haven't lifted, with the scope it covers; and the denials of the same effect on other
+   * targets (evidence for the judge).
    */
   check(asked: ActionClass, owner: OwnerWords | undefined): { active?: { denial: DenialRecord; scope: DenialScope }; similar: DenialRecord[] } {
     this.load();
     const similar: DenialRecord[] = [];
     for (const denial of [...this.records].reverse()) {
-      const scope = classMatch(denial, asked);
-      if (scope) {
-        if (liftedBy(denial, scope, owner) === undefined) return { active: { denial, scope }, similar };
+      const match = classMatch(denial, asked);
+      if (match) {
+        if (liftedBy(denial, match.scope, owner, match.unit) === undefined) return { active: { denial, scope: match.scope }, similar };
         continue;
       }
-      if (denial.tool === asked.tool && denial.actions.some((action) => asked.actions.includes(action))) similar.push(denial);
+      // The same effect on another target (a read or a run only by the same program): evidence.
+      const sameAction = denial.actions.some((action) => asked.actions.includes(action));
+      if (unitsOf(denial).some((unit) => asked.units.some((other) => unit.effects.some((effect) => other.effects.includes(effect) && (sameAction || (effect !== "read" && effect !== "run")))))) similar.push(denial);
     }
     return { similar: similar.slice(0, 3) };
   }

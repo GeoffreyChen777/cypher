@@ -19,35 +19,14 @@
  * (`.env`, a key) is still one.
  */
 
-import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { globToRegExp } from "./glob.ts";
+import { isAbsolute, join, sep } from "node:path";
+import { globBase, globToRegExp } from "./glob.ts";
+import { canonicalize, escapeGlob, existingMatches, expandHome, floating, globsIntersect } from "./resolve.ts";
 import type { Zone } from "./config.ts";
 
-export function expandHome(path: string, home = homedir()): string {
-  if (path === "~") return home;
-  if (path.startsWith("~/")) return join(home, path.slice(2));
-  return path;
-}
-
-/** Follow symlinks through the nearest existing ancestor; keep the missing tail as written. */
-export function canonicalize(path: string, cwd: string, home = homedir()): string {
-  const absolute = resolve(cwd, expandHome(path.startsWith("@") ? path.slice(1) : path, home));
-  const tail: string[] = [];
-  let current = absolute;
-  for (;;) {
-    try {
-      const real = realpathSync.native(current);
-      return tail.length === 0 ? real : join(real, ...tail.reverse());
-    } catch {
-      const parent = dirname(current);
-      if (parent === current) return absolute;
-      tail.push(basename(current));
-      current = parent;
-    }
-  }
-}
+// One resolver for every path (resolve.ts): literal paths here, patterns in `classifyPattern`.
+export { canonicalize, expandHome } from "./resolve.ts";
 
 export function isUnder(path: string, root: string): boolean {
   if (path === root) return true;
@@ -59,6 +38,8 @@ interface CompiledPattern {
   source: string;
   regex: RegExp;
   exception: boolean;
+  /** The expanded glob (absolute, or `**\/…` anchored anywhere), for `classifyPattern`. */
+  glob: string;
 }
 
 export type Guard = "protected" | "self";
@@ -97,7 +78,7 @@ export function compilePatterns(patterns: readonly string[], roots: readonly str
       const source = exception ? expanded.slice(1) : expanded;
       // `**/x` matches anywhere: anchor it on any directory boundary.
       const anchored = source.startsWith("**/") ? `/${source}` : source;
-      return { source: pattern, regex: globToRegExp(anchored), exception };
+      return { source: pattern, regex: globToRegExp(anchored), exception, glob: anchored };
     }),
   );
 }
@@ -112,6 +93,28 @@ export function matchPatterns(path: string, compiled: readonly CompiledPattern[]
     hit ??= pattern.source;
   }
   return hit;
+}
+
+/**
+ * What a glob (resolve.ts `resolvePattern`) could stand for (round 5): the existing paths it matches now,
+ * each classified, and the configured patterns some path it may be could match although none exists now.
+ *
+ * A pattern rooted in a place (`~/.ssh/**`, `<agent>/cypher-permissions/**`) counts when the glob could
+ * be a path inside it; a pattern that names a file anywhere by its name (`**\/.env`, `**\/*.pem`) counts
+ * only through an existing match, as bash expands a glob only to files that are there (`rm build/*` is no
+ * secret because some file *could* be called `id_rsa.log`). The permission system is read more strictly:
+ * any of its patterns the glob could match, and with `subtree` (a deletion, a move, a recursive change)
+ * any of its places inside what the glob names.
+ */
+export interface PatternClassification {
+  matches: Classification[];
+  /** The sensitive pattern it could match. */
+  sensitive?: string;
+  /** The permission-system pattern it could match. */
+  permissionSystem?: string;
+  /** The guard (`self` before `protected`) it could fall under, with the pattern. */
+  guard?: Guard;
+  guardMatch?: string;
 }
 
 export interface PathContextInput {
@@ -171,6 +174,60 @@ export class PathContext {
 
   inScratch(path: string): boolean {
     return this.scratch.some((root) => isUnder(path, root));
+  }
+
+  /**
+   * Whether `glob` could stand for a path `list` covers: it intersects a positive pattern (or, with
+   * `subtree`, holds a place a rooted pattern names), unless an exception holds every path it may be.
+   */
+  private couldMatch(list: readonly CompiledPattern[], glob: string, subtree: boolean, anywhereNames = true): string | undefined {
+    const own = this.ownFolders.find((root) => glob.startsWith(`${root}/`) || glob === root);
+    for (const pattern of list) {
+      if (pattern.exception) continue;
+      // A pattern that names a file anywhere by its name counts when the glob's own name says that name
+      // (`"$D/.pi/permissions.json"`), never because some path it may be could be called so (`/tmp/x-$$`).
+      if (floating(pattern.glob) && (!anywhereNames || /[*?[]/.test(glob.slice(glob.lastIndexOf("/") + 1)))) continue;
+      if (own !== undefined && pattern.regex.test(own)) continue;
+      const hit = globsIntersect(glob, pattern.glob) || (subtree && !floating(pattern.glob) && this.holds(glob, pattern.glob));
+      if (!hit) continue;
+      // An exception that holds the whole glob (`~/.ssh/*.pub` against `!~/.ssh/*.pub`): its regex reads the glob as text.
+      if (list.some((exception) => exception.exception && exception.regex.test(glob))) continue;
+      return pattern.source;
+    }
+    return undefined;
+  }
+
+  /**
+   * Whether what `glob` names holds a place a rooted pattern covers: the pattern's literal directory lies
+   * inside it (`rm -rf ~/.cypher/pi-runtime` holds `<agent>/cypher-permissions`), or a place the pattern
+   * matches now does (`~/.cypher*\/*\/pi-runtime/agent/…` under a profile folder that is there).
+   */
+  private holds(glob: string, pattern: string): boolean {
+    const inside = `${glob.replace(/\/+$/, "")}/**`;
+    const place = pattern.replace(/\/\*\*$/, "");
+    const base = globBase(place);
+    if (globsIntersect(inside, escapeGlob(base)) || globsIntersect(glob, escapeGlob(base))) return true;
+    if (base === place) return false;
+    return existingMatches(place).paths.some((path) => globsIntersect(inside, escapeGlob(path)) || globsIntersect(glob, escapeGlob(path)));
+  }
+
+  /** What a glob could be (`PatternClassification`): a literal path is one too, with `subtree` for what lies below it. */
+  classifyPattern(glob: string, options: { subtree?: boolean; unknownText?: boolean } = {}): PatternClassification {
+    const subtree = options.subtree === true;
+    // What it matches now (bash expands a glob to the files that are there); text known only when it runs
+    // is no glob: it could be anything, so only the patterns tell.
+    const { paths } = options.unknownText ? { paths: [] } : /[*?[\]\\]/.test(glob) ? existingMatches(glob) : { paths: [glob] };
+    const matches = paths.map((path) => this.classify(path));
+    const out: PatternClassification = { matches };
+    const sensitive = matches.find((item) => item.zone === "sensitive")?.match ?? this.couldMatch(this.sensitive, glob, false, false);
+    if (sensitive) out.sensitive = sensitive;
+    const system = matches.map((item) => this.isPermissionSystem(item.path)).find(Boolean) ?? this.couldMatch(this.permissionSystem, glob, subtree);
+    if (system) out.permissionSystem = system;
+    const self = matches.find((item) => item.guard === "self")?.match ?? this.couldMatch(this.self, glob, false, false);
+    const guarded = self ? undefined : (matches.find((item) => item.guard === "protected")?.match ?? this.couldMatch(this.protectedPatterns, glob, false, false));
+    if (self) Object.assign(out, { guard: "self", guardMatch: self });
+    else if (guarded) Object.assign(out, { guard: "protected", guardMatch: guarded });
+    return out;
   }
 
   classify(path: string): Classification {
