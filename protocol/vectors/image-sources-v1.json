@@ -1,0 +1,777 @@
+{
+  "version": 1,
+  "description": "Image sources in chat replies, shared by the desktop (crates/ui/src/markdown/image_source.rs) and iOS. `max_bytes`: the most bytes one image may be (fetched, read through the engine, or decoded from a data URI); larger shows an error placeholder. `formats`: the supported file extensions (matched in any case) and their media types; anything else is not an image and stays a link or a file chip. `cases`: classify `src` (a Markdown image destination, or the path of an image-only paragraph) given the chat's folder `cwd`, the `roots` it may read in lookup order (a session: its checkout; a workspace's own chat: its folder, then each project) and, when known, the host's `home` (absent: `~` stays the head of paths and matches roots written with `~`). `expect.kind`: `local` (`mime` from the extension; `candidates` = where to read it through the engine, in order, each a `root` from `roots` (as normalized) and the `path` relative to it; the first that exists wins: a relative path is tried from `cwd`, then from each root, each resolved try mapped to the innermost root holding it, duplicates dropped); `outside` (`path` = the first resolved absolute path, or the source as written when there is no folder: not readable, shows an error); `remote` (`url` as written; https only, no cookies or credentials; a URL whose last path segment has a non-image extension is `not_image`, one without an extension is fetched and its bytes decide); `data` (`mime`; base64 only); `rejected` (`reason`: `insecure` for plain http, `unsupported` for a non-base64 data URI); `not_image`. Local paths: `file://` (optionally `localhost`) and `cypher-file:` prefixes are stripped, `?query` and `#fragment` dropped, percent-escapes decoded, a trailing `:12`, `:12-20` or `:12:5` line suffix dropped, `.`/`..` folded. `lines`: `line` is a whole reply paragraph's Markdown source; `src` is the image source it shows as a block preview, or null. A paragraph qualifies when, trimmed, it is one token with no whitespace, bare, in backticks or in <…> (bare tokens must not contain * [ ] ( ) < > ` !), that classifies (with no context) as `local` or `outside`, or as `remote` with an image extension.",
+  "max_bytes": 20971520,
+  "formats": {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "svg": "image/svg+xml"
+  },
+  "cases": [
+    {
+      "name": "relative: the chat folder first, then each root",
+      "src": "shots/a.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj",
+        "/w/lib"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/a.png"
+          },
+          {
+            "root": "/w/lib",
+            "path": "shots/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "relative: falls back from a sub-folder cwd to the root",
+      "src": "out/b.jpg",
+      "cwd": "/w/proj/app",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/jpeg",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "app/out/b.jpg"
+          },
+          {
+            "root": "/w/proj",
+            "path": "out/b.jpg"
+          }
+        ]
+      }
+    },
+    {
+      "name": "relative: dot segments fold",
+      "src": "./shots/../a.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "relative: ../ may climb into another root",
+      "src": "../lib/icons/x.svg",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj",
+        "/w/lib"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/svg+xml",
+        "candidates": [
+          {
+            "root": "/w/lib",
+            "path": "icons/x.svg"
+          }
+        ]
+      }
+    },
+    {
+      "name": "relative: climbing out of every root is outside",
+      "src": "../../etc/a.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "outside",
+        "path": "/etc/a.png"
+      }
+    },
+    {
+      "name": "relative: no folder at all is outside, as written",
+      "src": "shots/a.png",
+      "expect": {
+        "kind": "outside",
+        "path": "shots/a.png"
+      }
+    },
+    {
+      "name": "absolute inside a root",
+      "src": "/w/lib/img/c.webp",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj",
+        "/w/lib"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/webp",
+        "candidates": [
+          {
+            "root": "/w/lib",
+            "path": "img/c.webp"
+          }
+        ]
+      }
+    },
+    {
+      "name": "absolute: only the innermost root holding it",
+      "src": "/w/proj/sub/d.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj",
+        "/w/proj/sub"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj/sub",
+            "path": "d.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "absolute outside every root",
+      "src": "/tmp/shot.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj",
+        "/w/lib"
+      ],
+      "expect": {
+        "kind": "outside",
+        "path": "/tmp/shot.png"
+      }
+    },
+    {
+      "name": "tilde expands with the host's home",
+      "src": "~/proj/a.png",
+      "cwd": "/Users/me/proj",
+      "roots": [
+        "/Users/me/proj"
+      ],
+      "home": "/Users/me",
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/Users/me/proj",
+            "path": "a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "tilde without a known home matches roots written with ~",
+      "src": "~/proj/a.png",
+      "cwd": "~/proj",
+      "roots": [
+        "~/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "~/proj",
+            "path": "a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "tilde outside the roots",
+      "src": "~/Desktop/a.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "outside",
+        "path": "~/Desktop/a.png"
+      }
+    },
+    {
+      "name": "file:// URL",
+      "src": "file:///w/proj/shots/a.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "file://localhost URL, percent-encoded",
+      "src": "file://localhost/w/proj/my%20shot.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "my shot.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "cypher-file: mention",
+      "src": "cypher-file:shots/a.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "percent-encoding decodes",
+      "src": "shots/my%20shot.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/my shot.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "spaces as written (<…> destination)",
+      "src": "shots/my shot.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/my shot.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "#L12 fragment dropped",
+      "src": "shots/a.png#L12",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": ":12 line suffix dropped",
+      "src": "shots/a.png:12",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": ":12-20 line range dropped",
+      "src": "shots/a.png:12-20",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "query dropped",
+      "src": "shots/a.png?raw=1",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "extension in any case",
+      "src": "shots/A.PNG",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/A.PNG"
+          }
+        ]
+      }
+    },
+    {
+      "name": "format jpg",
+      "src": "a.jpg",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/jpeg",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "a.jpg"
+          }
+        ]
+      }
+    },
+    {
+      "name": "format jpeg, upper case",
+      "src": "a.JPEG",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/jpeg",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "a.JPEG"
+          }
+        ]
+      }
+    },
+    {
+      "name": "format gif",
+      "src": "a.gif",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/gif",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "a.gif"
+          }
+        ]
+      }
+    },
+    {
+      "name": "format webp",
+      "src": "a.webp",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/webp",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "a.webp"
+          }
+        ]
+      }
+    },
+    {
+      "name": "format svg",
+      "src": "a.svg",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/svg+xml",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "a.svg"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unsupported extension",
+      "src": "shots/a.bmp",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "not an image",
+      "src": "notes.pdf",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "no extension",
+      "src": "Makefile",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "a dot file is not an extension",
+      "src": "shots/.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "plain http rejected",
+      "src": "http://x/a.png",
+      "expect": {
+        "kind": "rejected",
+        "reason": "insecure"
+      }
+    },
+    {
+      "name": "plain http without extension rejected",
+      "src": "http://x/render?id=3",
+      "expect": {
+        "kind": "rejected",
+        "reason": "insecure"
+      }
+    },
+    {
+      "name": "plain http, scheme in any case",
+      "src": "HTTP://x/a.png",
+      "expect": {
+        "kind": "rejected",
+        "reason": "insecure"
+      }
+    },
+    {
+      "name": "plain http to another kind of file is not an image",
+      "src": "http://x/doc.pdf",
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "https",
+      "src": "https://x/a.webp",
+      "expect": {
+        "kind": "remote",
+        "url": "https://x/a.webp"
+      }
+    },
+    {
+      "name": "https kept as written",
+      "src": "HTTPS://x/A.PNG#frag",
+      "expect": {
+        "kind": "remote",
+        "url": "HTTPS://x/A.PNG#frag"
+      }
+    },
+    {
+      "name": "https without extension: its bytes decide",
+      "src": "https://x/render?id=3&s=2",
+      "expect": {
+        "kind": "remote",
+        "url": "https://x/render?id=3&s=2"
+      }
+    },
+    {
+      "name": "https to another kind of file is not an image",
+      "src": "https://x/doc.pdf?dl=1",
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "https with nothing after it",
+      "src": "https://",
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "data URI png",
+      "src": "data:image/png;base64,iVBORw0KGgo=",
+      "expect": {
+        "kind": "data",
+        "mime": "image/png"
+      }
+    },
+    {
+      "name": "data URI svg+xml",
+      "src": "data:image/svg+xml;base64,PHN2Zy8+",
+      "expect": {
+        "kind": "data",
+        "mime": "image/svg+xml"
+      }
+    },
+    {
+      "name": "data URI in any case",
+      "src": "DATA:IMAGE/JPEG;base64,/9j/",
+      "expect": {
+        "kind": "data",
+        "mime": "image/jpeg"
+      }
+    },
+    {
+      "name": "data URI with parameters",
+      "src": "data:image/gif;name=a.gif;base64,R0lGODlh",
+      "expect": {
+        "kind": "data",
+        "mime": "image/gif"
+      }
+    },
+    {
+      "name": "data URI, non-image type",
+      "src": "data:text/plain;base64,aGk=",
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "data URI, unsupported image type",
+      "src": "data:image/bmp;base64,Qk0=",
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "data URI not base64",
+      "src": "data:image/svg+xml,%3Csvg%2F%3E",
+      "expect": {
+        "kind": "rejected",
+        "reason": "unsupported"
+      }
+    },
+    {
+      "name": "other scheme",
+      "src": "mailto:a@b.c",
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "other scheme with an image name",
+      "src": "ftp://x/a.png",
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "empty",
+      "src": "",
+      "expect": {
+        "kind": "not_image"
+      }
+    }
+  ],
+  "lines": [
+    {
+      "name": "a file reference in backticks",
+      "line": "`shots/a.png`",
+      "src": "shots/a.png"
+    },
+    {
+      "name": "a bare relative path",
+      "line": "shots/a.png",
+      "src": "shots/a.png"
+    },
+    {
+      "name": "a bare name",
+      "line": "a.png",
+      "src": "a.png"
+    },
+    {
+      "name": "surrounding spaces are trimmed",
+      "line": "  `shots/a.png`  ",
+      "src": "shots/a.png"
+    },
+    {
+      "name": "an absolute path, extension in any case",
+      "line": "/w/proj/a.PNG",
+      "src": "/w/proj/a.PNG"
+    },
+    {
+      "name": "a home path",
+      "line": "~/Desktop/shot.jpg",
+      "src": "~/Desktop/shot.jpg"
+    },
+    {
+      "name": "a file reference with lines",
+      "line": "`shots/a.png:12`",
+      "src": "shots/a.png:12"
+    },
+    {
+      "name": "a file URL",
+      "line": "file:///w/a.webp",
+      "src": "file:///w/a.webp"
+    },
+    {
+      "name": "an https URL to an image",
+      "line": "https://x/a.gif",
+      "src": "https://x/a.gif"
+    },
+    {
+      "name": "an autolink to an image",
+      "line": "<https://x/a.webp>",
+      "src": "https://x/a.webp"
+    },
+    {
+      "name": "an https URL without an image extension",
+      "line": "https://x/render?id=3",
+      "src": null
+    },
+    {
+      "name": "plain http",
+      "line": "http://x/a.png",
+      "src": null
+    },
+    {
+      "name": "prose around the path",
+      "line": "See shots/a.png",
+      "src": null
+    },
+    {
+      "name": "two references",
+      "line": "`a.png` `b.png`",
+      "src": null
+    },
+    {
+      "name": "another kind of file",
+      "line": "`notes.pdf`",
+      "src": null
+    },
+    {
+      "name": "emphasis",
+      "line": "**a.png**",
+      "src": null
+    },
+    {
+      "name": "a link",
+      "line": "[shot](a.png)",
+      "src": null
+    },
+    {
+      "name": "a Markdown image (parsed as one, not here)",
+      "line": "![shot](a.png)",
+      "src": null
+    },
+    {
+      "name": "a data URI",
+      "line": "data:image/png;base64,iVBORw0KGgo=",
+      "src": null
+    },
+    {
+      "name": "empty",
+      "line": "",
+      "src": null
+    }
+  ]
+}
