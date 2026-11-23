@@ -83,7 +83,9 @@ pub fn ref_of_link(url: &str) -> Option<GitRef> {
 /// what is before a `#` (`C**#**1` is no ref) and a ref split across them
 /// still matches; the pieces keep their own styles. An inline code span
 /// is one reference or nothing, and keeps its code look.
-pub fn linkify(runs: &[InlineRun]) -> Option<Vec<InlineRun>> {
+///
+/// A reference `hides` says a lookup found to name nothing stays text.
+pub fn linkify(runs: &[InlineRun], hides: &dyn Fn(&GitRef) -> bool) -> Option<Vec<InlineRun>> {
     let is_prose =
         |run: &InlineRun| !run.style.code && run.style.link.is_none() && run.style.math.is_none();
     let mut out: Vec<InlineRun> = Vec::with_capacity(runs.len());
@@ -92,7 +94,10 @@ pub fn linkify(runs: &[InlineRun]) -> Option<Vec<InlineRun>> {
     while ix < runs.len() {
         let run = &runs[ix];
         if run.style.code && run.style.link.is_none() && run.style.math.is_none() {
-            match find_git_refs(&run.text, true).first() {
+            match find_git_refs(&run.text, true)
+                .first()
+                .filter(|found| !hides(&found.git_ref))
+            {
                 Some(found) => {
                     found_any = true;
                     let mut linked = run.clone();
@@ -115,7 +120,8 @@ pub fn linkify(runs: &[InlineRun]) -> Option<Vec<InlineRun>> {
             .map_or(runs.len(), |len| ix + len);
         let group = &runs[ix..end];
         let text: String = group.iter().map(|run| run.text.as_str()).collect();
-        let found = find_git_refs(&text, false);
+        let mut found = find_git_refs(&text, false);
+        found.retain(|found| !hides(&found.git_ref));
         if found.is_empty() {
             out.extend(group.iter().cloned());
         } else {
@@ -184,6 +190,55 @@ pub type GitRefClickHandler = Rc<dyn Fn(GitRefHover, &mut Window, &mut gpui::App
 pub struct GitRefUi {
     pub on_hover: GitRefHoverHandler,
     pub on_click: GitRefClickHandler,
+    /// References found to name nothing: they read as plain text.
+    pub unresolved: Rc<RefCell<Unresolved>>,
+}
+
+/// References a lookup found to name nothing (`notFound`), per chat: they
+/// read as plain text from then on. A lookup that couldn't run
+/// (`unavailable`) hides nothing: the next one may.
+#[derive(Debug, Default)]
+pub struct Unresolved {
+    chat: String,
+    refs: std::collections::HashSet<(String, GitRef)>,
+    revision: u64,
+}
+
+impl Unresolved {
+    /// The most references kept; past it the set starts over.
+    pub const BUDGET: usize = 512;
+
+    /// The chat whose rows render next.
+    pub fn set_chat(&mut self, chat: &str) {
+        if self.chat != chat {
+            self.chat = chat.to_owned();
+            self.revision += 1;
+        }
+    }
+
+    /// `git_ref` names nothing in `chat`: `true` when that is news.
+    pub fn insert(&mut self, chat: &str, git_ref: GitRef) -> bool {
+        let key = (chat.to_owned(), git_ref);
+        if self.refs.contains(&key) {
+            return false;
+        }
+        if self.refs.len() >= Self::BUDGET {
+            self.refs.clear();
+        }
+        self.refs.insert(key);
+        self.revision += 1;
+        true
+    }
+
+    /// Whether `git_ref` reads as plain text in the current chat.
+    pub fn hides(&self, git_ref: &GitRef) -> bool {
+        self.refs.contains(&(self.chat.clone(), git_ref.clone()))
+    }
+
+    /// Changes whenever what [`Self::hides`] says may have.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
 }
 
 /// A text element's references: the link ranges that are one.
@@ -275,7 +330,8 @@ pub fn hover_overlay(
                 }
                 match over {
                     Some(ix) => {
-                        HOVERED.with(|hovered| *hovered.borrow_mut() = Some((scope, key.clone(), ix)));
+                        HOVERED
+                            .with(|hovered| *hovered.borrow_mut() = Some((scope, key.clone(), ix)));
                         let hover = hover_for(&key, &row_key, ix, &spans[ix], &layout);
                         (ui.on_hover)(Some(hover), window, cx);
                     }
@@ -311,7 +367,7 @@ mod tests {
             crate::markdown::parser::Block::Paragraph { runs } => runs.clone(),
             other => panic!("not a paragraph: {other:?}"),
         };
-        linkify(&runs)
+        linkify(&runs, &|_| false)
             .unwrap_or(runs)
             .into_iter()
             .map(|run| (run.text, run.style.link))
@@ -324,7 +380,7 @@ mod tests {
             crate::markdown::parser::Block::Paragraph { runs } => runs.clone(),
             _ => return Vec::new(),
         };
-        let runs = linkify(&runs).unwrap_or(runs);
+        let runs = linkify(&runs, &|_| false).unwrap_or(runs);
         let mut out: Vec<(String, GitRef)> = Vec::new();
         for run in runs {
             let Some(git_ref) = run.style.link.as_deref().and_then(ref_of_link) else {
@@ -358,14 +414,19 @@ mod tests {
             links("Fixed in #12 and cypher-ai/cypher#7, see a1b2c3d."),
             vec![
                 ("#12".into(), issue(None, 12)),
-                ("cypher-ai/cypher#7".into(), issue(Some("cypher-ai/cypher"), 7)),
+                (
+                    "cypher-ai/cypher#7".into(),
+                    issue(Some("cypher-ai/cypher"), 7)
+                ),
                 ("a1b2c3d".into(), commit("a1b2c3d")),
             ]
         );
         // The prose around them is untouched.
         let runs = linked("Fixed in #12.");
         assert_eq!(
-            runs.iter().map(|(text, _)| text.as_str()).collect::<String>(),
+            runs.iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<String>(),
             "Fixed in #12."
         );
         assert_eq!(runs[0].1, None);
@@ -374,7 +435,10 @@ mod tests {
 
     #[test]
     fn inline_code_is_one_ref_or_nothing() {
-        assert_eq!(links("Commit `deadbeef` landed"), vec![("deadbeef".into(), commit("deadbeef"))]);
+        assert_eq!(
+            links("Commit `deadbeef` landed"),
+            vec![("deadbeef".into(), commit("deadbeef"))]
+        );
         assert_eq!(links("Run `git show a1b2c3d` now"), vec![]);
         assert_eq!(links("See `#42`."), vec![("#42".into(), issue(None, 42))]);
         // The code span keeps its code look.
@@ -382,15 +446,21 @@ mod tests {
         let crate::markdown::parser::Block::Paragraph { runs } = &tree.blocks[0].block else {
             panic!()
         };
-        let runs = linkify(runs).unwrap();
-        assert!(runs.iter().any(|run| run.style.code && run.style.link.is_some()));
+        let runs = linkify(runs, &|_| false).unwrap();
+        assert!(
+            runs.iter()
+                .any(|run| run.style.code && run.style.link.is_some())
+        );
     }
 
     #[test]
     fn cjk_neighbours_still_match() {
         assert_eq!(
             links("已在#12修复，提交a1b2c3d。"),
-            vec![("#12".into(), issue(None, 12))]
+            vec![
+                ("#12".into(), issue(None, 12)),
+                ("a1b2c3d".into(), commit("a1b2c3d"))
+            ]
         );
         assert_eq!(
             links("提交 a1b2c3d 已合并"),
@@ -405,17 +475,40 @@ mod tests {
         let crate::markdown::parser::Block::Paragraph { runs } = &tree.blocks[0].block else {
             panic!()
         };
-        let runs = linkify(runs).unwrap();
+        let runs = linkify(runs, &|_| false).unwrap();
         let piece = runs.iter().find(|run| run.text == "#12").unwrap();
         assert!(piece.style.bold && piece.style.link.is_some());
         // What precedes a `#` across a style boundary still counts: `C#1`.
-        assert_eq!(links("C**#1**"), vec![]);
+        // (`C**#1**` is no emphasis at all: its `**` can't open after `C`.)
+        assert_eq!(links("**C**#1"), vec![]);
     }
 
     #[test]
     fn non_refs_stay_text() {
-        assert_eq!(links("C# and F#7 and &#123; and 1234567 and deadbeef"), vec![]);
-        assert!(linkify(&[plain("nothing to see")]).is_none());
+        assert_eq!(
+            links("C# and F#7 and &#123; and 1234567 and deadbeef"),
+            vec![]
+        );
+        assert!(linkify(&[plain("nothing to see")], &|_| false).is_none());
+    }
+
+    #[test]
+    fn refs_that_name_nothing_stay_text() {
+        let tree = parse("See #12 and #13, and `#12`");
+        let crate::markdown::parser::Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!()
+        };
+        let twelve = issue(None, 12);
+        let runs = linkify(runs, &|git_ref| *git_ref == twelve).unwrap();
+        let linked: Vec<GitRef> = runs
+            .iter()
+            .filter_map(|run| run.style.link.as_deref().and_then(ref_of_link))
+            .collect();
+        assert_eq!(linked, vec![issue(None, 13)]);
+        let text: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(text, "See #12 and #13, and #12");
+        // Nothing left to link: the runs render as they are.
+        assert!(linkify(&[plain("see #12")], &|_| true).is_none());
     }
 
     #[test]

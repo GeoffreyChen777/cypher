@@ -233,8 +233,9 @@ pub struct RenderCache {
     /// The [`crate::kit::theme::theme_generation`] these entries were shaped under.
     generation: u32,
     style_revision: u64,
-    /// Whether the entries were flattened with git references linked.
-    git_refs: bool,
+    /// Whether the entries were flattened with git references linked, and
+    /// under which [`super::git_ref::Unresolved::revision`].
+    git_refs: Option<u64>,
 }
 
 /// Cached code text/runs (validity: code length + highlight identity).
@@ -1396,11 +1397,15 @@ fn flatten_cached(
     math_env: Option<&MathEnv>,
 ) -> Rc<FlatText> {
     let chips = opts.code_refs.is_some();
-    let git_refs = opts.git_refs.is_some();
+    let git_refs = opts
+        .git_refs
+        .as_ref()
+        .map(|ui| ui.unresolved.borrow().revision());
     let build = || {
-        let linked = git_refs
-            .then(|| super::git_ref::linkify(runs))
-            .flatten();
+        let linked = opts.git_refs.as_ref().and_then(|ui| {
+            let unresolved = ui.unresolved.borrow();
+            super::git_ref::linkify(runs, &|git_ref| unresolved.hides(git_ref))
+        });
         Rc::new(flatten_runs_math(
             linked.as_deref().unwrap_or(runs),
             theme,

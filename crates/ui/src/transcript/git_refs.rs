@@ -148,6 +148,8 @@ pub(crate) struct GitRefCards {
     /// A click before its lookup answered: act on it then.
     click_when_resolved: Option<CardKey>,
     ui: Option<GitRefUi>,
+    /// References found to name nothing, shared with the rows' wiring.
+    unresolved: Rc<std::cell::RefCell<git_ref::Unresolved>>,
     pub(crate) resolver: Option<Resolver>,
     pub(crate) url_opener: Option<UrlOpener>,
     pub(crate) commit_opener: Option<CommitOpener>,
@@ -228,6 +230,12 @@ pub(super) fn card_model(resolution: &GitRefResolution, now: i64) -> Option<Card
                     pull.author, pull.head_branch, pull.base_branch
                 )),
                 pull.checks.as_ref().and_then(checks_text),
+                match (pull.changed_files, pull.additions, pull.deletions) {
+                    (Some(files), Some(additions), Some(deletions)) => {
+                        Some(diff_stat(files, additions, deletions))
+                    }
+                    _ => None,
+                },
             ]
             .into_iter()
             .flatten()
@@ -279,6 +287,12 @@ pub(super) fn history_commit(commit: &GitCommitPreview) -> GitHistoryCommit {
     }
 }
 
+/// The lookup found nothing by that name: the reference reads as plain
+/// text from then on. One that couldn't run (`unavailable`) may next time.
+pub(super) fn names_nothing(resolution: &GitRefResolution) -> bool {
+    matches!(resolution, GitRefResolution::NotFound { .. })
+}
+
 fn unix_now() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -327,7 +341,11 @@ impl Transcript {
     /// The reference wiring for the selected chat's rows: `None` without a
     /// git checkout (nothing is detected then).
     pub(super) fn git_ref_ui(&mut self, cx: &mut Context<Self>) -> Option<GitRefUi> {
-        ref_context(self.state.read(cx))?;
+        let context = ref_context(self.state.read(cx))?;
+        self.git_refs
+            .unresolved
+            .borrow_mut()
+            .set_chat(&context.chat_id);
         if let Some(ui) = &self.git_refs.ui {
             return Some(ui.clone());
         }
@@ -343,6 +361,7 @@ impl Transcript {
                     .update(cx, |this, cx| this.git_ref_clicked(link, window, cx))
                     .ok();
             }),
+            unresolved: self.git_refs.unresolved.clone(),
         };
         self.git_refs.ui = Some(ui.clone());
         Some(ui)
@@ -461,6 +480,12 @@ impl Transcript {
             let resolution = answer.await;
             this.update(cx, |this, cx| {
                 this.git_refs.tasks.remove(&task_key);
+                if names_nothing(&resolution) {
+                    this.git_refs
+                        .unresolved
+                        .borrow_mut()
+                        .insert(&task_key.context.chat_id, task_key.git_ref.clone());
+                }
                 this.git_refs
                     .cache
                     .settle(task_key.clone(), resolution, Instant::now());
@@ -494,7 +519,12 @@ impl Transcript {
 
     /// A click's destination, once its lookup answered: a commit in this
     /// checkout opens in the Git view, anything else its web page.
-    fn act_on_git_ref(&mut self, key: &CardKey, window: Option<&mut Window>, cx: &mut Context<Self>) {
+    fn act_on_git_ref(
+        &mut self,
+        key: &CardKey,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(Lookup::Done(resolution)) = self.git_refs.cache.get(key, Instant::now()).cloned()
         else {
             return;
@@ -553,7 +583,11 @@ impl Transcript {
     }
 
     /// The card, on the floating layer under (or over) its reference.
-    pub(super) fn git_ref_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn git_ref_card(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let (hover, _) = self.git_refs.target.clone()?;
         let model = self.git_ref_card_model();
         if model.is_none() && !self.git_ref_card_loading() {
@@ -584,9 +618,15 @@ impl Transcript {
         let anchor = hover.anchor;
         let below = f32::from(viewport.height - anchor.bottom());
         let (position, corner) = if below >= 120.0 || below >= f32::from(anchor.top()) {
-            (point(anchor.left(), anchor.bottom() + px(4.0)), gpui::Anchor::TopLeft)
+            (
+                point(anchor.left(), anchor.bottom() + px(4.0)),
+                gpui::Anchor::TopLeft,
+            )
         } else {
-            (point(anchor.left(), anchor.top() - px(4.0)), gpui::Anchor::BottomLeft)
+            (
+                point(anchor.left(), anchor.top() - px(4.0)),
+                gpui::Anchor::BottomLeft,
+            )
         };
         Some(
             gpui::deferred(
