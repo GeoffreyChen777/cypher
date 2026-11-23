@@ -484,6 +484,68 @@ function copyDanger(command: RiskCommand, view: CommandView, facts: RiskFacts): 
   return undefined;
 }
 
+/**
+ * Transfer tools (data): how each one names a destination off this machine. Copying files there is
+ * "send-data" (grades.ts): consent-gated, whatever the files are; the floor (`exfiltrates`) still decides secrets.
+ * - `dest`: the last operand is the destination, off this machine when it matches.
+ * - `options`: options whose value is a file sent (`curl -T f`, `-F x=@f`, `--data @f`).
+ */
+interface Transfer {
+  programs: readonly string[];
+  /** Subcommand words before the operands (`s3 cp`, `copy`). */
+  sub?: readonly (readonly string[])[];
+  dest?: (word: string) => string | undefined;
+  options?: RegExp;
+  /** An option's value is a file only when it starts with `@` (`--data @f`); else any value is. */
+  at?: RegExp;
+}
+
+const SCHEME_DEST = (schemes: string) => (word: string) => new RegExp(`^(?:${schemes})://([^/]+)`, "i").exec(word)?.[1];
+export const TRANSFERS: readonly Transfer[] = [
+  { programs: ["scp", "rsync", "sftp"], dest: (word) => remoteOperand(word)?.host },
+  { programs: ["curl"], options: /^(-T|--upload-file|-F|--form|--form-string|-d|--data|--data-binary|--data-urlencode|--json)$/, at: /^(-d|--data|--data-binary|--data-urlencode|--json)$/ },
+  { programs: ["rclone"], sub: [["copy"], ["copyto"], ["sync"], ["move"], ["moveto"], ["bisync"]], dest: (word) => /^([A-Za-z0-9_.-]+):/.exec(word)?.[1] },
+  { programs: ["aws"], sub: [["s3", "cp"], ["s3", "sync"], ["s3", "mv"]], dest: SCHEME_DEST("s3") },
+  { programs: ["gsutil"], sub: [["cp"], ["rsync"], ["mv"], ["-m", "cp"], ["-m", "rsync"]], dest: SCHEME_DEST("gs") },
+  { programs: ["gcloud"], sub: [["storage", "cp"], ["storage", "rsync"], ["storage", "mv"]], dest: SCHEME_DEST("gs") },
+  { programs: ["azcopy"], sub: [["copy"], ["sync"]], dest: SCHEME_DEST("https") },
+  { programs: ["mc"], sub: [["cp"], ["mirror"], ["mv"]], dest: (word) => /^([A-Za-z0-9_.-]+)\/./.exec(word)?.[1] },
+];
+
+/** Copying or uploading files to another machine, by the TRANSFERS table: "sends files to <where>". */
+export function uploadDanger(view: CommandView): string | undefined {
+  for (const row of TRANSFERS) {
+    if (!row.programs.includes(view.program)) continue;
+    let args = view.args;
+    if (row.sub) {
+      const sub = row.sub.find((words) => words.every((word, i) => args[i] === word));
+      if (!sub) continue;
+      args = args.slice(sub.length);
+    }
+    if (row.options) {
+      for (let i = 0; i < args.length; i++) {
+        const word = args[i];
+        const [name, inline] = word.startsWith("--") && word.includes("=") ? [word.slice(0, word.indexOf("=")), word.slice(word.indexOf("=") + 1)] : [word, undefined];
+        if (!row.options.test(name)) continue;
+        const value = inline ?? args[i + 1];
+        if (value === undefined) continue;
+        const sendsFile = row.at?.test(name) ? value.startsWith("@") || value === UNKNOWN : name.startsWith("-F") || name.startsWith("--form") ? /=[<@]/.test(value) || value === UNKNOWN : true;
+        if (sendsFile) return `sends files off this machine (${view.program} ${name} ${value})`;
+      }
+    }
+    if (row.dest) {
+      const operands = args.filter((word) => !word.startsWith("-"));
+      const last = operands.at(-1);
+      if (operands.length < 2 || last === undefined) continue;
+      if (last === UNKNOWN) return `sends files to a place known only when it runs (${view.program})`;
+      const where = row.dest(last);
+      // The sources must be this machine's: between two other places is copyDanger's.
+      if (where !== undefined && !operands.slice(0, -1).some((word) => row.dest!(word) !== undefined)) return `sends files to ${where}, another machine`;
+    }
+  }
+  return undefined;
+}
+
 function writeDanger(classification: Classification, facts?: RiskFacts): string | undefined {
   // What this task made is its own to change, even where a file there runs
   // code later (its dev instance's Runtime); the installed app and the
@@ -691,6 +753,9 @@ function gitPushDanger(command: RiskCommand, view: CommandView, facts: RiskFacts
     if (!branch || !git) return "pushes to a branch it cannot tell";
     if (!refspec.includes(":") && !git.isBranch(branch) && name !== "HEAD") return `pushes ${branch}, which is no local branch (a tag publishes a release)`;
     if (isDefault(branch, git, facts)) return `publishes to ${branch}`;
+    // `src:dest` writes the remote's `dest`: what is checked is the DESTINATION ref, which must be this task's own branch
+    // (a source of its own says nothing about whose branch it lands on).
+    if (refspec.includes(":") && !ownBranch(branch, git, facts)) return `pushes into ${branch}, a branch this task didn't make`;
   }
   return undefined;
 }
@@ -1192,6 +1257,7 @@ function assessWords(command: RiskCommand, facts: RiskFacts): Assessment {
   const danger =
     destroyDanger(command, view, facts) ??
     copyDanger(command, view, facts) ??
+    uploadDanger(view) ??
     protectedTarget(view, facts) ??
     (view.program === "git"
       ? (gitOptionDanger(view, command.hints) ?? gitConfigDanger(view) ?? (team ? undefined : gitPushDanger(command, view, facts)) ?? gitDiscardDanger(command, view, facts) ?? gitHistoryDanger(view))

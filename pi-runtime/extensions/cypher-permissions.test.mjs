@@ -1943,15 +1943,18 @@ test("variables the line set to a literal are known where they surely hold", () 
   assert.deepEqual(words("L=if; $L"), [["if"]], "a value is never a keyword");
 });
 
-test("scp and rsync to one machine are local work like ssh, kept per host", async () => {
+test("ssh to one machine is local work, kept per host; copying files to it is send-data (grades.ts), a danger", async () => {
   const { permissions } = engine();
-  const line = `L=/mnt/data/mint; scp -q $L/gamma_net.sh hw-5090:/tmp/gn.sh && ssh -o ConnectTimeout=20 hw-5090 'scp -q /tmp/gn.sh gamma:~/bin/g.sh && ssh -o BatchMode=yes gamma "chmod +x ~/bin/g.sh; echo ok"'`;
+  const upload = `L=/mnt/data/mint; scp -q $L/gamma_net.sh hw-5090:/tmp/gn.sh`;
+  assert.equal(permissions.assess(upload, workspace).tier, "danger");
+  assert.match(permissions.assess(upload, workspace).kind, /sends files to hw-5090/);
+  const line = `ssh -o ConnectTimeout=20 hw-5090 'ssh -o BatchMode=yes gamma "chmod +x ~/bin/g.sh; echo ok"'`;
   assert.equal(permissions.assess(line, workspace).tier, "local");
   const asked = ctx({ choice: "Always in app" });
   await permissions.requestEscalation(line, { label: "Install the benchmark" }, asked);
-  assert.deepEqual([...asked.asked[0].title.matchAll(/^Pattern: (.*)$/gm)].map((match) => match[1]), ["scp … hw-5090:*", "ssh hw-5090 …"]);
+  assert.deepEqual([...asked.asked[0].title.matchAll(/^Pattern: (.*)$/gm)].map((match) => match[1]), ["ssh hw-5090 …"]);
   const kind = (command) => permissions.checkCommand(command, workspace).kind;
-  assert.equal(kind("scp -q /mnt/data/other.sh hw-5090:/tmp/x.sh"), "outside", "another upload to the same host");
+  assert.notEqual(kind("scp -q /mnt/data/other.sh hw-5090:/tmp/x.sh"), "outside", "an upload is no ssh");
   assert.equal(kind("ssh -o BatchMode=yes -o ConnectTimeout=5 hw-5090 nvidia-smi"), "outside", "options that change nothing here");
   assert.equal(kind("ssh -o ProxyCommand=/p hw-5090 nvidia-smi"), "sandbox");
   assert.equal(kind("scp -q x other-host:/tmp/"), "sandbox", "another host");
@@ -1981,7 +1984,7 @@ test("scp and rsync stay dangerous between machines, over local secrets and star
     assert.match(assessment.kind, kind, line);
   }
   assert.equal(permissions.assess("scp hw-5090:/data/r.csv ~/Downloads/", workspace).tier, "local");
-  assert.equal(permissions.assess("rsync -av -e 'ssh -p 2222' ./out/ hw-5090:/data/", workspace).tier, "local");
+  assert.equal(permissions.assess("rsync -av -e 'ssh -p 2222' ./out/ hw-5090:/data/", workspace).tier, "danger", "an upload sends data");
 });
 
 // --- Fewer questions about checking the work (2026-11-18) -------------------------------
