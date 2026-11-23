@@ -34,6 +34,8 @@ const CORPORA: &[&str] = &[
     "TeX delimiters \\(x_1\\) and\n\\[\n\\sum_k k\n\\]\nthen prose, prices $5 and $10\n",
     "Here it is:\n\n```html artifact title=\"Bubble sort\"\n<!doctype html>\n<p>hi</p>\n```\n\nafter\n",
     "- item\n\n  ````svg artifact\n  <svg/>\n  ````\n",
+    "See ![the chart](out/chart.png) above.\n\n![](https://x.dev/a.webp)\n\n`shots/a.png`\n\n3\n",
+    "- shot: ![a](a.png)\n- b\n\n![x](notes.pdf) stays a link\n",
 ];
 
 #[test]
@@ -760,4 +762,115 @@ fn a_streamed_artifact_closes_when_its_fence_does() {
         parser.tree().blocks.last().map(|top| &top.block),
         Some(Block::Artifact { closed: true, .. })
     ));
+}
+
+fn image(src: &str, alt: &str) -> Block {
+    Block::Image {
+        src: src.into(),
+        alt: alt.into(),
+    }
+}
+
+
+#[test]
+fn an_image_alone_is_a_block() {
+    assert_eq!(
+        blocks("![The chart](out/chart.png)\n"),
+        vec![image("out/chart.png", "The chart")]
+    );
+    assert_eq!(
+        blocks("![a](a.png) ![b](https://x.dev/b.gif)\n"),
+        vec![image("a.png", "a"), image("https://x.dev/b.gif", "b")]
+    );
+    assert_eq!(
+        blocks("![](data:image/png;base64,iVBO)\n"),
+        vec![image("data:image/png;base64,iVBO", "")]
+    );
+}
+
+#[test]
+fn an_image_in_a_sentence_follows_its_paragraph() {
+    let parsed = blocks("See ![the chart](out/chart.png) above.\n\nNext.\n");
+    assert_eq!(parsed.len(), 3);
+    let Block::Paragraph { runs } = &parsed[0] else {
+        panic!("{parsed:?}");
+    };
+    assert_eq!(
+        super::super::render::runs_text(runs),
+        "See the chart above."
+    );
+    assert!(runs.iter().all(|run| run.style.link.is_none()));
+    assert_eq!(parsed[1], image("out/chart.png", "the chart"));
+    // Both carry the paragraph's range: one source block.
+    let tree = parse_full("See ![the chart](out/chart.png) above.\n");
+    assert_eq!(tree.blocks[0].range, tree.blocks[1].range);
+}
+
+#[test]
+fn images_in_lists_quotes_and_headings_stay_with_them() {
+    let parsed = blocks("- shot: ![a](a.png)\n- b\n");
+    let Block::List { items, .. } = &parsed[0] else {
+        panic!("{parsed:?}");
+    };
+    assert!(matches!(items[0][0], Block::Paragraph { .. }));
+    assert_eq!(items[0][1], image("a.png", "a"));
+    let parsed = blocks("> ![q](q.jpg)\n");
+    assert_eq!(
+        parsed,
+        vec![Block::BlockQuote {
+            children: vec![image("q.jpg", "q")]
+        }]
+    );
+    let parsed = blocks("## Result ![r](r.svg)\n");
+    assert!(matches!(parsed[0], Block::Heading { .. }));
+    assert_eq!(parsed[1], image("r.svg", "r"));
+}
+
+#[test]
+fn a_non_image_destination_stays_a_link() {
+    let parsed = blocks("![notes](notes.pdf)\n");
+    let Block::Paragraph { runs } = &parsed[0] else {
+        panic!("{parsed:?}");
+    };
+    assert_eq!(runs[0].style.link.as_deref(), Some("notes.pdf"));
+    assert_eq!(parsed.len(), 1);
+}
+
+#[test]
+fn a_paragraph_that_is_only_an_image_path_is_an_image() {
+    assert_eq!(
+        blocks("`shots/a.png`\n"),
+        vec![image("shots/a.png", "shots/a.png")]
+    );
+    assert_eq!(
+        blocks("shots/A.PNG\n"),
+        vec![image("shots/A.PNG", "shots/A.PNG")]
+    );
+    assert_eq!(
+        blocks("https://x.dev/a.webp\n"),
+        vec![image("https://x.dev/a.webp", "https://x.dev/a.webp")]
+    );
+    for prose in [
+        "See `shots/a.png`\n",
+        "`notes.pdf`\n",
+        "http://x.dev/a.png\n",
+        "`a.png` `b.png`\n",
+    ] {
+        assert!(
+            matches!(blocks(prose).as_slice(), [Block::Paragraph { .. }]),
+            "{prose}"
+        );
+    }
+}
+
+#[test]
+fn streaming_a_paragraph_with_an_image_keeps_the_block_before_it() {
+    let text = "1. one\n\n![a](a.png)\n\n2. two\n";
+    for chunk in [1, 3, 7] {
+        assert_eq!(
+            stream(chunk, text).tree().blocks,
+            parse_full(text).blocks,
+            "{chunk}"
+        );
+    }
 }

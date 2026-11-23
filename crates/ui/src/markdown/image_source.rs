@@ -130,10 +130,17 @@ pub enum Source {
         format: Format,
     },
     /// A file outside every root the chat may read (absolute, normalized).
-    Outside { path: String },
-    Remote { url: String },
+    Outside {
+        path: String,
+    },
+    Remote {
+        url: String,
+    },
     /// A `data:` URI; `payload` is its base64.
-    Data { format: Format, payload: String },
+    Data {
+        format: Format,
+        payload: String,
+    },
     Rejected(Rejection),
     /// Not an image: it stays a link or a file chip.
     NotImage,
@@ -218,9 +225,9 @@ pub fn image_line(line: &str) -> Option<String> {
     let named = match classify(inner, &Context::default()) {
         Source::Local { .. } | Source::Outside { .. } => true,
         // A bare URL is an image only when its path says so.
-        Source::Remote { url } => remote_extension(&url).is_some_and(|ext| {
-            Format::for_extension(ext).is_some()
-        }),
+        Source::Remote { url } => {
+            remote_extension(&url).is_some_and(|ext| Format::for_extension(ext).is_some())
+        }
         Source::Data { .. } | Source::Rejected(_) | Source::NotImage => false,
     };
     named.then(|| inner.to_owned())
