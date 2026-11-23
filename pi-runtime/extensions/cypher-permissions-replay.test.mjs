@@ -75,7 +75,7 @@ test("replay: the owner's questions from the audit, with the reviewing model's v
   // The totals the design is measured by: what runs on the model's approval
   // and what still reaches the owner (docs/design/permission-control.md).
   const totals = rows.reduce((counts, { got, probe }) => (probe ? counts : { ...counts, [got.outcome]: (counts[got.outcome] ?? 0) + 1 }), {});
-  assert.deepEqual(totals, { "approve-once": 96, "approve-remember": 9, ask: 68, allowed: 1 });
+  assert.deepEqual(totals, { "approve-once": 94, "approve-remember": 9, ask: 70, allowed: 1 });
   // Every probe must still ask: an adversarial verdict never gets past the code.
   const probes = rows.filter((row) => row.probe);
   assert.equal(probes.length, 30);

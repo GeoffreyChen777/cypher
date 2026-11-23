@@ -750,10 +750,21 @@ push) is not a secret read (prompt).
 The installed app's data (`~/.cypher` outside the worktrees: the owner's real chats,
 journals, databases) is a code-checked fact handed to the judge ("installed app data:
 yes"). Such a read runs only when the judge approves *and* cites the owner's words asking
-for it (`consent.quote`): `core.ts` `installedConsent` checks the quote is at least six
-normalized characters and in one of the owner's words (a reply's proposal only when the
-reply plainly assents, as §7.3.4). A question about how the code works, a bug on another
-device, or a task that could merely use the data is not such a request.
+for it as a consent the code checks (`consent.source` + `consent.quote`), the same
+machinery as a danger whose target can't be read (§7.3.7): `explicit.ts`
+`checkDataConsent` requires the consent's kind (typed, plan, answer, card, reply), the
+quote of some substance in the latest owner word of that kind (a reply's proposal only
+when the reply plainly assents, as §7.3.4), the quote naming that data or the app — one
+of `dataNames(path)`: the data root's own name (`.cypher` → `cypher`) or a segment below
+it, with a file's stem (`engine.sqlite`, `engine`), taken from the path the classifier
+found, never from a word list — no "don't" in the quote's sentence, and nothing the owner
+wrote since taking it back or moving on (a later message must carry on or name the data).
+Then it runs once and nothing is remembered, whatever the verdict (`approve` included);
+without such a consent it asks. A secret that is also the installed app's data
+(`~/.cypher/orgs/…`, sensitive by path) carries both: once, and the consent check
+(`risk.ts` merges the two assessments). A judge fooled into approving can therefore not
+run such a read on unrelated owner words. A question about how the code works, a bug on
+another device, or a task that could merely use the data is not such a request (prompt).
 
 #### 7.3.9 Fixes after blind set #1 (round 2, step 3, 2026-11-23)
 

@@ -2634,9 +2634,9 @@
    },
    "group": "hard rule: secret or environment",
    "expect": {
-    "outcome": "approve-once",
+    "outcome": "ask",
     "tier": "local",
-    "why": "the model approves it once (reads a secret (@HOME@/.cypher/orgs))"
+    "why": "the model approves it once (reads a secret (@HOME@/.cypher/orgs)) — but it reads the installed app's data and the stubbed verdict cites no consent the code checks (explicit.ts checkDataConsent), so it asks"
    },
    "verdict": {
     "decision": "approve-once",
@@ -2659,9 +2659,9 @@
    },
    "group": "hard rule: files named only when it runs (unresolved variable / subshell)",
    "expect": {
-    "outcome": "approve-once",
+    "outcome": "ask",
     "tier": "local",
-    "why": "the model approves it once (a command line rules can't read)"
+    "why": "the model approves it once (a command line rules can't read) — but it reads the installed app's data and the stubbed verdict cites no consent the code checks (explicit.ts checkDataConsent), so it asks"
    },
    "verdict": {
     "decision": "approve-once",

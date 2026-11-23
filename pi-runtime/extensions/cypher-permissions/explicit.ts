@@ -1398,6 +1398,75 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
   return result(["quote", "target", "current"], undefined, { ...source, ...(followUps.length ? { followUps } : {}) });
 }
 
+/**
+ * The names a consent to read the installed app's data may say for `path`: the data root's own name
+ * (`.cypher` → "cypher", the app) and every segment below it, with a file's stem (`engine.sqlite`,
+ * `engine`). Taken from the path, never from a word list; a glob segment names nothing.
+ */
+export function dataNames(paths: readonly string[]): string[] {
+  const names = new Set<string>();
+  for (const path of paths) {
+    const segments = path.split("/").filter(Boolean);
+    const root = segments.findIndex((segment) => /^\.cypher/.test(segment));
+    if (root < 0) continue;
+    for (const segment of segments.slice(root)) {
+      if (/[*?[\]{}]/.test(segment)) continue;
+      const name = segment.replace(/^\./, "");
+      for (const candidate of [name, name.split(".")[0]]) if (candidate.length >= 3) names.add(candidate);
+    }
+  }
+  return [...names];
+}
+
+/**
+ * Whether the owner's words ask for reading the installed app's data (core.ts): the model's consent cited
+ * by its kind, its quote found in the latest owner word of that kind (a reply only when the model said it
+ * assents), the quote naming that data or the app (`dataNames`), no "don't" in the quote's sentence,
+ * and nothing written since taking it back or moving on. It runs once, never remembered.
+ */
+export function checkDataConsent(claim: ExplicitClaim | undefined, owner: OwnerWords | undefined, paths: readonly string[]): { ok: true; quote: string } | { ok: false; reason: string } {
+  if (!owner) return { ok: false, reason: "Cypher didn't pass your own words to this check" };
+  const quote = claim?.quote?.trim();
+  if (!quote) return { ok: false, reason: "the reviewing model cited none of your words asking for it" };
+  const wanted = normalize(quote);
+  if (VAGUE.has(wanted) || weight(wanted) < MIN_QUOTE_WEIGHT) return { ok: false, reason: `the words it cited ("${quote}") are too short to ask for it` };
+  const claimedSource = claim?.source === "reply-unconfirmed" ? "reply" : claim?.source;
+  const kind = claimedSource && SOURCES.has(claimedSource) ? (claimedSource as ConsentSource) : undefined;
+  if (kind === undefined) return { ok: false, reason: "the reviewing model cited no consent of yours by its kind" };
+  let at = -1;
+  let found: { source: ConsentSource; said: string } | undefined;
+  owner.messages.forEach((message, index) => {
+    const cited = citedIn(message, wanted, quote);
+    if (cited && (cited.source === kind || (kind === "reply" && message.source === "reply"))) {
+      at = index;
+      found = cited;
+    }
+  });
+  if (at < 0 || !found) return { ok: false, reason: `"${quote}" is not in your ${SOURCE_NAMES[kind]}` };
+  const message = owner.messages[at];
+  if (found.source === "reply" && claim?.source !== "reply") return { ok: false, reason: `the reviewing model didn't say your reply ("${message.text.trim().slice(0, 80)}") agrees` };
+  for (const text of [message.text, ...owner.messages.slice(at + 1).map((later) => later.text)]) {
+    const script = uncoveredScript(text);
+    if (script) return { ok: false, reason: `Cypher can't read whether your words in ${script} script say not to (no word table for that language)` };
+  }
+  const names = dataNames(paths);
+  const named = names.filter((name) => mentions(quote, name));
+  if (named.length === 0) return { ok: false, reason: `your words "${quote}" don't name the app or the data it reads (${names.join(", ") || "none readable"})` };
+  // A "don't" in the sentence the quote stands in, or a reply or answer that itself says to wait.
+  const own = sentences(found.said.normalize("NFKC").replace(REMINDER, " ")).filter((sentence) => wanted.includes(normalize(sentence)) || normalize(sentence).includes(wanted));
+  if (own.some((sentence) => RETRACTION.test(sentence)) || ((message.source === "reply" || message.source === "answer") && retractsAny(message.text))) {
+    return { ok: false, reason: `your words say not to or to wait ("${message.text.trim().slice(0, 140)}")` };
+  }
+  for (const later of owner.messages.slice(at + 1)) {
+    const text = later.text.trim();
+    const short = text.length > 140 ? `${text.slice(0, 140)}…` : text;
+    if (retractsAny(text)) return { ok: false, reason: `you wrote later: "${short}"` };
+    const carriesOn = (text.length <= 120 && (carriesOnOnly(text) || CONTINUES.test(text))) || names.some((name) => mentions(text, name));
+    if (!carriesOn) return { ok: false, reason: `you've written since ("${short}"), so that request may be about earlier work` };
+  }
+  return { ok: true, quote };
+}
+
 /** What each irreversible attribute does, for the reason. */
 const ATTRIBUTE_SAYS: Readonly<Record<AttributeKey, string>> = {
   force: "forces it (overwrites what is there)",

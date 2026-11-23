@@ -37,13 +37,10 @@ import {
 import { globBase, hasGlob } from "./glob.ts";
 import { GRANT_ENTRY, GrantStore, newGrant, REVOKE_ENTRY, ROOT_ENTRY } from "./grants.ts";
 import type { Grant, GrantScope } from "./grants.ts";
-import { checkExplicit, citedIn, describeTarget, lineTargets, normalize, repoName } from "./explicit.ts";
+import { checkDataConsent, checkExplicit, describeTarget, lineTargets, repoName } from "./explicit.ts";
 import type { ExplicitClaim, ExplicitFacts, ExplicitResult, LineTargets, OwnerWords, Target, TargetFacts } from "./explicit.ts";
 import { conversationContext, judgePrompt, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
 import type { Concern, JudgeRequest } from "./judge.ts";
-
-/** The shortest quote (normalized characters) that may ask for reading the installed app's data. */
-const INSTALLED_QUOTE_MIN = 6;
 import { isUnder, PathContext } from "./paths.ts";
 import type { Classification } from "./paths.ts";
 import { decide, describe } from "./policy.ts";
@@ -1797,7 +1794,8 @@ export class Permissions {
         );
         audit.judge = verdict.state;
         // The installed app's data: the owner's words must ask for it, and the model must cite them.
-        const installedConsent = installedRead && verdict.decision === "approve" ? this.installedConsent(verdict.claim) : undefined;
+        const data = [line, ...(line.assessments ?? [])].flatMap((assessment) => (assessment.concern === "installed-app" && assessment.data ? [assessment.data] : []));
+        const installedConsent = installedRead && verdict.decision === "approve" ? this.installedConsent(verdict.claim, data) : undefined;
         if (installedConsent && !installedConsent.ok) {
           audit.explicit = { ok: false, reason: installedConsent.reason, targets: [], passed: [] };
           verdict.decision = "ask-user";
@@ -1812,7 +1810,8 @@ export class Permissions {
         if (verdict.decision === "approve" && (!dangerous || explicit?.ok)) {
           // `approve-once`: this call runs, and nothing is remembered; so does
           // an approval of a line that reads a secret (risk.ts `once`).
-          const kept = verdict.once || explicit?.once === true || line.once === true || line.assessments?.some((assessment) => assessment.once === true) ? [] : memo;
+          // The installed app's data: once, never remembered (the consent was for this request).
+          const kept = verdict.once || installedRead || explicit?.once === true || line.once === true || line.assessments?.some((assessment) => assessment.once === true) ? [] : memo;
           for (const pattern of kept) this.addCommandGrant(pattern, "chat", "judge", label);
           const reason = explicit?.ok ? `${verdict.reason} (your words: "${explicit.quote}")` : verdict.reason;
           finish({ decision: "allow", decidedBy: "judge", reason, scope: kept.length ? "chat" : "once", prompted: false });
@@ -1887,21 +1886,12 @@ export class Permissions {
   }
 
   /**
-   * Whether the model cited owner words that ask for reading the installed app's data: a quote of
-   * some substance found in one of the owner's words (citedIn: a reply's proposal only when the
-   * reply plainly assents and the model said so). The quote is the model's; that it is the owner's
-   * is the code's.
+   * Whether the model cited owner words that ask for reading the installed app's data (explicit.ts
+   * `checkDataConsent`): a consent of a kind, its quote in that owner word, naming the data or the
+   * app, not taken back or moved on from. The quote is the model's; that it holds is the code's.
    */
-  installedConsent(claim: ExplicitClaim | undefined): { ok: true; quote: string } | { ok: false; reason: string } {
-    const quote = claim?.quote?.trim();
-    if (!quote) return { ok: false, reason: "the reviewing model cited none of your words asking for it" };
-    const wanted = normalize(quote);
-    if (wanted.length < INSTALLED_QUOTE_MIN) return { ok: false, reason: `the words it cited ("${quote}") are too short to ask for it` };
-    for (const word of this.ownerWords?.messages ?? []) {
-      const hit = citedIn(word, wanted, quote);
-      if (hit && (hit.source !== "reply" || claim?.source === "reply")) return { ok: true, quote };
-    }
-    return { ok: false, reason: `"${quote}" is not in your words` };
+  installedConsent(claim: ExplicitClaim | undefined, data: readonly string[]): { ok: true; quote: string } | { ok: false; reason: string } {
+    return checkDataConsent(claim, this.ownerWords, data);
   }
 
   /** Ask the engine for the owner's words as of now; a failure keeps the ones at hand. */

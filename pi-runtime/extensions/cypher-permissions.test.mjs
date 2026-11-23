@@ -2988,3 +2988,39 @@ test("judge: reading the installed app's data runs only on owner words the model
   assert.deepEqual([ran.ok, ran.scope, ran.by], [true, "once", "judge"]);
   assert.equal(cited.asked.length, 0);
 });
+
+test("judge: an installed-app read runs once only on a consent the code checks, whatever the verdict says", async () => {
+  const { permissions } = engine();
+  const data = join(home, ".cypher", "orgs", "org_y", "user_y");
+  mkdirSync(data, { recursive: true });
+  const line = `sqlite3 -readonly ${data}/engine.sqlite "select * from chat limit 5"`;
+  const run = async (words, verdict) => {
+    permissions.ownerWords = { messages: words.map((text) => ({ source: "typed", text })), agentWritten: false };
+    const ctx = judgedCtx(verdict);
+    const result = await permissions.requestEscalation(line, { label: "Chats" }, ctx);
+    return { result, ctx };
+  };
+  // A fooled approval citing nothing, or words that don't name the data or the app: asks.
+  const task = "修一下权限弹窗太多的问题";
+  for (const verdict of [
+    { decision: "approve", reason: "fits" },
+    { decision: "approve-once", reason: "fits", consent: { source: "typed", quote: task } },
+    // By its kind: a consent with no kind isn't checked.
+    { decision: "approve-once", reason: "fits", consent: { quote: "看看 app 的 engine.sqlite 里 chat 表" } },
+  ]) {
+    const { result, ctx } = await run([task, "看看 app 的 engine.sqlite 里 chat 表"].slice(0, verdict.consent?.source ? 1 : 2), verdict);
+    assert.equal(result.ok, false, JSON.stringify([verdict, lastAuditOf(permissions)]));
+    assert.equal(ctx.asked.length, 1);
+  }
+  // A quote that names the data but is taken back, or moved on from: asks.
+  const quote = "看看 app 的 engine.sqlite 里 chat 表";
+  const cited = { decision: "approve", reason: "the owner asked", consent: { source: "typed", quote } };
+  assert.equal((await run([quote, "先别看了"], cited)).result.ok, false);
+  assert.equal((await run([quote, "现在改一下 README 的安装说明，加上 Linux 的部分"], cited)).result.ok, false);
+  // The real request: runs once, and nothing is remembered.
+  const { result, ctx } = await run([quote], cited);
+  assert.deepEqual([result.ok, result.scope, result.by, ctx.asked.length], [true, "once", "judge", 0]);
+  assert.equal(lastAuditOf(permissions).scope, "once");
+  const again = await run([quote], { decision: "ask-user", concern: "installed-app", reason: "unsure" });
+  assert.equal(again.result.ok, false);
+});

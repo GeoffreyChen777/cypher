@@ -66,6 +66,8 @@ export interface Assessment {
    * installed-app read also runs only on owner words cited as consent (core.ts).
    */
   concern?: "secret" | "installed-app";
+  /** For an installed-app read: the data's path, whose names a consent must say (explicit.ts `checkDataConsent`). */
+  data?: string;
 }
 
 /**
@@ -694,7 +696,7 @@ function installedAppRisk(command: RiskCommand, view: CommandView, facts: RiskFa
   // Reading the installed app's logs and data is how a report about it gets
   // diagnosed: ordinary work the model decides on.
   // The owner's data (chats, journals, databases) is a concern the model must find asked for; the app's and Runtime's program files are not.
-  const reads = (path: string): Assessment => ({ tier: "local", kind: `reads the installed Cypher app's data (${path})`, ...(INSTALLED_PROGRAM.test(path) ? {} : { concern: "installed-app" as const }) });
+  const reads = (path: string): Assessment => ({ tier: "local", kind: `reads the installed Cypher app's data (${path})`, ...(INSTALLED_PROGRAM.test(path) ? {} : { concern: "installed-app" as const, data: path }) });
   let soft: Assessment | undefined;
   if (command.cwd !== undefined) {
     const cwd = facts.classify(command.cwd, undefined);
@@ -1225,7 +1227,7 @@ function assessWords(command: RiskCommand, facts: RiskFacts): Assessment {
     if (assessment.tier === "danger") return assessment;
     const redirected = redirectRisk(command, facts);
     if (redirected?.tier === "danger") return redirected;
-    return { tier: "local", kind: assessment.kind ?? redirected?.kind ?? `runs ${basename(next[0] ?? "a program")} through ${view.program}`, ...(assessment.once || redirected?.once ? { once: true as const } : {}), ...(assessment.concern || redirected?.concern ? { concern: assessment.concern ?? redirected?.concern } : {}) };
+    return { tier: "local", kind: assessment.kind ?? redirected?.kind ?? `runs ${basename(next[0] ?? "a program")} through ${view.program}`, ...(assessment.once || redirected?.once ? { once: true as const } : {}), ...(assessment.concern || redirected?.concern ? { concern: assessment.concern ?? redirected?.concern } : {}), ...(assessment.data ? { data: assessment.data } : {}) };
   }
   // What `find -exec` runs is a command of its own, on the files `find`
   // starts from (`find build -exec rm {} +` deletes in `build`).
@@ -1246,10 +1248,13 @@ function assessWords(command: RiskCommand, facts: RiskFacts): Assessment {
   const system = permissionSystemRisk(command, view, facts);
   if (system) return system;
   let soft: Assessment | undefined = ran;
-  for (const check of [pathRisk(command, view, facts), installedAppRisk(command, view, facts)]) {
+  const installed = installedAppRisk(command, view, facts);
+  for (const check of [pathRisk(command, view, facts), installed]) {
     if (check?.tier === "danger") return check;
     soft ??= check;
   }
+  // A secret that is also the installed app's data (`~/.cypher/orgs/…`) is both: once, and only on a consent naming it (core.ts).
+  if (soft && soft !== installed && installed?.concern === "installed-app") soft = { ...soft, concern: "installed-app", data: installed.data };
   // A reversible, team-visible step on this task's own branch or pull request (grades.ts): the judge's, not a danger.
   const team = teamStep(command, view, facts);
   // The project's own tools resolve from where the command runs (`cd apps/edge && npx wrangler`).
