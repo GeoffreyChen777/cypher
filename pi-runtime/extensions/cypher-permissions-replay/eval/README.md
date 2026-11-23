@@ -28,6 +28,7 @@ Data never goes into the repository. Everything below lives under
 | `mechanism.mjs` | which mechanism made an outcome, from the decision's reasons (shared by run and report) |
 | `report.mjs` | before/after tables as Markdown (`RESULTS.md` is its output, plus notes) |
 | `merge.py` | merges results of one case file, the later file winning per case (rerun only the cases a corpus fix changed) |
+| `facts.py` | per-case facts production would read at the record's time (the folder's branch, gh's PRs for it, local branches, creators that made things), from evidence only → `facts.json` for run.mjs `--facts` |
 | `blind.mjs` | blind sets (`blind-N/cases.json`, written from the design doc only) → run.mjs case files, and their scores (`--score`) |
 | `rootcause.py` | the root-cause table of RESULTS.md from a hand-made class map (kept in the data dir) and the live/stub results |
 
@@ -166,6 +167,23 @@ After a corpus fix that changes some held-out cases, rerun only those (a subset 
 $D/results/<earlier>-live.json $D/results/<subset>-live.json` (later files win per case).
 
 `before-live*.json` are the corrected (`withUserMessages`) runs; the uncorrected ones are kept as `*-v1.json`.
+
+## Reconstructed facts (`--facts`)
+
+The fake machine keeps every repository on main, has no gh and makes nothing a creator would make, so what
+production reads from git and gh is missing: the chat's workspace branch, the PRs gh lists for it, local branches,
+and paths/refs an `observed` creation needs. `facts.py` rebuilds them per case from evidence (git's own output in
+the chat's sessions before the record, the engine's "… on the new branch X" record of making the folder, a
+`git worktree add -b`, the folder's reflog; `gh pr create` URLs and `gh pr view/list --json`), never from labels or
+the owner's decision (its header lists the rules). With `--facts`, each case runs on its own machine: its folder
+checks out the branch, the branches exist, `pullRequestsWithHead` answers from the PRs, and its `ran` creators make
+what they plan to make between plan and settle (they all had non-error results).
+
+```sh
+python3 -I $EVAL/facts.py --audit $D/audit-snapshot.jsonl --org ~/.cypher/orgs/<org>/<user> \
+  --cases $D/corpus/heldout.json,$D/corpus/dev.json --out $D/corpus/facts.json      # ~1 min, escalated
+node $EVAL/run.mjs … --cases $D/corpus/heldout.json --context $D/corpus/context-heldout.json --workspace-branch --facts $D/corpus/facts.json
+```
 
 ## Blind sets
 

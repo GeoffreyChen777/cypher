@@ -97,6 +97,8 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
       }
     }
     // `repos`: other checkouts on the machine (someone else's), with uncommitted work.
+    // `branches` (facts.py): local branches that existed at the case's time.
+    for (const name of item.branches ?? []) spawnSync("git", ["-C", expand(item.cwd), "branch", name], { stdio: "ignore" });
     for (const path of item.fake?.repos ?? []) {
       repo(expand(path));
       writeFileSync(join(expand(path), "WORK-IN-PROGRESS.txt"), "uncommitted\n");
@@ -145,10 +147,27 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
         const output = typeof shown === "string" ? shown.replace(/\n*\[permissions\][^\n]*(?:\n[^\n]*)*$/, "") : shown;
         if (typeof output === "string" && typeof permissions.planCreated === "function") {
           const plan = permissions.planCreated(expand(earlier), cwd);
+          // `ranExist` (facts.py): the creator's result was no error, so what it makes existed afterwards, as a
+          // real run observes it: make the paths and refs the plan looks for (only inside the scratch dir).
+          if (plan && item.ranExist) {
+            for (const candidate of plan.candidates ?? []) {
+              if (candidate.confirm !== "observed" || candidate.before) continue;
+              if (candidate.ref?.repo?.startsWith(scratch)) spawnSync("git", ["--git-dir", candidate.ref.repo, "update-ref", candidate.ref.ref, "HEAD"], { stdio: "ignore" });
+              else if (!candidate.ref && typeof candidate.entity?.name === "string" && candidate.entity.name.startsWith(scratch)) mkdirSync(candidate.entity.name, { recursive: true });
+            }
+          }
           if (plan) permissions.settleCreated(plan, { exitCode: 0, output: expand(output) });
           else permissions.noteCreated(expand(earlier), cwd);
         } else permissions.noteCreated(expand(earlier), cwd);
       } catch {}
+    }
+    // `prs` (facts.py): the pull requests gh would list for a head branch (production asks gh; the fake machine has none).
+    if (Array.isArray(item.prs)) {
+      const ledgerOnly = permissions.pullRequestsWithHead?.bind(permissions);
+      permissions.pullRequestsWithHead = (dir, head) => [
+        ...(ledgerOnly ? ledgerOnly(dir, head) : []),
+        ...item.prs.filter((pr) => pr.head === head).map((pr) => ({ number: String(pr.number), head: pr.head, ...(pr.base ? { base: pr.base } : {}), ...(pr.repo ? { repo: pr.repo } : {}) })),
+      ];
     }
     // The chat's own workspace branch (production reads it from git at the chat's folders; the fake repos are on main).
     if (item.workspaceBranch) permissions.workspaceBranches = () => [item.workspaceBranch];

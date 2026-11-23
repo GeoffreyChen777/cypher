@@ -37,6 +37,8 @@ const { values: args } = parseArgs({
     context: { type: "string" },
     // Give each case the branch its cwd had checked out, as git's own output in the conversation shows it (workspace-branch.mjs).
     "workspace-branch": { type: "boolean", default: false },
+    // facts.py's per-case facts (checked-out branch, gh's PRs, creators that made things): each such case runs isolated.
+    facts: { type: "string" },
     concurrency: { type: "string", default: "6" },
     sample: { type: "string" },
     seed: { type: "string", default: "20261122" },
@@ -105,12 +107,25 @@ if (args.live) {
   } });
 }
 const stubbed = stubModel(args.stub, { consent: args["consent-claim"] });
+if (args.facts) {
+  const facts = JSON.parse(readFileSync(args.facts, "utf8")).cases;
+  for (const item of cases) {
+    if (item.adversarial) continue;
+    const found = facts[String(item.base ?? item.id)];
+    if (!found) continue;
+    if (found.checkout) item.checkout = found.checkout;
+    if (found.prs) item.prs = found.prs;
+    if (found.branches) item.branches = found.branches;
+    if (found.ranExist) item.ranExist = true;
+    item.isolate = true;
+  }
+}
 if (args["workspace-branch"]) {
   for (const item of cases) {
     // An adversarial case's conversation is its own; a mutation of the owner's words keeps its base's folder and branch.
     if (item.adversarial) continue;
     const found = workspaceBranchOf(context[String(item.base ?? item.id)]?.branch, item.cwd);
-    if (found) item.workspaceBranch = found;
+    if (found && !item.checkout) item.workspaceBranch = found;
   }
 }
 
