@@ -749,7 +749,10 @@ function ownTarget(kind: "branch" | "pr", message: string, opened: readonly Pull
     names = [found, ...prs.filter((pr) => pr.number === found).flatMap((pr) => (pr.head ? [pr.head] : []))];
   }
   // Words that name something else ("merge other-branch", "0.3.5", "#13") leave it to the names they say.
-  return namesOther(message, names) ? undefined : found;
+  if (namesOther(message, names)) return undefined;
+  // Merging, a default branch may only be where it goes ("merge into main"), never what is merged ("merge main into it").
+  if (kind === "pr" && namedAttributes(message, {}).branches.some((branch) => BRANCHY.test(branch.name) && branch.role !== "base")) return undefined;
+  return found;
 }
 
 /** The message holds an entity-shaped name (OWN_NAME: `#12`, `x-y`, `a/b`, `v1.2`, a number) that is none of `own`, no default branch and no word of the table. */
@@ -1103,8 +1106,10 @@ function attributeClash(target: Target, message: string, context: EntityContext,
     entity.kind === "pr" ? { head: entity.head, base: entity.base } : entity.kind === "branch" ? { self: entity.name } : {};
   if (entity.kind !== "pr" && entity.kind !== "branch") return undefined;
   const same = (a: string | undefined, b: string) => a !== undefined && a.replace(/^origin\//, "").toLowerCase() === b.toLowerCase();
+  // Asked for a pull request, a branch marked as where it goes ("pr 给main") is the pull request's base, not the branch a push sends.
+  const prBase = entity.kind === "branch" && SAYS.pr.test(message);
   for (const branch of named.branches) {
-    if (!branch.role) continue;
+    if (!branch.role || (prBase && branch.role === "base")) continue;
     const want = entity.kind === "pr" ? (branch.role === "base" ? own.base : own.head) : own.self;
     // An attribute not known is checked by the target's own identity (its number), not here.
     if (want !== undefined && !same(want, branch.name)) {

@@ -565,3 +565,85 @@ test("replies (property): an unmarked reply binds iff the judge says it assents;
   }
   assert.ok(checked > 1000, `${checked}`);
 });
+
+// --- Round 2, part F: the task's own targets --------------------------------------------------
+
+const ownFacts = (own) => ({ ...explicitFacts, own: () => own });
+const ONE = { branches: ["fix-badge"], prs: [{ number: "52", head: "fix-badge", base: "main" }] };
+const typedSays = (text) => words({ text, source: "typed" });
+const MERGE52 = [["gh", "pr", "merge", "52", "--merge"]];
+const PUSH_OWN = [["git", "push", "-u", "origin", "fix-badge"]];
+const DELETE_OWN = [["git", "push", "origin", "--delete", "fix-badge"]];
+const ownCheck = (text, line, target, own = ONE) => checkExplicit({ quote: text, targets: [target] }, targetsOf(line), typedSays(text), [], ownFacts(own));
+
+test("own targets: an action with no target binds to the task's one branch or pull request", () => {
+  assert.equal(ownCheck("ci 没问题就merge", MERGE52, { kind: "pr", value: "52" }).ok, true);
+  assert.equal(ownCheck("merge it into main once the checks pass", MERGE52, { kind: "pr", value: "52" }).ok, true);
+  assert.equal(ownCheck("commit，然后pr 给main", PUSH_OWN, { kind: "branch", value: "fix-badge" }).ok, true, "a PR asked for covers pushing its head");
+  assert.equal(ownCheck("然后删除 remote branch", DELETE_OWN, { kind: "branch", value: "fix-badge" }).ok, true);
+  // Without own facts the same words name nothing.
+  assert.equal(checkExplicit({ quote: "ci 没问题就merge", targets: [{ kind: "pr", value: "52" }] }, targetsOf(MERGE52), typedSays("ci 没问题就merge"), [], explicitFacts).ok, false);
+});
+
+test("own targets: several or none, another name in the words, or a default branch as what is merged still ask", () => {
+  const two = { branches: ["fix-badge", "fix-other"], prs: [{ number: "52" }, { number: "53" }] };
+  assert.equal(ownCheck("ci 没问题就merge", MERGE52, { kind: "pr", value: "52" }, two).ok, false);
+  assert.equal(ownCheck("pr 给main", PUSH_OWN, { kind: "branch", value: "fix-badge" }, two).ok, false);
+  assert.equal(ownCheck("ci 没问题就merge", MERGE52, { kind: "pr", value: "52" }, { branches: [], prs: [] }).ok, false);
+  for (const text of ["merge other-branch into main", "merge #53 when green", "merge main into your branch", "merge it, then release 0.3.5"]) assert.equal(ownCheck(text, MERGE52, { kind: "pr", value: "52" }).ok, false, text);
+  // A PR request never pushes a default branch, and a branch the task doesn't own isn't implied.
+  assert.equal(ownCheck("pr 给main", [["git", "push", "origin", "HEAD:main"]], { kind: "branch", value: "main" }).ok, false);
+  assert.equal(ownCheck("pr 给main", [["git", "push", "origin", "fix-x"]], { kind: "branch", value: "fix-x" }).ok, false);
+  // "push to main" sends main, not the task's branch.
+  assert.equal(ownCheck("push it to main", PUSH_OWN, { kind: "branch", value: "fix-badge" }).ok, false);
+});
+
+test("own targets (property): an entity-shaped name the task doesn't own, anywhere in the words, blocks the implicit binding", () => {
+  const others = ["fix-other", "#53", "pr 53", "feat/login", "v2.3.0", "relay-7", "other_branch", "0.3.5"];
+  const bases = [
+    ["ci 没问题就merge", MERGE52, { kind: "pr", value: "52" }],
+    ["pr 给main", PUSH_OWN, { kind: "branch", value: "fix-badge" }],
+    ["然后删除 remote branch", DELETE_OWN, { kind: "branch", value: "fix-badge" }],
+    ["merge it once green", MERGE52, { kind: "pr", value: "52" }],
+  ];
+  for (const [text, line, target] of bases) assert.equal(ownCheck(text, line, target).ok, true, text);
+  for (let i = 0; i < 300; i++) {
+    const [text, line, target] = pick(bases);
+    const other = pick(others);
+    const said = rand() < 0.5 ? `${other} ${text}` : `${text} ${pick(["", "and", "然后", "then"])} ${other}`;
+    const got = ownCheck(said, line, target);
+    assert.equal(got.ok, false, `"${said}" bound to the task's own ${target.value}`);
+  }
+});
+
+test("lexicon: a Latin word next to CJK stands as a word; inside a Latin word it doesn't", async () => {
+  const { actionWords, nounWords } = await import("./cypher-permissions/lexicon.ts");
+  for (const text of ["然后pr 给main", "pr给main", "就merge", "ci 没问题就merge了"]) assert.equal(nounWords("pr").test(text) || actionWords("merge").test(text), true, text);
+  for (const text of ["premerge", "sprint", "emergency", "approve"]) assert.equal(actionWords("merge").test(text), false, text);
+  assert.equal(nounWords("pr").test("sprint"), false);
+});
+
+test("attributes: a count or a measure is never a role-marked branch", () => {
+  const read = targetsOf([["gh", "pr", "create", "--base", "main", "--head", "fix-badge", "--fill"]]);
+  for (const text of ["Open a PR into main; rerun flaky checks up to 2x", "PR to main, wait up to 30s between polls", "PR 给 main，最多重试到 3x"]) {
+    const got = checkExplicit({ quote: text, targets: [{ kind: "pr", value: "fix-badge → main" }] }, read, typedSays(text), [], explicitFacts);
+    assert.equal(got.ok, true, `${text}: ${got.reason}`);
+  }
+  const got = checkExplicit({ quote: "Open a PR into release-2", targets: [{ kind: "pr", value: "fix-badge → main" }] }, read, typedSays("Open a PR into release-2"), [], explicitFacts);
+  assert.equal(got.ok, false, "a real ref in the base role still conflicts");
+});
+
+test("env: a location variable is a benign prefix only when it names a read-only system directory", async () => {
+  const { benignEnv, setSystemDirectory } = await import("./cypher-permissions/commands.ts");
+  const before = setSystemDirectory((path) => path.startsWith("/Applications/"));
+  try {
+    assert.equal(benignEnv("DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer"), true);
+    for (const value of [undefined, "/tmp/xcode", "./Xcode", "/Applications/../tmp", "/Applications/X*", "$HOME/x"]) assert.equal(benignEnv("DEVELOPER_DIR", value), false, String(value));
+    // Variables that are no location stay as they were, whatever the value.
+    assert.equal(benignEnv("PATH", "/Applications/Xcode.app"), false);
+    assert.equal(benignEnv("LD_PRELOAD", "/Applications/x.dylib"), false);
+    assert.equal(benignEnv("RUST_LOG", "debug"), true);
+  } finally {
+    setSystemDirectory(before);
+  }
+});

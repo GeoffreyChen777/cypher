@@ -508,9 +508,11 @@ let systemDirectory = (path: string): boolean => {
   }
 };
 
-/** Replays and tests: the machine's read-only directories, as a fake machine has them. */
-export function setSystemDirectory(check: (path: string) => boolean): void {
+/** Replays and tests: the machine's read-only directories, as a fake machine has them. Returns the check it replaces. */
+export function setSystemDirectory(check: (path: string) => boolean): (path: string) => boolean {
+  const before = systemDirectory;
   systemDirectory = check;
+  return before;
 }
 
 /** A command seen through the wrappers that only run it (`nohup`, `timeout 30`, `env NAME=value`). */

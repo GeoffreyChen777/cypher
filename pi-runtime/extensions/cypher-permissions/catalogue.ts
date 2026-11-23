@@ -18,10 +18,12 @@
  * - `succeeded`: the line exited 0 and every command in it ran in the line's
  *   own shell joined by `&&` (so each one succeeded), and the creator is the
  *   system's program;
- * - `output`: `succeeded`, the creator is the line's only command, and its
- *   output's last line has the row's shape. Text that `echo`, `printf`,
- *   `cat` or any other command prints can never mint an entry: with another
- *   command in the line nothing is read from the output at all;
+ * - `output`: the line exited 0, its output is the creator's own (every
+ *   other command prints nothing, as `export`, `cd` or `mkdir -p`, or only
+ *   selects the creator's lines through a pipe, as `| tail -1`:
+ *   `loneOutput`), and its last line has the row's shape. Text that `echo`,
+ *   `printf`, `cat` or any other command prints can never mint an entry:
+ *   with such a command in the line nothing is read from the output at all;
  * - `ran`: the line ran (a dev instance names its data directories before it
  *   makes them, in the background).
  *
