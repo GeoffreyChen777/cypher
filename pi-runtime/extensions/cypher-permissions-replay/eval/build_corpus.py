@@ -5,7 +5,8 @@
 
 Reads (never writes) the permission audit, the chat journals (`journals/<chatId>.jsonl`,
 whose `sessionStarted` events name the chat's Pi session files) and the Pi sessions
-(`agent-sessions/*.jsonl`). Writes, under DIR (keep it outside the repository):
+(`agent-sessions/*.jsonl`); for a deleted chat, its journal's events and the progress
+reporter's sessions (see "deleted chats" below). Writes, under DIR (keep it outside the repository):
 
   dev.json, heldout.json                every PROMPTED record (decidedBy "user"), split
   regression-dev.json, regression-heldout.json   a fixed sample of auto-decided records
@@ -18,6 +19,9 @@ org/user ids, redacted tokens; plus
   user   the conversation's user messages as Pi stored them (translated, briefs included)
   label  {owner: allowed|denied|auto-<by>, should: ask|allow|unknown, why}
   split  dev|heldout
+  context     session | session-time | journal | none (how the conversation was found)
+  unscorable  why the case can't be scored (no owner message for the call's turn); left out of every rate
+  ranOutputs, processes   facts for the fake machine (machine.mjs)
 Only what precedes the record's time is kept.
 """
 import argparse
@@ -127,12 +131,31 @@ AGENT_PREFIXES = (
 )
 
 
+# What the engine writes into notices it starts a turn with, wherever it is in the text
+# (crates/engine/src/bots/notice.rs `wake_prompt`: "[<headline>]\n\n<output>\n\n(A notice from your workspace, …)").
+AGENT_MARKERS = ("(A notice from your workspace, not a message from your owner",)
+
+
 def agent_written(text, agent_texts):
     stripped = text.lstrip()
-    if stripped.startswith(AGENT_PREFIXES):
+    if stripped.startswith(AGENT_PREFIXES) or any(marker in text for marker in AGENT_MARKERS):
         return True
     key = re.sub(r"\s+", " ", stripped)[:200]
     return bool(key) and key in agent_texts
+
+
+# The engine puts a note ahead of each owner turn in a workspace's own chat (crates/engine/src/bots.rs
+# `turn_note` / `with_turn_note`): "<note>\n\n<the owner's message>", the note's first line `TURN_NOTE_HEAD`
+# and its last `TURN_NOTE_TAIL`. Only what follows is the owner's (the engine's owner words never hold the note).
+TURN_NOTE_HEAD = "[Cypher: where your plans stand now"
+TURN_NOTE_TAIL = "\nUse get_work for the details."
+
+
+def strip_turn_note(text):
+    if not text.lstrip().startswith(TURN_NOTE_HEAD):
+        return text
+    end = text.find(TURN_NOTE_TAIL)
+    return "" if end < 0 else text[end + len(TURN_NOTE_TAIL):].lstrip("\n")
 
 
 PLAN_INSTRUCTION = re.compile(r"Your owner['’]s instruction, verbatim \(quoted\):\n\"\"\"\n(.*?)\n\"\"\"", re.S)
@@ -160,6 +183,197 @@ def clip_head(text, limit):
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+# --- deleted chats: the journal + the progress reporter's readings -------------
+#
+# When a chat is deleted its Pi session file and its chat doc go, but its journal
+# (`journals/<chatId>.jsonl`: the agent's text, tool calls and results, ask_user
+# questions and answers, turn ends) stays. The owner's messages are not in the journal;
+# the engine's progress reporter (`crates/engine/src/session/progress.rs`) runs one tiny
+# Pi session per reading whose prompt quotes the turn's latest user message (`<request>`,
+# as Pi stored it: the translation when there was one, clipped at 2,000 chars) and the
+# turn's activity (`[Run] <command>` lines). A reading belongs to a chat when its commands
+# are that chat's commands; its request is put just before the turn's first command.
+
+PROGRESS_MARK = "You are watching an AI coding agent work on a user's request"
+PROGRESS_REQUEST = re.compile(r"<request>\n(.*?)\n</request>", re.S)
+PROGRESS_ACTIVITY = re.compile(r"<agent_activity>\n(.*?)\n</agent_activity>", re.S)
+# Journal tool kinds as Pi's tool names (the rest keep their own name).
+JOURNAL_TOOLS = {"exec": "bash", "readFile": "read", "writeFile": "write", "editFile": "edit", "search": "grep", "glob": "find", "webSearch": "web_search"}
+
+
+def flat(text):
+    return " ".join((text or "").split())
+
+
+def progress_reading(text):
+    """(request, [the first line of each `[Run]` command, flattened]) of a progress reporter's prompt, or None."""
+    if not text.startswith(PROGRESS_MARK):
+        return None
+    request = PROGRESS_REQUEST.search(text)
+    activity = PROGRESS_ACTIVITY.search(text)
+    if not request:
+        return None
+    runs = []
+    for line in (activity.group(1) if activity else "").split("\n"):
+        if line.startswith("[Run] "):
+            body = flat(re.sub(r" \((?:done|failed|running)\)$", "", line[6:])).rstrip("…").rstrip()
+            if body:
+                runs.append(body)
+    return request.group(1), runs
+
+
+def iso(stamp_ms):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(stamp_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def journal_events(path):
+    out = []
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(item.get("event"), dict):
+                out.append((item.get("seq") or 0, item["event"]))
+    out.sort(key=lambda pair: pair[0])
+    return out
+
+
+def journal_entries(events):
+    """A journal as Pi-like session entries (each with its journal `_seq`): assistant messages
+    (text + tool calls), tool results, and `_turnEnd` markers at `done` events."""
+    entries = []
+    current = None
+    names = {}
+
+    def flush():
+        nonlocal current
+        if current and (current["text"].strip() or current["tools"]):
+            content = ([{"type": "text", "text": current["text"]}] if current["text"].strip() else []) + current["tools"]
+            entries.append({"type": "message", "_seq": current["seq"], "message": {"role": "assistant", "content": content}})
+        current = None
+
+    for seq, event in events:
+        kind = event.get("type")
+        if kind == "textDelta":
+            if current is None or current["tools"]:
+                flush()
+                current = {"seq": seq, "text": "", "tools": []}
+            current["text"] += event.get("text") or ""
+        elif kind == "toolCall":
+            call = event.get("call") or {}
+            name = JOURNAL_TOOLS.get(call.get("kind")) or call.get("name") or call.get("kind") or "tool"
+            arguments = call.get("input") if call.get("kind") == "unknown" else {k: v for k, v in call.items() if k != "kind"}
+            names[event.get("id")] = name
+            if current is None:
+                current = {"seq": seq, "text": "", "tools": []}
+            current["tools"].append({"type": "toolCall", "id": event.get("id"), "name": name, "arguments": arguments or {}, "_seq": seq})
+        elif kind == "toolResult":
+            flush()
+            entries.append({"type": "message", "_seq": seq, "message": {"role": "toolResult", "toolCallId": event.get("id"), "toolName": names.get(event.get("id")), "content": [{"type": "text", "text": str(event.get("output") or "")}], "isError": bool(event.get("isError"))}})
+        elif kind in ("assistantMessageCompleted", "steered"):
+            flush()
+        elif kind == "done":
+            flush()
+            entries.append({"type": "_turnEnd", "_seq": seq})
+    flush()
+    return entries
+
+
+def rebuild_from_journal(index, record):
+    """A deleted chat's conversation up to the record's call: (entries, cwd, why) or (None, cwd, why).
+    The owner's messages come from the progress reporter's readings (see above); the record's
+    turn must have one, or the case is unscorable."""
+    chat = record.get("chatId") or ""
+    path = os.path.join(index.org, "journals", f"{chat}.jsonl")
+    if not chat or not os.path.exists(path):
+        return None, None, "no journal"
+    events = journal_events(path)
+    cwds = [e.get("cwd") for _, e in events if e.get("type") == "sessionStarted" and e.get("cwd")]
+    cwd = cwds[0] if cwds else None
+    entries = journal_entries(events)
+    ends = [e["_seq"] for e in entries if e["type"] == "_turnEnd"]
+
+    def turn(seq):
+        return sum(1 for end in ends if end < seq)
+
+    calls = [(part["_seq"], part) for e in entries if e["type"] == "message" and e["message"]["role"] == "assistant" for part in e["message"]["content"] if part.get("type") == "toolCall"]
+    execs = [(seq, flat(part["arguments"].get("command"))) for seq, part in calls if part["name"] == "bash" and isinstance(part["arguments"].get("command"), str)]
+
+    def first_match(body, floor):
+        for seq, command in execs:
+            if seq >= floor and (command == body or (len(body) >= 8 and command.startswith(body))):
+                return seq
+        return None
+
+    # The readings of this chat: same cwd, and most of their commands (the latest one included) are this chat's.
+    readings = []
+    floor = 0
+    for stamp, reading_cwd, request, runs in index.progress_readings():
+        if reading_cwd not in cwds or not runs:
+            continue
+        positions = []
+        pointer = floor
+        for body in runs:
+            seq = first_match(body, pointer)
+            if seq is not None:
+                positions.append(seq)
+                pointer = seq
+        last = first_match(runs[-1], floor)
+        if last is None or len(positions) < max(1, -(-len(runs) * 3 // 5)):
+            continue
+        start = positions[0]
+        same_turn = [seq for seq, _ in execs if turn(seq) == turn(last) and seq <= start]
+        if turn(start) != turn(last) or same_turn == [start]:
+            # The turn's first command: the request opened the turn.
+            start = max([end for end in ends if end < last] or [0]) + 0.5
+        readings.append((start, stamp, request))
+        floor = max(floor, int(start))
+    # One user message per (turn, request), at its earliest position.
+    users = {}
+    for start, stamp, request in readings:
+        key = (turn(start), request)
+        if key not in users or start < users[key][0]:
+            users[key] = (start, stamp, request)
+    # The record's call: its command (or path) among the journal's calls, nearest in time.
+    command = record.get("command")
+    if command:
+        hits = [seq for seq, c in execs if c == flat(command)]
+        if not hits:
+            probe = json.dumps(command[:60])[1:-1]
+            hits = [seq for seq, part in calls if probe in json.dumps(part["arguments"], ensure_ascii=False)]
+    else:
+        wanted = [p for p in record.get("paths") or [] if p]
+        hits = [seq for seq, part in calls if part["name"] == record["tool"] and any(isinstance(v, str) and (v == p or p.endswith(v.lstrip("./~")) or v.endswith(p)) for v in part["arguments"].values() for p in wanted)]
+    if not hits:
+        return None, cwd, "the call is not in the chat's journal"
+    when = ms(record["time"]) or 0
+
+    def seen_at(seq):
+        later = [stamp for start, stamp, _ in readings if start >= seq]
+        return min(later) if later else None
+
+    hit = min(hits, key=lambda seq: abs((seen_at(seq) or when) - when) if seen_at(seq) is not None else float("inf")) if len(hits) > 1 else hits[0]
+    if not any(turn(start) == turn(hit) and start < hit for start, _, _ in users.values()):
+        return None, cwd, "the chat was deleted; its journal holds no message of the owner for the call's turn"
+    out = [e for e in entries if e["_seq"] < hit and e["type"] == "message" and not any(p.get("_seq") == hit for p in e["message"].get("content") or [] if isinstance(p, dict))]
+    for start, stamp, request in users.values():
+        if start < hit:
+            out.append({"type": "message", "_seq": start - 0.25, "timestamp": iso(min(stamp, when)), "message": {"role": "user", "content": [{"type": "text", "text": request}]}})
+    out.sort(key=lambda e: e["_seq"])
+    for entry in out:
+        for part in entry["message"].get("content") or []:
+            if isinstance(part, dict):
+                part.pop("_seq", None)
+    return out, cwd, None
+
+
+JOURNAL_SOURCE = ("rebuilt by eval/build_corpus.py from a deleted chat's journal (agent text, tool calls and results, ask_user "
+                  "answers) and the progress reporter's readings (the owner's messages as Pi stored them: translated, no originals)")
+
+
 CREATOR = re.compile(r"worktree add|\bmkdir\b|switch -c|checkout -b|\bclone\b|simctl (create|clone)|\b(docker|podman) (run|create)|mktemp|\bcp -R|\bnpm init|cargo new|gh repo create|branch [^-]")
 PR_CREATE = re.compile(r"\b(gh pr create|glab mr create)\b")
 
@@ -185,6 +399,12 @@ class Index:
         self._calls = None
         self._agent_texts = None
         self._started = None
+        self._progress = None
+
+    def progress_readings(self):
+        """(time ms, cwd, request, run lines) of every progress reporter session, oldest first (filled by scan)."""
+        self.scan()
+        return self._progress
 
     def all_sessions(self):
         return sorted(glob.glob(os.path.join(self.org, "agent-sessions", "*.jsonl")))
@@ -196,14 +416,23 @@ class Index:
         self._calls = collections.defaultdict(list)
         self._agent_texts = set()
         self._started = {}  # started chat id -> (card, instruction)
+        self._progress = []
         for path in self.all_sessions():
             entries = load_session(path, cache=False) or []
             brief_card = brief_instruction = None
             pending = {}
+            first_user = True
             for index, entry in enumerate(entries):
                 if entry.get("type") != "message":
                     continue
                 message = entry["message"]
+                if message.get("role") == "user" and first_user:
+                    first_user = False
+                    reading = progress_reading(text_of(message.get("content")))
+                    if reading:
+                        header = next((e for e in entries if e.get("type") == "session"), {})
+                        self._progress.append((ms(header.get("timestamp", "")) or ms(entry.get("timestamp", "")) or 0, header.get("cwd"), *reading))
+                        break
                 if message.get("role") == "user" and brief_card is None:
                     brief_card, brief_instruction = plan_parts(text_of(message.get("content")))
                 if message.get("role") == "assistant":
@@ -223,6 +452,20 @@ class Index:
                     for chat in re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", result):
                         if chat in self.chat_sessions and chat not in self._started:
                             self._started[chat] = (brief_card, brief_instruction)
+        self._progress.sort(key=lambda reading: reading[0])
+
+    def at_time(self, record):
+        """The chat's own session that was running at the record's time, cut there: for a call the
+        builder can't find by its command or path (a codemode script's inner call)."""
+        when = ms(record["time"]) or 0
+        for path in self.chat_sessions.get(record.get("chatId") or "", []):
+            entries = load_session(path) or []
+            stamps = [ms(e.get("timestamp", "")) or 0 for e in entries]
+            known = [s for s in stamps if s]
+            if known and known[0] <= when <= known[-1] + 60_000:
+                cut = max(i for i, s in enumerate(stamps) if s and s <= when) + 1
+                return (path, cut)
+        return None
 
     def find_call(self, record):
         """The session and entry index of the record's tool call: the chat's own sessions first, then any (a subagent's)."""
@@ -328,11 +571,13 @@ def owner_messages(index, chat, entries_upto, when):
             brief_card, brief_instruction = plan_parts(text)
             if brief_card or brief_instruction:
                 card, instruction = brief_card or card, brief_instruction or instruction
-        if agent_written(text, index._agent_texts):
+        original = strip_turn_note(translations.get(text.strip(), text))
+        text = strip_turn_note(text)
+        # The translation of an engine notice no longer starts with its prefix: judge both texts.
+        if not original.strip() or agent_written(text, index._agent_texts) or agent_written(original, index._agent_texts):
             agent = True
             last_agent_text = None
             continue
-        original = translations.get(text.strip(), text)
         word = {"text": clip_head(original, 2000), "source": "typed", "at": stamp}
         if last_agent_text:
             word["source"] = "reply"
@@ -374,8 +619,9 @@ def branch_of(entries_upto, limit=40):
 
 
 def facts_of(entries_upto):
-    """The PRs this chat opened (call + result), and the commands that made things (for created.ts)."""
-    branch, ran = [], []
+    """The PRs this chat opened (call + result), and the commands that made things (for created.ts)
+    with their output (the ledger settles a lone creator's output, such as the udid `simctl create` prints)."""
+    branch, ran, outputs = [], [], []
     results = {}
     for entry in entries_upto:
         if entry.get("type") == "message" and entry["message"].get("role") == "toolResult":
@@ -395,7 +641,38 @@ def facts_of(entries_upto):
                 branch.append({"type": "message", "message": {"role": "toolResult", "toolCallId": part["id"], "toolName": part.get("name"), "content": [{"type": "text", "text": clip_head(text_of(result.get("content")), 800)}], "isError": bool(result.get("isError"))}})
             elif CREATOR.search(command) and not results.get(part.get("id"), {}).get("isError"):
                 ran.append(command)
-    return branch[-6:], ran[-30:]
+                result = results.get(part.get("id"))
+                outputs.append(clip_head(text_of(result.get("content")), 2000) if result else None)
+    return branch[-6:], ran[-30:], outputs[-30:]
+
+
+# Process ids a kill names (`kill [-SIG] 123 456`, `for p in 123 456`), for process_facts.
+KILL_PIDS = re.compile(r"\b(?:kill(?:\s+-[\w]+)*|for \w+ in)((?:\s+\d{2,7}\b)+)")
+
+
+def process_facts(entries_upto, command, cwd):
+    """What the fake machine says about the processes a kill names (machine.mjs `processes`). The
+    replay can't read a process's working directory, so it reads it from this chat's earlier tool
+    output: `roots` when an output line shows the pid together with the chat's folder (a path under
+    it: the process runs there, or runs its build), which is what production reads live
+    (core.ts `processFacts`: `inRoots`, so the review decides). Production may also find the chat's
+    marker in the process's environment (then no review at all); the transcript can't show that, so
+    no pid is marked as the chat's own. Anything else stays unknown ("foreign")."""
+    pids = sorted({p for m in KILL_PIDS.finditer(command or "") for p in m.group(1).split()})
+    if not pids or not cwd:
+        return {}
+    folder = re.compile(re.escape(cwd.rstrip("/")) + r"(?=$|[/\s'\"|:,)])")
+    facts = {}
+    for entry in entries_upto:
+        if entry.get("type") != "message" or entry["message"].get("role") != "toolResult":
+            continue
+        for line in text_of(entry["message"].get("content")).splitlines():
+            if not folder.search(line):
+                continue
+            for pid in pids:
+                if re.search(rf"(?<![\w.]){pid}(?![\w.])", line):
+                    facts[pid] = "roots"
+    return facts
 
 
 # --- labels -----------------------------------------------------------------
@@ -495,8 +772,22 @@ def main():
         kind = "prompted" if record.get("decidedBy") == "user" else "regression"
         split = "heldout" if heldout(record) else "dev"
         hit, own = index.find_call(record)
+        how = "session" if hit else None
+        unscorable = None
+        journal_cwd = None
+        if not hit:
+            hit = index.at_time(record)
+            if hit:
+                how, own = "session-time", True
         entries = load_session(hit[0]) if hit else []
         cut = entries[: hit[1]] if hit else []
+        if not hit:
+            rebuilt, journal_cwd, unscorable = rebuild_from_journal(index, record)
+            if rebuilt is not None:
+                how, own, cut = "journal", True, rebuilt
+            else:
+                how = "none"
+                unscorable = unscorable or "no conversation found"
         chat_entries = cut
         if hit and not own:
             # A subagent's session: the owner's words are the chat's own.
@@ -507,10 +798,11 @@ def main():
         if hit and not own:
             agent = True
         header = next((e for e in entries if e.get("type") == "session"), {}) if hit else {}
-        cwd = header.get("cwd") or (os.path.join(HOME, "Developer", "cypher"))
+        cwd = header.get("cwd") or journal_cwd or (os.path.join(HOME, "Developer", "cypher"))
         model = next((f"{e.get('provider')}/{e.get('modelId')}" for e in reversed(cut) if e.get("type") == "model_change"), None)
-        found_by["own session" if hit and own else "other session (subagent)" if hit else "not found"] += 1
-        branch, ran = facts_of(cut)
+        found_by[{"session": "own session" if own else "other session (subagent)", "session-time": "own session, cut at the record's time", "journal": "deleted chat: journal + progress readings"}.get(how, f"unscorable: {unscorable}")] += 1
+        branch, ran, ran_outputs = facts_of(cut)
+        processes = process_facts(cut, record.get("command"), cwd)
         case = {
             "id": record["_line"],
             "date": record["time"][:10],
@@ -524,12 +816,17 @@ def main():
             "recorded": {k: record[k] for k in ("decision", "decidedBy", "tier", "kind", "judge", "onceOnly", "choice", "reviewer", "explicit", "scope", "zone", "guard", "offered") if k in record},
             "group": kind,
             "split": split,
-            "owner": {"messages": words, "agentWritten": agent, "source": "rebuilt by eval/build_corpus.py from the chat's Pi sessions (cypher-translation-input originals; briefs/steering by prefix and by the texts agents sent)"},
+            "owner": {"messages": words, "agentWritten": agent, "source": JOURNAL_SOURCE if how == "journal" else "rebuilt by eval/build_corpus.py from the chat's Pi sessions (cypher-translation-input originals; briefs/steering by prefix and by the texts agents sent)"},
             "user": user_messages(cut),
             "label": label_for(record, words),
             **({"branch": branch} if branch else {}),
             **({"ran": ran} if ran else {}),
-            "context": "session" if hit else "none",
+            # The output of each `ran` command (null when its result is not in the session), for the ledger.
+            **({"ranOutputs": ran_outputs} if any(o is not None for o in ran_outputs) else {}),
+            **({"processes": processes} if processes else {}),
+            # session | session-time (own session cut at the record's time) | journal (deleted chat) | none
+            "context": how,
+            **({"unscorable": unscorable} if unscorable else {}),
         }
         if case["capability"] != "escalate" and "paths" not in case:
             # Nothing the replay can put to the extension (no path, no escalation).
@@ -541,9 +838,10 @@ def main():
         case = deep(case, sanitize)
         name = ("" if kind == "prompted" else "regression-") + split
         outputs[name].append(case)
-        if hit:
+        if how != "none":
             contexts[name][str(case["id"])] = deep({"branch": branch_of(cut), "model": model}, sanitize)
         stats[f"{name}"] += 1
+        stats[f"{name}:context={how}"] += 1
         stats[f"{name}:{case['label']['owner']}"] += 1
         stats[f"{name}:should={case['label']['should']}"] += 1
     os.makedirs(args.out, exist_ok=True)

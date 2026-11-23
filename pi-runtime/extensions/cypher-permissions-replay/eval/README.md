@@ -27,6 +27,8 @@ Data never goes into the repository. Everything below lives under
 | `run.mjs` | runs case files, writes per-case rows (with the explicit check's quote, source, targets and passed checks) and the summary |
 | `mechanism.mjs` | which mechanism made an outcome, from the decision's reasons (shared by run and report) |
 | `report.mjs` | before/after tables as Markdown (`RESULTS.md` is its output, plus notes) |
+| `merge.py` | merges results of one case file, the later file winning per case (rerun only the cases a corpus fix changed) |
+| `rootcause.py` | the root-cause table of RESULTS.md from a hand-made class map (kept in the data dir) and the live/stub results |
 
 ## Rebuilding the corpus
 
@@ -50,7 +52,17 @@ How the builder rebuilds each case:
   sessions. The record's tool call is found there (same command, or the same tool on the same path),
   the latest one at or before the record's time. If it is only in another session (a subagent's),
   that session is used for the conversation and `agentWritten` is set.
-- **cwd**: the session header's `cwd`.
+  When no tool call carries the record's command (a codemode script's inner call), the chat's own session that
+  was running at the record's time is cut there (`context: "session-time"`).
+- **Deleted chats** (`context: "journal"`): the session file and chat doc are gone but `journals/<chatId>.jsonl`
+  stays. Its events become Pi-like entries (agent text, tool calls and results, ask_user answers, turn ends); the
+  owner's messages come from the progress reporter's sessions, whose prompt quotes the turn's latest user message
+  (`<request>`, as Pi stored it) and the turn's `[Run]` commands. A reading belongs to the chat when most of its
+  commands, the latest included, are that chat's; its request opens the turn of its first command. When the
+  record's turn has no reading, the case is **unscorable** (`context: "none"`, `unscorable: <reason>`): run.mjs,
+  report.mjs, headline.py and merge.py leave it out of every rate (older result rows count only for cases with
+  their own session, `mechanism.mjs` `scored`).
+- **cwd**: the session header's `cwd` (a deleted chat: its journal's `sessionStarted` cwd).
 - **Owner words** (`owner.messages`, `OwnerWord {text, source, question?, proposal?, at?}`), only
   what precedes the record:
   - `typed`: a user message the owner wrote (the original from `cypher-translation-input` when Pi
@@ -65,11 +77,18 @@ How the builder rebuilds each case:
     engine's prefixes (`AGENT_PREFIXES`) and by matching the texts agents sent
     (`start_session`/`steer_session`/`send_message`/`subagent` arguments); they set `agentWritten`
     and stay only in `user`. This is a heuristic: the engine's signed command authors are in the
-    Loro docs, which this builder doesn't read.
+    Loro docs, which this builder doesn't read. Engine notices are also told by markers anywhere in the
+    text (`AGENT_MARKERS`, a workspace wake notice) and judged on both the stored text and its translation
+    original; the note the engine puts ahead of each owner turn in a workspace's own chat
+    (`[Cypher: where your plans stand now …] … Use get_work for the details.`) is cut off, the rest is the owner's.
 - **user**: the last 8 user messages as Pi stored them (translated, briefs included).
 - **branch**: earlier `gh pr create` / `glab mr create` calls of the session with their results
   (the PRs this chat opened). **ran**: earlier commands that make things (worktrees, branches,
-  mkdir, clones, containers, simulators), for `created.ts`.
+  mkdir, clones, containers, simulators), for `created.ts`; **ranOutputs** their output, so the fake
+  machine plans and settles them as a real run does (a lone creator's printed name counts).
+- **processes** (machine.mjs): for each pid a kill names, `roots` when an earlier output line of the chat
+  shows it with the chat's folder (production's `inRoots`), else unknown ("foreign"). Never `chat`: the
+  marker in a process's environment can't be read from a transcript.
 - **verdict** (stub): the recorded judge verdict when the model saw the record (`judgeVerdict`;
   an old "Not sure enough to approve on its own" is an approve); otherwise none, and the stub
   answers ask-user.
@@ -134,12 +153,17 @@ node $EVAL/report.mjs --results $D/results --corpus $D/corpus > /tmp/tables.md
 $EVAL/round.sh <sha> <label> [stub|live|all]     # live parts need escalation
 node $EVAL/report.mjs --results $D/results --corpus $D/corpus --after <label> > /tmp/tables.md
 ```
+After a corpus fix that changes some held-out cases, rerun only those (a subset case file) and merge:
+`python3 -I $EVAL/merge.py --corpus $D/corpus/heldout.json --label <label>-live --out $D/results/<label>-live.json
+$D/results/<earlier>-live.json $D/results/<subset>-live.json` (later files win per case).
+
 `before-live*.json` are the corrected (`withUserMessages`) runs; the uncorrected ones are kept as `*-v1.json`.
 
 ## Metrics (in the summary)
 
-- `promptRateOwnerApproved`: share of owner-allowed cases (not mutants, not adversarial) that
-  still ask; also split by `should` (`promptRateShouldAllow`, `promptRateShouldUnknown`).
+- `promptRateOwnerApproved`: share of owner-allowed cases (not mutants, not adversarial, not unscorable) that
+  still ask; also split by `should` (`promptRateShouldAllow`, `promptRateShouldUnknown`) and by how the
+  conversation was found (`promptRateByContext`); `unscorable` lists the cases left out.
 - `falseApprovalsOwnerDenied`, `falseApprovalsAdversarial` (per class): approvals where the case
   must ask (`denied` counts as not approved).
 - `mutationStability`: share of mutants whose ask/not-ask outcome equals their base's, per family

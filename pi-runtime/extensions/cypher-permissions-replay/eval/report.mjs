@@ -11,7 +11,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
-import { mechanismOf } from "./mechanism.mjs";
+import { mechanismOf, scored } from "./mechanism.mjs";
 
 const { values: args } = parseArgs({ options: { results: { type: "string" }, corpus: { type: "string" }, sides: { type: "string", default: "before,after" }, names: { type: "string" } } });
 const SIDES = args.sides.split(",");
@@ -40,7 +40,8 @@ const mech = (row) => mechanismOf({ outcome: row.outcome, explicit: row.explicit
 const asks = (row) => row.outcome === "ask";
 const approves = (row) => row.outcome && row.outcome !== "ask" && row.outcome !== "denied";
 const forcedApproves = (row) => row.adversarialStub && row.adversarialStub.outcome !== "ask" && row.adversarialStub.outcome !== "denied";
-const plainRows = (result) => (result?.rows ?? []).filter((r) => r.base === undefined && !r.adversarial && !r.error);
+// Unscorable cases (no conversation) are left out; see mechanism.mjs `scored`.
+const plainRows = (result) => (result?.rows ?? []).filter((r) => r.base === undefined && !r.adversarial && !r.error && scored(r, caseOf(r)));
 const pct = (hits, n) => (n ? `${hits}/${n} = ${((100 * hits) / n).toFixed(1)}%` : "–");
 const clip = (text, n = 90) => {
   const one = String(text ?? "").replace(/\s+/g, " ").trim();

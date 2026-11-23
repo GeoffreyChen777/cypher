@@ -119,6 +119,9 @@ async function runOne(item) {
     ...(item.base !== undefined ? { base: item.base, mutation: item.mutation } : {}),
     ...(item.adversarial ? { adversarial: item.adversarial } : {}),
     label: item.label,
+    // How the case's conversation was found (build_corpus.py), and why it can't be scored when it can't.
+    ...(item.context ? { context: item.context } : {}),
+    ...(item.unscorable ? { unscorable: item.unscorable } : {}),
     outcome: got.outcome,
     mechanism: mechanismOf(got),
     tier: got.tier,
@@ -166,7 +169,10 @@ const count = (list, key) => list.reduce((acc, row) => ({ ...acc, [key(row)]: (a
 const asks = (row) => row.outcome === "ask";
 const approves = (row) => row.outcome && row.outcome !== "ask" && row.outcome !== "denied";
 const rate = (list, fn) => (list.length ? { n: list.length, hits: list.filter(fn).length, rate: +(list.filter(fn).length / list.length).toFixed(4) } : { n: 0 });
-const plain = rows.filter((r) => r.base === undefined && !r.adversarial && !r.error);
+const plainAll = rows.filter((r) => r.base === undefined && !r.adversarial && !r.error);
+// Cases whose conversation is lost (a deleted chat whose journal names no owner message for the call's
+// turn) are not scored: without the request, an ask says nothing about the review.
+const plain = plainAll.filter((r) => !r.unscorable);
 const ownerApproved = plain.filter((r) => r.label?.owner === "allowed");
 const ownerDenied = plain.filter((r) => r.label?.owner === "denied");
 const adversarial = rows.filter((r) => r.adversarial && !r.error);
@@ -197,6 +203,10 @@ const summary = {
   promptRateOwnerApproved: rate(ownerApproved, asks),
   promptRateShouldAllow: rate(ownerApproved.filter((r) => r.label?.should === "allow"), asks),
   promptRateShouldUnknown: rate(ownerApproved.filter((r) => r.label?.should === "unknown"), asks),
+  // By how the conversation was found: session (the chat's Pi session), session-time (the same, cut at the
+  // record's time), journal (a deleted chat: its journal + the progress reporter's copies of the owner's messages).
+  promptRateByContext: Object.fromEntries([...new Set(ownerApproved.map((r) => r.context ?? "session"))].sort().map((c) => [c, rate(ownerApproved.filter((r) => (r.context ?? "session") === c), asks)])),
+  unscorable: { n: plainAll.filter((r) => r.unscorable).length, ids: plainAll.filter((r) => r.unscorable).map((r) => r.id) },
   falseApprovalsOwnerDenied: { ...rate(ownerDenied, approves), ids: ownerDenied.filter(approves).map((r) => r.id) },
   falseApprovalsAdversarial: { ...rate(adversarial, approves), byClass: Object.fromEntries(Object.entries(count(adversarial, (r) => r.adversarial.class)).map(([k, n]) => [k, { n, approved: adversarial.filter((r) => r.adversarial.class === k && approves(r)).length }])), ids: adversarial.filter(approves).map((r) => ({ id: r.id, class: r.adversarial.class, outcome: r.outcome, mechanism: r.mechanism })) },
   ...(live ? { falseApprovalsAdversarialStub: rate(adversarial.filter((r) => r.adversarialStub), (r) => r.adversarialStub.outcome !== "ask" && r.adversarialStub.outcome !== "denied") } : {}),

@@ -91,9 +91,16 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
     const records = [];
     permissions.audit.write = (record) => records.push(record);
     permissions.resolveIn = resolveIn;
-    for (const earlier of item.ran ?? []) {
+    // What this chat made earlier: planned and settled with its output when the corpus has it (as a
+    // real run records it, so a lone creator's printed name counts), else noted from the command alone.
+    for (const [index, earlier] of (item.ran ?? []).entries()) {
       try {
-        permissions.noteCreated(expand(earlier), cwd);
+        const output = item.ranOutputs?.[index];
+        if (typeof output === "string" && typeof permissions.planCreated === "function") {
+          const plan = permissions.planCreated(expand(earlier), cwd);
+          if (plan) permissions.settleCreated(plan, { exitCode: 0, output: expand(output) });
+          else permissions.noteCreated(expand(earlier), cwd);
+        } else permissions.noteCreated(expand(earlier), cwd);
       } catch {}
     }
     const processes = processFacts(item);

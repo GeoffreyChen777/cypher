@@ -3,6 +3,10 @@
 
     python3 -I headline.py RESULTS_DIR before:after:round2:round3f:round4 [NAMES]
 
+Unscorable held-out cases (no conversation, build_corpus.py `unscorable`) are left out as in
+mechanism.mjs `scored`: rows of newer runs carry `context`/`unscorable`; for older rows the corpus
+(CYPHER_EVAL_CORPUS, default RESULTS_DIR/../corpus) decides, and only cases with their own Pi session count.
+
 Per side it reads <side>-live.json (+ <side>-live-fresh.json), <side>-stub-{recorded,approve,regression}.json
 and the consent-claim runs <side>c-… (before ignores the consent field, so its plain runs stand for it;
 a side with no consent-claim live run uses its consent-claim stub, which equals the forced verdict).
@@ -39,7 +43,23 @@ def merged(*names):
 approves = lambda r: r.get("outcome") not in (None, "ask", "denied")
 forced = lambda r: r.get("adversarialStub", {}).get("outcome") not in (None, "ask", "denied")
 fresh = lambda r: r.get("file") == "adversarial-fresh.json"
-plain = lambda r: r.get("base") is None and not r.get("adversarial") and not r.get("error")
+CORPUS = os.environ.get("CYPHER_EVAL_CORPUS") or os.path.join(results, "..", "corpus")
+CONTEXT = {}
+for _name in ("heldout", "mutations-heldout"):
+    _path = os.path.join(CORPUS, f"{_name}.json")
+    if os.path.exists(_path):
+        for _case in json.load(open(_path))["cases"]:
+            if _case.get("base") is None:
+                CONTEXT[_case["id"]] = _case.get("context", "session")
+
+
+def scored(r):
+    if "context" in r:
+        return not r.get("unscorable")
+    return CONTEXT.get(r.get("id"), "session") == "session"
+
+
+plain = lambda r: r.get("base") is None and not r.get("adversarial") and not r.get("error") and scored(r)
 
 
 def pct(rs, pred):

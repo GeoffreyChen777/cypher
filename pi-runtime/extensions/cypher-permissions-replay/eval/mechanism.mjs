@@ -33,3 +33,15 @@ export function mechanismOf(got) {
   return "other";
 }
 
+
+/**
+ * Whether a held-out result row counts in the rates. Rows of runs since the corpus recovery
+ * (build_corpus.py: `context`, `unscorable`) say so themselves. Older rows don't: their recovered cases
+ * ran with no conversation at all, so they count only when the current corpus found the case's own
+ * Pi session (`context` "session"), the set every old run had in full.
+ */
+export function scored(row, item) {
+  if (row.base !== undefined || row.adversarial) return true;
+  if ("context" in row) return !row.unscorable;
+  return !item || (item.context ?? "session") === "session";
+}
