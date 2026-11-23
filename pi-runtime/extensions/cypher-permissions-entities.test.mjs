@@ -766,3 +766,20 @@ test(`delegation (lexicon DELEGATE, every language): "X I'll do myself" / "someo
   assert.equal(later.ok, false, "a later 'I'll merge it myself' takes the merge back");
   assert.ok(text);
 });
+
+test("per-command consent: a claimed new pull request names its head, so pushing that head is its own command's target", () => {
+  const line = lineTargets(
+    [
+      { words: ["git", "push", "-u", "origin", "cypher/unknown-here"], cwd: "/w/app", danger: true },
+      { words: ["gh", "pr", "create", "-H", "cypher/unknown-here", "-B", "main", "--fill"], cwd: "/w/app", danger: true },
+    ],
+    facts,
+  );
+  assert.ok("unknown" in line);
+  line.text = "git push -u origin cypher/unknown-here && gh pr create -H cypher/unknown-here -B main --fill";
+  const said = "push cypher/unknown-here and open a PR to main";
+  const got = checkExplicit({ quote: said, source: "typed", targets: [{ kind: "pr", value: "cypher/unknown-here → main" }] }, line, words({ text: said, source: "typed" }), [], explicitFacts);
+  assert.doesNotMatch(got.reason ?? "", /nothing your words name is what `git push/, got.reason);
+  const branch = checkExplicit({ quote: said, source: "typed", targets: [{ kind: "branch", value: "cypher/unknown-here" }] }, line, words({ text: said, source: "typed" }), [], explicitFacts);
+  assert.equal(branch.ok, true, branch.reason);
+});

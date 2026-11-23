@@ -1386,7 +1386,9 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
     // (`gh release create v2 && npm publish`: the release's consent brings none for the publish).
     for (const command of "unread" in read ? (read.unread ?? []) : []) {
       const own = (value: string) => new RegExp(`(?<![A-Za-z0-9_.-])${value.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_-])`, "i").test(command.text);
-      if (!command.open && !claimed.some((item) => item.value.trim() !== "" && own(item.value))) return result(["quote"], `${unknown}, and nothing your words name is what \`${command.text.slice(0, 60)}\` acts on`, source);
+      // A claimed target's names: itself, or a new pull request's head and base ("x → main"), whose head the push publishes.
+      const names = (value: string) => [value, ...value.split(/\s*(?:→|->)\s*|\s+of\s+/)].map((name) => name.trim()).filter((name) => name !== "");
+      if (!command.open && !claimed.some((item) => names(item.value).some(own))) return result(["quote"], `${unknown}, and nothing your words name is what \`${command.text.slice(0, 60)}\` acts on`, source);
       if (command.actions.length && !command.actions.some((action) => actionWords(action).test(quote))) return result(["quote"], `${unknown}, and your words "${quote}" don't ask to ${command.actions.join(" or ")} (\`${command.text.slice(0, 60)}\`)`, source);
     }
     return result(["quote", "current"], undefined, { ...source, once: true, unknown, ...(followUps.length ? { followUps } : {}) });
