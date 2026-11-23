@@ -187,6 +187,8 @@ async function runOne(item) {
     onceOnly: got.onceOnly,
     reviewer: got.reviewer,
     recorded: item.recorded ? { tier: item.recorded.tier, decidedBy: item.recorded.decidedBy, decision: item.recorded.decision } : undefined,
+    // Earlier prompts of the chat replayed first (`deniedEarlier`): whether each was asked and recorded as a denial.
+    ...(got.earlier ? { earlier: got.earlier } : {}),
   };
   if (live && item.adversarial) {
     const forced = await replayOn(item, { complete: stubbed });
@@ -216,6 +218,7 @@ process.stderr.write("\n");
 machine.cleanup();
 rows.sort((a, b) => String(a.file).localeCompare(String(b.file)) || (typeof a.id === "number" && typeof b.id === "number" ? a.id - b.id : String(a.id).localeCompare(String(b.id))));
 
+const judgeDown = (row) => row.judge === "unavailable" || row.judge === "paused";
 const count = (list, key) => list.reduce((acc, row) => ({ ...acc, [key(row)]: (acc[key(row)] ?? 0) + 1 }), {});
 const asks = (row) => row.outcome === "ask";
 const approves = (row) => row.outcome && row.outcome !== "ask" && row.outcome !== "denied";
@@ -268,6 +271,9 @@ const summary = {
   mutationStabilityPassingBase: { ...rate(stable.filter((r) => r.baseOutcome !== "ask"), (r) => r.stable), byFamily: Object.fromEntries(Object.keys(byKind).map((family) => [family, rate(stable.filter((r) => r.baseOutcome !== "ask" && r.mutation?.family === family), (r) => r.stable)])) },
   mutationStability: { ...rate(stable, (r) => r.stable), byFamily: byKind, unstable: stable.filter((r) => !r.stable).slice(0, 200).map((r) => ({ id: r.id, base: r.base, family: r.mutation?.family, variant: r.mutation?.variant, base_outcome: r.baseOutcome, outcome: r.outcome, mechanism: r.mechanism })) },
   errors: rows.filter((r) => r.error).length,
+  // Requests the reviewing model never decided (timeouts, errors, a pause after them): an ask by the floor's
+  // no-judge row, not the judge's. A live run is clean only with none.
+  judgeUnavailable: { n: rows.filter(judgeDown).length, ids: rows.filter(judgeDown).map((r) => r.id) },
 };
 if (args.compare) {
   const before = JSON.parse(readFileSync(args.compare, "utf8")).rows;

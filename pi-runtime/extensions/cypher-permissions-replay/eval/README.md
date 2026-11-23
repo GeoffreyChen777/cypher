@@ -203,6 +203,16 @@ chat's earlier creators run for real there (`ranRun`: `git branch`, `git tag -a`
 and a spoof's `echo`), between plan and settle, so the ledger observes what they made, and refs one case makes
 must not exist for another. `EVAL_DEBUG=1` prints each such run with the ledger.
 
+Round 4 setup keys (blind set #4 on): `otherChats` [{kind, name, note}] goes into another chat's ledger for that case only
+(machine.mjs `otherChats`, names expanded like every other path), and what another chat made exists on the machine (its
+branches and tags in the case's repository, its folders); `deniedEarlier` [{tool, command|paths, choice deny|dismissed,
+at}] becomes the case's `deniedEarlier`: machine.mjs replays each such prompt first, on the same permission object (so
+the same chat), as production records it — the request is asked (stub verdict ask-user on a standing concern), the
+dialog answers Deny or nothing, the owner's words are those up to `at` — and the conversation shows the tool call with
+the result the agent got. Each row's `earlier` says whether the prompt was shown and a denial recorded. `ownerAsked`
+(latest|earlier|routine|none) is kept as `blind.ownerAsked`; `--score` splits by it (`byOwnerAsked`) and lists
+`judgeUnavailable` and `deniedEarlier` rows. Any case file may carry `deniedEarlier` (the held-out denied variants do).
+
 ```sh
 node $EVAL/blind.mjs --cases $D/blind-1/cases.json --out $D/blind-corpus/blind-1.json
 node $EVAL/run.mjs --extensions <ext> --owner-words full --cases $D/blind-corpus/blind-1.json \
@@ -238,6 +248,9 @@ audit-new/corpus/context-heldout.json`.
   keyword map (`run.mjs: mechanismOf`): `floor` (always-ask), `A consent`, `B target`,
   `C provenance`, `D lifecycle` (from the explicit check's reason), `judge said ask`,
   `E shell/unknown` (rules can't read the line), or `approved:<by>` / `denied`.
+- `judgeUnavailable`: requests the reviewing model never decided (timeouts, errors, a pause after them; row
+  `judge` `unavailable`/`paused`). Their asks are the floor's no-judge row, not judge decisions: a live run is clean
+  only with none (rerun those cases alone).
 - Regression: run `regression-heldout.json` (auto-decided records) before and after with
   `--compare` to see what newly asks or newly passes. Only the difference means something: the
   fake machine has none of the owner's permission rules, so rule-decided records reach the stub

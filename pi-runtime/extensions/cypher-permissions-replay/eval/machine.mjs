@@ -125,7 +125,7 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
     permissions.appendEntry = () => {};
     // Other chats' ledgers (round 4, core.ts `othersMade`): only what the case says other chats made
     // (`otherChats`: ledger entries), never the ledgers of the other cases replayed on this machine.
-    if ("othersMade" in permissions) permissions.othersMade = () => (item.otherChats ?? []).map((entry) => ({ chatId: "other-chat", ...entry }));
+    if ("othersMade" in permissions) permissions.othersMade = () => (item.otherChats ?? []).map((entry) => ({ chatId: "other-chat", ...entry, name: expand(String(entry.name)) }));
     const records = [];
     permissions.audit.write = (record) => records.push(record);
     permissions.resolveIn = resolveIn;
@@ -187,6 +187,46 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
     const base = conversation ? JSON.parse(expand(JSON.stringify(conversation))) : user;
     const extra = conversation ? [] : (item.branch ?? []);
     const branch = [...base, ...JSON.parse(expand(JSON.stringify(extra)))];
+    // `deniedEarlier` (round 4): earlier prompts of this chat the owner answered Deny or closed (`dismissed`),
+    // replayed through the same permission object before the case's request, as production records them: the
+    // request is asked (a stub verdict ask-user on a standing concern), the dialog answers "Deny" or nothing, and the owner's words
+    // are those before the prompt (`at`; all of them when it has none).
+    const earlier = [];
+    for (const denied of item.deniedEarlier ?? []) {
+      const fullWords = permissions.ownerWords;
+      if (item.owner && typeof denied.at === "number") {
+        const wordsThen = { ...item.owner, messages: (item.owner.messages ?? []).filter((word) => typeof word.at !== "number" || word.at <= denied.at) };
+        permissions.ownerWords = ownerWordsFor(JSON.parse(expand(JSON.stringify(wordsThen))), ownerWords);
+      }
+      const shown = [];
+      const earlierCtx = {
+        cwd,
+        hasUI: true,
+        ui: {
+          async select(title, options) {
+            shown.push(title);
+            return denied.choice === "deny" ? "Deny" : undefined;
+          },
+          notify() {},
+        },
+        branch: () => branch,
+        // A concern that stands whatever the owner wrote (judge.ts CONCERN_TABLE), so the prompt is shown, as it was.
+        complete: async () => JSON.stringify({ decision: "ask-user", reason: "an earlier prompt the owner answered", concern: "not-owner" }),
+      };
+      const recordedBefore = permissions.denials?.any?.() ? 1 : 0;
+      try {
+        const line = denied.command !== undefined ? expand(denied.command) : undefined;
+        if ((denied.capability ?? "escalate") === "escalate" && line !== undefined) await permissions.requestEscalation(line, { label: "replay" }, earlierCtx);
+        else if (denied.tool === "request_permission") await permissions.requestPermission({ capability: denied.capability, paths: denied.paths.map(expand) }, earlierCtx);
+        else await permissions.authorize(denied.paths.map((path) => ({ capability: denied.capability ?? "read", path: expand(path) })), { tool: denied.tool }, earlierCtx);
+      } catch (error) {
+        earlier.push({ choice: denied.choice, error: String(error).slice(0, 200) });
+        permissions.ownerWords = fullWords;
+        continue;
+      }
+      permissions.ownerWords = fullWords;
+      earlier.push({ choice: denied.choice, prompted: shown.length > 0, denialRecorded: Boolean(permissions.denials?.any?.()) && !recordedBefore });
+    }
     const judged = [];
     const answers = [];
     const dialogs = [];
@@ -209,12 +249,14 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
       },
     };
     const before = permissions.grants.all().filter((grant) => grant.scope !== "once").length;
+    const mark = records.length;
     let result;
     const command = item.command !== undefined ? expand(item.command) : undefined;
     if (item.capability === "escalate") result = await permissions.requestEscalation(command, proposal ?? item.proposal ?? { label: "replay" }, ctx);
     else if (item.tool === "request_permission") result = await permissions.requestPermission({ capability: item.capability, paths: item.paths.map(expand) }, ctx);
     else result = await permissions.authorize(item.paths.map((path) => ({ capability: item.capability, path: expand(path) })), { tool: item.tool }, ctx);
-    const audit = records.at(-1) ?? {};
+    // The case's own record (not one of an earlier prompt's, `deniedEarlier`).
+    const audit = records.slice(mark).at(-1) ?? {};
     const remembered = permissions.grants.all().filter((grant) => grant.scope !== "once").length > before;
     let outcome;
     if (dialogs.length) outcome = "ask";
@@ -232,6 +274,7 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
       reviewer: plain(audit.reviewer),
       answer: answers.at(-1),
       dialog: dialogs[0]?.title ? plain(String(dialogs[0].title)).slice(0, 400) : undefined,
+      ...(earlier.length ? { earlier } : {}),
     };
   }
 
