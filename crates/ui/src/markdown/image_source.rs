@@ -85,6 +85,8 @@ impl Format {
             .then_some(Self::Svg)
     }
 
+    /// As the shared vectors spell it.
+    #[cfg(test)]
     pub fn mime(self) -> &'static str {
         match self {
             Self::Png => "image/png",
@@ -106,6 +108,8 @@ pub enum Rejection {
 }
 
 impl Rejection {
+    /// As the shared vectors spell it.
+    #[cfg(test)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Insecure => "insecure",
