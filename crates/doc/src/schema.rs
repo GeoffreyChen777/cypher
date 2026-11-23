@@ -7,6 +7,8 @@
 //!   completedAt?, comments?: json, models?: json, turnChanges?: json, recovery?: json }
 //! - `commands`: LoroList of LoroMap {
 //!   id, kind, payload(json), issuedBy, issuedAt, basedOn?, expiresAt?, status, resolution? }
+//! - `planBodies`: LoroMap { <workId>: LoroMap { plan?: json, result?: json } }  (host-only
+//!   writer; a workspace chat's long plan text, see `schema/plan_bodies.rs`)
 //!
 //! Part maps: { id, kind: "text"|"tool"|"input"|"error", text?: LoroText, call?: json,
 //! isError?, questions?: json, resolved?, message? }. Text bodies are **LoroText** so streaming
@@ -23,10 +25,12 @@ use crate::constants::SESSION_SCHEMA_VERSION;
 use crate::parts::{MessagePart, MessageStatus};
 
 mod launch;
+mod plan_bodies;
 mod salvage;
 mod segment_writer;
 
 pub use launch::{LaunchFact, LaunchRecord, latest_launch};
+pub use plan_bodies::PLAN_BODIES;
 use salvage::*;
 pub use segment_writer::*;
 

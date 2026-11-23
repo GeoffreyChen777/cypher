@@ -189,8 +189,9 @@ impl EngineRpc {
                 }
             }
             MutateParams::SaveBotRoutine { mut routine } => {
-                routine.clamp();
+                // Before the clamp: a prompt over its cap is refused, not cut.
                 routine.validate().map_err(RpcError::BadParams)?;
+                routine.clamp();
                 if let Some(space_id) = routine.target.space_id() {
                     let bot = ws
                         .bot(&routine.bot_id)
@@ -351,9 +352,11 @@ impl EngineRpc {
                 send,
                 text,
             } => {
-                let text = text
-                    .map(|t| p::clip(&t, p::ANSWER_MAX))
-                    .filter(|t| !t.is_empty());
+                // Refused over its cap rather than cut before it is sent.
+                if let Some(text) = &text {
+                    p::check_review_text(text).map_err(RpcError::BadParams)?;
+                }
+                let text = text.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
                 let review = p::ReviewDecision {
                     send,
                     text,

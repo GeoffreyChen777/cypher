@@ -10,6 +10,19 @@ extension AppModel {
         enterDemoMode()
         if args.contains("-demo-many") { demo?.addManyProjects() }
         if args.contains("-demo-history") { demo?.addSessionHistory() }
+        if args.contains("-demo-long-plans"), let demo {
+            // DemoDataset+PlanBodies.swift: bodies now, never, or after N s.
+            let late = args.firstIndex(of: "-plan-bodies-late").flatMap { ix in
+                ix + 1 < args.count ? Double(args[ix + 1]) : nil
+            }
+            demo.addLongPlans(bodies: late == nil && !args.contains("-plan-bodies-missing"))
+            if let late {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(late))
+                    demo.writePlanBodies()
+                }
+            }
+        }
         if let ix = args.firstIndex(of: "-route"), ix + 1 < args.count {
             let spec = args[ix + 1]
             if spec.hasPrefix("chat:") {

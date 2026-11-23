@@ -55,6 +55,10 @@ pub(super) struct Wake {
     pub what: &'static str,
     /// Who wrote the output ([`cypher_doc::command_author`]).
     pub author: &'static str,
+    /// Where the whole output is when the turn's copy is cut, e.g. "get_work
+    /// with work_id w1 shows all of it"; `None` cuts it with an ellipsis
+    /// alone.
+    pub whole: Option<String>,
 }
 
 /// How posting a notice went.
@@ -75,7 +79,17 @@ pub(super) fn wake_prompt(wake: &Wake, output: &str) -> String {
     let output = if output.is_empty() {
         "(no output)".to_string()
     } else {
-        p::clip(output, WAKE_OUTPUT_MAX)
+        let clipped = p::clip(output, WAKE_OUTPUT_MAX);
+        match &wake.whole {
+            // Say it was cut, and where the rest is, rather than let the
+            // agent take the ellipsis for the end.
+            Some(whole) if clipped != output => format!(
+                "{clipped}\n\n(Only its first {WAKE_OUTPUT_MAX} of {} characters are \
+                 shown here; {whole}.)",
+                output.chars().count()
+            ),
+            _ => clipped,
+        }
     };
     format!(
         "[{}]\n\n{output}\n\n(A notice from your workspace, not a message from your owner: {} \
@@ -227,10 +241,11 @@ mod tests {
 
     #[test]
     fn the_turn_carries_the_output_and_asks_for_a_short_answer() {
-        let wake = Wake {
+        let mut wake = Wake {
             headline: "Routine \"Morning brief\" finished".into(),
             what: "this routine just ran",
             author: cypher_doc::command_author::ROUTINE,
+            whole: None,
         };
         let prompt = wake_prompt(&wake, "  Three sessions moved.\n");
         assert!(
@@ -242,5 +257,19 @@ mod tests {
         assert!(wake_prompt(&wake, " ").contains("(no output)"));
         let long = "x".repeat(WAKE_OUTPUT_MAX * 2);
         assert!(wake_prompt(&wake, &long).chars().count() < WAKE_OUTPUT_MAX + 700);
+        assert!(!wake_prompt(&wake, &long).contains("are shown here"));
+
+        // A plan's turn says its output was cut, and where the rest is.
+        wake.whole = Some("get_work with work_id w1 shows all of it".into());
+        let cut = wake_prompt(&wake, &long);
+        assert!(cut.chars().count() < WAKE_OUTPUT_MAX + 800);
+        assert!(
+            cut.contains("(Only its first 6000 of 12000 characters are shown here; get_work with work_id w1 shows all of it.)"),
+            "{cut}"
+        );
+        assert!(
+            !wake_prompt(&wake, "short").contains("shown here"),
+            "nothing to say when nothing was cut"
+        );
     }
 }

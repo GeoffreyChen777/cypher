@@ -837,3 +837,67 @@ async fn the_owners_photo_reaches_connections_and_follows_changes() {
         "an update, not a second connection: {connected:?}"
     );
 }
+
+/// The owner's edit of an answer to review over `ANSWER_MAX` is refused
+/// with the overshoot instead of being cut before it is sent (plan-body.md
+/// §9, D8); one at the cap is recorded whole. The exchange belongs to a
+/// workspace this engine doesn't host, so nothing acts on the decision.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_review_text_over_its_cap_is_refused_not_cut() {
+    let tmp = tempfile::tempdir().unwrap();
+    let core = support::assemble_mock(&tmp.path().join("data"));
+    let draft = BotExchange {
+        id: "ex-long".into(),
+        bot_id: "bot-elsewhere".into(),
+        connection_id: "conn-1".into(),
+        direction: ExchangeDirection::Incoming,
+        question: "Can we ship Friday?".into(),
+        answer: Some("Draft.".into()),
+        state: ExchangeState::AwaitingReview,
+        asked_at: 1,
+        answered_at: None,
+        review: None,
+    };
+    core.workspace
+        .put_record(
+            cypher_proto::KIND_BOT_EXCHANGES,
+            &draft.id,
+            &draft,
+            cypher_engine::RecordFields::All,
+        )
+        .unwrap();
+    let review = |text: String| {
+        serde_json::json!({
+            "op": "reviewBotExchange",
+            "exchangeId": "ex-long",
+            "send": true,
+            "text": text,
+        })
+    };
+    let client = cypher_rpc::memory_client(core.rpc_service());
+    let err = client
+        .call(
+            cypher_rpc::methods::MUTATE,
+            review("x".repeat(cypher_proto::ANSWER_MAX + 10)),
+        )
+        .await
+        .expect_err("over the cap");
+    assert!(
+        err.to_string().contains(
+            "The answer has 8,010 characters, 10 over the 8,000 an answer holds. Nothing is \
+             cut: shorten it and send it again."
+        ),
+        "{err}"
+    );
+    let row = |core: &EngineCore| {
+        core.workspace
+            .record::<BotExchange>(cypher_proto::KIND_BOT_EXCHANGES, "ex-long")
+            .expect("the exchange row")
+    };
+    assert!(row(&core).awaiting_review(), "nothing was decided");
+    let whole = "界".repeat(cypher_proto::ANSWER_MAX);
+    mutate(&core, review(whole.clone())).await;
+    let decided = row(&core).review.expect("the decision");
+    assert!(decided.send);
+    assert_eq!(decided.text, Some(whole));
+}

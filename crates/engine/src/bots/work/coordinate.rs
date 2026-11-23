@@ -51,6 +51,18 @@ fn refuse(text: impl Into<String>) -> EngineError {
     EngineError::Other(text.into())
 }
 
+/// `propose_plan`'s refusal of details over a plan's cap, with the
+/// overshoot (docs/design/plan-body.md §7).
+fn plan_too_long(len: usize) -> String {
+    format!(
+        "The steps' details add up to {len} characters, {} over the {} a plan holds in \
+         all. Nothing is cut for you: shorten them, or split the work into two plans, and \
+         propose again.",
+        len.saturating_sub(p::PLAN_BODY_MAX),
+        p::PLAN_BODY_MAX
+    )
+}
+
 fn parse<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Result<T, EngineError> {
     serde_json::from_value(value.clone()).map_err(|err| refuse(format!("Invalid arguments: {err}")))
 }
@@ -689,13 +701,8 @@ impl Bots {
             }
             details += step.detail.as_deref().map_or(0, count);
         }
-        if details > p::PLAN_DETAILS_MAX {
-            return Err(refuse(format!(
-                "The steps' details add up to {details} characters; a plan holds at most {} \
-                 in all. Nothing is cut for you: shorten them, or split the work into two \
-                 plans, and propose again.",
-                p::PLAN_DETAILS_MAX
-            )));
+        if details > p::PLAN_BODY_MAX {
+            return Err(refuse(plan_too_long(details)));
         }
         let time_limit = match args.time_limit_minutes {
             None => view.bot.plans.time_limit_minutes(),
@@ -763,6 +770,7 @@ impl Bots {
         }
         let instruction = self.latest_owner_message(&chat.id).await;
         let instruction_len = instruction.trim().chars().count();
+        let now = p::now_ms();
         let mut work = BotWork {
             id: new_id(),
             bot_id: view.bot.id.clone(),
@@ -779,7 +787,7 @@ impl Bots {
             chat_id: chat.id.clone(),
             tool_call_id: args.tool_call_id.filter(|id| !id.is_empty()),
             thread_chat_id: None,
-            created_at: p::now_ms(),
+            created_at: now,
             started_at: None,
             ended_at: None,
             result: None,
@@ -790,8 +798,26 @@ impl Bots {
             time_added_minutes: None,
             warned_at: None,
             coordinator_choice,
+            body_rev: None,
+            result_rev: None,
         };
-        work.clamp();
+        // The row keeps previews; what they cut goes to the chat doc first
+        // (docs/design/plan-body.md §4), so no device sees a row whose body
+        // the host failed to write.
+        let body = work
+            .cut_plan(now)
+            .map_err(|over| refuse(plan_too_long(over.len)))?;
+        if let Some(body) = &body
+            && let Err(err) = self.write_plan_body(&chat.id, &work.id, body)
+        {
+            tracing::warn!(work = %work.id, error = %err, "could not write a plan's full text");
+            return Err(refuse(format!(
+                "The plan couldn't be saved on this device ({err}), so nothing was proposed. \
+                 Propose it again."
+            )));
+        }
+        // A crash or a failed write here leaves the body without a row; the
+        // cleanup pass removes it.
         self.inner.workspace.put_record(
             p::KIND_BOT_WORK,
             &work.id,
@@ -821,13 +847,13 @@ impl Bots {
             );
         }
         // The one text a plan can't refuse is the owner's own message.
-        if instruction_len > p::INSTRUCTION_MAX {
+        if instruction_len > p::INSTRUCTION_BODY_MAX {
             waiting.push_str(&format!(
                 " Your owner's message has {instruction_len} characters and the background \
                  session is given only its first {}: if it needs anything from the rest, \
                  say so in your reply and propose the plan again with that in the steps' \
                  details.",
-                p::INSTRUCTION_MAX
+                p::INSTRUCTION_BODY_MAX
             ));
         }
         Ok(format!(
@@ -953,6 +979,8 @@ impl Bots {
             .record::<BotWork>(p::KIND_BOT_WORK, id)
             .filter(|w| w.bot_id == view.bot.id)
             .ok_or_else(|| refuse(format!("No plan \"{id}\". Use list_work.")))?;
+        // The full text, from the chat doc when the row holds previews.
+        let text = self.plan_text(&work)?;
         let mut out = vec![format!(
             "Plan {} · \"{}\" · {} · proposed {}",
             work.id,
@@ -987,14 +1015,21 @@ impl Bots {
         if let Some(summary) = &work.summary {
             out.push(format!("Summary: {summary}"));
         }
-        if !work.instruction.is_empty() {
+        if text.plan.is_preview() || text.result_source.is_preview() {
+            out.push(
+                "(Its full text is missing on this device: what follows is the shortened \
+                 preview.)"
+                    .into(),
+            );
+        }
+        if !text.instruction.is_empty() {
             out.push(format!(
                 "Instruction (quoted): {}",
-                p::clip(&work.instruction, 600)
+                p::clip(&text.instruction, 600)
             ));
         }
         out.push("Steps:".into());
-        for step in &work.steps {
+        for (index, step) in work.steps.iter().enumerate() {
             let place = step
                 .project
                 .as_deref()
@@ -1007,6 +1042,9 @@ impl Bots {
                 step_word(step.state),
                 step.title
             ));
+            if let Some(detail) = text.detail(index) {
+                out.push(format!("   detail: {detail}"));
+            }
             if let Some(note) = &step.note {
                 out.push(format!("   note: {note}"));
             }
@@ -1035,7 +1073,7 @@ impl Bots {
                 }
             }
         }
-        if let Some(result) = &work.result {
+        if let Some(result) = &text.result {
             out.push(format!("Result:\n{result}"));
         }
         Ok(out.join("\n"))
@@ -1724,23 +1762,39 @@ impl Bots {
         if result.is_empty() {
             return Err(refuse("Give your owner a result: what was done and found."));
         }
-        let length = result.chars().count();
-        if length > p::RESULT_MAX {
+        if let Err(over) = p::check_result_body(result) {
             return Err(refuse(format!(
-                "The result has {length} characters; it holds at most {}. Nothing is cut \
-                 for you: keep what changed, what was verified and what needs your owner, \
-                 link the sessions for the rest, and call finish_work again.",
-                p::RESULT_MAX
+                "The result has {} characters, {} over the {} it holds. Nothing is cut for \
+                 you: keep it concise (what changed, what was verified and what needs your \
+                 owner), link the sessions for the rest, and call finish_work again.",
+                over.len,
+                over.over(),
+                over.max
             )));
         }
         let now = p::now_ms();
-        self.edit_work(&work.id, |w| {
+        let end = |w: &mut BotWork| {
             w.state = state;
-            w.result = Some(result.to_string());
             w.ended_at = Some(now);
             // The steps end with the plan: one still under way would spin
             // on the owner's card for good.
             w.close_steps(now);
+        };
+        // A result the row must cut goes to the chat doc first, outside the
+        // row lock; the row then names it.
+        let mut row = work.clone();
+        end(&mut row);
+        let (preview, rev) = self.result_fields(row, result, now).map_err(|err| {
+            tracing::warn!(work = %work.id, error = %err, "could not write a plan's full result");
+            refuse(format!(
+                "The result couldn't be saved on this device ({err}), so the work isn't \
+                 finished yet. Call finish_work again."
+            ))
+        })?;
+        self.edit_work(&work.id, |w| {
+            end(w);
+            w.result = preview;
+            w.result_rev = rev;
         })?;
         let (kind, line) = match state {
             WorkState::Done => (ActivityKind::WorkFinished, "Finished the plan"),

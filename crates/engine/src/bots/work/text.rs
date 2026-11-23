@@ -3,7 +3,8 @@
 //! (§6.2). The prompts describe; the tools enforce on every call.
 
 use cypher_proto::{
-    Bot, BotWork, Device, INSTRUCTION_MAX, PLAN_WARN_BEFORE_MS, RESULT_MAX, Space, describe_minutes,
+    Bot, BotWork, Device, INSTRUCTION_BODY_MAX, INSTRUCTION_MAX, PLAN_WARN_BEFORE_MS, PlanText,
+    RESULT_BODY_MAX, Space, TextSource, describe_minutes,
 };
 
 use super::Role;
@@ -58,7 +59,7 @@ pub(super) fn prompt(bot: &Bot, role: &Role, roots: &[String]) -> Option<String>
                 format!(
                     "- When everything is done, or something blocks the plan for good, call \
                      finish_work once with outcome done or failed and a concise result (at \
-                     most {RESULT_MAX} characters): what changed and where, citing each \
+                     most {RESULT_BODY_MAX} characters): what changed and where, citing each \
                      session as [its title](cypher://session/<session id>), what was \
                      verified, and what needs your owner. Open with one sentence that \
                      says how it went: your owner is told that much first and reads the \
@@ -109,9 +110,12 @@ fn direct_lines(work_directly: bool, roots: &[String]) -> Vec<String> {
 /// The first message of an orchestration thread: the approved plan with
 /// step ids, projects and devices, the owner's instruction verbatim, and
 /// what the thread may do in plain words. Never the bot chat's history.
+/// `text` is the plan's full text ([`PlanText::of`] with its body); the
+/// host never briefs from previews.
 pub(super) fn brief(
     bot: &Bot,
     work: &BotWork,
+    text: &PlanText,
     spaces: &[Space],
     devices: &[Device],
     this_device: &str,
@@ -140,7 +144,7 @@ pub(super) fn brief(
     lines.push(String::new());
     lines.push("Steps:".to_string());
     let mut projects: Vec<String> = Vec::new();
-    for step in &work.steps {
+    for (index, step) in work.steps.iter().enumerate() {
         let place = step
             .project
             .as_deref()
@@ -159,7 +163,7 @@ pub(super) fn brief(
             })
             .unwrap_or_default();
         lines.push(format!("{}. {}{place}", step.id, step.title));
-        if let Some(detail) = &step.detail {
+        if let Some(detail) = text.detail(index) {
             lines.push(format!("   {detail}"));
         }
         if !step.session_choice.is_empty() {
@@ -170,24 +174,30 @@ pub(super) fn brief(
         }
     }
     // A message over the cap was stored cut; the thread must know its end
-    // is missing rather than take the ellipsis for the owner's.
-    let cut =
-        work.instruction.chars().count() >= INSTRUCTION_MAX && work.instruction.ends_with('…');
+    // is missing rather than take the ellipsis for the owner's. A body
+    // holds up to its own cap; a row without one, from an older host, up to
+    // the row's.
+    let instruction = &text.instruction;
+    let cap = match text.plan {
+        TextSource::Body => INSTRUCTION_BODY_MAX,
+        TextSource::Row | TextSource::Preview => INSTRUCTION_MAX,
+    };
+    let cut = instruction.chars().count() >= cap && instruction.ends_with('…');
     lines.extend([
         String::new(),
         if cut {
             format!(
-                "Your owner's instruction (quoted; only its first {INSTRUCTION_MAX} characters, \
-                 the rest was cut):"
+                "Your owner's instruction (quoted; only its first {cap} characters, the rest \
+                 was cut):"
             )
         } else {
             "Your owner's instruction, verbatim (quoted):".to_string()
         },
         "\"\"\"".to_string(),
-        if work.instruction.trim().is_empty() {
+        if instruction.trim().is_empty() {
             "(none recorded)".to_string()
         } else {
-            work.instruction.clone()
+            instruction.clone()
         },
         "\"\"\"".to_string(),
         String::new(),
@@ -327,15 +337,19 @@ mod tests {
             time_added_minutes: None,
             warned_at: None,
             coordinator_choice: Default::default(),
+            body_rev: None,
+            result_rev: None,
         };
         let spaces = [
             space("sp-a", "mac-a", "/w/app-a"),
             space("sp-b", "mac-b", "/w/app-b"),
         ];
         let devices = [device("mac-a", "Studio"), device("mac-b", "Laptop")];
+        let row_text = PlanText::of(&work, None);
         let text = brief(
             &bot(true, true, false),
             &work,
+            &row_text,
             &spaces,
             &devices,
             "mac-a",
@@ -357,6 +371,7 @@ mod tests {
         let steering = brief(
             &bot(false, true, true),
             &work,
+            &row_text,
             &spaces,
             &devices,
             "mac-a",
@@ -364,6 +379,53 @@ mod tests {
         );
         assert!(steering.contains("Other sessions only after your owner approves each"));
         assert!(steering.contains("No direct work: Work directly is off"));
+
+        // A row of previews briefs from its body: the full detail and the
+        // instruction, cut (and said so) only at the body's own cap.
+        let mut long = work.clone();
+        long.instruction = "指".repeat(INSTRUCTION_BODY_MAX + 5);
+        long.steps[0].detail = Some(format!("{}END", "设".repeat(9_000)));
+        let body = long.cut_plan(5).unwrap().expect("a body");
+        let bodies = cypher_proto::WorkBodies {
+            plan: Some(body),
+            result: None,
+        };
+        let text = PlanText::of(&long, Some(&bodies));
+        assert_eq!(text.plan, TextSource::Body);
+        let full = brief(
+            &bot(false, true, false),
+            &long,
+            &text,
+            &spaces,
+            &devices,
+            "mac-a",
+            &[],
+        );
+        assert!(full.contains(&format!("   {}END\n", "设".repeat(9_000))));
+        assert!(
+            full.contains("only its first 30000 characters, the rest was cut"),
+            "{full}"
+        );
+        // An instruction at the row's cap, from a body, is not taken for cut.
+        let mut mid = work.clone();
+        mid.instruction = format!("{}…", "指".repeat(INSTRUCTION_MAX + 10));
+        mid.steps[0].detail = Some("设".repeat(9_000));
+        let body = mid.cut_plan(5).unwrap().expect("a body");
+        let bodies = cypher_proto::WorkBodies {
+            plan: Some(body),
+            result: None,
+        };
+        let text = PlanText::of(&mid, Some(&bodies));
+        let whole = brief(
+            &bot(false, true, false),
+            &mid,
+            &text,
+            &spaces,
+            &devices,
+            "mac-a",
+            &[],
+        );
+        assert!(whole.contains("instruction, verbatim"), "{whole}");
     }
 
     #[test]

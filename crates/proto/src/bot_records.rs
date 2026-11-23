@@ -20,6 +20,7 @@ use chrono::{DateTime, Datelike, Duration, NaiveDateTime, NaiveTime, TimeZone, U
 use serde::{Deserialize, Serialize};
 
 use crate::BotScope;
+use crate::plan_body::REV_MAX;
 
 /// Registry row kinds.
 pub const KIND_BOT_WORK: &str = "botWork";
@@ -102,6 +103,50 @@ pub fn clip(text: &str, max: usize) -> String {
     let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+/// `n` with thousands separators, as the refusals write it: 4,000.
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Refuse `text` over `max` characters (counted as [`clip`] counts them),
+/// with the overshoot: "`what` has 4,120 characters, 120 over the 4,000
+/// `holder` holds. Nothing is cut: shorten it and `again`." A text the row
+/// keeps whole is refused, never cut without a word
+/// (docs/design/plan-body.md §9).
+pub fn refuse_over(
+    text: &str,
+    max: usize,
+    what: &str,
+    holder: &str,
+    again: &str,
+) -> Result<(), String> {
+    let len = text.trim().chars().count();
+    if len <= max {
+        return Ok(());
+    }
+    Err(format!(
+        "{what} has {} characters, {} over the {} {holder} holds. Nothing is cut: shorten \
+         it and {again}.",
+        grouped(len),
+        grouped(len - max),
+        grouped(max)
+    ))
+}
+
+/// The owner's edit of an answer to review (`Mutate reviewBotExchange`):
+/// refused over [`ANSWER_MAX`] rather than cut before it is sent.
+pub fn check_review_text(text: &str) -> Result<(), String> {
+    refuse_over(text, ANSWER_MAX, "The answer", "an answer", "send it again")
 }
 
 /// What `c` takes in serde_json's output, in UTF-16 units.
@@ -431,6 +476,17 @@ pub struct BotWork {
     /// leaves out follows the workspace's chat.
     #[serde(default, skip_serializing_if = "SessionChoice::is_empty")]
     pub coordinator_choice: SessionChoice,
+    /// Host-written, set when the plan's text was cut to fit the row: the
+    /// rev of the full text in the workspace chat doc's
+    /// `planBodies[id].plan` ([`PlanBody`](crate::PlanBody)). Absent = the
+    /// row is the whole plan: `instruction` and the steps' details are not
+    /// previews.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_rev: Option<String>,
+    /// The same for `result` (`planBodies[id].result`,
+    /// [`PlanResult`](crate::PlanResult)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_rev: Option<String>,
 }
 
 impl BotWork {
@@ -454,8 +510,14 @@ impl BotWork {
             .map(|started| started + i64::from(self.limit_minutes(fallback)) * 60_000)
     }
 
+    /// Cap every text to fit the row. Over a cap, `instruction`, the steps'
+    /// details and `result` become previews (an ellipsis marks each cut);
+    /// [`Self::cut_plan`] and [`Self::cut_result`] keep the full text as a
+    /// body when that happens.
     pub fn clamp(&mut self) {
         self.coordinator_choice.clamp();
+        self.body_rev = clip_opt(&self.body_rev, REV_MAX);
+        self.result_rev = clip_opt(&self.result_rev, REV_MAX);
         self.title = clip(&self.title, TITLE_MAX);
         self.instruction = clip(&self.instruction, INSTRUCTION_MAX);
         self.summary = clip_opt(&self.summary, DETAIL_MAX);
@@ -1105,6 +1167,13 @@ impl BotRoutine {
         if self.prompt.trim().is_empty() {
             return Err("Say what the routine should do.".into());
         }
+        refuse_over(
+            &self.prompt,
+            PROMPT_MAX,
+            "The prompt",
+            "a routine",
+            "save again",
+        )?;
         if self
             .target
             .space_id()
@@ -1188,7 +1257,13 @@ impl BotShortcut {
         if self.request.trim().is_empty() {
             return Err("Give the shortcut the request it sends.".into());
         }
-        Ok(())
+        refuse_over(
+            &self.request,
+            PROMPT_MAX,
+            "The request",
+            "a shortcut",
+            "save again",
+        )
     }
 
     /// Whether a click asks for text first.
@@ -1742,6 +1817,43 @@ mod tests {
     }
 
     #[test]
+    fn long_texts_are_refused_with_the_overshoot_not_cut() {
+        assert_eq!(grouped(0), "0");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(4_000), "4,000");
+        assert_eq!(grouped(1_234_567), "1,234,567");
+        // Counted as `clip` counts: trimmed, in characters.
+        let at_cap = format!("  {}\n", "界".repeat(PROMPT_MAX));
+        assert_eq!(
+            refuse_over(&at_cap, PROMPT_MAX, "It", "a row", "go"),
+            Ok(())
+        );
+        assert_eq!(
+            refuse_over(
+                &"x".repeat(4_120),
+                PROMPT_MAX,
+                "The prompt",
+                "a routine",
+                "save again"
+            ),
+            Err(
+                "The prompt has 4,120 characters, 120 over the 4,000 a routine holds. \
+                 Nothing is cut: shorten it and save again."
+                    .into()
+            )
+        );
+        assert!(check_review_text(&"x".repeat(ANSWER_MAX)).is_ok());
+        assert_eq!(
+            check_review_text(&"x".repeat(ANSWER_MAX + 1)),
+            Err(
+                "The answer has 8,001 characters, 1 over the 8,000 an answer holds. \
+                 Nothing is cut: shorten it and send it again."
+                    .into()
+            )
+        );
+    }
+
+    #[test]
     fn records_round_trip_and_default_missing_fields() {
         let work: BotWork = serde_json::from_value(serde_json::json!({
             "id": "w1", "botId": "b", "title": "Fix it", "chatId": "c", "createdAt": 1,
@@ -1798,6 +1910,8 @@ mod tests {
             time_added_minutes: None,
             warned_at: None,
             coordinator_choice: Default::default(),
+            body_rev: None,
+            result_rev: None,
         };
         work.clamp();
         let units = serde_json::to_string(&work).unwrap().encode_utf16().count();
@@ -1996,6 +2110,8 @@ mod tests {
             time_added_minutes: Some(PLAN_TIME_ADDED_MAX_MINUTES),
             warned_at: at,
             coordinator_choice: choice.clone(),
+            body_rev: None,
+            result_rev: None,
         };
         // The proposal as the engine stores it: nothing has run yet.
         let proposed = |detail: &str| {
@@ -2098,6 +2214,8 @@ mod tests {
             time_added_minutes: None,
             warned_at: None,
             coordinator_choice: Default::default(),
+            body_rev: None,
+            result_rev: None,
         };
         let before = work.clone();
         work.clamp();
@@ -2145,6 +2263,8 @@ mod tests {
             time_added_minutes: None,
             warned_at: None,
             coordinator_choice: Default::default(),
+            body_rev: None,
+            result_rev: None,
         };
         let states = |w: &BotWork| w.steps.iter().map(|s| s.state).collect::<Vec<_>>();
         use StepState::{Asking, Done, Failed, Pending, Running, Skipped};
@@ -2210,6 +2330,8 @@ mod tests {
             time_added_minutes: None,
             warned_at: None,
             coordinator_choice: Default::default(),
+            body_rev: None,
+            result_rev: None,
         };
         records.work = vec![
             work("plan", WorkState::Proposed, vec![]),
