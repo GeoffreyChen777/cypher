@@ -37,6 +37,7 @@ import { UNKNOWN } from "./shell.ts";
 import { ANY, ENV_CLOSE, ENV_OPEN, escapeGlob, resolveText } from "./resolve.ts";
 import { interpreterOf } from "./code.ts";
 import { refsWritten, unwrapped } from "./effects.ts";
+import { foldPipe } from "./fold.ts";
 import { genericDestroyer, TOLD_BY_PLACE } from "./catalogue.ts";
 import { gradeOf, judgeDecides } from "./grades.ts";
 
@@ -576,6 +577,62 @@ function named(path: string, facts: RiskFacts): Classification | undefined {
 }
 
 /**
+ * Options whose value is a folder a command writes files into that its words don't name (data, round 5
+ * step 2): an extraction's `-C`, a copy's `-t`, git's `--work-tree`. With `find ROOT … -exec WRITER` and
+ * `-delete`, ROOT (narrowed by `-name`): what it writes there is known only when it runs.
+ */
+export const DESTINATION_OPTIONS: readonly { programs: RegExp; options: readonly string[]; when?: RegExp }[] = [
+  { programs: /^(tar|gtar|bsdtar)$/, options: ["-C", "--directory"], when: /^(-?[A-Za-z]*x[A-Za-z]*|--extract|--get)$/ },
+  { programs: /^(unzip|ditto|7z|7za)$/, options: ["-d", "-o"] },
+  { programs: /^(cp|mv|install|ln|gcp)$/, options: ["-t", "--target-directory"] },
+  { programs: /^git$/, options: ["--work-tree"] },
+  { programs: /^(cpio|pax)$/, options: ["-D", "--directory"] },
+];
+
+/** Writes of files a command doesn't name, into a folder it does (`tar x -C D`, `git --work-tree=D checkout`, `find D -exec …`): the floor where that folder holds the permission system. */
+function destinationRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): Assessment | undefined {
+  for (const { glob, existing } of destinationGlobs(command, view, facts)) {
+    const found = facts.couldBe?.(glob, undefined, { subtree: true });
+    // `find` acts only on what is there: the permission-system files among its matches now. An extraction or checkout may make them.
+    if (existing && !found?.matches.some((item) => facts.permissionSystem?.(item.path))) continue;
+    if (found?.permissionSystem) return { tier: "danger", kind: `changes the permission system itself (it writes inside ${shownPattern(glob)}, which holds ${found.permissionSystem})`, key: "permission-system", floor: true };
+  }
+  return undefined;
+}
+
+/** The folders (as globs) a command writes inside without naming the files (`DESTINATION_OPTIONS`, `find -exec`). */
+function destinationGlobs(command: RiskCommand, view: CommandView, facts: RiskFacts): { glob: string; existing?: boolean }[] {
+  const out: { glob: string; existing?: boolean }[] = [];
+  const dir = operandDir(command, view);
+  const place = (word: string) => {
+    if (word === UNKNOWN) return undefined;
+    const at = facts.classify(word, dir)?.path;
+    return at === undefined ? undefined : escapeGlob(at);
+  };
+  const row = DESTINATION_OPTIONS.find((candidate) => candidate.programs.test(view.program));
+  if (row && (!row.when || view.args.some((word) => row.when!.test(word)))) {
+    for (const [i, word] of view.args.entries()) {
+      for (const option of row.options) {
+        const value = word === option ? view.args[i + 1] : word.startsWith(`${option}=`) ? word.slice(option.length + 1) : /^-[A-Za-z]$/.test(option) && word.startsWith(option) && word.length > 2 && !word.startsWith("--") ? word.slice(2) : undefined;
+        const at = value === undefined ? undefined : place(value);
+        if (at !== undefined) out.push({ glob: `${at}/**` });
+      }
+    }
+  }
+  if (view.program === "find" && fileEffect(command, view, view.args.find((word) => !word.startsWith("-")) ?? ".") === "write") {
+    const roots = view.args.slice(0, Math.max(0, view.args.findIndex((word) => word.startsWith("-") || word === "!" || word === "("))).filter((word) => word !== UNKNOWN);
+    const names = view.args.flatMap((word, i) => (/^-(name|iname)$/.test(word) && view.args[i + 1] !== undefined && view.args[i + 1] !== UNKNOWN ? [view.args[i + 1]] : []));
+    for (const root of roots.length ? roots : ["."]) {
+      const at = place(root);
+      if (at === undefined) continue;
+      if (names.length) for (const name of names) out.push({ glob: `${at}/**/${name}`, existing: true });
+      else out.push({ glob: `${at}/**`, existing: true });
+    }
+  }
+  return out;
+}
+
+/**
  * Commands that make a link (data, round 5 step 2): another name for their sources, through which a later
  * write changes them. `options`: what makes the program one (`cp -l`); none, any use.
  */
@@ -596,6 +653,8 @@ const SENDS_AT_FILES = /^(curl|http|https|xh)$/;
 function pathRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): Assessment | undefined {
   const redirected = redirectRisk(command, facts);
   if (redirected?.tier === "danger") return redirected;
+  const inside = destinationRisk(command, view, facts);
+  if (inside) return inside;
   let soft: Assessment | undefined = redirected;
   const dir = operandDir(command, view);
   // Words known only when they run, by every path they may stand for (resolve.ts); a start known only when it runs says nothing of secrets.
@@ -1467,7 +1526,9 @@ function assessWords(command: RiskCommand, facts: RiskFacts): Assessment {
     return { tier: "local", kind: assessment.kind ?? redirected?.kind ?? `runs ${basename(next[0] ?? "a program")} through ${view.program}`, ...(assessment.once || redirected?.once ? { once: true as const } : {}), ...(assessment.concern || redirected?.concern ? { concern: assessment.concern ?? redirected?.concern } : {}), ...(assessment.data ? { data: assessment.data } : {}) };
   }
   // What `find -exec` runs is a command of its own, on the files `find`
-  // starts from (`find build -exec rm {} +` deletes in `build`).
+  // starts from (`find build -exec rm {} +` deletes in `build`). What it writes among them first: the permission system's floor.
+  const inside = destinationRisk(command, view, facts);
+  if (inside) return inside;
   let ran: Assessment | undefined;
   for (const run of findRuns(view) ?? []) {
     const starts = run.some((word) => word.includes("{}")) ? findStarts(view) : [""];
@@ -1976,8 +2037,94 @@ function archiveOutput(view: CommandView): string | undefined {
   return undefined;
 }
 
+/**
+ * The commands wrappers run with the operands they substitute (round 5 step 2, data in `WRAPPED`): each
+ * is read like a command of the line (same directory), so its sink and the file it is handed meet.
+ * - `find ROOT -name P … -exec CMD {} ;`: CMD with `{}` as ROOT/P (each `-name`, `-iname`, `-path` value);
+ * - `… | xargs [-I T] CMD`: CMD with what the pipe prints when it folds (fold.ts), else nothing;
+ * - `parallel CMD ::: A B`: CMD with `{}` as each A, else A appended;
+ * - `env -S 'CMD'`, `env --split-string=CMD`, `eval 'CMD'`: CMD split into words.
+ */
+export function wrappedRuns(commands: readonly (RiskCommand & { joint?: string; input?: string })[]): RiskCommand[] {
+  const out: RiskCommand[] = [];
+  const push = (from: RiskCommand, words: string[]) => {
+    if (words.length && words[0] !== UNKNOWN) out.push({ ...from, words, reads: [], writes: [], hints: undefined, patterns: undefined });
+  };
+  for (const [index, command] of commands.entries()) {
+    const words = command.words;
+    const program = basename(words[0] ?? "");
+    if (program === "find" || program === "fd") {
+      const at = words.findIndex((word) => /^-(exec|execdir|ok|okdir)$/.test(word));
+      if (at < 0) continue;
+      const end = words.findIndex((word, i) => i > at && (word === ";" || word === "+" || word === "\\;"));
+      const run = words.slice(at + 1, end < 0 ? undefined : end);
+      const roots = words.slice(1).filter((word, i) => i < at - 1 && !word.startsWith("-") && word !== UNKNOWN);
+      const root = roots[0] ?? ".";
+      const names: string[] = [];
+      for (let i = 1; i < at; i++) if (/^-(name|iname|path|ipath|wholename)$/.test(words[i]) && words[i + 1] !== undefined && words[i + 1] !== UNKNOWN) names.push(/^-(i?path|wholename)$/.test(words[i]) ? words[i + 1] : `${root.replace(/\/$/, "")}/${words[i + 1]}`);
+      for (const name of names.length ? names : [root]) push(command, run.map((word) => word.split("{}").join(name)));
+      continue;
+    }
+    if (program === "xargs") {
+      const previous = commands[index - 1];
+      const fed = previous?.joint === "|" ? foldPipe(pipeBefore(commands, index), UNKNOWN) : command.input;
+      if (fed === undefined) continue;
+      const items = fed.split(/\s+/).filter(Boolean);
+      let i = 1;
+      let token: string | undefined;
+      for (; i < words.length; i++) {
+        const word = words[i];
+        if (word === "-I" || word === "-i" || word === "--replace") token = words[++i] ?? "{}";
+        else if (/^-I./.test(word)) token = word.slice(2);
+        else if (/^-(n|L|P|s|d|E|a)$/.test(word)) i++;
+        else if (!word.startsWith("-")) break;
+      }
+      const run = words.slice(i);
+      if (!run.length) continue;
+      if (token !== undefined) for (const item of items) push(command, run.map((word) => word.split(token!).join(item)));
+      else push(command, [...run, ...items]);
+      continue;
+    }
+    if (program === "parallel") {
+      const sep = words.indexOf(":::");
+      if (sep < 0) continue;
+      const run = words.slice(1, sep).filter((word, i, all) => !(i === 0 && word.startsWith("-")));
+      const items = words.slice(sep + 1).filter((word) => word !== UNKNOWN && word !== ":::");
+      for (const item of items) push(command, run.some((word) => word.includes("{}")) ? run.map((word) => word.split("{}").join(item)) : [...run, item]);
+      continue;
+    }
+    // `eval WORDS`: the line its words make (known when they fold, fold.ts).
+    if (program === "eval") {
+      if (words.length > 1 && !words.includes(UNKNOWN)) push(command, splitWords(words.slice(1).join(" ")));
+      continue;
+    }
+    if (program === "env") {
+      const at = words.findIndex((word) => word === "-S" || word.startsWith("--split-string"));
+      if (at < 0) continue;
+      const text = words[at].includes("=") ? words[at].split("=").slice(1).join("=") : words[at + 1];
+      if (text === undefined || text === UNKNOWN) continue;
+      push(command, [...splitWords(text), ...words.slice(at + 2)]);
+    }
+  }
+  return out;
+}
+
+/** The commands piped into the one at `index`, in order (the pipe it ends). */
+function pipeBefore(commands: readonly (RiskCommand & { joint?: string; input?: string })[], index: number): { words: readonly string[]; input?: string }[] {
+  let start = index - 1;
+  while (start > 0 && commands[start - 1]?.joint === "|") start--;
+  return commands.slice(start, index);
+}
+
+/** A command line's words, by quotes and spaces only (what `env -S` splits). */
+function splitWords(text: string): string[] {
+  return [...text.matchAll(/'([^']*)'|"([^"]*)"|(\S+)/g)].map((match) => match[1] ?? match[2] ?? match[3]);
+}
+
 /** A line's data flow (`exfiltrates`): the first network sink it has and the first secret it reads, each when there is one. */
-export function lineFlow(commands: readonly RiskCommand[], facts: RiskFacts, expands: readonly string[] = [], code?: ReadonlyMap<RiskCommand, CodeFlow>): CodeFlow {
+export function lineFlow(given: readonly RiskCommand[], facts: RiskFacts, expands: readonly string[] = [], code?: ReadonlyMap<RiskCommand, CodeFlow>): CodeFlow {
+  // What wrappers run, with the operands they hand it (`find -name P -exec … {}`, `xargs` of a literal, `parallel … ::: x`, `env -S '…'`).
+  const commands = [...given, ...wrappedRuns(given)];
   let sink: string | undefined;
   let secret: string | undefined;
   /** A name some other command of the line also uses: it may make the file this one sends. */

@@ -244,7 +244,7 @@ export function codeOf(words: readonly string[], unknown: string, patterns?: rea
 
 // --- What code can do --------------------------------------------------------------------
 
-export type Capability = "network" | "spawn" | "read" | "env" | "home" | "dynamic";
+export type Capability = "network" | "spawn" | "read" | "write" | "env" | "home" | "dynamic";
 
 /**
  * Per language, the names that give code a capability (data). A name is matched as an identifier
@@ -294,6 +294,16 @@ export const CAPABILITIES: readonly { capability: Capability; languages: readonl
   { capability: "read", languages: ["powershell"], names: ["Get-Content", "gc ", "-InFile", "ReadAllText", "ReadAllBytes", "ReadAllLines", "Import-Csv", "type ", "cat "] },
   { capability: "read", languages: ["swift"], names: ["contentsOf", "contentsOfFile", "FileManager", "FileHandle", "fopen("] },
   { capability: "read", languages: ["awk"], names: ["getline"] },
+  // Writing a file (round 5 step 2: with a permission-system path among its literals, the floor).
+  { capability: "write", languages: ["python"], names: ["'w'", '"w"', "'a'", '"a"', "'wb'", '"wb"', "write_text", "write_bytes", "shutil.copy", "shutil.copyfile", "shutil.move", "os.rename", "os.replace", "os.remove", "os.unlink", "os.symlink", "os.link"] },
+  { capability: "write", languages: ["javascript"], names: ["writeFile", "writeFileSync", "appendFile", "appendFileSync", "createWriteStream", "renameSync", "rename(", "unlinkSync", "rmSync", "copyFile", "copyFileSync", "symlinkSync", "linkSync", "Deno.writeTextFile", "Deno.writeFile", "Bun.write"] },
+  { capability: "write", languages: ["ruby"], names: ["File.write", "IO.write", "'w'", '"w"', "'a'", '"a"', "FileUtils", "File.rename", "File.delete", "File.symlink"] },
+  { capability: "write", languages: ["perl"], names: ["'>", '">', "'>>", '">>', "unlink", "rename", "symlink"] },
+  { capability: "write", languages: ["php"], names: ["file_put_contents", "fwrite", "'w'", '"w"', "rename(", "unlink(", "copy("] },
+  { capability: "write", languages: ["julia"], names: ["write(", "\"w\"", "cp(", "mv(", "rm("] },
+  { capability: "write", languages: ["powershell"], names: ["Set-Content", "Add-Content", "Out-File", "WriteAllText", "Copy-Item", "Move-Item", "Remove-Item", ">"] },
+  { capability: "write", languages: ["swift"], names: ["write(to", "createFile", "moveItem", "copyItem", "removeItem"] },
+  { capability: "write", languages: ["lua", "r", "tcl", "applescript", "awk", "sed"], names: ["io.open", "writeLines", "write(", "file(", "open", "write ", "> \"", ">\"", "w "] },
   // The environment (a credential variable read by its name; or the whole of it).
   { capability: "env", languages: ["python"], names: ["os.environ", "os.getenv", "environ.get", "getenv("] },
   { capability: "env", languages: ["javascript"], names: ["process.env", "Deno.env", "Bun.env"] },
@@ -478,6 +488,8 @@ export interface CodeScan {
   paths: string[];
   /** Whether it reads files at all (`open(`, `readFileSync`). */
   reads: boolean;
+  /** Whether it writes, moves or deletes files (`'w'`, `writeFileSync`). */
+  writes: boolean;
   /** Credential variables it reads by name, or "the environment" for all of it. */
   env: string[];
   /** Why it can't be read: names that build code at run time, obfuscation. */
@@ -498,7 +510,7 @@ const ENV_ALL = /^\s*(?:[),;}\]]|$|\.(?:items|keys|values|copy|to_h|to_a|each|en
  */
 export function scanCode(code: string, language: Language, secretName: (name: string) => boolean): CodeScan {
   const literals = literalsOf(code);
-  const scan: CodeScan = { network: [], spawn: [], commands: [], paths: [], reads: false, env: [], opaque: [], urls: [] };
+  const scan: CodeScan = { network: [], spawn: [], commands: [], paths: [], reads: false, writes: false, env: [], opaque: [], urls: [] };
   if (language === "unread") {
     scan.opaque.push("it is code in a language Cypher can't read");
     return scan;
@@ -510,6 +522,7 @@ export function scanCode(code: string, language: Language, secretName: (name: st
   scan.spawn = capabilityNames(code, language, "spawn");
   if (scan.commands.length && !scan.spawn.length) scan.spawn.push("a command form");
   scan.reads = capabilityNames(code, language, "read").length > 0;
+  scan.writes = capabilityNames(code, language, "write").length > 0;
   const dynamic = capabilityNames(code, language, "dynamic");
   if (dynamic.length) scan.opaque.push(`it builds or decodes code at run time (${dynamic.slice(0, 3).join(", ")})`);
   const escapes = (code.match(/\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\[0-7]{3}|\bchr\s*\(|\bString\.fromCharCode|\\u\{[0-9a-fA-F]+\}/g) ?? []).length;

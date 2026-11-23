@@ -72,6 +72,7 @@
  * sandbox unless it is approved as written.
  */
 
+import { foldPipe } from "./fold.ts";
 import { ANY, ENV_CLOSE, ENV_OPEN, escapeGlob, userHome } from "./resolve.ts";
 
 /** A word known only when the line runs. */
@@ -924,7 +925,15 @@ function read(
       }
       const close = closingParen(source, i + 2);
       const before = out.length;
-      read(source.slice(i + 2, close), home, options, out, true, vars, subshells, subshell);
+      const text = source.slice(i + 2, close);
+      read(text, home, options, out, true, vars, subshells, subshell);
+      // A pipe of literal text through pure transforms (fold.ts): the text it prints is known now (round 5 step 2).
+      const folded = !/[;&\n`]|\|\||\$\(/.test(text) ? foldPipe(out.slice(before), UNKNOWN) : undefined;
+      if (folded !== undefined && !vars.poisoned && /^[\x20-\x7e]*\n*$/.test(folded)) {
+        expand(folded.replace(/\n+$/, ""));
+        inWord = true;
+        return close;
+      }
       becomesUnknown();
       // A command whose output is a path in a known place (`$(mktemp -d)`, `$(pwd)`): that place.
       const inner = out.slice(before);

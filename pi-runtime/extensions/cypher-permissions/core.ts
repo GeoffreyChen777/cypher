@@ -1971,6 +1971,18 @@ export class Permissions {
       }
     }
     if (scan.env.length) finding.secret ??= scan.env[0] === "the environment" ? "the environment" : `$${scan.env[0]}`;
+    // A permission-system file the code names, in code that writes files (code.ts `write` names): the floor (round 5 step 2).
+    if (scan.writes) {
+      for (const path of scan.paths) {
+        if (!/[/.~]/.test(path)) continue;
+        const classification = this.classify(resolveText(path, this.home), at);
+        const system = this.paths.isPermissionSystem(classification.path);
+        if (system !== undefined) {
+          finding.floor ??= { tier: "danger", kind: `changes the permission system itself (${path}, in ${language} code)`, key: "permission-system", floor: true };
+          break;
+        }
+      }
+    }
     for (const line of scan.commands.slice(0, MAX_CODE_COMMANDS)) nested(line);
     return finding;
   }
