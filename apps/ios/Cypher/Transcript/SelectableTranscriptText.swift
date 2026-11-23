@@ -540,6 +540,7 @@ struct SelectableTranscriptText: UIViewRepresentable {
     @Environment(\.fileReferenceSnippet) private var referenceSnippet
     @Environment(\.openBotChat) private var openSession
     @Environment(\.transcriptImageFiles) private var imageFiles
+    @Environment(\.transcriptGitRefs) private var gitRefs
 
     func makeUIView(context: Context) -> TranscriptUITextView {
         let storage = NSTextStorage()
@@ -578,6 +579,7 @@ struct SelectableTranscriptText: UIViewRepresentable {
             open: openWorkspace, context: referenceContext, snippet: referenceSnippet)
         context.coordinator.openSession = openSession
         context.coordinator.imageFiles = imageFiles
+        context.coordinator.gitRefs = gitRefs
         context.coordinator.update(view, attributed: attributed, drafts: drafts)
         return view
     }
@@ -589,6 +591,7 @@ struct SelectableTranscriptText: UIViewRepresentable {
             open: openWorkspace, context: referenceContext, snippet: referenceSnippet)
         context.coordinator.openSession = openSession
         context.coordinator.imageFiles = imageFiles
+        context.coordinator.gitRefs = gitRefs
         context.coordinator.update(view, attributed: attributed, drafts: drafts)
     }
 
@@ -608,6 +611,10 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
     /// Where image chips' thumbnails are read.
     var imageFiles: TranscriptImageFiles?
     private var thumbnailLoads: Set<String> = []
+    /// Where a reply's git refs resolve; nil leaves them plain text.
+    var gitRefs: TranscriptGitRefs?
+    /// The last text given and what it showed as, with its git refs marked.
+    private var decorated: (given: NSAttributedString, shown: NSAttributedString)?
 
     /// What file chips and file links reach: the session's Files sheet.
     struct TranscriptFiles {
@@ -668,7 +675,7 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
     }
 
     func update(_ view: UITextView, attributed: NSAttributedString, drafts: CommentDrafts?) {
-        latest = attributed
+        latest = withGitRefs(attributed)
         self.drafts = drafts
         applyLatest(to: view)
     }
@@ -686,6 +693,81 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
         view.invalidateIntrinsicContentSize()
         applying = false
         loadThumbnails(in: view)
+        prefetchGitRefs(in: view)
+    }
+
+    /// A reply's git refs marked as links, in a chat with a checkout.
+    private func withGitRefs(_ attributed: NSAttributedString) -> NSAttributedString {
+        guard gitRefs != nil, entry?.role == .assistant else { return attributed }
+        if let decorated, decorated.given === attributed || decorated.given.isEqual(to: attributed) {
+            return decorated.shown
+        }
+        let shown = GitRefText.decorate(attributed)
+        decorated = (attributed, shown)
+        return shown
+    }
+
+    /// Resolve the refs a block shows ahead of a tap (iPhone has no hover),
+    /// so the tap knows at once whether there is a card; a few per block.
+    private func prefetchGitRefs(in view: UITextView) {
+        guard let gitRefs else { return }
+        for ref in GitRefText.refs(in: view.textStorage).prefix(6)
+        where GitRefStore.shared.cached(ref, refs: gitRefs) == nil {
+            Task { @MainActor in _ = await GitRefStore.shared.resolve(ref, refs: gitRefs) }
+        }
+    }
+
+    private func gitRef(_ textView: UITextView, _ textItem: UITextItem) -> GitRef? {
+        guard case .link(let url) = textItem.content, url.scheme == GitRefText.scheme,
+            textItem.range.location < textView.textStorage.length
+        else { return nil }
+        return
+            (textView.textStorage.attribute(.cypherGitRef, at: textItem.range.location, effectiveRange: nil)
+            as? GitRefBox)?.ref
+    }
+
+    /// A tap on a git ref: its card in a popover at the ref, or — when the
+    /// host has no card for it — its page.
+    private func gitRefAction(_ ref: GitRef, in textView: UITextView, range: NSRange) -> UIAction {
+        UIAction { [weak self, weak textView] _ in
+            guard let self, let gitRefs = self.gitRefs else { return }
+            Task { @MainActor in
+                let resolution = await GitRefStore.shared.resolve(ref, refs: gitRefs)
+                guard let textView else { return }
+                if resolution.hasCard {
+                    self.presentCard(resolution, from: textView, range: range)
+                } else if let url = resolution.url ?? ref.webURL() {
+                    await UIApplication.shared.open(url)
+                }
+            }
+        }
+    }
+
+    private func presentCard(_ resolution: GitRefResolution, from textView: UITextView, range: NSRange) {
+        var responder: UIResponder? = textView
+        while let next = responder, !(next is UIViewController) { responder = next.next }
+        guard let host = responder as? UIViewController else { return }
+        let presenter = host.presentedViewController == nil ? host : host.presentedViewController!
+        weak var controller: UIViewController?
+        let actions = GitRefCardActions(
+            openURL: { UIApplication.shared.open($0) },
+            copy: { UIPasteboard.general.string = $0 },
+            dismiss: { controller?.dismiss(animated: true) })
+        let hosting = UIHostingController(rootView: GitRefCard(resolution: resolution, actions: actions))
+        controller = hosting
+        hosting.view.backgroundColor = UIColor(Theme.sheetPanel)
+        let size = hosting.sizeThatFits(in: CGSize(width: GitRefCard.width, height: 600))
+        hosting.preferredContentSize = CGSize(width: GitRefCard.width, height: size.height)
+        hosting.modalPresentationStyle = .popover
+        if let popover = hosting.popoverPresentationController {
+            popover.sourceView = textView
+            let glyphs = textView.layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            popover.sourceRect = textView.layoutManager.boundingRect(forGlyphRange: glyphs, in: textView.textContainer)
+                .offsetBy(dx: textView.textContainerInset.left, dy: textView.textContainerInset.top)
+            popover.permittedArrowDirections = [.up, .down]
+            popover.delegate = self
+        }
+        presenter.present(hosting, animated: true)
     }
 
     /// Give each chip naming an image file its thumbnail, once loaded; the
@@ -777,6 +859,9 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
     func textView(
         _ textView: UITextView, primaryActionFor textItem: UITextItem, defaultAction: UIAction
     ) -> UIAction? {
+        if let ref = gitRef(textView, textItem) {
+            return gitRefAction(ref, in: textView, range: textItem.range)
+        }
         // A session link opens in-app, never through the system.
         if case .link(let url) = textItem.content, SessionLink.isSessionLink(url) {
             guard let id = SessionLink.chatId(url), let openSession else { return nil }
@@ -792,6 +877,7 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
     func textView(
         _ textView: UITextView, menuConfigurationFor textItem: UITextItem, defaultMenu: UIMenu
     ) -> UITextItem.MenuConfiguration? {
+        if let ref = gitRef(textView, textItem) { return gitRefMenu(ref) }
         guard let reference = reference(textItem), case .link(let url) = textItem.content else {
             return UITextItem.MenuConfiguration(menu: defaultMenu)
         }
@@ -819,6 +905,39 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
         return UITextItem.MenuConfiguration(preview: .view(card), menu: menu)
     }
 
+    /// A long press on a git ref: its card (once resolved) over Open on
+    /// GitHub and Copy.
+    private func gitRefMenu(_ ref: GitRef) -> UITextItem.MenuConfiguration {
+        let resolution = gitRefs.flatMap { GitRefStore.shared.cached(ref, refs: $0) }
+        var actions: [UIMenuElement] = []
+        if let url = resolution?.url ?? ref.webURL() {
+            actions.append(
+                UIAction(title: "Open on GitHub", image: UIImage(systemName: "arrow.up.right.square")) { _ in
+                    UIApplication.shared.open(url)
+                })
+        }
+        let copied: String
+        if case .commit(let commit) = resolution {
+            copied = commit.sha
+        } else if case .commit(_, let sha) = ref {
+            copied = sha
+        } else {
+            copied = resolution?.url?.absoluteString ?? ref.label
+        }
+        let title = if case .commit = ref { "Copy SHA" } else { "Copy Link" }
+        actions.append(
+            UIAction(title: title, image: UIImage(systemName: "doc.on.doc")) { _ in
+                UIPasteboard.general.string = copied
+            })
+        let menu = UIMenu(children: actions)
+        guard let resolution, resolution.hasCard else { return UITextItem.MenuConfiguration(menu: menu) }
+        let hosting = UIHostingController(rootView: GitRefCard(resolution: resolution))
+        let size = hosting.sizeThatFits(in: CGSize(width: GitRefCard.width, height: 600))
+        hosting.view.frame = CGRect(x: 0, y: 0, width: GitRefCard.width, height: size.height)
+        hosting.view.backgroundColor = UIColor(Theme.sheetPanel)
+        return UITextItem.MenuConfiguration(preview: .view(hosting.view), menu: menu)
+    }
+
     func textView(
         _ textView: UITextView, editMenuForTextIn range: NSRange,
         suggestedActions: [UIMenuElement]
@@ -830,6 +949,13 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
         ].compactMap { $0 }
         return UIMenu(children: ours + suggestedActions)
     }
+}
+
+extension TranscriptSelectionCoordinator: UIPopoverPresentationControllerDelegate {
+    /// A git ref's card stays a popover on iPhone, not a sheet.
+    func adaptivePresentationStyle(
+        for controller: UIPresentationController, traitCollection: UITraitCollection
+    ) -> UIModalPresentationStyle { .none }
 }
 
 /// A tap inside native selected text must not trigger the transcript's
