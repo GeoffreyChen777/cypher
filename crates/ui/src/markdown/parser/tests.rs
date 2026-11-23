@@ -771,7 +771,6 @@ fn image(src: &str, alt: &str) -> Block {
     }
 }
 
-
 #[test]
 fn an_image_alone_is_a_block() {
     assert_eq!(
