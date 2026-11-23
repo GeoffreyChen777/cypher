@@ -582,6 +582,8 @@ for (const language of LANGUAGES as Language[]) {
 
 /** Letters of a script spaces separate: such words match at a word start. */
 const SPACED = /[\p{Script=Latin}\p{Script=Cyrillic}\p{Script=Greek}]/u;
+/** The same letters (and combining marks), as a character-class body. */
+const SPACED_LETTER = "\\p{Script=Latin}\\p{Script=Cyrillic}\\p{Script=Greek}\\p{M}";
 
 function escape(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -593,7 +595,9 @@ function wordSource(word: string): string {
   const body = (stem ? word.slice(0, -1) : word).normalize("NFKC").toLowerCase();
   const text = escape(body).replace(/\s+/g, "\\s+").replace(/'/g, "['’]?");
   if (!SPACED.test(body)) return text;
-  return `(?<![\\p{L}\\p{N}_])${text}${stem ? "" : "(?![\\p{L}\\p{N}_])"}`;
+  // A word of a spaced script ends where letters of a spaced script end: next to a CJK character
+  // ("然后pr", "就merge") it stands as a word of its own, as owners mix scripts without spaces.
+  return `(?<![${SPACED_LETTER}\\p{N}_])${text}${stem ? "" : `(?![${SPACED_LETTER}\\p{N}_])`}`;
 }
 
 function compile(words: Iterable<string>, flags = "iu"): RegExp {

@@ -18,10 +18,12 @@
  * - `succeeded`: the line exited 0 and every command in it ran in the line's
  *   own shell joined by `&&` (so each one succeeded), and the creator is the
  *   system's program;
- * - `output`: `succeeded`, the creator is the line's only command, and its
- *   output's last line has the row's shape. Text that `echo`, `printf`,
- *   `cat` or any other command prints can never mint an entry: with another
- *   command in the line nothing is read from the output at all;
+ * - `output`: the line exited 0, its output is the creator's own (every
+ *   other command prints nothing, as `export`, `cd` or `mkdir -p`, or only
+ *   selects the creator's lines through a pipe, as `| tail -1`:
+ *   `loneOutput`), and its last line has the row's shape. Text that `echo`,
+ *   `printf`, `cat` or any other command prints can never mint an entry:
+ *   with such a command in the line nothing is read from the output at all;
  * - `ran`: the line ran (a dev instance names its data directories before it
  *   makes them, in the background).
  *
@@ -495,6 +497,46 @@ export function lineSucceeded(commands: readonly CatalogueCommand[], exitCode: n
 }
 
 /** The last non-empty line of a command's output. */
+/** Commands that print nothing on stdout or stderr as written here (`export X=…`, `cd dir`, `mkdir -p dir`). */
+const SILENT: ReadonlySet<string> = new Set(["export", "cd", "unset", "set", "true", ":", "mkdir", "sleep", "umask", "shopt"]);
+/** Options that make a silent command print (`mkdir -v`, `set -x`, `set -o` alone lists options). */
+const LOUD_OPTION = /^-(?:[a-z]*[vx][a-z]*|-verbose|-xtrace)$/i;
+
+/**
+ * Whether the line's output is the creator's own (`at`): every other command
+ * prints nothing (an assignment, `export`, `cd`, `mkdir -p`), or takes the
+ * creator's output through a pipe and only selects lines of it (`| tail -1`,
+ * `| head -n 3`). An `echo`, a `printf`, a `sed` or any other command that
+ * prints or rewrites may forge the name, so the output is then nobody's.
+ */
+export function loneOutput(commands: readonly CatalogueCommand[], at: number): boolean {
+  let piped = false;
+  for (const [index, command] of commands.entries()) {
+    if (index === at) {
+      piped = command.joint === "|";
+      continue;
+    }
+    const program = command.words[0];
+    if (index > at && piped) {
+      // A selector of the creator's lines: `tail`/`head` with a line count and no file.
+      const rest = command.words.slice(1);
+      const selects = (program === "tail" || program === "head") && rest.every((word, i) => /^-(?:n)?\d+$/.test(word) || (word === "-n" && /^\d+$/.test(rest[i + 1] ?? "")) || (/^\d+$/.test(word) && rest[i - 1] === "-n"));
+      if (!selects || command.writes.length) return false;
+      piped = command.joint === "|";
+      continue;
+    }
+    piped = false;
+    // Its stdout or stderr redirected elsewhere doesn't make a command silent: only what it never prints.
+    if (program === undefined) {
+      if (command.joint === "|") return false;
+      continue;
+    }
+    if (program === UNKNOWN || !SILENT.has(program) || command.words.slice(1).some((word) => word === UNKNOWN || LOUD_OPTION.test(word)) || command.joint === "|") return false;
+    if ((program === "set" && command.words.length === 1) || (program === "cd" && command.words[1] === "-")) return false;
+  }
+  return true;
+}
+
 function lastLine(output: string): string | undefined {
   const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   return lines.at(-1);
@@ -528,8 +570,10 @@ export function settleCreations(
         if (!succeeded || !trusted(candidate.command)) entity = undefined;
         break;
       case "output": {
-        // Only the creator's own output: the line is that one command, and it succeeded.
-        if (!succeeded || commands.length !== 1 || !trusted(candidate.command) || result.output === undefined || !candidate.pattern) {
+        // Only the creator's own output: the line's other commands print nothing or only pick its lines
+        // (`loneOutput`), and the line exited 0 (through `| tail -1` that is tail's status: a creator that
+        // failed prints no line its pattern takes).
+        if (result.exitCode !== 0 || !(succeeded || commands.length > 1) || !loneOutput(commands, candidate.command) || !trusted(candidate.command) || result.output === undefined || !candidate.pattern) {
           entity = undefined;
           break;
         }

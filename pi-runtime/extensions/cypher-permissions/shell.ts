@@ -131,7 +131,7 @@ export interface ParseOptions {
   /** Whether `NAME=value` alone on a command may stand (it changes nothing a program sees). */
   assignable?: (name: string) => boolean;
   /** Whether `NAME=value` in front of a command may stand (it does not change how programs load or run code). */
-  prefixAllowed?: (name: string) => boolean;
+  prefixAllowed?: (name: string, value?: string) => boolean;
   /** Whether `export NAME=value` may keep its value known (not a variable bash itself reads); without it, `export` forgets every value. */
   exportable?: (name: string) => boolean;
   /** The directory the line starts in: what `$PWD` is, in a line that never changes directory. */
@@ -616,7 +616,7 @@ function read(
       }
     }
     if (assigns.length) {
-      const allowed = assigns.every((name) => options.prefixAllowed?.(name));
+      const allowed = assigns.every((name, index) => options.prefixAllowed?.(name, assignValues[index]));
       if (!allowed && !evaluate) throw new Opaque("a variable assignment in front of a command");
       env = assigns;
       envValues = assignValues.map((value) => value ?? UNKNOWN);
@@ -1126,7 +1126,7 @@ function dashC(words: readonly string[], options: ParseOptions): string | undefi
       if (WRAPPER_REFUSES[name]?.test(word)) return undefined;
       const assignment = name === "env" ? /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(word) : null;
       if (assignment) {
-        if (!options.prefixAllowed?.(assignment[1])) return undefined;
+        if (!options.prefixAllowed?.(assignment[1], word.slice(assignment[0].length))) return undefined;
         continue;
       }
       if (!word.startsWith("-") || word === "-") break;

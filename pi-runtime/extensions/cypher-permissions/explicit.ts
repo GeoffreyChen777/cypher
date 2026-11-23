@@ -189,7 +189,29 @@ export function bareAssent(reply: string, quote: string): boolean {
   const quoted = normalize(quote);
   for (const name of rest.match(OWN_NAME) ?? []) if (!quoted.includes(normalize(name))) return false;
   for (const action of ACTIONS) if (actionWords(action, true).test(rest) && !actionWords(action).test(quote)) return false;
+  // Saying more than an assent's size, it must cite what it agrees to: an action of the quote ("swift-delta 删了",
+  // "Release a new version."). Longer words that cite none of it ("show me the logs", "thanks, looks good") may be
+  // about anything, whatever the model reads into them.
+  if (replySize(text) > BARE_REPLY && !citesAction(text, quote)) return false;
   return true;
+}
+
+/** The most a reply may say and bind without citing the proposal's action: two words, or four CJK characters. */
+const BARE_REPLY = 4;
+
+/** How much a reply says, its filler words left out: a word of a spaced script counts 2, a CJK character 1. */
+export function replySize(text: string): number {
+  const rest = text.normalize("NFKC").replace(FILLER, " ");
+  const words = rest.match(/[\p{Script=Latin}\p{Script=Cyrillic}\p{Script=Greek}\p{N}_'’-]+/gu) ?? [];
+  const cjk = rest.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu) ?? [];
+  const other = rest.replace(/[\p{Script=Latin}\p{Script=Cyrillic}\p{Script=Greek}\p{N}_'’\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\s\p{P}\p{S}-]+/gu, " ").trim();
+  return words.length * 2 + cjk.length + (other ? other.split(/\s+/).length * 2 : 0);
+}
+
+/** The reply says an action (or the pull-request noun) its quoted proposal says. */
+function citesAction(reply: string, quote: string): boolean {
+  const asks = (regex: RegExp) => regex.test(reply) && regex.test(quote);
+  return ACTIONS.some((action) => asks(actionWords(action))) || asks(nounWords("pr")) || asks(nounWords("tag"));
 }
 
 const ACTIONS = ["create", "delete", "merge", "close", "comment", "review", "edit", "ready", "reopen", "push", "publish", "release", "unpublish", "install", "stop", "erase", "apply", "rename", "write", "archive", "reach"];
@@ -700,6 +722,48 @@ export interface ExplicitFacts {
   pullRequestsWithHead?(dir: string | undefined, branch: string): readonly PullRequestFact[];
   /** The branch checked out in a worktree. */
   worktreeBranch?(path: string): string | undefined;
+  /** This task's own branches and pull requests (core.ts `ownEntities`): what a consent naming no target may mean. */
+  own?(): { branches: readonly string[]; prs: readonly PullRequestFact[] };
+}
+
+/**
+ * The one entity of this task a consent that names an action but no target
+ * binds to: the task's own branch, or its own pull request, when exactly one
+ * fits (several or none: undefined, and the consent must name it). Default
+ * branches are never a task's own.
+ */
+function ownTarget(kind: "branch" | "pr", message: string, opened: readonly PullRequestFact[], facts: ExplicitFacts): string | undefined {
+  const own = facts.own?.() ?? { branches: [], prs: [] };
+  const prs = [...own.prs, ...opened];
+  let found: string | undefined;
+  let names: string[];
+  if (kind === "branch") {
+    const branches = new Set([...own.branches, ...opened.flatMap((pr) => (pr.head ? [pr.head] : []))].filter((name) => !BRANCHY.test(name)));
+    if (branches.size !== 1) return undefined;
+    found = [...branches][0];
+    names = [found, ...prs.filter((pr) => pr.head === found).map((pr) => pr.number)];
+  } else {
+    const numbers = new Set(prs.map((pr) => pr.number));
+    if (numbers.size !== 1) return undefined;
+    found = [...numbers][0];
+    names = [found, ...prs.filter((pr) => pr.number === found).flatMap((pr) => (pr.head ? [pr.head] : []))];
+  }
+  // Words that name something else ("merge other-branch", "0.3.5", "#13") leave it to the names they say.
+  if (namesOther(message, names)) return undefined;
+  // Merging, a default branch may only be where it goes ("merge into main"), never what is merged ("merge main into it").
+  if (kind === "pr" && namedAttributes(message, {}).branches.some((branch) => BRANCHY.test(branch.name) && branch.role !== "base")) return undefined;
+  return found;
+}
+
+/** The message holds an entity-shaped name (OWN_NAME: `#12`, `x-y`, `a/b`, `v1.2`, a number) that is none of `own`, no default branch and no word of the table. */
+function namesOther(message: string, own: readonly string[]): boolean {
+  const mine = new Set(own.map((name) => name.toLowerCase()));
+  for (const raw of message.normalize("NFKC").match(OWN_NAME) ?? []) {
+    const name = raw.replace(/^[#!]/, "").replace(/^origin\//, "").toLowerCase();
+    if (mine.has(name) || BRANCHY.test(name) || ordinaryWord(name)) continue;
+    return true;
+  }
+  return false;
 }
 
 type Entry = { type?: string; message?: { role?: string; content?: unknown; toolCallId?: unknown; isError?: unknown } };
@@ -831,6 +895,8 @@ function uncoveredByKind(target: Target, message: string, opened: readonly PullR
       // Merging a pull request merges its head branch: "merge fix-x into main" names the pull request from fix-x.
       const pr = canonical(target.entity, context);
       if (target.action === "merge" && pr.head && namesEntity(message, { kind: "branch", name: pr.head, ...(pr.repo ? { repo: pr.repo } : {}) }, context) && (!pr.base || ["main", "master"].includes(pr.base) || mentions(message, pr.base))) return undefined;
+      // No pull request named: the task's own one, when it has exactly one.
+      if (ownTarget("pr", message, opened, facts) === target.value && (!target.repo || !origin || repoOf(target.repo) === origin)) return undefined;
       if (!SAYS.pr.test(message)) return `your message doesn't say which pull request (#${target.value})`;
       const ours = opened.filter((pr) => pr.number === target.value && (!pr.repo || !origin || repoOf(pr.repo) === origin) && (!target.repo || !pr.repo || repoOf(pr.repo) === repoOf(target.repo)));
       return ours.length ? undefined : `your message doesn't name pull request #${target.value}, and this chat didn't open it`;
@@ -838,10 +904,13 @@ function uncoveredByKind(target: Target, message: string, opened: readonly PullR
     case "branch":
       if (target.action === "delete") {
         if (!SAYS.delete.test(message)) return "your message doesn't ask to delete a branch";
-        return mentions(message, target.value) ? undefined : `it deletes ${target.value}, a branch your message doesn't name`;
+        if (mentions(message, target.value)) return undefined;
+        return ownTarget("branch", message, opened, facts) === target.value ? undefined : `it deletes ${target.value}, a branch your message doesn't name`;
       }
-      if (!SAYS.push.test(message)) return "your message doesn't ask to push";
-      return mentions(message, target.value) ? undefined : `it pushes to ${target.value}, a branch your message doesn't name`;
+      // The task's own branch (exactly one): "push" or a pull request asked for (its head must be pushed) names it.
+      const own = ownTarget("branch", message, opened, facts) === target.value;
+      if (!SAYS.push.test(message) && !(own && SAYS.pr.test(message))) return "your message doesn't ask to push";
+      return mentions(message, target.value) || own ? undefined : `it pushes to ${target.value}, a branch your message doesn't name`;
     case "tag": {
       if (!SAYS.release.test(message) && !SAYS.push.test(message)) return "your message doesn't ask for a release or a tag";
       if (mentions(message, target.value)) return undefined;
@@ -901,12 +970,17 @@ const LEXICON_WORD = new RegExp(`^(?:${allWords().source})$`, "iu");
  */
 function markedRef(name: string, after: string): boolean {
   if (!/^[a-z0-9][a-z0-9._/-]*$/.test(name) || ordinaryWord(name) || REMOTE_NAMES.test(name)) return false;
+  // A count or a measure ("up to 2x", "to 30s", "to 4k"), not a ref.
+  if (QUANTITY.test(name)) return false;
   if (/[/_\d]/.test(name) || BRANCHY.test(name)) return true;
   if (!name.includes("-") || name.split("-").some((part) => part.length >= 3 && ordinaryWord(part))) return false;
   const next = after.trim().split(/\s+/)[0] ?? "";
   const ends = next === "" || /^[,.;:!?，。；！？、)]/.test(after.trimStart()) || listWords("baseBefore").test(next) || listWords("headBefore").test(next) || ordinaryWord(next.replace(/[^\p{L}\p{N}-]+$/u, ""));
   return ends;
 }
+
+/** A number with a short unit: `2x`, `30s`, `10ms`, `4k`, `3rd`. */
+const QUANTITY = /^\d+(?:\.\d+)?[a-z]{0,3}$/i;
 
 /** Branch names that are branches whatever the repository has. */
 const BRANCHY = /^(main|master|develop|development|dev|trunk|staging)$/i;
@@ -1032,8 +1106,10 @@ function attributeClash(target: Target, message: string, context: EntityContext,
     entity.kind === "pr" ? { head: entity.head, base: entity.base } : entity.kind === "branch" ? { self: entity.name } : {};
   if (entity.kind !== "pr" && entity.kind !== "branch") return undefined;
   const same = (a: string | undefined, b: string) => a !== undefined && a.replace(/^origin\//, "").toLowerCase() === b.toLowerCase();
+  // Asked for a pull request, a branch marked as where it goes ("pr 给main") is the pull request's base, not the branch a push sends.
+  const prBase = entity.kind === "branch" && SAYS.pr.test(message);
   for (const branch of named.branches) {
-    if (!branch.role) continue;
+    if (!branch.role || (prBase && branch.role === "base")) continue;
     const want = entity.kind === "pr" ? (branch.role === "base" ? own.base : own.head) : own.self;
     // An attribute not known is checked by the target's own identity (its number), not here.
     if (want !== undefined && !same(want, branch.name)) {

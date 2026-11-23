@@ -1010,6 +1010,37 @@ default branch; unknown asks.
 words is those words, checked as `typed` (quote source `typed` in the audit), with every
 typed check, and the reply's own "wait"/"not yet" still takes it back.
 
+**The task's own targets** (round 2, part F; `explicit.ts` `ownTarget`). A consent that
+names an action but no target ("pr 给main", "ci 没问题就 merge", "删除 remote branch")
+binds to this task's own entity of that kind, as code-checked facts (core.ts
+`ownEntities`): its branches are the branch checked out in each of the chat's project
+folders (never a default branch), the branches the ledger says it made, and the heads of
+pull requests it opened; its pull requests are the ones the ledger or the transcript
+says it opened, and those gh lists with its one branch as their head. It binds only when
+exactly one candidate fits: two branches or two pull requests, or none, still ask. And
+only when the words name nothing else: an entity-shaped name (OWN_NAME: `#13`, `x-y`,
+`a/b`, `v1.2`, a number) that is none of the candidate's names, no default branch and no
+word of the table leaves the consent to the names it says ("merge other-branch",
+"release 0.3.5"); merging, a default branch may only be where it goes ("merge into main"),
+never what is merged ("merge main into it"). The action itself must still be said, in any
+language of the table. A pull request asked for covers pushing its own head branch ("pr"
+as a verb), and a branch the consent marks as where it goes is then the pull request's
+base, not a branch the push sends; a pull request request never covers pushing a default
+branch, and "push to main" still conflicts with pushing the task's branch.
+
+**Words, not prose** (round 2). A word of a spaced script stands as a word next to a CJK
+character ("然后pr", "就merge"; the table's boundaries were any letter, so Chinese
+messages that mix scripts lost their verbs). A count or a measure (`2x`, `30s`, `4k`) is
+never a role-marked ref ("rerun up to 2x" named `2x` as the base).
+
+**A reply that says more than an assent must cite the action** (round 2). Besides
+`bareAssent`'s checks (no question, negation, deferral, other verb or other name), a reply
+whose size exceeds an assent's — two words of a spaced script, or four CJK characters,
+after the table's filler words (`replySize` > 4) — binds only when it says an action (or
+the pull-request or tag noun) its quoted proposal says: "swift-delta 删了" and "Release a
+new version." bind, "ログを見せて", "danke, sieht gut aus" or "go ahead with that" never,
+whatever the judge's `assents` says. No yes-word list: the size rule only narrows.
+
 Tests: `cypher-permissions-entities.test.mjs` — unit tests, and seeded property tests
 over generated entity pairs (symmetry, antisymmetry, transitivity, qualification with the
 current repository changes nothing, a path outside a folder is never in it, unrelated
@@ -1021,7 +1052,11 @@ table, generated consents with its merge words (pass), its retractions later or 
 reply (ask) and its negations next to the verb (ask), uncovered scripts, random pull
 requests against consents naming another base, head or repository in random languages
 (never pass), and qualified/unqualified/URL forms of a pull request, branch or release
-in the current repository (identical outcome). `PERMISSIONS_SEED=<n>` reruns the
+in the current repository (identical outcome); part F adds the own-target binding (one
+candidate binds, several or none or another entity-shaped name anywhere in the words
+never), mixed-script words, quantities, replies by size, and location variables.
+`cypher-permissions-provenance.test.mjs` has the compound-line creators (silent
+companions and line selectors record; a printing command anywhere never). `PERMISSIONS_SEED=<n>` reruns the
 property tests with another seed.
 
 #### 7.3.3 What this task made: the provenance ledger (2026-11-18, ledger since 2026-11-22)
@@ -1057,10 +1092,23 @@ around every bash call, in the sandbox and outside it):
   that is there now and was not before (`observed`, whatever the exit status); anything
   else only when the line exited 0, every command ran in the line's own shell joined by
   `&&`, and the creator is the system's program (`succeeded`); a name read from output only
-  when, in addition, the creator is the line's only command and the last line of its
-  output has the row's shape (`output`). So `echo <UDID>`, `printf`, `cat`, or another
-  command in the same line can never mint an entry; a dev instance's directories, which it
-  makes in the background, count when the line ran (`ran`). A truncated output is not read.
+  when, in addition, the output is the creator's own and its last line has the row's shape
+  (`output`). The output is the creator's own when every other command of the line prints
+  nothing as written (an assignment, `export`, `cd` other than `cd -`, `mkdir` without
+  `-v`, `true`, `sleep`, `set` with arguments) or takes the creator's output through a pipe
+  and only selects lines of it (`| tail -1`, `| head -n 3`, no file operand), and the line
+  exited 0 (round 2, `catalogue.ts` `loneOutput`: `export DEVELOPER_DIR=…; xcrun simctl
+  create … 2>&1 | tail -1` records its simulator). So `echo <UDID>`, `printf`, `cat`, `sed`
+  or any other command that prints or rewrites, anywhere in the line, still never mints an
+  entry; a dev instance's directories, which it makes in the background, count when the
+  line ran (`ran`). A truncated output is not read.
+- A location variable in front of a command (`DEVELOPER_DIR`, `SDKROOT`, `*_HOME`,
+  `*ROOT`) changes which toolchain runs, so it made the command unreadable. It is benign
+  when its value is a literal absolute directory outside the home folder that exists and
+  this user can't write (`commands.ts` `benignEnv(name, value)`, `systemLocation`):
+  `env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun simctl delete <udid>`
+  reads as the simulator delete it is, and the ledger decides. Replays name their fake
+  machine's read-only directories (`setSystemDirectory`).
 - Nothing sensitive, protected, Cypher's own, the installed app's or the permission
   system's is ever recorded, however it was created, so a write the owner approved once
   can never become a free hand to delete it later.

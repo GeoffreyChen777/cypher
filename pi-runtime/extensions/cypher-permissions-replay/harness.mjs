@@ -15,6 +15,10 @@ import { fileURLToPath } from "node:url";
 
 import { Permissions } from "../cypher-permissions/core.ts";
 import { UNKNOWN } from "../cypher-permissions/shell.ts";
+import { setSystemDirectory } from "../cypher-permissions/commands.ts";
+
+// The fake machine's read-only directories (a `DEVELOPER_DIR=/Applications/Xcode.app/…` names the installed toolchain), on any host.
+setSystemDirectory((path) => /^\/(Applications|Library|System|usr|opt\/local)\//.test(path));
 
 const here = dirname(fileURLToPath(import.meta.url));
 

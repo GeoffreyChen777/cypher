@@ -1053,3 +1053,61 @@ test("property: for an unreadable line, a claimed target counts only when the co
     }
   }
 });
+
+// --- Round 2, part F: a creator's output inside a compound line -----------------------------
+
+test("output: a creator's printed name counts when the line's other commands print nothing or only pick its lines", () => {
+  const UDID = "CEFBDAD9-6EA3-4B0D-8D7A-EAC8FF15F458";
+  const made = (line, output = UDID, exitCode = 0) => run(line, { output, exitCode }).filter((entry) => entry.kind === "simulator").map((entry) => entry.name);
+  // Silent companions and line selectors keep the output the creator's.
+  for (const line of [
+    `xcrun simctl create "n" "iPhone 18 Pro"`,
+    `export DEVELOPER_DIR=/x; xcrun simctl create "n" "iPhone 18 Pro" 2>&1 | tail -1`,
+    `cd /work/repo && mkdir -p shots && xcrun simctl create n t`,
+    `U=1; xcrun simctl create n t | head -n 1`,
+  ]) assert.deepEqual(made(line), [UDID], line);
+  // Anything that prints or rewrites may forge the name: nothing is read.
+  for (const line of [
+    `echo ${UDID}; xcrun simctl create n t`,
+    `xcrun simctl create n t; echo ${UDID}`,
+    `printf '%s\\n' ${UDID} && xcrun simctl create n t`,
+    `xcrun simctl create n t | sed s/.*/${UDID}/`,
+    `xcrun simctl create n t | tail -1 somefile`,
+    `mkdir -v d; xcrun simctl create n t`,
+    `cat notes.txt; xcrun simctl create n t`,
+    `set; xcrun simctl create n t`,
+  ]) assert.deepEqual(made(line), [], line);
+  // A failed line records nothing, piped or not.
+  assert.deepEqual(made(`export A=1; xcrun simctl create n t | tail -1`, UDID, 1), []);
+});
+
+test("output (property): a printing command anywhere in the line, with any companions, mints nothing", () => {
+  for (const seed of process.env.PERMISSIONS_SEED ? [Number(process.env.PERMISSIONS_SEED)] : SEEDS) {
+    const rand = prngFor(seed);
+    const pick = (list) => list[Math.floor(rand() * list.length)];
+    const UDID = "0E6F0A52-0B1C-4D7E-9F00-1234567890AB";
+    const silent = ["export A=1", "cd /work/repo", "mkdir -p out", "true", "sleep 1"];
+    const loud = [`echo ${UDID}`, `printf ${UDID}`, `cat f`, `ls`, `node -e 1`, `python3 -c 1`];
+    for (let i = 0; i < 40; i++) {
+      const parts = Array.from({ length: Math.floor(rand() * 3) }, () => pick(silent));
+      const at = Math.floor(rand() * (parts.length + 1));
+      parts.splice(at, 0, "xcrun simctl create n t");
+      const quiet = parts.join(pick(["; ", " && "]));
+      assert.equal(run(quiet, { output: UDID }).some((entry) => entry.name === UDID), true, `seed ${seed}: ${quiet}`);
+      const noisy = [...parts];
+      noisy.splice(Math.floor(rand() * (noisy.length + 1)), 0, pick(loud));
+      const line = noisy.join(pick(["; ", " && "]));
+      assert.equal(run(line, { output: UDID }).some((entry) => entry.name === UDID), false, `seed ${seed}: ${line}`);
+    }
+  }
+});
+
+function prngFor(seed) {
+  let state = seed >>> 0 || 1;
+  return () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return (state >>> 0) / 4294967296;
+  };
+}
