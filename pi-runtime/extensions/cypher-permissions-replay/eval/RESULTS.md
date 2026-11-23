@@ -1430,5 +1430,5 @@ probe's one row was the sign-in failure above.
 
 `npm --prefix pi-runtime test`: 308/308 pass (the known sandbox-only `provider-service.test.mjs` "Pi RPC catalog
 timed out" did not occur). `bash scripts/check.sh runtime`: pass. Round 4 changed nothing under `crates/` (`git diff
---stat edec0430 HEAD -- crates/` is empty); `cargo test -p cypher-ui --lib` (round 3's unfinished check): see the
-report of this step.
+--stat edec0430 HEAD -- crates/` is empty); `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo test -p cypher-ui
+--lib` (round 3's unfinished check, cold build ~9 min): 1176 passed, 0 failed, 1 ignored.
