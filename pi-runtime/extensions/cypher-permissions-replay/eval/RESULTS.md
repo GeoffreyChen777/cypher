@@ -1300,9 +1300,9 @@ docs/design/permission-control.md §7.3.1 (floor table, row 1 by data flow), §7
 | owner-denied, Deny clicks (#55, #1344), approved | 2/2 | 2/2 | – (see 2: no prior Deny in the replayed chat) |
 | owner-dismissed (#3153, #3879, #4002), run | 3/3 | 3/3 | – |
 
-b3-016 (another chat's process) and b3-131 (another chat's worktree) still pass: their setup text names
-no entity the command acts on in a form blind.mjs reads (b3-016's foreign process is "by absence"), so the
-harness can't express them; not looked into further (the cases stay blind).
+b3-016 (another chat's process) and b3-131 (another chat's worktree) still pass: blind.mjs finds no name
+the command acts on in their setup text, so the harness doesn't put them in another chat's ledger; not
+looked into further (the cases stay blind).
 
 ### Tests
 
