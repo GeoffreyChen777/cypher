@@ -682,6 +682,11 @@ function installedMention(text: string, facts: RiskFacts, home: string | undefin
 /** The installed app's and Runtime's program files (not the owner's data): `/Applications/Cypher.app`, a Runtime version outside its `agent/` folder. */
 const INSTALLED_PROGRAM = /^\/Applications\/Cypher\.app(\/|$)|\/\.cypher\/pi-runtime\/(current|versions\/[^/]+)(\/(?!agent(\/|$))|$)/;
 
+/** Whether a canonical path is the installed app's or Runtime's program files, not the owner's data (`INSTALLED_PROGRAM`). */
+export function installedProgram(path: string): boolean {
+  return INSTALLED_PROGRAM.test(path);
+}
+
 /**
  * Touching the installed Cypher app (`/Applications/Cypher.app`, its data in
  * `~/.cypher` outside the chats' worktrees, its Runtime): a human decides,

@@ -1,8 +1,10 @@
 /**
- * Explicit requests: a dangerous command (publishing, pushing, a pull
- * request) runs without a dialog when the owner's own words ask for exactly
- * it. The reviewing model finds those words and names what the command acts
- * on; this module checks both, so the model's say-so is never enough:
+ * Explicit requests: whether the owner's own words ask for exactly what a
+ * dangerous command (publishing, pushing, a pull request) does. Since round 3
+ * (2026-11-23) this is evidence, never a gate: `scanConsents` and
+ * `scanDataConsent` run the checks on every owner word for the judge's prompt,
+ * `checkExplicit` on the consent the judge cites for the audit, and the
+ * judge's verdict decides (core.ts). The checks:
  *
  * 1. The quote is the owner's: it occurs, as written (whitespace, case and
  *    full-width punctuation aside), in one of the owner's consents. Only
@@ -32,8 +34,9 @@
  *    takes nothing back.
  *
  * A target known only when the line runs (`git push origin $BRANCH`) can't
- * be checked, so it asks; a body or title known only when it runs
- * (`--body "$(cat …)"`) can be, since it changes what is said, not where.
+ * be checked, so only the consent's own words are; a body or title known only
+ * when it runs (`--body "$(cat …)"`) can be, since it changes what is said,
+ * not where.
  */
 
 import { basename, isAbsolute, join, resolve } from "node:path";
@@ -1268,7 +1271,7 @@ export interface ExplicitResult {
  * theirs, names what the line acts on, and nothing they wrote since takes
  * it back.
  */
-export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: OwnerWords | undefined, entries: readonly Entry[], facts: ExplicitFacts): ExplicitResult {
+export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: OwnerWords | undefined, entries: readonly Entry[], facts: ExplicitFacts, options: { wordsOnly?: boolean } = {}): ExplicitResult {
   // A line whose target can't be read (all or part of it): only the consent can be checked (see below), and the targets that could be read.
   const unknown = "unknown" in read ? read.unknown : undefined;
   const targets = "targets" in read ? read.targets : (read.known ?? []);
@@ -1371,27 +1374,33 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
   // The target can't be read: the checked consent lets it run once, never remembered, when its own words name
   // what the model says the command acts on and ask for that kind of action (lexicon.ts); a bare "yes" never does.
   if (unknown !== undefined) {
-    if (claimed.length === 0) return result(["quote"], `${unknown}, and the reviewing model named no target`, source);
+    // The code's own scan (`scanConsents`, `wordsOnly`): no model claims a target, so what can be checked is that the
+    // words stand and ask for the line's kind of action.
+    const actions = "actions" in read && read.actions?.length ? read.actions : ["delete", "stop", "push", "publish", "release", "merge", "install", "apply", "write", "erase", "reach"];
+    if (options.wordsOnly) {
+      if (!actions.some((action) => actionWords(action).test(quote))) return result(["quote", "current"], `${unknown}, and your words "${quote}" don't ask to ${actions.join(" or ")}`, source);
+      return result(["quote", "current"], undefined, { ...source, once: true, unknown, ...(followUps.length ? { followUps } : {}) });
+    }
+    if (claimed.length === 0) return result(["quote", "current"], `${unknown}, and the reviewing model named no target`, source);
     const unnamed = claimed.find((item) => {
       const entity = claimEntity(item);
       return entity === undefined || !(namesEntity(quote, entity, context) || mentions(quote, item.value));
     });
-    if (unnamed) return result(["quote"], `${unknown}, and your words "${quote}" don't name ${unnamed.kind} ${unnamed.value}`, source);
+    if (unnamed) return result(["quote", "current"], `${unknown}, and your words "${quote}" don't name ${unnamed.kind} ${unnamed.value}`, source);
     // The claimed target must be in the command's own text: a name the line never says is the model's guess.
     const text = "text" in read ? read.text : undefined;
     const token = (value: string) => value !== "" && new RegExp(`(?<![A-Za-z0-9_.-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_-])`, "i").test(text ?? "");
     const absent = claimed.find((item) => text === undefined || !token(item.value.trim()));
-    if (absent) return result(["quote"], `${unknown}, and the command never names ${absent.kind} ${absent.value}`, source);
-    const actions = "actions" in read && read.actions?.length ? read.actions : ["delete", "stop", "push", "publish", "release", "merge", "install", "apply", "write", "erase", "reach"];
-    if (!actions.some((action) => actionWords(action).test(quote))) return result(["quote"], `${unknown}, and your words "${quote}" don't ask to ${actions.join(" or ")}`, source);
+    if (absent) return result(["quote", "current"], `${unknown}, and the command never names ${absent.kind} ${absent.value}`, source);
+    if (!actions.some((action) => actionWords(action).test(quote))) return result(["quote", "current"], `${unknown}, and your words "${quote}" don't ask to ${actions.join(" or ")}`, source);
     // Every unreadable command needs its own: a claimed target in its own words, and its own action asked for
     // (`gh release create v2 && npm publish`: the release's consent brings none for the publish).
     for (const command of "unread" in read ? (read.unread ?? []) : []) {
       const own = (value: string) => new RegExp(`(?<![A-Za-z0-9_.-])${value.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_-])`, "i").test(command.text);
       // A claimed target's names: itself, or a new pull request's head and base ("x → main"), whose head the push publishes.
       const names = (value: string) => [value, ...value.split(/\s*(?:→|->)\s*|\s+of\s+/)].map((name) => name.trim()).filter((name) => name !== "");
-      if (!command.open && !claimed.some((item) => names(item.value).some(own))) return result(["quote"], `${unknown}, and nothing your words name is what \`${command.text.slice(0, 60)}\` acts on`, source);
-      if (command.actions.length && !command.actions.some((action) => actionWords(action).test(quote))) return result(["quote"], `${unknown}, and your words "${quote}" don't ask to ${command.actions.join(" or ")} (\`${command.text.slice(0, 60)}\`)`, source);
+      if (!command.open && !claimed.some((item) => names(item.value).some(own))) return result(["quote", "current"], `${unknown}, and nothing your words name is what \`${command.text.slice(0, 60)}\` acts on`, source);
+      if (command.actions.length && !command.actions.some((action) => actionWords(action).test(quote))) return result(["quote", "current"], `${unknown}, and your words "${quote}" don't ask to ${command.actions.join(" or ")} (\`${command.text.slice(0, 60)}\`)`, source);
     }
     return result(["quote", "current"], undefined, { ...source, once: true, unknown, ...(followUps.length ? { followUps } : {}) });
   }
@@ -1473,6 +1482,11 @@ const ATTRIBUTE_SAYS: Readonly<Record<AttributeKey, string>> = {
   bypass: "bypasses a protection (branch protection, required checks or review)",
 };
 
+/** What an attribute does, in words (for the judge's evidence). */
+export function describeAttribute(attribute: AttributeKey): string {
+  return ATTRIBUTE_SAYS[attribute];
+}
+
 /** Whether a message says to wait or not do something, whatever about. */
 function retractsAny(text: string): boolean {
   return sentences(text.normalize("NFKC").replace(REMINDER, " ")).some((sentence) => RETRACTION.test(sentence));
@@ -1508,4 +1522,115 @@ function consentedFollowUp(target: Target, said: string, opened: readonly PullRe
     }
   }
   return undefined;
+}
+
+// --- Evidence for the reviewing model (round 3) ------------------------------------------------------
+
+/**
+ * What the code finds in one owner word for a dangerous line (`scanConsents`): the same checks a cited
+ * consent gets (`checkExplicit`: the words ask for the action, name or imply every target, carry the
+ * attributes it adds, and nothing written since takes them back), run on the word itself instead of a
+ * model's quote. Evidence for the judge, never a gate.
+ */
+export interface ConsentFinding {
+  /** 1-based, as the judge's prompt numbers the owner's words. */
+  index: number;
+  source: ConsentSource;
+  /** The words checked (the word, or the sentence of it that passed). */
+  quote: string;
+  /** Every check passed: the words ask for this action on every target the line names, and still stand. */
+  ok: boolean;
+  /** Which checks passed: `quote` (the words say something), `target` (they name what the line acts on), `current` (not taken back since). */
+  passed: ExplicitResult["passed"];
+  /** Why not, as `checkExplicit` says it. */
+  reason?: string;
+  /** The line's target (or part of it) can't be read: only the consent itself and the readable targets could be checked. */
+  unread?: boolean;
+  followUps?: string[];
+}
+
+/** The candidates a word is checked as: its whole text, then each sentence (a "don't" elsewhere in it stays its own). */
+function quotesOf(text: string): string[] {
+  const whole = text.trim();
+  const parts = sentences(whole).filter((sentence) => sentence !== whole);
+  return [whole, ...parts].filter((quote) => quote !== "");
+}
+
+/** The checked words a word offers: a reply its proposal (as the reply's assent) and its own text (as typed); any other word its text. */
+function candidatesOf(word: OwnerWord): { source: ConsentSource; quote: string }[] {
+  if (word.source === "reply") return [...quotesOf(word.proposal ?? "").map((quote) => ({ source: "reply" as const, quote })), ...quotesOf(word.text).map((quote) => ({ source: "typed" as const, quote }))];
+  return quotesOf(word.text).map((quote) => ({ source: word.source, quote }));
+}
+
+/** How far a result got: passed checks, an ok counting most. */
+function progress(result: ExplicitResult): number {
+  return (result.ok ? 10 : 0) + result.passed.length;
+}
+
+/**
+ * Every owner word checked as a consent for the line (latest last), with the line's own targets as the
+ * claim. A reply is checked as assenting to its proposal (whether it does is the judge's call, and the
+ * finding says it is a reply).
+ */
+export function scanConsents(read: LineTargets, owner: OwnerWords | undefined, entries: readonly Entry[], facts: ExplicitFacts): ConsentFinding[] {
+  if (!owner) return [];
+  const targets = "targets" in read ? read.targets : (read.known ?? []);
+  const claimed = targets.map((target) => ({ kind: target.kind, value: target.value }));
+  const unread = "unknown" in read;
+  const findings: ConsentFinding[] = [];
+  owner.messages.forEach((word, at) => {
+    let best: { result: ExplicitResult; quote: string; source: ConsentSource } | undefined;
+    for (const candidate of candidatesOf(word)) {
+      // Only this word: a later identical word would otherwise be the one found.
+      const only: OwnerWords = { ...owner, messages: owner.messages.map((message, index) => (index === at ? message : index < at ? { ...message, text: "", proposal: "", question: "" } : message)) };
+      const result = checkExplicit({ quote: candidate.quote, source: candidate.source, targets: claimed }, read, only, entries, facts, { wordsOnly: unread });
+      if (!best || progress(result) > progress(best.result)) best = { result, quote: candidate.quote, source: candidate.source };
+      if (result.ok) break;
+    }
+    if (!best) return;
+    const { result } = best;
+    findings.push({
+      index: at + 1,
+      source: best.source === "typed" && word.source === "reply" ? "typed" : word.source,
+      quote: best.quote.length > 240 ? `${best.quote.slice(0, 240)}…` : best.quote,
+      ok: result.ok,
+      passed: result.passed,
+      ...(result.reason ? { reason: result.reason } : {}),
+      ...(unread ? { unread: true } : {}),
+      ...(result.followUps?.length ? { followUps: result.followUps } : {}),
+    });
+  });
+  return findings;
+}
+
+/** What the code finds about a read of the installed app's data (`scanDataConsent`): an owner word asking for it, or why none does. */
+export interface DataFinding {
+  ok: boolean;
+  index?: number;
+  source?: ConsentSource;
+  quote?: string;
+  reason?: string;
+  /** The names a consent may say for the data (`dataNames`). */
+  names: string[];
+}
+
+/**
+ * The latest owner word that asks for reading the installed app's data, checked as `checkDataConsent`
+ * checks a cited one (its words name the app or the data, no "don't" in that sentence, not taken back or
+ * moved on from since). Evidence for the judge, never a gate.
+ */
+export function scanDataConsent(owner: OwnerWords | undefined, paths: readonly string[]): DataFinding {
+  const names = dataNames(paths);
+  if (!owner) return { ok: false, reason: "Cypher didn't pass the owner's words", names };
+  let closest: DataFinding | undefined;
+  for (let at = owner.messages.length - 1; at >= 0; at--) {
+    const word = owner.messages[at];
+    for (const candidate of candidatesOf(word)) {
+      const only: OwnerWords = { ...owner, messages: owner.messages.map((message, index) => (index < at ? { ...message, text: "", proposal: "", question: "" } : message)) };
+      const result = checkDataConsent({ quote: candidate.quote, source: candidate.source }, only, paths);
+      if (result.ok) return { ok: true, index: at + 1, source: word.source, quote: candidate.quote.length > 240 ? `${candidate.quote.slice(0, 240)}…` : candidate.quote, names };
+      closest ??= { ok: false, index: at + 1, source: word.source, reason: result.reason, names };
+    }
+  }
+  return closest ?? { ok: false, reason: "the owner has written nothing", names };
 }

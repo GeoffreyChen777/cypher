@@ -52,10 +52,9 @@ function processFacts(item) {
 
 /** The stubbed reviewing model: the case's (or probe's) recorded, rule-made or assumed verdict. */
 export function stubbedModel(verdict) {
-  // A recorded or assumed ask stands for the model's ask with a concrete concern (judge.ts `CONCERNS`):
-  // without one, an ask on a local request would run once.
-  const asked = (v) => (v.decision === "ask-user" && v.concern === undefined ? { ...v, concern: "beyond-request" } : v);
-  return async () => JSON.stringify(verdict ? asked(verdict) : { decision: "ask-user", reason: "no verdict for this case", concern: "beyond-request" });
+  // A recorded or assumed ask carries the concern a judge would name for what the line does (judge.ts
+  // `CONCERN_TABLE`, set per case in the fixture since round 3); an ask without one runs once.
+  return async () => JSON.stringify(verdict ?? { decision: "ask-user", reason: "no verdict for this case" });
 }
 
 /**

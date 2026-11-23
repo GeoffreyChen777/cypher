@@ -7,12 +7,14 @@
  * - `judge`: reversible, and seen by the team at most (a branch pushed, a
  *   pull request opened or edited): when the code has checked that it acts
  *   only on what this task made (risk.ts `teamStep`), it is a local step the
- *   reviewing model decides with the task's context. No owner quote needed.
+ *   reviewing model decides with the task's context.
  * - `consent`: hard to take back, or reaching the public, production or
- *   another person's work: the explicit check (explicit.ts) runs as before.
+ *   another person's work: a danger.
  *
- * The always-ask floor (a secret leaving the machine, the permission system
- * itself, no reviewing model) is above every row and unchanged.
+ * Since round 3 (2026-11-23) a grade is evidence for the reviewing model,
+ * never a gate: every danger goes to the judge, whose verdict decides, and
+ * its prompt carries the grade of what the line does (`gradesOf`). Only the
+ * floor (floor.ts) still asks the owner by itself.
  *
  * A row's `own` names the code-checked fact that makes the action this
  * task's: never the model's word. A row without it is consent-gated
@@ -61,4 +63,46 @@ export function gradeOf(action: string): Grade | undefined {
 export function judgeDecides(action: string): boolean {
   const grade = BY_ACTION.get(action);
   return grade !== undefined && grade.approver === "judge" && grade.own !== undefined && grade.reversible !== "irreversible" && grade.audience !== "public";
+}
+
+/**
+ * Which grade a dangerous line's target has, by what the tool table says it does (explicit.ts `Target`:
+ * its kind and action), as data. The first row that matches wins; a forcing or bypassing attribute
+ * (explicit.ts `ATTRIBUTE_FLAGS`) adds `force-push`. Evidence for the judge's prompt (round 3).
+ */
+export const TARGET_GRADES: readonly { kinds: readonly string[]; actions: readonly string[]; grade: string; when?: "default-branch" }[] = [
+  { kinds: ["pr"], actions: ["merge"], grade: "merge-default" },
+  { kinds: ["pr"], actions: ["comment", "review"], grade: "pr-comment" },
+  { kinds: ["pr"], actions: ["create"], grade: "pr-open" },
+  { kinds: ["pr"], actions: ["edit", "ready", "reopen", "close"], grade: "pr-update" },
+  { kinds: ["branch"], actions: ["push"], grade: "push-default", when: "default-branch" },
+  { kinds: ["branch"], actions: ["push"], grade: "push-foreign" },
+  { kinds: ["branch"], actions: ["delete"], grade: "force-push" },
+  { kinds: ["tag"], actions: ["push", "create"], grade: "tag" },
+  { kinds: ["tag", "release", "package"], actions: ["release", "publish", "unpublish"], grade: "release" },
+  { kinds: ["host"], actions: ["send"], grade: "send-data" },
+  { kinds: ["path", "worktree", "process", "simulator", "container", "image", "resource", "branch", "tag", "repo"], actions: ["delete", "erase", "stop"], grade: "delete-unmerged" },
+];
+
+const DEFAULT_BRANCH = /^(?:[\w.-]+\/)?(main|master|trunk|develop)$/;
+
+/** The grades of a line's targets (`TARGET_GRADES`), each once, in the order found. */
+export function gradesOf(targets: readonly { kind: string; action: string; value: string }[], attributes: readonly string[] = []): Grade[] {
+  const out: Grade[] = [];
+  const add = (action: string) => {
+    const grade = BY_ACTION.get(action);
+    if (grade && !out.includes(grade)) out.push(grade);
+  };
+  for (const target of targets) {
+    const row = TARGET_GRADES.find((item) => item.kinds.includes(target.kind) && item.actions.includes(target.action) && (item.when !== "default-branch" || DEFAULT_BRANCH.test(target.value)));
+    if (row) add(row.grade);
+  }
+  if (attributes.length) add("force-push");
+  return out;
+}
+
+/** A grade in words, for the judge: "merges into the default branch (recoverable, seen by the team)". */
+export function describeGrade(grade: Grade): string {
+  const audience = grade.audience === "self" ? "seen by no one else" : grade.audience === "team" ? "seen by the team" : "public";
+  return `${grade.says} (${grade.reversible}, ${audience})`;
 }

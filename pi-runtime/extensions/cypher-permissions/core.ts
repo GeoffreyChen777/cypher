@@ -37,10 +37,13 @@ import {
 import { globBase, hasGlob } from "./glob.ts";
 import { GRANT_ENTRY, GrantStore, newGrant, REVOKE_ENTRY, ROOT_ENTRY } from "./grants.ts";
 import type { Grant, GrantScope } from "./grants.ts";
-import { checkDataConsent, checkExplicit, describeTarget, lineTargets, repoName } from "./explicit.ts";
+import { checkDataConsent, checkExplicit, describeAttribute, describeTarget, lineTargets, repoName, scanConsents, scanDataConsent } from "./explicit.ts";
 import type { ExplicitClaim, ExplicitFacts, ExplicitResult, LineTargets, OwnerWords, Target, TargetFacts } from "./explicit.ts";
-import { conversationContext, judgePrompt, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
-import type { Concern, JudgeRequest } from "./judge.ts";
+import { answeredByConsent, conversationContext, judgePrompt, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
+import type { Concern, JudgeEvidence, JudgeRequest } from "./judge.ts";
+import { floorOf } from "./floor.ts";
+import type { FloorHit } from "./floor.ts";
+import { describeGrade, gradesOf } from "./grades.ts";
 import { isUnder, PathContext } from "./paths.ts";
 import type { Classification } from "./paths.ts";
 import { decide, describe } from "./policy.ts";
@@ -49,7 +52,7 @@ import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs }
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
 import { benignEnv, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
-import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, normalRefspec, redirectRisk, TIER_RANK } from "./risk.ts";
+import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, normalRefspec, redirectRisk, TIER_RANK } from "./risk.ts";
 import type { Assessment, GitFacts, KillTarget, ProcessFacts, RiskFacts, Tier } from "./risk.ts";
 import { INSPECT, inspectMatches, viewOf } from "./packs.ts";
 import { parseShell, UNKNOWN } from "./shell.ts";
@@ -181,6 +184,22 @@ const ALWAYS_IN = "Always in ";
 /** Dangerous work: until the user's next message. */
 const TASK = "Allow for this task";
 
+/**
+ * A prompt that came back without a button: closed, timed out, or cut off by the turn ending. It is
+ * not a refusal (round 3): only Deny (and Deny and stop) is. It is audited as `dismissed` (never
+ * `deny`), keeps nothing, and the agent is told it was not answered rather than refused.
+ */
+function unanswered(choice: string | undefined, started: number, timeoutMs: number | null | undefined, signal: AbortSignal | undefined): "dismissed" | "timeout" | "aborted" | undefined {
+  if (choice !== undefined && choice !== "") return undefined;
+  if (signal?.aborted) return "aborted";
+  if (typeof timeoutMs === "number" && Date.now() - started >= timeoutMs) return "timeout";
+  return "dismissed";
+}
+
+/** What the agent is told about an unanswered prompt. */
+const UNANSWERED = "Not run: the owner closed the permission prompt without answering. That is not a refusal; don't repeat it on your own. Ask them whether they want it, or continue without it.";
+
+
 /** A reviewing model that failed to sign in (an expired session, a missing key). */
 const AUTH_FAILURE = /authenticat|unauthori[sz]ed|\b401\b|\b403\b|expired|log ?in|sign ?in|credential|api key|forbidden/i;
 
@@ -204,14 +223,17 @@ interface Review {
 }
 
 /**
- * Whether an ask on this request must name a concern from the closed list (judge.ts `CONCERNS`) to
- * stand: a local bash line, or a file request outside the sensitive zone, with no concern the code
- * itself established. Network, tool calls and dangers keep every ask.
+ * Whether the owner's own words, as the code checked them (`JudgeEvidence`), answer a concern the judge
+ * asked with (judge.ts `CONCERN_TABLE` `answeredByConsent`): a consent of a kind the code vouches for by
+ * itself (typed, a plan, its card or an answer; a reply's assent is the judge's call), covering every
+ * target the line names, not taken back since; for the installed app's data, owner words naming it.
+ * Returns the words, or undefined. Round 3: "what the owner's previous turn already asked for, the judge
+ * must let through".
  */
-export function asksNeedConcern(request: Pick<JudgeRequest, "tier" | "capability" | "zone" | "knownConcern">): boolean {
-  if (request.tier !== "local" || request.knownConcern !== undefined) return false;
-  if (request.capability === "escalate") return true;
-  return (request.capability === "read" || request.capability === "write") && request.zone !== "sensitive";
+export function consentAnswers(concern: Concern | undefined, evidence: JudgeEvidence | undefined): string | undefined {
+  if (concern === undefined || !answeredByConsent(concern) || !evidence) return undefined;
+  if (concern === "installed-app" && evidence.installedData) return evidence.installedData.finding.ok ? evidence.installedData.finding.quote : undefined;
+  return evidence.consents?.find((finding) => finding.ok && !finding.unread && finding.source !== "reply")?.quote;
 }
 
 type ElevateOutcome = { allowed: true; scope: Scope; by: Grant["approvedBy"] } | { allowed: false; reason: string; abort?: boolean };
@@ -913,9 +935,12 @@ export class Permissions {
   }
 
   /**
-   * Ask the reviewing model about one request. It approves, or says why it
-   * could not; a model that cannot run (none here, paused, an error, a
-   * timeout) never approves.
+   * Ask the reviewing model about one request. Its verdict decides: an
+   * approval runs the call, and an ask stands only with a concern from the
+   * closed list (judge.ts `CONCERN_TABLE`); an ask without one runs once.
+   * A model that cannot decide (none here, paused, an error, a timeout or
+   * an unreadable answer after the retry) is the floor's `no-judge` row:
+   * the owner is asked, with the reason.
    */
   private async review(
     request: Omit<JudgeRequest, "level" | "workspaceRoots" | "userMessages" | "recentToolCalls">,
@@ -926,10 +951,11 @@ export class Permissions {
     if (paused) return { decision: "ask-user", once: false, reason: paused, state: "paused" };
     const { userMessages, recentToolCalls } = conversationContext(ctx.branch());
     const judgeRequest: JudgeRequest = { ...request, level: this.level, workspaceRoots: this.roots, userMessages, recentToolCalls, ownerWords: this.ownerWords };
-    // One attempt, then one retry when it timed out or failed for a reason other than signing in.
+    // One attempt, then one retry when it timed out, gave no readable answer, or failed for a reason other than signing in.
     let text: string | undefined;
     let failure: string | undefined;
     let timedOut = false;
+    let verdict: ReturnType<typeof parseVerdict> | undefined;
     for (let attempt = 0; attempt < JUDGE_ATTEMPTS; attempt++) {
       const controller = new AbortController();
       timedOut = false;
@@ -949,7 +975,8 @@ export class Permissions {
         clearTimeout(timer);
         ctx.signal?.removeEventListener("abort", onAbort);
       }
-      if (text !== undefined || ctx.signal?.aborted || (failure && AUTH_FAILURE.test(failure))) break;
+      verdict = text === undefined ? undefined : parseVerdict(text);
+      if ((verdict && verdict.kind !== "unreadable") || ctx.signal?.aborted || (failure && AUTH_FAILURE.test(failure))) break;
     }
     if (text === undefined) {
       if (timedOut) {
@@ -962,15 +989,18 @@ export class Permissions {
       return { decision: "ask-user", once: false, reason: `The reviewing model failed${why}`, state: "unavailable" };
     }
     this.noteReview("ok");
-    const verdict = parseVerdict(text);
-    // An ask on a local request with no concern from the closed list runs once: the classifier found no danger.
-    if (verdict.kind === "ask-user" && verdict.concern === undefined && asksNeedConcern(request)) {
+    verdict ??= parseVerdict(text);
+    // No readable verdict, twice: no judge decided.
+    if (verdict.kind === "unreadable") return { decision: "ask-user", once: false, reason: `${verdict.reason} (twice)`, state: "unavailable", audit: { judgeVerdict: "unreadable" } };
+    // An ask with no concern from the closed list runs once: caution without a concrete concern is no reason to interrupt the owner.
+    if (verdict.kind === "ask-user" && verdict.concern === undefined) {
       return {
         decision: "approve",
         once: true,
         reason: `${verdict.reason} (it named no concrete concern, so it runs once)`,
         state: "approved",
         audit: { judgeVerdict: "ask-user" },
+        ...(verdict.quote || verdict.targets ? { claim: { quote: verdict.quote, ...(verdict.source ? { source: verdict.source } : {}), targets: verdict.targets } } : {}),
       };
     }
     return {
@@ -982,6 +1012,17 @@ export class Permissions {
       ...(verdict.quote || verdict.targets ? { claim: { quote: verdict.quote, ...(verdict.source ? { source: verdict.source } : {}), targets: verdict.targets } } : {}),
       ...(verdict.concern ? { concern: verdict.concern } : {}),
     };
+  }
+
+  /**
+   * An ask on a concern the owner's own words answer (`consentAnswers`) runs once instead: the review's
+   * new decision, or the review as it was.
+   */
+  private answered(review: Review, evidence: JudgeEvidence | undefined): Review {
+    if (review.decision !== "ask-user" || review.state !== "asked") return review;
+    const words = consentAnswers(review.concern, evidence);
+    if (words === undefined) return review;
+    return { ...review, decision: "approve", once: true, state: "approved", reason: `${review.reason} (but your own words ask for it, "${words.length > 120 ? `${words.slice(0, 120)}…` : words}", so it runs once)` };
   }
 
   private async elevate(
@@ -1008,13 +1049,16 @@ export class Permissions {
     const self = request.classifications.some((item) => item.guard === "self");
     const guarded = request.classifications.some((item) => item.guard === "protected");
     const file = request.domain === undefined && request.toolInput === undefined;
-    // A protected write runs code later: dangerous, a human's alone.
-    const tier: Tier = file && guarded && !sensitive && !self ? "danger" : "local";
-    // The always-ask floor: a write to the permission system's own files.
-    const floor =
-      file && request.capability === "write"
-        ? request.classifications.map((item) => this.paths.isPermissionSystem(item.path) && item.path).find((path): path is string => typeof path === "string")
-        : undefined;
+    // A protected write runs code later, and a write to Cypher's own data changes the installed app: dangers, for the judge, never remembered.
+    const tier: Tier = file && request.capability === "write" && (guarded || self) && !sensitive ? "danger" : "local";
+    // The floor (floor.ts): a write to the permission system's own files; the owner's own "Ask me" setting.
+    const floor = floorOf(
+      {
+        permissionSystemPath: file && request.capability === "write" ? request.classifications.map((item) => this.paths.isPermissionSystem(item.path) && item.path).find((path): path is string => typeof path === "string") : undefined,
+        ownerRule: request.mode === "ask" ? "this kind of request is set to Ask me" : undefined,
+      },
+      "before",
+    );
     const base: AuditRecord = {
       decision: "deny",
       decidedBy: "user",
@@ -1027,13 +1071,16 @@ export class Permissions {
       tier,
     };
     const finish = (record: Partial<AuditRecord>) => this.audit.write({ ...base, latencyMs: Date.now() - started, ...record } as AuditRecord);
-    // Model first: the judge either approves automatically or puts the
-    // question to the user with its reason.
+    // Model first: the judge decides; only the floor asks without it.
     let judgeNote: string | undefined;
-    if (floor !== undefined) judgeNote = `Only you can approve this: ${displayPath(floor, this.home)} is part of the permission system itself.`;
-    if (request.mode === "assisted" && tier !== "danger" && floor === undefined) {
+    if (floor?.id === "permission-system") judgeNote = `Only you can approve this: ${displayPath(floor.detail, this.home)} is part of the permission system itself.`;
+    if (floor === undefined) {
       const first = request.classifications[0];
-      const verdict = await this.review(
+      // The installed app's data (the owner's chats, journals, databases): evidence, and whether the owner's words name it.
+      const data = file ? paths.filter((path) => this.installedApp(path) && !installedProgram(path)) : [];
+      if (data.length) await this.refreshOwnerWords();
+      const evidence: JudgeEvidence | undefined = data.length ? { installedData: { paths: data.map((path) => displayPath(path, this.home)), finding: scanDataConsent(this.ownerWords, data) } } : undefined;
+      const reviewed = await this.review(
         {
           // A domain reads as "network" with the domain as its path; a tool call as "tool".
           capability: request.domain !== undefined ? "network" : request.toolInput !== undefined ? "tool" : request.capability,
@@ -1047,14 +1094,17 @@ export class Permissions {
           input: request.toolInput,
           justification: request.justification,
           tier,
+          ...(tier === "danger" ? { tierReason: self ? "writes Cypher's own data" : "writes a file that runs code later" } : {}),
+          ...(evidence ? { evidence } : {}),
         },
         ctx,
       );
+      const verdict = this.answered(reviewed, evidence);
       base.judge = verdict.state;
       Object.assign(base, verdict.audit);
       if (verdict.decision === "approve") {
-        // Remembered for the chat, so the same access is not reviewed again; a secret, or an approval of this call alone, only once.
-        const scope = sensitive || verdict.once ? "once" : "chat";
+        // Remembered for the chat, so the same access is not reviewed again; a secret, a danger, the installed app's data, or an approval of this call alone, only once.
+        const scope = sensitive || verdict.once || tier === "danger" || data.length > 0 ? "once" : "chat";
         finish({ decision: "allow", decidedBy: "judge", reason: verdict.reason, scope, prompted: false });
         return { allowed: true, scope, by: "judge" };
       }
@@ -1075,11 +1125,13 @@ export class Permissions {
     else options = [projectOption, ONCE, HUMAN.deny, HUMAN.stop];
     const kind = request.domain !== undefined ? "network" : request.toolInput !== undefined ? "tool" : "access";
     const title = approvalTitle(request, judgeNote, this.home, tier === "danger") + promptLine(kind, ctx.toolCallId);
+    const shown = Date.now();
     const choice = await ctx.ui.select(title, options, {
       signal: ctx.signal,
       timeout: this.config.ask.timeoutMs ?? undefined,
     });
-    const asked = { prompted: true, choice: choice ?? "dismissed" };
+    const nobody = unanswered(choice, shown, this.config.ask.timeoutMs, ctx.signal);
+    const asked = { prompted: true, choice: nobody ?? choice };
     switch (choice) {
       case HUMAN.once:
       case ONCE:
@@ -1102,11 +1154,15 @@ export class Permissions {
         finish({ decision: "abort", ...asked });
         ctx.abort?.();
         return { allowed: false, reason: "The user denied this and stopped the turn.", abort: true };
-      default: {
-        const reason = choice === HUMAN.deny ? "The user denied this request." : "No approval was given (the request was dismissed or timed out).";
+      case HUMAN.deny: {
+        const reason = "The user denied this request.";
         finish({ reason, ...asked });
         return { allowed: false, reason: `${reason} Do not retry the same access; continue without it or ask the user.` };
       }
+      default:
+        // Closed, timed out, or an answer that is none of the buttons: no decision, and no denial.
+        finish({ decision: "dismissed", reason: `No answer (${nobody ?? "not one of the options"}).`, ...asked });
+        return { allowed: false, reason: UNANSWERED };
     }
   }
 
@@ -1616,15 +1672,15 @@ export class Permissions {
   }
 
   /**
-   * The agent asks to run a bash call outside the sandbox. Who decides
-   * depends on the line's risk tier (risk.ts):
+   * The agent asks to run a bash call outside the sandbox. The floor
+   * (floor.ts) goes to a human; everything else to the reviewing model
+   * first (round 3), with the code's evidence:
    *
-   * - dangerous: a human, every task: run once, or allow its patterns until
-   *   the user's next message. A danger short of the most sensitive
-   *   (risk.ts `reviewable`) goes to the reviewing model first, which may run
-   *   it once when the user's own message asks for exactly it;
-   * - local: the reviewing model, which remembers its approval for the chat;
-   *   else a human: once, or always in this project by patterns for similar
+   * - dangerous: its approval runs the line once, never remembered; when it
+   *   asks with a listed concern, a human decides: run once, or allow its
+   *   patterns until the user's next message;
+   * - local: its approval is remembered for the chat; when it asks, a human
+   *   decides: once, or always in this project by patterns for similar
    *   commands (the agent's, then each other command's category).
    *
    * `onceOnly` says why no pattern could be offered.
@@ -1735,16 +1791,13 @@ export class Permissions {
         finish({ decision: "allow", decidedBy: "rule", prompted: false });
         return { ok: true, scope: "rule", by: "rule" } as const;
       }
-      // The reviewing model decides, with one exception each way. The
-      // always-ask floor (a secret leaving the machine, a change to the
-      // permission system, a rule set to ask) never reaches it. A danger
-      // reaches it, but may only run when the owner's own words ask for
-      // exactly it, which explicit.ts checks against the model's quote and
-      // the target Cypher read from the line; a line whose target can't be
-      // read reaches it too, and may run once when the consent it cites
-      // checks (its kind, its quote, not taken back) and no target that can
-      // be read is outside it. Everything the line only does to what this
-      // task made is not a danger in the first place (risk.ts `facts.created`).
+      // The reviewing model decides (round 3). Only the floor (floor.ts) asks without it: a secret leaving
+      // the machine, a change to the permission system, the owner's own rule set to ask; and, after it, no
+      // judge that could decide. Everything else reaches it, dangers and lines whose target can't be read
+      // included, with what the code checked as evidence (`evidenceFor`): the owner's words against the
+      // line's targets, the grade, the installed app's data, the ledger. Its approval runs the line (a
+      // danger once, never remembered); an ask stands only with a concern from the closed list that the
+      // owner's own words don't answer (`answered`).
       const floor = this.alwaysAsk(line);
       const targets: LineTargets | undefined =
         dangerous && floor === undefined
@@ -1755,25 +1808,19 @@ export class Permissions {
       // What the line says, as written and with the evaluator's known expansions: an unreadable target the model claims must occur in it.
       if (targets && "unknown" in targets) targets.text = [command, ...line.commands.map((item) => item.words.filter((word) => word !== UNKNOWN).join(" "))].join("\n");
       const unknownTarget = targets && "unknown" in targets ? targets.unknown : undefined;
-      // A danger runs on the owner's own words: the ones they have written by now. A target that can't be read runs on
-      // nothing else, so with no words at all the model isn't asked.
-      if (dangerous && floor === undefined && mode === "assisted") await this.refreshOwnerWords();
-      const noWords = unknownTarget !== undefined && !this.ownerWords?.messages.length;
-      const reviewable = !dangerous || (floor === undefined && !noWords);
-      if (floor !== undefined) audit.explicit = { ok: false, reason: `only you can approve this: ${floor}`, targets: [], passed: [] };
-      else if (noWords) {
-        const why = this.ownerWords ? "you've written nothing a danger could run on" : "Cypher didn't pass your own words to this check (an older Cypher, or a run Cypher didn't start)";
-        audit.explicit = { ok: false, reason: unknownTarget ? `${unknownTarget}, and ${why}` : why, targets: [], passed: [] };
-      } else if (unknownTarget) audit.explicit = { ok: false, reason: `${unknownTarget}, and the reviewing model cited no consent of yours`, targets: [], passed: [] };
+      // The installed app's data the line reads (risk.ts `concern`): whether the owner's words name it is evidence too.
+      const data = [line, ...(line.assessments ?? [])].flatMap((assessment) => (assessment.concern === "installed-app" && assessment.data ? [assessment.data] : []));
+      const installedRead = !dangerous && data.length > 0;
+      if (floor !== undefined) audit.explicit = { ok: false, reason: `only you can approve this: ${floor.detail}`, targets: [], passed: [] };
       let review: string | undefined;
-      if (mode === "assisted" && floor === undefined && reviewable) {
+      if (mode === "assisted" && floor === undefined) {
+        // The owner's words as they have written them by now: the evidence is checked against them.
+        if (dangerous || installedRead) await this.refreshOwnerWords();
         const purpose = [proposal.label && `Purpose: ${proposal.label}`, proposal.reason && `Reason: ${proposal.reason}`].filter(Boolean).join("\n");
         // An approval is remembered for the commands' own categories, never for patterns the agent proposed; a danger's, never.
         const memo = dangerous ? [] : patterns.filter((pattern) => !pattern.proposed);
-        // Concerns the classifier itself established: an ask on them stands; the installed app's data runs only on cited owner words.
-        const concerns = new Set([line.concern, ...(line.assessments ?? []).map((assessment) => assessment.concern)].filter((concern) => concern !== undefined));
-        const installedRead = !dangerous && concerns.has("installed-app");
-        const verdict = await this.review(
+        const evidence = this.evidenceFor(targets, data, ctx);
+        const reviewed = await this.review(
           {
             capability: "escalate",
             paths: [],
@@ -1787,37 +1834,32 @@ export class Permissions {
             ...(targets && "targets" in targets ? { targets: targets.targets.map((target) => describeTarget(target)) } : {}),
             ...(targets && "unknown" in targets ? { targets: (targets.known ?? []).map((target) => describeTarget(target)), unknownTarget: targets.unknown } : {}),
             created: this.createdSummary(line),
-            ...(installedRead ? { installedRead: true } : {}),
-            ...(concerns.size ? { knownConcern: concerns.has("installed-app") ? "installed-app" : "secret" } : {}),
+            evidence,
           },
           ctx,
         );
+        audit.judge = reviewed.state;
+        Object.assign(audit, reviewed.audit);
+        // No reviewing model could decide: the floor's last row.
+        const noJudge = floorOf({ review: reviewed }, "after");
+        const verdict = noJudge ? reviewed : this.answered(reviewed, evidence);
         audit.judge = verdict.state;
-        // The installed app's data: the owner's words must ask for it, and the model must cite them.
-        const data = [line, ...(line.assessments ?? [])].flatMap((assessment) => (assessment.concern === "installed-app" && assessment.data ? [assessment.data] : []));
-        const installedConsent = installedRead && verdict.decision === "approve" ? this.installedConsent(verdict.claim, data) : undefined;
-        if (installedConsent && !installedConsent.ok) {
-          audit.explicit = { ok: false, reason: installedConsent.reason, targets: [], passed: [] };
-          verdict.decision = "ask-user";
-          verdict.reason = `It reads the installed app's data, and ${installedConsent.reason}.`;
+        // The code's check of what the model cited, for the audit: it no longer gates (round 3).
+        if (!noJudge && dangerous && targets && (verdict.decision === "approve" || verdict.claim)) audit.explicit = checkExplicit(verdict.claim ?? {}, targets, this.ownerWords, ctx.branch(), this.explicitFacts());
+        else if (!noJudge && installedRead && verdict.decision === "approve") {
+          const cited = this.installedConsent(verdict.claim, data);
+          audit.explicit = cited.ok ? { ok: true, quote: cited.quote, targets: [], passed: ["quote", "current"] } : { ok: false, reason: cited.reason, targets: [], passed: [] };
         }
-        Object.assign(audit, verdict.audit);
-        let explicit: ExplicitResult | undefined;
-        if (dangerous && targets && (verdict.decision === "approve" || verdict.claim)) {
-          explicit = checkExplicit(verdict.claim ?? {}, targets, this.ownerWords, ctx.branch(), this.explicitFacts());
-          audit.explicit = explicit;
-        }
-        if (verdict.decision === "approve" && (!dangerous || explicit?.ok)) {
-          // `approve-once`: this call runs, and nothing is remembered; so does
-          // an approval of a line that reads a secret (risk.ts `once`).
-          // The installed app's data: once, never remembered (the consent was for this request).
-          const kept = verdict.once || installedRead || explicit?.once === true || line.once === true || line.assessments?.some((assessment) => assessment.once === true) ? [] : memo;
+        if (verdict.decision === "approve") {
+          // `approve-once`: this call runs, and nothing is remembered; so does an approval of a danger, of a
+          // line that reads a secret (risk.ts `once`) or the installed app's data, or of an ask the owner's words answered.
+          const kept = verdict.once || dangerous || installedRead || line.once === true || line.assessments?.some((assessment) => assessment.once === true) ? [] : memo;
           for (const pattern of kept) this.addCommandGrant(pattern, "chat", "judge", label);
-          const reason = explicit?.ok ? `${verdict.reason} (your words: "${explicit.quote}")` : verdict.reason;
-          finish({ decision: "allow", decidedBy: "judge", reason, scope: kept.length ? "chat" : "once", prompted: false });
+          const quoted = audit.explicit?.ok && audit.explicit.quote ? ` (your words: "${audit.explicit.quote}")` : "";
+          finish({ decision: "allow", decidedBy: "judge", reason: `${verdict.reason}${quoted}`, scope: kept.length ? "chat" : "once", prompted: false });
           return { ok: true, scope: "once", by: "judge", ...(onceOnly ? { onceOnly } : {}) } as const;
         }
-        review = verdict.decision === "approve" && explicit && !explicit.ok ? `It found your request, but Cypher couldn't confirm it: ${explicit.reason}.` : verdict.reason;
+        review = verdict.reason;
         audit.reviewer = review;
       }
       if (!ctx.hasUI) {
@@ -1827,10 +1869,10 @@ export class Permissions {
       }
       const lines: string[] = [];
       if (dangerous && line.kind) {
-        const asks = floor !== undefined ? " This always asks." : unknownTarget ? ` It asks: ${unknownTarget}.` : "";
+        const asks = floor !== undefined ? " This always asks." : unknownTarget ? ` Cypher can't read all it acts on: ${unknownTarget}.` : "";
         lines.push(fact("Note", `Dangerous: it ${homeRelative(line.kind, this.home)}.${asks}`));
       }
-      if (!dangerous && floor !== undefined) lines.push(fact("Note", `This always asks: ${homeRelative(floor, this.home)}.`));
+      if (!dangerous && floor !== undefined) lines.push(fact("Note", `This always asks: ${homeRelative(floor.detail, this.home)}.`));
       if (proposal.label) lines.push(fact("Purpose", proposal.label));
       lines.push(fact("Command", command));
       for (const pattern of patterns) lines.push(fact("Pattern", describePattern(pattern.match)));
@@ -1844,8 +1886,10 @@ export class Permissions {
       const title = `${question}\n\nContext:\n${lines.join("\n")}${promptLine("escalate", ctx.toolCallId)}`;
       const projectOption = `${ALWAYS_IN}${this.projectName}`;
       const options = patterns.length === 0 ? [RUN_ONCE, HUMAN.deny, HUMAN.stop] : dangerous ? [TASK, HUMAN.deny, HUMAN.stop] : [projectOption, ONCE, HUMAN.deny, HUMAN.stop];
+      const shown = Date.now();
       const choice = await ctx.ui.select(title, options, { signal: ctx.signal, timeout: this.config.ask.timeoutMs ?? undefined });
-      const asked = { prompted: true, choice: choice ?? "dismissed", decidedBy: "user" as const };
+      const nobody = unanswered(choice, shown, this.config.ask.timeoutMs, ctx.signal);
+      const asked = { prompted: true, choice: nobody ?? choice, decidedBy: "user" as const };
       switch (choice) {
         case RUN_ONCE:
         case ONCE:
@@ -1876,11 +1920,15 @@ export class Permissions {
           finish({ decision: "abort", ...asked });
           ctx.abort?.();
           return { ok: false, reason: "The user denied this and stopped the turn.", abort: true } as const;
-        default: {
-          const reason = choice === HUMAN.deny ? "The user denied running this outside the sandbox." : "No approval was given (the request was dismissed or timed out).";
+        case HUMAN.deny: {
+          const reason = "The user denied running this outside the sandbox.";
           finish({ ...asked, reason });
           return { ok: false, reason: `${reason} Continue in the sandbox or ask the user.` } as const;
         }
+        default:
+          // Closed, timed out, or an answer that is none of the buttons: no decision, and no denial.
+          finish({ ...asked, decision: "dismissed", reason: `No answer (${nobody ?? "not one of the options"}).` });
+          return { ok: false, reason: UNANSWERED } as const;
       }
     });
   }
@@ -1906,23 +1954,64 @@ export class Permissions {
   }
 
   /**
-   * The always-ask floor: why no rule, grant or reviewing model may approve
-   * this line, whatever the owner wrote. Only two things are here (risk.ts
-   * `floor`): a secret or credential leaving this machine, and a change to
-   * the permission system itself. A rule the user set to ask or deny counts
-   * too: they asked to be asked. (The third floor case, no reviewing model,
-   * is `review`'s: it asks with the reason.)
+   * The floor (floor.ts `FLOOR`, the rows tested before the judge): why no
+   * rule, grant or reviewing model may approve this line, whatever the
+   * owner wrote — a secret or credential leaving this machine, a change to
+   * the permission system itself (risk.ts sets `floor` on both), or the
+   * owner's own command rule set to ask or deny. The last row, no reviewing
+   * model, is tested on the review's outcome (`requestEscalation`).
    */
-  private alwaysAsk(line: LineAssessment): string | undefined {
-    if (line.floor === true) return line.kind ?? "it always asks";
+  private alwaysAsk(line: LineAssessment): FloorHit | undefined {
     const rules = this.commandRules();
-    for (const [index, item] of line.commands.entries()) {
-      if (line.assessments![index].floor === true) return line.assessments![index].kind ?? "it always asks";
+    let ownerRule: string | undefined;
+    for (const item of line.commands) {
       if (item.inert) continue;
       const held = rules.find((rule) => rule.decision !== "allow" && matchesQuietly(rule.match, item.words, true));
-      if (held) return `\`${describePattern(held.match)}\` is set to ${held.decision === "deny" ? "never run" : "always ask"}`;
+      if (held) {
+        ownerRule = `\`${describePattern(held.match)}\` is set to ${held.decision === "deny" ? "never run" : "always ask"}`;
+        break;
+      }
     }
-    return undefined;
+    return floorOf({ assessments: [line, ...(line.assessments ?? [])], ownerRule }, "before");
+  }
+
+  /**
+   * What the code established about a line, for the judge (round 3): each owner word checked as a
+   * consent for the line's targets (the same checks a cited consent gets: explicit.ts `scanConsents`),
+   * the grade of what it does (grades.ts), what its flags add, and whether the owner's words name the
+   * installed app's data it reads. Evidence, never a gate.
+   */
+  private evidenceFor(targets: LineTargets | undefined, data: readonly string[], ctx: RequestContext): JudgeEvidence | undefined {
+    const evidence: { -readonly [K in keyof JudgeEvidence]: JudgeEvidence[K] } = {};
+    if (targets) {
+      const known = "targets" in targets ? targets.targets : (targets.known ?? []);
+      evidence.consents = scanConsents(targets, this.ownerWords, ctx.branch(), this.memoFacts());
+      const grades = gradesOf(known, targets.attributes ?? []).map(describeGrade);
+      if (grades.length) evidence.grades = grades;
+      if (targets.attributes?.length) evidence.attributes = targets.attributes.map((attribute) => describeAttribute(attribute));
+    }
+    if (data.length) evidence.installedData = { paths: [...new Set(data.map((path) => displayPath(path, this.home)))], finding: scanDataConsent(this.ownerWords, data) };
+    return Object.keys(evidence).length ? evidence : undefined;
+  }
+
+  /** The explicit check's facts, each machine fact asked once (a scan checks every owner word against them). */
+  private memoFacts(): ExplicitFacts {
+    const facts = this.explicitFacts();
+    const memo = <A extends unknown[], R>(fn: (...args: A) => R) => {
+      const seen = new Map<string, R>();
+      return (...args: A): R => {
+        const key = JSON.stringify(args);
+        if (!seen.has(key)) seen.set(key, fn(...args));
+        return seen.get(key)!;
+      };
+    };
+    return {
+      originRepo: memo(facts.originRepo),
+      release: memo(facts.release),
+      ...(facts.pullRequestsWithHead ? { pullRequestsWithHead: memo(facts.pullRequestsWithHead) } : {}),
+      ...(facts.worktreeBranch ? { worktreeBranch: memo(facts.worktreeBranch) } : {}),
+      ...(facts.own ? { own: memo(facts.own) } : {}),
+    };
   }
 
   /** What a dangerous line's commands act on (explicit.ts), or why that is known only when it runs. */
@@ -2765,7 +2854,7 @@ function approvalTitle(
         : first?.guard === "protected"
           ? "write a protected file"
           : `${request.capability} outside the project folders`;
-  if (dangerous) lines.push("Note: Dangerous: a write here runs code later. This always asks.");
+  if (dangerous) lines.push(first?.guard === "self" ? "Note: Dangerous: it changes Cypher's own data." : "Note: Dangerous: a write here runs code later.");
   for (const item of request.classifications) lines.push(fact("Path", displayPath(item.path, home)));
   const matches = [...new Set(request.classifications.map((item) => item.match).filter((match): match is string => Boolean(match)))];
   if (matches.length) lines.push(fact("Matches", matches.join(", ")));

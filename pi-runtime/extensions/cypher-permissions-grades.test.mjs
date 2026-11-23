@@ -1,14 +1,16 @@
-// Graded risk (grades.ts, risk.ts `teamStep`) and the judge's concern list
-// (judge.ts `CONCERNS`, core.ts `asksNeedConcern`). Property tests draw from a
+// Graded risk (grades.ts, risk.ts `teamStep`), the judge's closed concern list
+// (judge.ts `CONCERN_TABLE`, core.ts `consentAnswers`) and the floor table
+// (floor.ts `FLOOR`). Property tests draw from a
 // seeded PRNG: PERMISSIONS_SEED reseeds them, and a failure names the seed.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { GRADES, gradeOf, judgeDecides } from "./cypher-permissions/grades.ts";
+import { describeGrade, GRADES, gradeOf, gradesOf, judgeDecides, TARGET_GRADES } from "./cypher-permissions/grades.ts";
+import { FLOOR, floorOf } from "./cypher-permissions/floor.ts";
 import { assessCommand } from "./cypher-permissions/risk.ts";
 import { asksOnly, viewOf } from "./cypher-permissions/packs.ts";
-import { CONCERNS, judgePrompt, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./cypher-permissions/judge.ts";
-import { asksNeedConcern } from "./cypher-permissions/core.ts";
+import { answeredByConsent, CONCERN_TABLE, CONCERNS, judgePrompt, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./cypher-permissions/judge.ts";
+import { consentAnswers } from "./cypher-permissions/core.ts";
 import { UNKNOWN } from "./cypher-permissions/shell.ts";
 
 const SEED = Number(process.env.PERMISSIONS_SEED ?? 20261123);
@@ -206,18 +208,69 @@ test("queries: npx of the project's pinned tool resolves from where the command 
   assert.equal(assess(["npx", "cowsay"], machine, `${REPO}/apps/edge`).tier, "danger");
 });
 
-test("judge: a local ask must name a concern from the closed list; dangers, network, tools and sensitive files keep every ask", () => {
-  assert.deepEqual([...CONCERNS], ["installed-app", "other-task", "secret", "beyond-request", "irreversible"]);
-  for (const concern of CONCERNS) assert.ok(JUDGE_SYSTEM_PROMPT.includes(`"${concern}"`), concern);
-  assert.equal(asksNeedConcern({ tier: "local", capability: "escalate", zone: "outside the sandbox" }), true);
-  assert.equal(asksNeedConcern({ tier: "local", capability: "read", zone: "external" }), true);
-  assert.equal(asksNeedConcern({ tier: "local", capability: "read", zone: "sensitive" }), false);
-  assert.equal(asksNeedConcern({ tier: "danger", capability: "escalate", zone: "outside the sandbox" }), false);
-  assert.equal(asksNeedConcern({ tier: "local", capability: "network", zone: "external" }), false);
-  assert.equal(asksNeedConcern({ tier: "local", capability: "tool", zone: "external" }), false);
-  assert.equal(asksNeedConcern({ tier: "local", capability: "escalate", zone: "outside the sandbox", knownConcern: "installed-app" }), false);
-  assert.equal(asksNeedConcern({ tier: "local", capability: "escalate", zone: "outside the sandbox", knownConcern: "secret" }), false);
+test("judge: the closed concern list is one table; every row is in the prompt; old names read as today's", () => {
+  assert.deepEqual([...CONCERNS], ["retracted", "other-target", "not-owner", "other-task", "destroys-data", "outside-audience", "installed-app", "secret", "system-change"]);
+  for (const row of CONCERN_TABLE) {
+    assert.ok(JUDGE_SYSTEM_PROMPT.includes(`- "${row.id}": ${row.means};`), row.id);
+    assert.equal(answeredByConsent(row.id), row.answeredByConsent, row.id);
+    // The concerns the owner's words answer are the ones that say "… and the owner didn't ask for that".
+    assert.equal(row.answeredByConsent, /the owner didn't ask for that/.test(row.means), row.id);
+  }
   assert.equal(parseVerdict('{"decision":"ask-user","reason":"x","concern":"none"}').concern, undefined);
+  assert.equal(parseVerdict('{"decision":"ask-user","reason":"x","concern":"beyond-request"}').concern, undefined, "the old catch-all is no concern");
+  assert.equal(parseVerdict('{"decision":"ask-user","reason":"x","concern":"irreversible"}').concern, "destroys-data");
+  assert.equal(parseVerdict('{"decision":"ask-user","reason":"x","concern":"Outside audience"}').concern, "outside-audience", "spelled loosely");
+  // The rule, in the prompt: what the owner's turns ask for is approved; an ask needs a listed concern.
+  assert.match(JUDGE_SYSTEM_PROMPT, /If the owner's recent turns ask for this action, APPROVE it/);
+  assert.match(JUDGE_SYSTEM_PROMPT, /An "ask-user" that names none of these runs once anyway/);
+  assert.doesNotMatch(JUDGE_SYSTEM_PROMPT, /a model verdict alone|never for a danger/i);
+});
+
+test("judge: an ask on a concern the owner's checked words answer runs once; the others stand", () => {
+  const typed = { index: 2, source: "typed", quote: "pr 给main 没问题合并", ok: true, passed: ["quote", "target", "current"] };
+  const reply = { ...typed, source: "reply" };
+  const unread = { ...typed, unread: true };
+  const stale = { ...typed, ok: false, passed: ["quote", "target"], reason: "you wrote later: \"wait\"" };
+  for (const row of CONCERN_TABLE) {
+    const answered = consentAnswers(row.id, { consents: [typed] });
+    assert.equal(answered, row.answeredByConsent ? typed.quote : undefined, row.id);
+    // A reply's assent is the judge's call; an unreadable target, a stale consent or none answer nothing.
+    for (const consents of [[reply], [unread], [stale], []]) assert.equal(consentAnswers(row.id, { consents }), undefined, `${row.id} ${JSON.stringify(consents)}`);
+  }
+  assert.equal(consentAnswers(undefined, { consents: [typed] }), undefined);
+  // The installed app's data: the owner's words naming it.
+  const named = { paths: ["~/.cypher/orgs/x/engine.sqlite"], finding: { ok: true, index: 1, source: "typed", quote: "看看我的 cypher 数据库", names: ["cypher"] } };
+  assert.equal(consentAnswers("installed-app", { installedData: named }), "看看我的 cypher 数据库");
+  assert.equal(consentAnswers("installed-app", { installedData: { ...named, finding: { ok: false, reason: "no", names: [] } } }), undefined);
+});
+
+test("floor: the only deterministic asks, one table: a secret leaving, the permission system, the owner's own rule, no judge", () => {
+  assert.deepEqual(FLOOR.map((row) => [row.id, row.stage]), [["secret-off-machine", "before"], ["permission-system", "before"], ["owner-rule", "before"], ["no-judge", "after"]]);
+  assert.equal(floorOf({ assessments: [{ tier: "danger", key: "secret-off-machine", floor: true, kind: "sends a secret" }] }, "before")?.id, "secret-off-machine");
+  assert.equal(floorOf({ assessments: [{ tier: "danger", key: "permission-system", floor: true, kind: "changes the permission system itself (x)" }] }, "before")?.detail, "changes the permission system itself (x)");
+  assert.equal(floorOf({ permissionSystemPath: "/h/.cypher/pi-runtime/agent/permissions.json" }, "before")?.id, "permission-system");
+  assert.equal(floorOf({ ownerRule: "`git push …` is set to always ask" }, "before")?.id, "owner-rule");
+  // Without the floor flag, a key alone is no floor row; nor is any other danger, however grave.
+  assert.equal(floorOf({ assessments: [{ tier: "danger", key: "secret-off-machine" }] }, "before"), undefined);
+  for (const kind of ["force-pushes or deletes a remote branch", "publishes a package", "changes the installed Cypher app or its data (~/.cypher)", "deletes files outside the project folders", "a command line rules can't read"]) {
+    assert.equal(floorOf({ assessments: [{ tier: "danger", kind, key: kind }] }, "before"), undefined, kind);
+  }
+  for (const state of ["unavailable", "paused"]) assert.equal(floorOf({ review: { state, reason: "no model" } }, "after")?.id, "no-judge", state);
+  for (const state of ["approved", "asked"]) assert.equal(floorOf({ review: { state, reason: "x" } }, "after"), undefined, state);
+  assert.equal(floorOf({ review: { state: "unavailable", reason: "x" } }, "before"), undefined, "a row is tested at its own stage");
+});
+
+test("grades as evidence: every target-grade row names a grade; a line's targets map to their grades", () => {
+  for (const row of TARGET_GRADES) assert.ok(gradeOf(row.grade), row.grade);
+  const of = (targets, attributes) => gradesOf(targets, attributes).map((grade) => grade.action);
+  assert.deepEqual(of([{ kind: "pr", action: "merge", value: "52" }]), ["merge-default"]);
+  assert.deepEqual(of([{ kind: "branch", action: "push", value: "main" }]), ["push-default"]);
+  assert.deepEqual(of([{ kind: "branch", action: "push", value: "cypher/x" }]), ["push-foreign"]);
+  assert.deepEqual(of([{ kind: "branch", action: "push", value: "cypher/x" }], ["force"]), ["push-foreign", "force-push"]);
+  assert.deepEqual(of([{ kind: "tag", action: "push", value: "v1.2.3" }, { kind: "package", action: "publish", value: "x@1" }]), ["tag", "release"]);
+  assert.deepEqual(of([{ kind: "path", action: "delete", value: "/x" }]), ["delete-unmerged"]);
+  assert.deepEqual(of([{ kind: "host", action: "reach", value: "web" }]), []);
+  assert.equal(describeGrade(gradeOf("merge-default")), "merges into the default branch (recoverable, seen by the team)");
 });
 
 test("judge: the owner's words, answers and plan card reach it for local requests too, never pushed out by agent text", () => {
@@ -235,8 +288,8 @@ test("judge: the owner's words, answers and plan card reach it for local request
   assert.match(prompt, /\[card\]/);
   assert.match(prompt, /\[answer\] The agent asked:/);
   assert.match(prompt, /pr 给main/);
-  const installed = judgePrompt({ capability: "escalate", paths: [], zone: "outside the sandbox", command: "sqlite3 -readonly x", level: "workspace", workspaceRoots: [], tier: "local", userMessages: [], recentToolCalls: [], ownerWords, installedRead: true });
-  assert.match(installed, /installed app data: yes/);
+  const installed = judgePrompt({ capability: "escalate", paths: [], zone: "outside the sandbox", command: "sqlite3 -readonly x", level: "workspace", workspaceRoots: [], tier: "local", userMessages: [], recentToolCalls: [], ownerWords, evidence: { installedData: { paths: ["~/.cypher/x.sqlite"], finding: { ok: false, reason: "your words don't name it", names: ["cypher"] } } } });
+  assert.match(installed, /## What Cypher's code checked \(trusted facts; evidence for your verdict, not a verdict\)\n- installed app data: yes \(.*~\/\.cypher\/x\.sqlite\)\n- the owner's words name that data or the app: no \(your words don't name it\)/);
 });
 
 // --- After blind set #1 (round 2, step 3): destination refs, transfers -------------------
