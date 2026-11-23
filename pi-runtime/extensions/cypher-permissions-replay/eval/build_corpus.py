@@ -17,7 +17,7 @@ Cases use the replay fixture's format (audit-2026-11.json `about`): @HOME@, plac
 org/user ids, redacted tokens; plus
   owner  {messages: OwnerWord[], agentWritten, source}   the consent sources, as the new engine passes them
   user   the conversation's user messages as Pi stored them (translated, briefs included)
-  label  {owner: allowed|denied|auto-<by>, should: ask|allow|unknown, why}
+  label  {owner: allowed|denied|dismissed|auto-<by>, should: ask|allow|unknown, why}
   split  dev|heldout
   context     session | session-time | journal | none (how the conversation was found)
   unscorable  why the case can't be scored (no owner message for the call's turn); left out of every rate
@@ -699,8 +699,16 @@ ACTION_OF = [
 ]
 
 
+# The buttons that refuse; any other answer (none: closed, timed out, the turn ended) is no refusal.
+DENY_CHOICES = {"Deny", "Deny and stop"}
+
+
 def label_for(record, words):
-    if record["decision"] == "deny":
+    # Only a Deny click is a denial (round 3): a prompt closed without an answer ("dismissed", "timeout",
+    # "aborted"; audited as decision "deny" before 2026-11-23, "dismissed" since) says nothing either way.
+    if record["decision"] in ("deny", "abort", "dismissed") and (record.get("prompted") or record.get("decidedBy") == "user") and record.get("choice") not in DENY_CHOICES:
+        return {"owner": "dismissed", "should": "unknown", "why": f"the owner closed the prompt without answering ({record.get('choice') or 'no choice'})"}
+    if record["decision"] in ("deny", "abort"):
         return {"owner": "denied", "should": "ask", "why": "the owner denied it"}
     if record.get("decidedBy") != "user":
         return {"owner": f"auto-{record.get('decidedBy')}", "should": "unknown", "why": "auto-decided; only regressions are measured"}
@@ -851,7 +859,7 @@ def main():
             json.dump({"about": about, "cases": cases}, handle, ensure_ascii=False, indent=1)
         with open(os.path.join(args.out, f"context-{name}.json"), "w", encoding="utf-8") as handle:
             json.dump(contexts[name], handle, ensure_ascii=False)
-    summary = {"records": len(records), "prompted": len(prompted), "promptedDenied": sum(1 for r in prompted if r["decision"] == "deny"), "regressionSample": len(sample), "counts": dict(stats), "context": dict(found_by), "heldoutFrom": HELDOUT_FROM}
+    summary = {"records": len(records), "prompted": len(prompted), "promptedDenied": sum(1 for r in prompted if r["decision"] in ("deny", "abort") and r.get("choice") in DENY_CHOICES), "promptedDismissed": sum(1 for r in prompted if r["decision"] in ("deny", "abort", "dismissed") and r.get("choice") not in DENY_CHOICES), "regressionSample": len(sample), "counts": dict(stats), "context": dict(found_by), "heldoutFrom": HELDOUT_FROM}
     with open(os.path.join(args.out, "corpus-stats.json"), "w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=1)
     print(json.dumps(summary, indent=1))

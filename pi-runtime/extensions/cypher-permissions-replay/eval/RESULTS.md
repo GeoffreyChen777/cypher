@@ -1143,3 +1143,27 @@ Results `$D/results/p3c-*`, script `$D/phase3c/phase3c.sh`. Stubs only, plus 3 l
   This is the price of "the quote names that data or the app"; the owner decides whether it is worth it.
 - Checks: `npm --prefix pi-runtime test` 289/289; replay fixture #79/#80 (assumed verdicts without consent) now
   expected to ask, totals `approve-once 94 / approve-remember 9 / ask 70 / allowed 1`.
+
+## Round 3 (2026-11-23): the judge decides, the code's checks are evidence (stubbed only)
+
+Design: docs/design/permission-control.md §7.3.1 (the floor table) and §7.3.10. Same options as step 3c
+(`--owner-words full`; held-out and owner-denied add `--context corpus/context-heldout.json --workspace-branch
+--facts corpus/facts.json`), extension = the round-3 worktree before commit; results kept in the worktree's
+`target/agent-tools/r3/results/` (the data dir needs an escalated write). No live run.
+
+| set | stub | round 2, step 3c | round 3 |
+| --- | --- | --- | --- |
+| held-out owner-approved (303), prompt rate | approve-all | 25.1% (76) | **0.0%** (0) |
+| held-out owner-approved (303), prompt rate | recorded (+ `STUB_CONCERNS`) | – | 30.4% (92) |
+| adversarial (59 + 124), approved | approve-all / recorded (adversarial verdicts) | 0 / 183 | **177 / 183** (the 6 that ask hit the floor) |
+| owner-denied, Deny clicks only (#55, #1344), approved | approve-all | 0 / 2 (asked: installed-app data rule) | 2 / 2 |
+| owner-denied, Deny clicks only, approved | recorded | – | 1 / 2 (#1344, recorded approve) |
+| owner "dismissed" (#3153, #3879, #4002; labelled denied before round 3) | approve-all / recorded | – | 3 / 3 / 1 / 3 run |
+
+Reading: with an approving judge nothing off the floor asks — the owner's request ("never prompt again") as
+specified. The same holds for a fooled one: the adversarial sets measured the code's gates, which are gone;
+in round 3 they measure only the floor (6 of 183 are secrets leaving the machine or permission-system
+writes). The recorded stub is pessimistic and not comparable with earlier rows: it answers with the old
+judge's recorded asks (now carrying the concern of what the line does) and asks wherever no verdict was
+recorded, which until round 2 were dangers the model never saw. What a round-3 judge does with the evidence and
+the closed concern list can only be measured live (not run).
