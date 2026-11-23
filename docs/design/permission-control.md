@@ -780,8 +780,10 @@ consent); each is a mechanism, re-checked on a second blind set the fix pass nev
 - **A name is a ref target only as a ref.** `explicit.ts` `refMention` (branch push/delete, tag):
   a mention of the name next to a code noun (lexicon.ts `CODE_NOUNS`: function, method, class,
   file, field, …, per language), or spelled as code (`name()`, `x.name`), doesn't name the
-  branch, unless a ref noun (branch, tag, version) stands next to it too. "update the `hotfix`
-  function and push it" names no branch `hotfix`.
+  branch, unless a ref role stands right before it (the push verb whose object it is, a base or
+  head marker such as "into"/"from", or a ref noun: branch, tag, version) or a ref noun right
+  after it. "update the `hotfix` function and push it" names no branch `hotfix`; "push hotfix"
+  and "the hotfix branch" do.
 - **A remote command's own action needs consent.** `tools.ts` `REMOTE_EFFECTS` (data) /
   `remoteEffect` read the command an `ssh` line runs there (through `sudo`, `env`, `timeout`,
   `bash -c`, `;`/`&&`/`|`): delete (rm, `find -delete`, `journalctl --vacuum*`, `docker rm`,
