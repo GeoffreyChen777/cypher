@@ -1091,6 +1091,35 @@ but the judge gets the evidence "- path known only when it runs: … could be th
 system's own files" (risk.ts `unresolvedWrites`). `mkdir` of such a path changes nothing that
 is there.
 
+Round 5, step 2 (2026-11-23, a red-team review of 123 cases): the same rows, closed by
+mechanism. The resolver follows a dangling symlink by its text (`readlink`) and compares a
+multiply-linked file's (dev, inode) with the permission system's files, so a link made now and
+written later lands where it points; making a link to a permission file (`ln`, `cp -l`) is a
+write to it, and every permission-system path is guarded for the file tools. The permission
+system gained a project's `.pi/settings.json`, `.pi/extensions/**`, `.pi/npm/**`, `.pi/git/**`
+and the agent's `models.json`. The floor's tables gained sinks (DNS lookups, ICMP probes, URL
+launchers with a URL, `python -m webbrowser`, bash's `/dev/tcp|udp` redirections, socat's file
+addresses), environment printers (`export -p`, `declare -x`, bare `set`, `ps e…`,
+`/proc/*/environ`, `${!v}`), interpreters (julia, R, pwsh, swift, expect, awk, sed, make; an
+`unread` row of languages Cypher has no table for, read as opaque code), command forms (sed's
+`e`, makefile recipes), and option or configuration values that are commands (`man -P`,
+`rsync -e`, `ssh -o ProxyCommand`, `tar --to-command`, `git -c`/`git config` for pager,
+sshCommand, aliases `!…`, `npm pkg set scripts.*`). The shell reader folds pure transforms of
+literal text (fold.ts: `$(echo … | base64 -d)` is the name it makes) and hands a wrapper's
+operands to what it runs (`find -name P -exec … {}`, `xargs`, `parallel :::`, `env -S`,
+`eval`). A per-chat **taint ledger** (`<agent>/cypher-permissions/taint/<chat>.jsonl`) records
+the files and repositories a command wrote from a secret (copy, append, archive, pipe, `git
+add`); a later send of such a file, or a push from such a repository, is the floor. An
+archiver's or sender's folder operand holding a sensitive file is a source. Writes into a folder
+a command names but whose files it doesn't (`tar -x -C`, `unzip -d`, `git --work-tree`, `find
+ROOT -exec`) are the floor where that folder could hold the permission system, as is code with
+a write capability that names one of its files. Pasted or quoted text in the owner's message
+(fences, `>` quotes, `$ ` prompt lines) counts as a request only when the owner's own words
+around it ask for it. Still judge-only (with evidence naming the danger): a shell function's
+arguments, a path from an assignment prefix read inside code, downloaded code run, a hook
+written then triggered, a file sent to the clipboard; and an approved plan card's agent-written
+text counting as consent (kept by design; open question). Details: RESULTS.md "Round 5, step 2".
+
 Row 2 in detail: its policy files, the settings that say which extensions load, its
 extension's code, its audit log and ledger, its session files (§3.6), written as an
 operand, through a redirection, or inside a script (`python3 -c
