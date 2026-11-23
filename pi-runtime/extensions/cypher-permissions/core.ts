@@ -1961,8 +1961,9 @@ export class Permissions {
       return { ...command, danger: false };
     });
     if (own.length === 0) return { ...read, actions: this.unreadActions(line) };
-    const again = lineTargets(named, this.targetFacts());
-    return "unknown" in again ? { ...again, known: [...(again.known ?? []), ...own], actions: this.unreadActions(line) } : { targets: [...again.targets, ...own] };
+    // The attributes are the line's (its dangerous commands' flags), whichever commands are read as entities.
+    const again = { ...lineTargets(named, this.targetFacts()), ...(read.attributes ? { attributes: read.attributes } : {}) };
+    return "unknown" in again ? { ...again, known: [...(again.known ?? []), ...own], actions: this.unreadActions(line) } : { ...again, targets: [...again.targets, ...own], ...(read.attributes ? { attributes: read.attributes } : {}) };
   }
 
   /** What a destroyer the target reader has no row for destroys, as entities: undefined when a name is known only when it runs. */

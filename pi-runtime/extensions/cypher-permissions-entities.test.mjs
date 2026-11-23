@@ -651,3 +651,118 @@ test("env: a location variable is a benign prefix only when it names a read-only
     setSystemDirectory(before);
   }
 });
+
+// --- After blind set #1 (round 2, step 3): attributes, code nouns, remote effects, per-command consent ------
+
+const hotfixFacts = { ...facts, git: () => ({ current: "hotfix", defaults: ["main"], isBranch: (name) => /^(main|hotfix|fix-badge)$/.test(name) }) };
+const hotfixTargets = (line) => lineTargets(line.map((words) => ({ words, cwd: "/w/app", danger: true })), hotfixFacts);
+const opened88 = [
+  { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "c1", arguments: { command: "gh pr create -H fix-badge -B main --fill" } }] } },
+  { type: "message", message: { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "https://github.com/me/app/pull/88" }] } },
+];
+
+test("attributes: force and a protection bypass must be named by the consent itself (ATTRIBUTE_FLAGS + lexicon attributeWords)", () => {
+  const forced = hotfixTargets([["git", "push", "--force", "origin", "HEAD:hotfix"]]);
+  assert.deepEqual(forced.attributes, ["force"]);
+  const said = "push the hotfix branch";
+  const no = checkExplicit({ quote: said, targets: [{ kind: "branch", value: "hotfix" }] }, forced, words({ text: said, source: "typed" }), [], explicitFacts);
+  assert.equal(no.ok, false);
+  assert.match(no.reason, /forces it/);
+  for (const text of ["force-push the hotfix branch", "hotfix 分支强推一下", "hotfix ブランチを強制 push して", "push --force auf den Branch hotfix"]) {
+    const yes = checkExplicit({ quote: text, targets: [{ kind: "branch", value: "hotfix" }] }, forced, words({ text, source: "typed" }), [], explicitFacts);
+    assert.equal(yes.ok, true, `${text}: ${yes.reason}`);
+  }
+  assert.deepEqual(hotfixTargets([["git", "push", "origin", "+hotfix"]]).attributes, ["force"]);
+  const admin = hotfixTargets([["gh", "pr", "merge", "88", "--merge", "--admin"]]);
+  assert.deepEqual(admin.attributes, ["bypass"]);
+  const asked = "pr 给main 没问题就合并";
+  const merge = checkExplicit({ quote: asked, targets: [{ kind: "pr", value: "88" }] }, admin, words({ text: asked, source: "typed" }), opened88, explicitFacts);
+  assert.equal(merge.ok, false);
+  assert.match(merge.reason, /bypasses a protection/);
+  const plain = checkExplicit({ quote: asked, targets: [{ kind: "pr", value: "88" }] }, hotfixTargets([["gh", "pr", "merge", "88", "--merge"]]), words({ text: asked, source: "typed" }), opened88, explicitFacts);
+  assert.equal(plain.attributes, undefined);
+  const byName = "用管理员权限绕过保护把 #88 合并了";
+  assert.equal(checkExplicit({ quote: byName, targets: [{ kind: "pr", value: "88" }] }, admin, words({ text: byName, source: "typed" }), opened88, explicitFacts).ok, true);
+});
+
+test(`attributes, property (seed ${process.env.PERMISSIONS_SEED ?? 20261122}): a forced push passes only when the consent names force, whatever the flag spelling`, () => {
+  for (let i = 0; i < 120; i++) {
+    const flag = pick(["-f", "--force", "--force-with-lease", "--force-with-lease=hotfix", "-uf", "+"]);
+    const line = flag === "+" ? ["git", "push", "origin", "+hotfix"] : ["git", "push", flag, "origin", "hotfix"];
+    const named = rand() < 0.5;
+    const text = named ? pick(["force push hotfix", "hotfix 强推", "push hotfix with --force", "forcer le push de hotfix"]) : pick(["push hotfix", "hotfix 推一下", "pousse la branche hotfix", "push den branch hotfix"]);
+    const got = checkExplicit({ quote: text, targets: [{ kind: "branch", value: "hotfix" }] }, hotfixTargets([line]), words({ text, source: "typed" }), [], explicitFacts);
+    if (!named) assert.equal(got.ok, false, `${line.join(" ")} / ${text}`);
+  }
+});
+
+test("refs: a name next to a code noun (function, file, method, class, field…) is no branch target; a ref noun keeps it one", async () => {
+  const { refMention } = await import("./cypher-permissions/explicit.ts");
+  for (const text of ["update the `hotfix` function to handle null carts and push it", "fix hotfix() and push", "改一下 hotfix 函数然后推上去", "the file release.yml fails, fix it and push", "rename the method hotfix", "die Funktion hotfix anpassen und pushen"]) {
+    assert.equal(refMention(text, text.includes("release") ? "release" : "hotfix"), false, text);
+  }
+  for (const text of ["push the hotfix branch", "push to hotfix", "推到 hotfix 分支", "push hotfix", "merge hotfix into main", "the hotfix branch's function is fine, push it"]) {
+    assert.equal(refMention(text, "hotfix"), true, text);
+  }
+  const forced = hotfixTargets([["git", "push", "origin", "HEAD:hotfix"]]);
+  const text = "update the `hotfix` function to handle null carts and push it";
+  const got = checkExplicit({ quote: text, targets: [{ kind: "branch", value: "hotfix" }] }, forced, words({ text, source: "typed" }), [], explicitFacts);
+  assert.equal(got.ok, false);
+});
+
+test("remote effects (tools.ts REMOTE_EFFECTS): naming a host is no consent to deleting, stopping or writing there", async () => {
+  const { remoteEffect } = await import("./cypher-permissions/tools.ts");
+  assert.equal(remoteEffect(["sudo rm -rf /var/log/nginx/*.gz /var/log/journal/*"]).action, "delete");
+  assert.equal(remoteEffect(["sudo", "-u", "www", "systemctl", "restart", "nginx"]).action, "apply");
+  assert.equal(remoteEffect(["df -h; du -sh /var/log/* | sort -h"]), undefined);
+  assert.equal(remoteEffect(["journalctl --vacuum-size=200M"]).action, "delete");
+  assert.equal(remoteEffect(["echo x > /etc/motd"]).action, "write");
+  assert.equal(remoteEffect(["ls 2>/dev/null"]), undefined);
+  assert.equal(remoteEffect(["bash -lc 'pkill -f worker'"]).action, "stop");
+  const line = lineTargets([{ words: ["ssh", "deploy@web-prod.acme.io", "sudo rm -rf /var/log/nginx/*.gz /var/log/journal/*"], cwd: "/w/app", danger: true }], facts);
+  const look = "看看 web-prod 磁盘为什么满了";
+  const no = checkExplicit({ quote: look, targets: [{ kind: "host", value: "web-prod.acme.io" }] }, line, words({ text: look, source: "typed" }), [], explicitFacts);
+  assert.equal(no.ok, false);
+  assert.match(no.reason, /would delete/);
+  const clean = "web-prod 磁盘满了，把旧的 nginx 日志删掉";
+  assert.equal(checkExplicit({ quote: clean, targets: [{ kind: "host", value: "web-prod.acme.io" }] }, line, words({ text: clean, source: "typed" }), [], explicitFacts).ok, true);
+  const reads = lineTargets([{ words: ["ssh", "deploy@web-prod.acme.io", "df -h"], cwd: "/w/app", danger: true }], facts);
+  assert.equal(checkExplicit({ quote: look, targets: [{ kind: "host", value: "web-prod.acme.io" }] }, reads, words({ text: look, source: "typed" }), [], explicitFacts).ok, true);
+});
+
+test("per-command consent: every unreadable danger of a line needs its own target; handing a part to someone else refuses it", () => {
+  const line = lineTargets(
+    [
+      { words: ["gh", "release", "create", "v2.3.0", "--generate-notes"], cwd: "/w/app", danger: true },
+      { words: ["npm", "publish"], cwd: "/w/app", danger: true },
+    ],
+    facts,
+  );
+  assert.ok("unknown" in line);
+  assert.deepEqual(line.unread.map((item) => item.text), ["npm publish"]);
+  line.text = "gh release create v2.3.0 --generate-notes && npm publish";
+  const said = "GitHub 上发一个 v2.3.0 的 release，npm 那边我自己来";
+  for (const source of ["typed", undefined]) {
+    const got = checkExplicit({ quote: said, ...(source ? { source } : {}), targets: [{ kind: "tag", value: "v2.3.0" }] }, line, words({ text: said, source: "typed" }), [], explicitFacts);
+    assert.equal(got.ok, false, got.reason);
+  }
+  // Even without the refusal, the publish brings no target of its own.
+  const both = "release v2.3.0 on GitHub and publish it";
+  const got = checkExplicit({ quote: both, source: "typed", targets: [{ kind: "tag", value: "v2.3.0" }] }, line, words({ text: both, source: "typed" }), [], explicitFacts);
+  assert.equal(got.ok, false);
+  assert.match(got.reason, /npm publish/);
+});
+
+test(`delegation (lexicon DELEGATE, every language): "X I'll do myself" / "someone else will" takes X back`, async () => {
+  const { listWords } = await import("./cypher-permissions/lexicon.ts");
+  const retract = listWords("retract");
+  for (const text of ["npm 那边我自己来", "I'll publish it myself", "someone else will deploy", "npm は自分でやります", "npm는 제가 직접 할게요", "npm mach ich selbst", "je m'en occupe pour npm", "npm lo hago yo", "npm eu mesmo faço", "npm lo faccio io", "npm я сам сделаю", "npm doe ik zelf", "npm sam zrobię", "npm'i ben yaparım"]) {
+    assert.ok(retract.test(text), text);
+  }
+  const read = merge52();
+  const text = "merge #52, I'll do the release myself";
+  // The refusal is about the release, not the merge: the merge still passes (concerns, per sentence).
+  const later = checkExplicit(claim52("merge #52"), read, words({ text: "merge #52", source: "typed" }, { text: "PR 52 我自己来合并", source: "typed" }), [], explicitFacts);
+  assert.equal(later.ok, false, "a later 'I'll merge it myself' takes the merge back");
+  assert.ok(text);
+});

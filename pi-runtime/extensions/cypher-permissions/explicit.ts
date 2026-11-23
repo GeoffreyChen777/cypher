@@ -47,8 +47,9 @@ import { antecedentsFor } from "./lifecycle.ts";
 import type { LedgerEntity } from "./ledger.ts";
 import type { GitFacts } from "./risk.ts";
 import { UNKNOWN } from "./shell.ts";
-import { actionWords, allWords, carriesOnOnly, listWords, nounWords, uncoveredScript } from "./lexicon.ts";
-import { readTool } from "./tools.ts";
+import { actionWords, allWords, attributeWords, carriesOnOnly, codeNounWords, listWords, nounWords, uncoveredScript } from "./lexicon.ts";
+import type { AttributeKey } from "./lexicon.ts";
+import { readTool, remoteEffect } from "./tools.ts";
 import type { ToolRead } from "./tools.ts";
 
 /** The variable the harness sets when it spawns Pi (`crates/harness/src/pi/spawn.rs`). */
@@ -372,13 +373,63 @@ export interface Target {
   version?: string;
   /** Where the command runs (for git facts). */
   dir?: string;
+  /** What a command run on a host changes there (tools.ts `remoteEffect`): its action, and the program that does it. */
+  remote_action?: string;
+  remote_says?: string;
   /** Whether a name is a branch of the repository at `dir` (for reading which branches a consent names). */
   isBranch?: (name: string) => boolean;
 }
 
 /** A line's targets, or why one can't be read before it runs. */
 /** What a dangerous line acts on; or why some of it can't be read, with the targets that could (`known`). */
-export type LineTargets = { targets: Target[] } | { unknown: string; known?: Target[]; actions?: string[]; text?: string };
+export type LineTargets =
+  | { targets: Target[]; attributes?: AttributeKey[] }
+  | { unknown: string; known?: Target[]; actions?: string[]; text?: string; attributes?: AttributeKey[]; unread?: UnreadCommand[] };
+
+/** One dangerous command whose target can't be read: its own words, and the action its table row says (if any). */
+export interface UnreadCommand {
+  text: string;
+  actions: string[];
+  /** Some of its words are known only when it runs (`$DIR/x`, `xargs …`): what it acts on may come from the rest of the line. */
+  open?: boolean;
+}
+
+/**
+ * Irreversible attributes a command's flags give its action (data): a consent to the action is not a consent
+ * to these; the owner's words must name each (lexicon.ts `attributeWords`). `sub`: the subcommand words.
+ */
+export const ATTRIBUTE_FLAGS: readonly { programs: readonly string[]; sub: readonly string[]; flags: RegExp; attribute: AttributeKey }[] = [
+  { programs: ["git"], sub: ["push"], flags: /^(-f|--force|--force-with-lease(=.*)?|--force-if-includes|--mirror|-[A-Za-z]*f[A-Za-z]*|\+.+)$/, attribute: "force" },
+  { programs: ["gh"], sub: ["pr", "merge"], flags: /^--admin$/, attribute: "bypass" },
+  { programs: ["glab"], sub: ["mr", "merge"], flags: /^(--skip-ci|--when-pipeline-succeeds=false)$/, attribute: "bypass" },
+  { programs: ["npm", "pnpm", "yarn"], sub: ["publish"], flags: /^(-f|--force)$/, attribute: "force" },
+  { programs: ["npm", "pnpm"], sub: ["unpublish"], flags: /^(-f|--force)$/, attribute: "force" },
+  { programs: ["cargo"], sub: ["publish"], flags: /^--allow-dirty$/, attribute: "force" },
+  { programs: ["kubectl"], sub: [], flags: /^(--force|--grace-period=0)$/, attribute: "force" },
+  { programs: ["helm"], sub: [], flags: /^--force$/, attribute: "force" },
+  { programs: ["docker", "podman"], sub: ["push"], flags: /^(-f|--force)$/, attribute: "force" },
+];
+
+/** The irreversible attributes one command's words carry (ATTRIBUTE_FLAGS). */
+export function attributesOf(words: readonly string[], cwd: string | undefined): AttributeKey[] {
+  const program = basename(words[0] ?? "");
+  const out = new Set<AttributeKey>();
+  for (const row of ATTRIBUTE_FLAGS) {
+    if (!row.programs.includes(program)) continue;
+    let rest: readonly string[];
+    if (program === "git") {
+      const parts = gitParts(words, cwd);
+      if (parts.sub !== row.sub[0]) continue;
+      rest = parts.rest;
+    } else {
+      const positionals = words.slice(1).filter((word) => !word.startsWith("-"));
+      if (!row.sub.every((word, i) => positionals[i] === word)) continue;
+      rest = words.slice(1);
+    }
+    if (rest.some((word) => word !== UNKNOWN && row.flags.test(word))) out.add(row.attribute);
+  }
+  return [...out];
+}
 
 /** What reading targets needs to know about the machine. */
 export interface TargetFacts {
@@ -455,15 +506,28 @@ const MOVES_HEAD = /^(commit|merge|reset|checkout|switch|pull|rebase|cherry-pick
  */
 export function lineTargets(commands: readonly TargetCommand[], facts: TargetFacts): LineTargets {
   const read = readLineTargets(commands, facts);
-  return read.unknown === undefined ? { targets: read.targets } : { unknown: read.unknown, known: read.targets };
+  const attributes = [...new Set(commands.filter((command) => command.danger).flatMap((command) => attributesOf(command.words, command.cwd)))];
+  const extra = attributes.length ? { attributes } : {};
+  return read.unknown === undefined ? { targets: read.targets, ...extra } : { unknown: read.unknown, known: read.targets, unread: read.unread, ...extra };
 }
 
 /** Every target the line's dangerous commands name, and the first reason one can't be read. */
-function readLineTargets(commands: readonly TargetCommand[], facts: TargetFacts): { targets: Target[]; unknown?: string } {
+function readLineTargets(commands: readonly TargetCommand[], facts: TargetFacts): { targets: Target[]; unknown?: string; unread: UnreadCommand[] } {
   const targets: Target[] = [];
   let unknown: string | undefined;
+  /** Every dangerous command whose target can't be read, each with its own words: each needs its own consent. */
+  const unread: UnreadCommand[] = [];
+  let at: TargetCommand | undefined;
   const cannot = (why: { unknown: string }) => {
     unknown ??= why.unknown;
+    if (!at || unread.some((item) => item.text === at!.words.join(" "))) return;
+    const program = basename(at.words[0] ?? "");
+    const parts = program === "git" ? gitParts(at.words, at.cwd) : undefined;
+    const tool = parts ? (parts.sub === "push" ? undefined : parts.sub === undefined ? undefined : readTool(["git", parts.sub, ...parts.rest])) : readTool(at.words);
+    const actions = parts?.sub === "push" ? ["push"] : tool && !("unknown" in tool) ? [tool.action] : [];
+    // Its input may be what it acts on: words known only when it runs, `xargs`, or a shell reading its script from the line.
+    const open = at.words.includes(UNKNOWN) || at.words.some((word) => /^(xargs|parallel|sh|bash|zsh|dash|ksh|fish|eval|python3?|node|perl|ruby|osascript)$/.test(basename(word)));
+    unread.push({ text: at.words.filter((word) => word !== UNKNOWN).join(" "), actions, ...(open ? { open: true } : {}) });
   };
   /** Tags the line creates, with the commit (undefined: known only when it runs). */
   const created = new Map<string, string | undefined>();
@@ -471,6 +535,7 @@ function readLineTargets(commands: readonly TargetCommand[], facts: TargetFacts)
   const branches = new Set<string>();
   let headMoved = false;
   for (const command of commands) {
+    at = command;
     const words = command.words;
     const program = basename(words[0] ?? "");
     for (const path of command.writes ?? []) {
@@ -538,7 +603,7 @@ function readLineTargets(commands: readonly TargetCommand[], facts: TargetFacts)
     const dir = target.dir;
     if (dir !== undefined) target.isBranch ??= (name) => facts.git(dir)?.isBranch(name) ?? false;
   }
-  return { targets, ...(unknown !== undefined ? { unknown } : {}) };
+  return { targets, unread, ...(unknown !== undefined ? { unknown } : {}) };
 }
 
 /** A target from an entity the table read, with what the command does to it. */
@@ -575,7 +640,10 @@ function toolTargets(read: ToolRead, words: readonly string[], cwd: string | und
       const at = sshHostIndex(words);
       const host = at === undefined ? undefined : words[at];
       if (!host || host === UNKNOWN) return { unknown: "the host is known only when it runs" };
-      return { targets: [targetOf({ kind: "host", name: host.replace(/^[^@]*@/, "").toLowerCase() }, action, cwd)] };
+      const target = targetOf({ kind: "host", name: host.replace(/^[^@]*@/, "").toLowerCase() }, action, cwd);
+      const effect = remoteEffect(words.slice(at! + 1));
+      if (effect) Object.assign(target, { remote_action: effect.action, remote_says: effect.says });
+      return { targets: [target] };
     }
     case "copy": {
       const hosts = new Set(words.slice(1).map((word) => remoteOperand(word)?.host).filter((host): host is string => host !== undefined));
@@ -825,6 +893,31 @@ export function mentions(text: string, value: string): boolean {
   return new RegExp(`(?<![A-Za-z0-9_./-])${escapeRegex(value.normalize("NFKC"))}(?![A-Za-z0-9_/-]|\\.[A-Za-z0-9])`, "i").test(haystack);
 }
 
+/**
+ * Whether the owner's words name `value` as a ref (a branch or tag): some mention of it that no code noun stands
+ * next to ("update the `hotfix` function" names a function, not the branch hotfix), unless a ref noun does too.
+ */
+export function refMention(text: string, value: string): boolean {
+  if (!value || !mentions(text, value)) return false;
+  const haystack = text.normalize("NFKC");
+  const code = codeNounWords();
+  const ref = anyOf(nounWords("branch"), nounWords("tag"), nounWords("version"));
+  const codeBefore = new RegExp(`(?:${code.source})[\\s\\p{P}\\p{S}]*$`, "iu");
+  const codeAfter = new RegExp(`^[\\s\\p{P}\\p{S}]*(?:${code.source})`, "iu");
+  const refBefore = new RegExp(`(?:${ref.source})[\\s\\p{P}\\p{S}]*$`, "iu");
+  const refAfter = new RegExp(`^[\\s\\p{P}\\p{S}]*(?:${ref.source})`, "iu");
+  const pattern = new RegExp(`(?<![A-Za-z0-9_./-])${escapeRegex(value.normalize("NFKC"))}(?![A-Za-z0-9_/-]|\\.[A-Za-z0-9])`, "giu");
+  for (const match of haystack.matchAll(pattern)) {
+    const before = haystack.slice(Math.max(0, match.index - 24), match.index).replace(/(?:\b(?:the|a|an|der|die|das|le|la|el|il)\s*)$/iu, "");
+    const after = haystack.slice(match.index + match[0].length, match.index + match[0].length + 24);
+    // `hotfix()` or `cart.hotfix` is code by its own spelling.
+    const spelledCode = /^\(/.test(after) || /\.$/.test(before);
+    const nextToCode = spelledCode || codeBefore.test(before) || codeAfter.test(after);
+    if (!nextToCode || refBefore.test(before) || refAfter.test(after)) return true;
+  }
+  return false;
+}
+
 /** Pull request numbers a message names: `#52`, `PR 52`, `pull/52`. */
 function namedPullRequests(text: string): Set<string> {
   const out = new Set<string>();
@@ -904,16 +997,16 @@ function uncoveredByKind(target: Target, message: string, opened: readonly PullR
     case "branch":
       if (target.action === "delete") {
         if (!SAYS.delete.test(message)) return "your message doesn't ask to delete a branch";
-        if (mentions(message, target.value)) return undefined;
+        if (refMention(message, target.value)) return undefined;
         return ownTarget("branch", message, opened, facts) === target.value ? undefined : `it deletes ${target.value}, a branch your message doesn't name`;
       }
       // The task's own branch (exactly one): "push" or a pull request asked for (its head must be pushed) names it.
       const own = ownTarget("branch", message, opened, facts) === target.value;
       if (!SAYS.push.test(message) && !(own && SAYS.pr.test(message))) return "your message doesn't ask to push";
-      return mentions(message, target.value) || own ? undefined : `it pushes to ${target.value}, a branch your message doesn't name`;
+      return refMention(message, target.value) || own ? undefined : `it pushes to ${target.value}, a branch your message doesn't name${mentions(message, target.value) ? " (it names a piece of code of that name)" : ""}`;
     case "tag": {
       if (!SAYS.release.test(message) && !SAYS.push.test(message)) return "your message doesn't ask for a release or a tag";
-      if (mentions(message, target.value)) return undefined;
+      if (refMention(message, target.value)) return undefined;
       const version = versionOf(target.value);
       const named = namedVersions(message);
       if (named.size) return version && named.has(version) ? undefined : `your message names version ${[...named].join(", ")}, not ${target.value}`;
@@ -937,7 +1030,10 @@ function uncoveredByKind(target: Target, message: string, opened: readonly PullR
     }
     case "host":
       // By its name, or one that holds it (`web` for `web.example.com`, `gamma` for `gamma-cluster`).
-      return namesEntity(message, target.entity, context) ? undefined : `it reaches ${target.value}, a host your message doesn't name`;
+      if (!namesEntity(message, target.entity, context)) return `it reaches ${target.value}, a host your message doesn't name`;
+      // A command run there that changes something (tools.ts `REMOTE_EFFECTS`): naming the host is no consent to it.
+      if (target.remote_action && !actionWords(target.remote_action).test(message)) return `it runs a command on ${target.value} that would ${target.remote_action} (${target.remote_says ?? ""}), which your message doesn't ask for`;
+      return undefined;
     default: {
       if (!actionWords(target.action).test(message)) return `your message doesn't ask to ${target.action} ${describeEntity(target.entity)}`;
       const here = target.dir ? { ...context, cwd: target.dir } : context;
@@ -1243,6 +1339,11 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
   if ((message.source === "reply" || message.source === "answer") && takesBack(message.text)) {
     return result(["quote"], `your answer was "${message.text.trim().slice(0, 140)}"`, source);
   }
+  // An irreversible attribute of the action (force, a protection bypass: ATTRIBUTE_FLAGS) must itself be named:
+  // a consent to push or merge is no consent to force it or bypass the branch's protection.
+  for (const attribute of read.attributes ?? []) {
+    if (!attributeWords(attribute).test(said)) return result(["quote"], `the command ${ATTRIBUTE_SAYS[attribute]}, which your words don't ask for`, source);
+  }
   // Every target must be what the owner's consent asks for, or a standard follow-up of it (lifecycle.ts).
   const followUps: string[] = [];
   for (const target of targets) {
@@ -1281,10 +1382,23 @@ export function checkExplicit(claim: ExplicitClaim, read: LineTargets, owner: Ow
     if (absent) return result(["quote"], `${unknown}, and the command never names ${absent.kind} ${absent.value}`, source);
     const actions = "actions" in read && read.actions?.length ? read.actions : ["delete", "stop", "push", "publish", "release", "merge", "install", "apply", "write", "erase", "reach"];
     if (!actions.some((action) => actionWords(action).test(quote))) return result(["quote"], `${unknown}, and your words "${quote}" don't ask to ${actions.join(" or ")}`, source);
+    // Every unreadable command needs its own: a claimed target in its own words, and its own action asked for
+    // (`gh release create v2 && npm publish`: the release's consent brings none for the publish).
+    for (const command of "unread" in read ? (read.unread ?? []) : []) {
+      const own = (value: string) => new RegExp(`(?<![A-Za-z0-9_.-])${value.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_-])`, "i").test(command.text);
+      if (!command.open && !claimed.some((item) => item.value.trim() !== "" && own(item.value))) return result(["quote"], `${unknown}, and nothing your words name is what \`${command.text.slice(0, 60)}\` acts on`, source);
+      if (command.actions.length && !command.actions.some((action) => actionWords(action).test(quote))) return result(["quote"], `${unknown}, and your words "${quote}" don't ask to ${command.actions.join(" or ")} (\`${command.text.slice(0, 60)}\`)`, source);
+    }
     return result(["quote", "current"], undefined, { ...source, once: true, unknown, ...(followUps.length ? { followUps } : {}) });
   }
   return result(["quote", "target", "current"], undefined, { ...source, ...(followUps.length ? { followUps } : {}) });
 }
+
+/** What each irreversible attribute does, for the reason. */
+const ATTRIBUTE_SAYS: Readonly<Record<AttributeKey, string>> = {
+  force: "forces it (overwrites what is there)",
+  bypass: "bypasses a protection (branch protection, required checks or review)",
+};
 
 /** Whether a message says to wait or not do something, whatever about. */
 function retractsAny(text: string): boolean {

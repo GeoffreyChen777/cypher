@@ -574,8 +574,97 @@ const DEFER: Readonly<Record<string, readonly string[]>> = {
   pl: ["raczej", "lepiej", "zamiast", "później", "jutro", "na razie", "zostaw", "odłóż", "przełóż", "wolę"],
   tr: ["yerine", "sonra", "yarın", "şimdilik", "bırak", "ertele*", "tercih"],
 };
+/**
+ * Handing a part to someone else, or keeping it for oneself ("npm 那边我自己来", "I'll publish it myself",
+ * "someone else will deploy"): for the agent, a refusal of that part. Counted with `retract`, as `defer` is.
+ */
+const DELEGATE: Readonly<Record<string, readonly string[]>> = {
+  en: ["i'll do it", "i will do it", "i'll do that", "i'll handle", "i will handle", "i'll take care", "i will take care", "leave it to me", "leave that to me", "myself", "someone else", "somebody else", "another team", "they'll do", "they will do", "they'll handle", "they will handle"],
+  zh: ["我自己来", "我自己弄", "我自己做", "我自己发", "我自己推", "我自己处理", "我亲自", "我来处理", "我来弄", "我来做", "我来发", "交给我", "留给我", "我手动", "别人来", "他来做", "她来做", "他们来", "让别人", "有人会"],
+  ja: ["自分でや", "自分でし", "自分で出", "自分で公開", "私がや", "僕がや", "俺がや", "こっちでや", "こちらでや", "任せて", "他の人が", "別の人が"],
+  ko: ["내가 할게", "제가 할게", "내가 직접", "제가 직접", "직접 할게", "다른 사람이", "내가 처리", "제가 처리"],
+  de: ["mach ich", "mache ich", "ich mache das", "ich mach das", "selbst", "selber", "übernehme ich", "ich übernehme", "jemand anderes", "jemand anders"],
+  fr: ["je m'en occupe", "je le fais", "je ferai", "je vais le faire", "moi-même", "moi même", "quelqu'un d'autre", "une autre équipe"],
+  es: ["yo me encargo", "me encargo yo", "lo hago yo", "yo lo hago", "yo mismo", "yo misma", "otra persona", "otro equipo"],
+  pt: ["eu faço", "eu mesmo", "eu mesma", "deixa comigo", "eu cuido", "outra pessoa", "outra equipe"],
+  it: ["lo faccio io", "me ne occupo", "io stesso", "io stessa", "ci penso io", "qualcun altro", "un altro team"],
+  ru: ["сам сделаю", "сама сделаю", "я сам", "я сама", "сделаю сам", "сделаю сама", "займусь сам", "кто-то другой", "кто-нибудь другой"],
+  nl: ["doe ik", "ik doe het", "zelf", "iemand anders"],
+  pl: ["sam zrobię", "sama zrobię", "zrobię sam", "zajmę się tym", "ktoś inny"],
+  tr: ["ben yaparım", "kendim", "başkası"],
+};
 for (const language of LANGUAGES as Language[]) {
-  (language as { defer?: readonly string[] }).defer = DEFER[language.code] ?? [];
+  (language as { defer?: readonly string[] }).defer = [...(DEFER[language.code] ?? []), ...(DELEGATE[language.code] ?? [])];
+}
+
+/**
+ * Irreversible attributes of an action (explicit.ts `ATTRIBUTE_FLAGS` reads them from the line): a consent
+ * to the action is not a consent to them; the owner's words must name them.
+ * - `force`: overwrite what is there (force-push, `--force` publish).
+ * - `bypass`: skip a protection (`gh pr merge --admin` bypasses branch protection and required checks).
+ */
+export type AttributeKey = "force" | "bypass";
+const ATTRIBUTE_WORDS: Readonly<Record<AttributeKey, Readonly<Record<string, readonly string[]>>>> = {
+  force: {
+    en: ["force*", "forcibly", "overwrit*", "rewrite history", "rewrit* the history"],
+    zh: ["强推", "强制", "覆盖", "force"],
+    ja: ["強制", "上書き", "フォース"],
+    ko: ["강제", "덮어"],
+    de: ["erzwing*", "überschreib*"],
+    fr: ["forc*", "écras*"],
+    es: ["forz*", "sobrescrib*"],
+    pt: ["forç*", "sobrescrev*"],
+    it: ["forz*", "sovrascriv*"],
+    ru: ["форс*", "принудительн*", "перезапиш*"],
+    nl: ["forceer*", "overschrijf*"],
+    pl: ["wymu*", "nadpis*"],
+    tr: ["zorla*", "üzerine yaz*"],
+  },
+  bypass: {
+    en: ["admin", "bypass*", "override*", "branch protection", "skip* the checks", "skip* checks", "skip* protection", "without review*", "ignor* the checks", "ignor* checks"],
+    zh: ["管理员", "绕过", "跳过保护", "跳过检查", "跳过 ci", "强制合并", "不等检查", "不等 ci", "不用等 ci", "不用等检查"],
+    ja: ["管理者", "バイパス", "保護を無視", "チェックを無視", "チェックを飛ば"],
+    ko: ["관리자", "우회", "보호를 무시", "체크를 건너"],
+    de: ["umgeh*", "schutz ignor*", "ohne review", "checks ignor*"],
+    fr: ["contourn*", "sans revue", "ignor* les checks"],
+    es: ["salt* la protección", "sin revisión", "ignor* los checks", "omit* los checks"],
+    pt: ["contorn*", "ignor* a proteção", "sem revisão"],
+    it: ["aggir*", "ignor* la protezione", "senza review"],
+    ru: ["админ*", "обой*", "в обход", "без ревью"],
+    nl: ["omzeil*", "zonder review"],
+    pl: ["obej*", "bez review"],
+    tr: ["yönetici", "atla*"],
+  },
+};
+
+/** Words, in any language of the table, that name an irreversible attribute. */
+export function attributeWords(key: AttributeKey): RegExp {
+  return cached(`attribute:${key}`, () => compile(Object.values(ATTRIBUTE_WORDS[key]).flat()));
+}
+
+/**
+ * Nouns of code, not refs (a name next to one is a function, a file, …: "update the `hotfix` function"),
+ * per language. A name in the owner's words next to one of these is no branch or tag target (explicit.ts `refMention`).
+ */
+const CODE_NOUNS: Readonly<Record<string, readonly string[]>> = {
+  en: ["function*", "func", "fn", "method*", "class*", "file*", "field*", "variable*", "var", "module*", "struct*", "component*", "endpoint*", "handler*", "script*", "constant*", "enum*", "property", "properties", "attribute*", "param*", "argument*", "column*", "macro*", "trait*", "interface*", "selector*", "query", "workflow*", "job*", "crate*", "package*", "dependenc*", "test", "tests", "spec*"],
+  zh: ["函数", "方法", "类", "文件", "字段", "变量", "模块", "结构体", "组件", "接口", "脚本", "常量", "枚举", "属性", "参数", "列", "宏", "工作流", "依赖", "测试"],
+  ja: ["関数", "メソッド", "クラス", "ファイル", "フィールド", "変数", "モジュール", "構造体", "コンポーネント", "スクリプト", "定数", "プロパティ", "引数", "テスト"],
+  ko: ["함수", "메서드", "클래스", "파일", "필드", "변수", "모듈", "구조체", "컴포넌트", "스크립트", "상수", "속성", "테스트"],
+  de: ["funktion*", "methode*", "klasse*", "datei*", "feld*", "variable*", "modul*", "skript*", "konstante*", "spalte*"],
+  fr: ["fonction*", "méthode*", "classe*", "fichier*", "champ*", "variable*", "module*", "colonne*"],
+  es: ["función", "funciones", "método*", "clase*", "archivo*", "fichero*", "campo*", "variable*", "módulo*", "columna*"],
+  pt: ["função", "funções", "método*", "classe*", "arquivo*", "campo*", "variável", "variáveis", "módulo*", "coluna*"],
+  it: ["funzion*", "metodo*", "metodi", "classe*", "campo", "campi", "variabil*", "modulo*", "colonna*"],
+  ru: ["функци*", "метод*", "класс*", "файл*", "переменн*", "модул*", "скрипт*"],
+  nl: ["functie*", "methode*", "klasse*", "bestand*", "veld*", "variabele*", "module*"],
+  pl: ["funkcj*", "metod*", "klas*", "plik*", "zmienn*", "modu*"],
+  tr: ["fonksiyon*", "metot*", "metod*", "sınıf*", "dosya*", "değişken*", "modül*"],
+};
+
+/** Words, in any language, that name a piece of code. */
+export function codeNounWords(): RegExp {
+  return cached("code-nouns", () => compile(Object.values(CODE_NOUNS).flat()));
 }
 
 // --- Compiled --------------------------------------------------------------------

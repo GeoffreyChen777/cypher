@@ -279,3 +279,80 @@ export function readTool(words: readonly string[]): ToolRead | { unknown: string
   }
   return read;
 }
+
+/**
+ * What a command run on another machine changes there (data): `ssh host 'sudo rm -rf /var/log/*'` deletes,
+ * `systemctl restart` applies, `tee`/`>` writes. Naming the host consents to reaching it, not to this
+ * (explicit.ts `uncovered`, host case). Rows: the action (lexicon.ts key) and the programs, optionally only
+ * with one of the subcommand words. Strongest first: a line that deletes and writes is a delete.
+ */
+export const REMOTE_EFFECTS: readonly { action: string; programs: readonly string[]; subs?: RegExp; flags?: RegExp }[] = [
+  { action: "delete", programs: ["rm", "rmdir", "unlink", "shred", "truncate", "wipefs", "srm", "trash"] },
+  { action: "delete", programs: ["find"], flags: /^-delete$/ },
+  { action: "delete", programs: ["journalctl"], flags: /^--vacuum/ },
+  { action: "delete", programs: ["docker", "podman", "crictl"], subs: /^(rm|rmi|prune)$/ },
+  { action: "delete", programs: ["apt", "apt-get", "yum", "dnf", "pacman", "brew", "pip", "pip3", "npm"], subs: /^(remove|purge|autoremove|uninstall|erase|-R.*)$/ },
+  { action: "delete", programs: ["git"], subs: /^(clean|reset)$/ },
+  { action: "delete", programs: ["dd", "mkfs", "mkfs.ext4", "mkfs.xfs", "fdisk", "parted"] },
+  { action: "stop", programs: ["kill", "pkill", "killall", "reboot", "shutdown", "halt", "poweroff"] },
+  { action: "stop", programs: ["systemctl", "service", "supervisorctl", "pm2", "docker", "podman", "launchctl"], subs: /^(stop|kill|disable|mask|unload|bootout|down)$/ },
+  { action: "apply", programs: ["systemctl", "service", "supervisorctl", "pm2", "docker", "podman", "nginx", "launchctl", "kubectl", "helm"], subs: /^(restart|reload|start|enable|up|apply|rollout|upgrade|install|scale)$/ },
+  { action: "apply", programs: ["apt", "apt-get", "yum", "dnf", "pacman", "brew", "pip", "pip3", "npm", "cargo", "snap"], subs: /^(install|upgrade|update|-S.*)$/ },
+  { action: "write", programs: ["mv", "cp", "tee", "chmod", "chown", "chgrp", "ln", "touch", "mkdir", "install", "rsync", "scp", "crontab", "patch", "useradd", "usermod", "passwd", "iptables", "ufw"] },
+  { action: "write", programs: ["sed", "perl"], flags: /^-[A-Za-z]*i/ },
+];
+
+const REMOTE_ORDER = ["delete", "stop", "apply", "write"];
+
+/** Wrappers that run the next word as the command (`sudo -u www rm …`). */
+const REMOTE_WRAPPERS = /^(sudo|doas|env|nohup|nice|ionice|timeout|time|command|exec|stdbuf|xargs)$/;
+
+/** What a remote command (the words after the host) changes, or undefined when it only reads or can't be told. */
+export function remoteEffect(words: readonly string[]): { action: string; says: string } | undefined {
+  const script = words.filter((word) => word !== UNKNOWN).join(" ");
+  if (!script.trim()) return undefined;
+  let best: { action: string; says: string } | undefined;
+  const consider = (action: string, says: string) => {
+    if (!best || REMOTE_ORDER.indexOf(action) < REMOTE_ORDER.indexOf(best.action)) best = { action, says };
+  };
+  // A redirect into a file (not a descriptor, not /dev/null) writes it.
+  for (const match of script.matchAll(/(?<![0-9&])>>?\s*([^\s&|;>]+)/g)) if (match[1] !== "/dev/null" && !match[1].startsWith("&")) consider("write", `> ${match[1]}`);
+  for (const segment of script.split(/\s*(?:;|&&|\|\||\||\n|\$\(|`)\s*/)) {
+    let parts = segment.trim().split(/\s+/).map((word) => word.replace(/^['"(]+|['")]+$/g, "")).filter(Boolean);
+    // Through wrappers and their options (`sudo -u www`, `timeout 5`, `env A=b`).
+    while (parts.length) {
+      const name = basename(parts[0]);
+      if (REMOTE_WRAPPERS.test(name)) {
+        parts = parts.slice(1);
+        while (parts.length && (parts[0].startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(parts[0]) || /^\d+[smh]?$/.test(parts[0]))) {
+          const option = parts[0];
+          parts = parts.slice(1);
+          if (/^-(u|g|C|n|k|s)$/.test(option) && parts.length) parts = parts.slice(1);
+        }
+        continue;
+      }
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(parts[0])) {
+        parts = parts.slice(1);
+        continue;
+      }
+      break;
+    }
+    if (!parts.length) continue;
+    const program = basename(parts[0]);
+    // `bash -c '…'`: its script is read as the remote command's.
+    if (/^(sh|bash|zsh|dash)$/.test(program) && parts.some((word) => /^-[a-z]*c$/.test(word))) {
+      const inner = remoteEffect(parts.slice(parts.findIndex((word) => /^-[a-z]*c$/.test(word)) + 1));
+      if (inner) consider(inner.action, inner.says);
+      continue;
+    }
+    const rest = parts.slice(1);
+    const subs = rest.filter((word) => !word.startsWith("-") || /^-[RS]/.test(word));
+    for (const row of REMOTE_EFFECTS) {
+      if (!row.programs.includes(program)) continue;
+      if (row.subs && !subs.slice(0, 2).some((word) => row.subs!.test(word))) continue;
+      if (row.flags && !rest.some((word) => row.flags!.test(word))) continue;
+      consider(row.action, parts.slice(0, 4).join(" "));
+    }
+  }
+  return best;
+}
