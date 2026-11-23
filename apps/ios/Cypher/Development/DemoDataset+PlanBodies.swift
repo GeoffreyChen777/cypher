@@ -144,7 +144,7 @@ extension DemoDataset {
             which callers depend on that shape;
             - whether the old client retried it, and whether retrying it is safe.
 
-            Write the list to `docs/ledger-migration.md` as a table, one row per call, and mark the \
+            Write the list to a migration note as a table, one row per call, and mark the \
             ones that look wrong today (the March double charges came from `create_charge` being \
             retried without a key). This step changes no code.
 
