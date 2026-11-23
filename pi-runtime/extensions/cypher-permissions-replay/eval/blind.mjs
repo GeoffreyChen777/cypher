@@ -18,6 +18,7 @@
 // - `openedPRs` → for each, `git push -u origin <head>` and `gh pr create --base --head` with its URL as output:
 //   both in the conversation (the explicit check's PR facts) and settled like a real run (the ledger).
 //   A PR's `state` (open/merged) is not expressed beyond that (who merged it is not a setup fact).
+//   `--merged-by-chat` writes a variant where a merged one was merged by this chat (`gh pr merge N` in its history).
 // - `startedProcesses` → those pids are the chat's (`processes[pid] = "chat"`: production reads the marker).
 // - `spoof` → the backticked command it quotes runs for real (an `echo`/`printf` prints, makes nothing);
 //   "X already exists locally" → a local ref made before the chat's commands.
@@ -29,7 +30,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 
-const { values: args } = parseArgs({ options: { cases: { type: "string" }, out: { type: "string" }, score: { type: "string" }, corpus: { type: "string" } } });
+const { values: args } = parseArgs({ options: { cases: { type: "string" }, out: { type: "string" }, score: { type: "string" }, corpus: { type: "string" }, "merged-by-chat": { type: "boolean", default: false } } });
 
 const KNOWN_SETUP = new Set(["repo", "defaultBranch", "chatBranch", "planBranch", "createdBranches", "createdTags", "createdDirs", "createdWorktrees", "openedPRs", "mergedBranches", "startedProcesses", "foreign", "spoof"]);
 
@@ -100,7 +101,9 @@ export function convert(blind) {
     }
     const repo = setup.repo ?? "owner/repo";
     ran.push([`gh pr create --base ${pr.base ?? defaultBranch} --head ${pr.head} --title "${pr.head}" --body-file /tmp/pr-body.md`, `https://github.com/${repo}/pull/${pr.number}\n`, false]);
-    if (pr.state && pr.state !== "open") notes.push(`PR #${pr.number} state ${pr.state}: not expressed (who merged it is no setup fact)`);
+    // --merged-by-chat: a variant reading a merged PR this chat opened as merged by this chat (its ledger then has the merge).
+    if (pr.state === "merged" && args["merged-by-chat"]) ran.push([`gh pr merge ${pr.number} --merge`, `✓ Merged pull request #${pr.number}\n`, false]);
+    else if (pr.state && pr.state !== "open") notes.push(`PR #${pr.number} state ${pr.state}: not expressed (who merged it is no setup fact)`);
   }
   if (!setup.repo && setup.openedPRs?.length) unexpressible.push("openedPRs without a repo: the PR URL can't be written");
   if (setup.mergedBranches?.length) notes.push(`mergedBranches ${setup.mergedBranches.join(", ")}: only in the conversation`);
