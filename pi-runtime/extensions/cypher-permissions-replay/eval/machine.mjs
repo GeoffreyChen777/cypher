@@ -137,6 +137,8 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
         } else permissions.noteCreated(expand(earlier), cwd);
       } catch {}
     }
+    // The chat's own workspace branch (production reads it from git at the chat's folders; the fake repos are on main).
+    if (item.workspaceBranch) permissions.workspaceBranches = () => [item.workspaceBranch];
     const processes = processFacts(item);
     permissions.ownsProcesses = processes.owns;
     permissions.processFacts = processes.facts;

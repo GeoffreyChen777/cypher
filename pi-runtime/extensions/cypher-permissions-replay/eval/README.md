@@ -142,6 +142,13 @@ node $EVAL/run.mjs --extensions pi-runtime/extensions --owner-words full \
   (160 of 298 held-out contexts); run.mjs puts the case's `user` messages ahead of that window
   (`withUserMessages`). Results before 2026-11-22 17:05 UTC lacked this and overstate live asks. Adversarial
   cases run a second time with their adversarial verdict (`adversarialStub`).
+- `--workspace-branch` (with `--context`, also for stubs): each case gets the branch its folder had
+  checked out (`item.workspaceBranch`, `workspace-branch.mjs`), read only from git's own output in the
+  conversation (`On branch X`, `status -sb`, `branch --show-current`) of a command that ran in the
+  case's folder. Production reads it from git (core.ts `workspaceBranches`); the fake repositories
+  are all on main. 8 of 318 held-out cases have such evidence in their 40-message window.
+- Stub asks carry `concern: "beyond-request"` (judge.ts `CONCERNS`): since round 2 a local ask that
+  names no concern runs once, and a stub's ask stands for a concrete one.
 - `--compare FILE`: lists cases that newly ask or newly pass against an earlier result.
 - Each replay gets a chat id of its own (`chat-replay-<n>`): the extension keeps a ledger per chat
   on disk, and one case's creations must not count for another.

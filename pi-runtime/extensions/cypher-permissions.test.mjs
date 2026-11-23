@@ -500,14 +500,14 @@ test("assisted: the judge approves an external write, and remembers it for the c
   assert.match(audit, /"decidedBy":"judge"/);
   assert.match(audit, /"tier":"local"/);
   // Not reviewed again.
-  const again = ctx({ judge: '{"decision":"ask-user","reason":"x"}', choice: "Deny" });
+  const again = ctx({ judge: '{"decision":"ask-user","concern":"beyond-request","reason":"x"}', choice: "Deny" });
   assert.equal((await permissions.authorize([{ capability: "write", path: join(other, "notes.md") }], { tool: "write" }, again)).ok, true);
   assert.equal(again.asked.length, 0);
 });
 
 test("assisted: an escalation reaches the human with the reviewer's reason", async () => {
   const { permissions, entries } = engine();
-  const c = ctx({ judge: '{"decision":"ask-user","reason":"unrelated to the task"}', choice: "Always in app" });
+  const c = ctx({ judge: '{"decision":"ask-user","concern":"beyond-request","reason":"unrelated to the task"}', choice: "Always in app" });
   const result = await permissions.authorize([{ capability: "write", path: join(other, "notes.md") }], { tool: "write" }, c);
   assert.equal(result.ok, true);
   assert.equal(c.asked.length, 1);
@@ -543,7 +543,7 @@ test("sensitive reads go to the judge first and never offer always-allow", async
   assert.equal(permissions.grants.findForFile("read", join(workspace, ".env")), undefined, "and leaves no grant");
 
   const c = ctx({ choice: "Deny" });
-  c.complete = judge('{"decision":"ask-user","reason":"The user never mentioned .env."}');
+  c.complete = judge('{"decision":"ask-user","concern":"beyond-request","reason":"The user never mentioned .env."}');
   const result = await permissions.authorize([{ capability: "read", path: ".env" }], { tool: "read" }, c);
   assert.equal(result.ok, false);
   assert.match(c.asked[0].title, /\nReview: The reviewing model couldn't approve this automatically\. The user never mentioned \.env\./);
@@ -1100,7 +1100,7 @@ test("escalation: dangerous commands the model can't approve ask a human, for th
   const asked = ctx({ choice: "Allow for this task" });
   asked.complete = async (_system, prompt) => {
     prompts.push(prompt);
-    return '{"decision":"ask-user","reason":"The user never asked to publish."}';
+    return '{"decision":"ask-user","concern":"beyond-request","reason":"The user never asked to publish."}';
   };
   asked.cwd = repo;
   assert.deepEqual(await permissions.requestEscalation("git push origin main", { label: "Publish" }, asked), { ok: true, scope: "task", by: "user" });
@@ -1175,7 +1175,7 @@ test("escalation: the model may run a danger the owner's own words ask for, once
     assert.match(unquoted.asked[0].title, /Review: .*Cypher couldn't confirm it: the reviewing model quoted none of your words\./);
     assert.deepEqual(unquoted.asked[0].options, ["Allow for this task", "Deny", "Deny and stop"]);
     // The model's ask-user stands, even with the owner's words quoted: the user decides.
-    const declined = judged('{"decision":"ask-user","reason":"The PR body is not ready.","userQuote":"open the PR against recipe/earlvlm","target":{"kind":"pr","value":"recipe/earlvlm"}}');
+    const declined = judged('{"decision":"ask-user","concern":"beyond-request","reason":"The PR body is not ready.","userQuote":"open the PR against recipe/earlvlm","target":{"kind":"pr","value":"recipe/earlvlm"}}');
     await permissions.requestEscalation(line, { label: "Open the PR" }, declined);
     assert.match(declined.asked[0].title, /Review: The reviewing model couldn't approve this automatically\. The PR body is not ready\./);
 
@@ -1266,7 +1266,7 @@ test("escalation: the model may run a danger the owner's own words ask for, once
     assert.equal(nested.asked.length, 1, "and with no consent cited, it asks");
     prompts.length = 0;
     assert.match(nested.asked[0].title, /\nNote: Dangerous: it changes a pull request other people see\. It asks: the pull request is known only when it runs\.\n/);
-    const titled = judged('{"decision":"ask-user","reason":"x"}');
+    const titled = judged('{"decision":"ask-user","concern":"beyond-request","reason":"x"}');
     await permissions.requestEscalation("gh pr create --base main --title $(cat t)", { label: "x" }, titled);
     assert.equal(prompts.length, 1, "a title known only when it runs goes to the model: the line names where it goes");
     prompts.length = 0;
@@ -1351,11 +1351,15 @@ test("risk tiers: inspections run outside on their own; secrets, other people's 
   // Read-only window and app queries; not ones that act.
   assert.equal(tier(`osascript -e 'tell application "System Events" to get name of every window of process "Dock"'`), "local");
   assert.equal(tier(`osascript -e 'tell application "System Events" to get bounds of window 1 of process "Dock"'`), "local");
+  // Raising a window is undone by a click and seen by no one else (grades by reversibility and audience): local, for the model.
+  assert.equal(tier(`osascript -e 'tell application "System Events" to tell process "Dock" to set frontmost to true'`), "local");
+  assert.equal(tier(`osascript -e 'tell application "System Events" to set frontmost of (first application process whose unix id is 92785) to true'`), "local");
   for (const line of [
     `osascript -e 'tell application "System Events" to keystroke "a"'`,
     `osascript -e 'tell application "System Events" to click button 1 of window 1'`,
     `osascript -e 'tell application "Mail" to quit'`,
-    `osascript -e 'tell application "System Events" to tell process "Dock" to set frontmost to true'`,
+    `osascript -e 'tell application "System Events" to tell process "Dock" to set frontmost to true' -e 'tell application "System Events" to keystroke "q"'`,
+    `osascript -e 'tell application "Mail" to activate' -e 'tell application "Mail" to send (make new outgoing message)'`,
     `osascript -e 'do shell script "id"'`,
     "osascript /tmp/script.scpt",
   ]) {
@@ -1400,7 +1404,7 @@ test("escalation: the model decides local work first and remembers it for the ch
     return c;
   };
   const approve = '{"decision":"approve","reason":"The user asked to check the server."}';
-  const ask = '{"decision":"ask-user","reason":"The user never mentioned the db host."}';
+  const ask = '{"decision":"ask-user","concern":"beyond-request","reason":"The user never mentioned the db host."}';
 
   // Approved by the model: it runs without a dialog, and similar commands run for the rest of the chat.
   const yes = judged(approve);
@@ -2005,8 +2009,11 @@ test("the judge has three answers: approve and remember, approve once, or ask", 
   const remember = parseVerdict('{"decision":"approve","reason":"fits"}');
   assert.deepEqual(remember, { decision: "approve", once: false, kind: "approve", reason: "fits" });
   assert.equal(parseVerdict('{"decision":"approve_once","reason":"x"}').once, true, "spelled loosely");
-  const asked = parseVerdict('{"decision":"ask-user","reason":"never asked"}');
-  assert.deepEqual(asked, { decision: "ask-user", once: false, kind: "ask-user", reason: "never asked" });
+  const asked = parseVerdict('{"decision":"ask-user","concern":"beyond-request","reason":"never asked"}');
+  assert.deepEqual(asked, { decision: "ask-user", once: false, kind: "ask-user", reason: "never asked", concern: "beyond-request" });
+  // A concern off the closed list is none.
+  assert.equal(parseVerdict('{"decision":"ask-user","concern":"vibes","reason":"x"}').concern, undefined);
+  assert.equal(parseVerdict('{"decision":"ask-user","concern":"Other task","reason":"x"}').concern, "other-task", "spelled loosely");
   assert.equal(parseVerdict("no json").kind, "unreadable");
   assert.deepEqual(Object.keys(defaultConfig().judge).sort(), ["model", "timeoutMs"]);
   assert.match(JUDGE_SYSTEM_PROMPT, /\{"decision": "approve" \| "approve-once" \| "ask-user", "reason": "[^"]*"\}\n/, "the answer is the decision and a reason");
@@ -2064,7 +2071,7 @@ test("escalation: approve-once runs the call and keeps no grant; approve remembe
   assert.deepEqual([audit.scope, audit.judgeVerdict], ["chat", "approve"]);
 
   // Ask-user: the user decides, and the audit says what the model answered.
-  const declined = judgedCtx({ decision: "ask-user", reason: "never asked about the db" });
+  const declined = judgedCtx({ decision: "ask-user", concern: "beyond-request", reason: "never asked about the db" });
   await permissions.requestEscalation("ssh deploy@db uptime", { label: "Uptime" }, declined);
   assert.equal(declined.asked.length, 1);
   audit = lastAuditOf(permissions);
@@ -2086,7 +2093,7 @@ test("file access: approve-once allows the call without a chat grant; a sensitiv
   assert.equal(secret.asked.length, 0, "the model's approval");
   assert.deepEqual([lastAuditOf(permissions).decidedBy, lastAuditOf(permissions).scope], ["judge", "once"], "a secret is never remembered");
   assert.equal(permissions.grants.all().length, 0);
-  const again = judgedCtx({ decision: "ask-user", reason: "The user never mentioned .env." });
+  const again = judgedCtx({ decision: "ask-user", concern: "beyond-request", reason: "The user never mentioned .env." });
   assert.equal((await permissions.authorize([{ capability: "read", path: ".env" }], { tool: "read" }, again)).ok, false);
   assert.equal(again.asked.length, 1, "the next read is reviewed again");
 });
@@ -2922,4 +2929,59 @@ test("a redirection to a path known only when it runs: read like the rest of the
   // What the task made stays known: an unknown file is not recorded as its own.
   permissions.noteCreated('echo x > "$F"', workspace);
   assert.deepEqual(permissions.created.all().paths.filter((path) => path.includes("\0")), []);
+});
+
+test("judge concerns: a local ask that names no listed concern runs once; one that names a concern asks; a danger's ask always asks", async () => {
+  const { permissions } = engine();
+  const bare = judgedCtx({ decision: "ask-user", reason: "not sure" });
+  assert.deepEqual(await permissions.requestEscalation("ssh deploy@web uptime", { label: "Uptime" }, bare), { ok: true, scope: "once", by: "judge" });
+  assert.equal(bare.asked.length, 0, "no dialog");
+  assert.equal(permissions.grants.all().length, 0, "nothing remembered");
+  assert.match(bare.prompts[0].system, /"concern"/);
+  let audit = lastAuditOf(permissions);
+  assert.deepEqual([audit.decision, audit.decidedBy, audit.scope], ["allow", "judge", "once"]);
+  assert.match(audit.reason, /named no concrete concern/);
+
+  const offList = judgedCtx({ decision: "ask-user", concern: "just a feeling", reason: "hmm" });
+  assert.equal((await permissions.requestEscalation("ssh deploy@web uptime", { label: "Uptime" }, offList)).ok, true, "a concern off the list is none");
+
+  const concrete = judgedCtx({ decision: "ask-user", concern: "other-task", reason: "another chat's worktree" });
+  await permissions.requestEscalation("ssh deploy@web uptime", { label: "Uptime" }, concrete);
+  assert.equal(concrete.asked.length, 1);
+  audit = lastAuditOf(permissions);
+  assert.deepEqual([audit.prompted, audit.judge], [true, "asked"]);
+
+  // A danger: the ask stands, concern or not.
+  const danger = judgedCtx({ decision: "ask-user", reason: "not sure" });
+  await permissions.requestEscalation("npm publish", { label: "Publish" }, danger);
+  assert.equal(danger.asked.length, 1);
+  // A sensitive file: the code knows the concern.
+  const secret = judgedCtx({ decision: "ask-user", reason: "never mentioned" });
+  assert.equal((await permissions.authorize([{ capability: "read", path: ".env" }], { tool: "read" }, secret)).ok, false);
+  assert.equal(secret.asked.length, 1);
+});
+
+test("judge: reading the installed app's data runs only on owner words the model cites", async () => {
+  const { permissions } = engine();
+  const data = join(home, ".cypher", "orgs", "org_x", "user_x");
+  mkdirSync(data, { recursive: true });
+  const line = `sqlite3 -readonly "file:${data}/docs.sqlite3?mode=ro" ".tables"`;
+  permissions.ownerWords = { messages: [{ source: "typed", text: "看看我正式版 cypher 的聊天记录里为什么权限弹窗这么多" }], agentWritten: false };
+  // Approved without citing anything: asks.
+  const uncited = judgedCtx({ decision: "approve-once", reason: "fits the investigation" });
+  assert.equal((await permissions.requestEscalation(line, { label: "Tables" }, uncited)).ok, false);
+  assert.equal(uncited.asked.length, 1);
+  assert.match(uncited.prompts[0].prompt, /installed app data: yes/);
+  assert.match(uncited.asked[0].title, /reads the installed app's data, and the reviewing model cited none of your words/);
+  // A quote that isn't the owner's: asks.
+  const made = judgedCtx({ decision: "approve-once", reason: "fits", consent: { source: "typed", quote: "please read my installed app database" } });
+  assert.equal((await permissions.requestEscalation(line, { label: "Tables" }, made)).ok, false);
+  // An ask without a concern still asks here: the code knows the concern.
+  const shy = judgedCtx({ decision: "ask-user", reason: "unsure" });
+  assert.equal((await permissions.requestEscalation(line, { label: "Tables" }, shy)).ok, false);
+  // Cited owner words: runs once.
+  const cited = judgedCtx({ decision: "approve-once", reason: "the owner asked about their chats", consent: { source: "typed", quote: "我正式版 cypher 的聊天记录" } });
+  const ran = await permissions.requestEscalation(line, { label: "Tables" }, cited);
+  assert.deepEqual([ran.ok, ran.scope, ran.by], [true, "once", "judge"]);
+  assert.equal(cited.asked.length, 0);
 });

@@ -20,6 +20,7 @@ import { parseArgs } from "node:util";
 
 import { createMachine } from "./machine.mjs";
 import { liveModel, stubModel } from "./models.mjs";
+import { workspaceBranchOf } from "./workspace-branch.mjs";
 import { mechanismOf as mechanismOfRow } from "./mechanism.mjs";
 
 const mechanismOf = (got) => mechanismOfRow({ outcome: got.outcome, explicit: got.explicit, kind: got.kind, onceOnly: got.onceOnly, judged: got.judged, judgeVerdict: got.audit.judgeVerdict ?? got.answer, decidedBy: got.audit.decidedBy });
@@ -34,6 +35,8 @@ const { values: args } = parseArgs({
     "consent-claim": { type: "boolean", default: false },
     "owner-words": { type: "string", default: "full" },
     context: { type: "string" },
+    // Give each case the branch its cwd had checked out, as git's own output in the conversation shows it (workspace-branch.mjs).
+    "workspace-branch": { type: "boolean", default: false },
     concurrency: { type: "string", default: "6" },
     sample: { type: "string" },
     seed: { type: "string", default: "20261122" },
@@ -102,6 +105,14 @@ if (args.live) {
   } });
 }
 const stubbed = stubModel(args.stub, { consent: args["consent-claim"] });
+if (args["workspace-branch"]) {
+  for (const item of cases) {
+    // An adversarial case's conversation is its own; a mutation of the owner's words keeps its base's folder and branch.
+    if (item.adversarial) continue;
+    const found = workspaceBranchOf(context[String(item.base ?? item.id)]?.branch, item.cwd);
+    if (found) item.workspaceBranch = found;
+  }
+}
 
 /**
  * The context file keeps the last 40 messages before the call, which in a long turn holds no
