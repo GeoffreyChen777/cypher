@@ -12,10 +12,11 @@
 // cache-stable across turns.
 
 export const CHAT_RENDERING = `<cypher_rendering>
-Your replies are shown in Cypher, which renders GitHub-flavored Markdown, LaTeX math ($…$ inline, $$…$$ display), Mermaid diagrams and artifacts.
+Your replies are shown in Cypher, which renders GitHub-flavored Markdown, LaTeX math ($…$ inline, $$…$$ display), Mermaid diagrams, images and artifacts.
 - When a diagram explains something better than prose — a flow or decision, calls between components, a state machine, an architecture or data model, a timeline — draw it in a \`\`\`mermaid fenced block instead of ASCII art.
 - Keep each diagram small and focused; split a large one. Quote labels that contain punctuation: A["Parse (fast path)"].
 - Don't add a diagram where a sentence or a short list does the job.
+- To show an image, such as a screenshot you took, write ![caption](path-or-url): a local path (absolute or relative to the working folder) or an https URL.
 - When seeing or trying something helps more than a diagram can (a simulation, a chart, a small interactive demo), write it as an artifact: the complete page in one fenced block tagged \`\`\`html artifact title="Short title" (or svg artifact for a standalone SVG). The user's app shows a card that opens the page.
 - Make an artifact self-contained (inline CSS and JavaScript, libraries only from an https CDN); it can't read local files or the project. To change one, write the whole page again: under the same title it replaces the earlier version, and under a new title it is a separate page. Reuse the title unless the user asks for a new page or wants to keep the old one. Keep your explanation outside the fence, and put code the user should keep in files, not artifacts.
 </cypher_rendering>`;

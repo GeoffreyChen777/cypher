@@ -167,11 +167,15 @@ final class WorkspaceBrowserSession {
     /// A file's raw bytes (image previews), read a slice at a time through
     /// `ReadWorkspaceFileChunk`. Refused past `limit`, and when the file is
     /// rewritten while it loads.
-    func fileBytes(_ path: String, limit: UInt64 = 24 * 1024 * 1024) async throws -> Data {
+    func fileBytes(
+        _ path: String, limit: UInt64 = 24 * 1024 * 1024, rootSpaceId: String? = nil
+    ) async throws -> Data {
         try check()
         guard WorkspaceFilePath.valid(path, allowRoot: false) else { throw WorkspaceBrowserError.invalidPath }
         if isDemo {
-            guard let data = Self.demoBytes(path) else { throw WorkspaceBrowserError.invalidPath }
+            guard let data = Self.demoBytes(path) ?? Self.demoText(path).map({ Data($0.utf8) }) else {
+                throw WorkspaceBrowserError.invalidPath
+            }
             return data
         }
         struct Chunk: Decodable, Sendable {
@@ -184,8 +188,11 @@ final class WorkspaceBrowserSession {
         var data = Data()
         var offset: UInt64 = 0
         var modified: Int64?
+        var root: [String: Any] = [:]
+        if let rootSpaceId { root["rootSpaceId"] = rootSpaceId }
         while true {
-            let chunk: Chunk = try await call("ReadWorkspaceFileChunk", path: path, extra: ["offset": offset])
+            let chunk: Chunk = try await call(
+                "ReadWorkspaceFileChunk", path: path, extra: root.merging(["offset": offset]) { _, new in new })
             guard chunk.bytes <= limit else { throw WorkspaceBrowserError.tooLarge }
             if offset > 0, chunk.modifiedMs != modified { throw WorkspaceBrowserError.changedWhileReading }
             modified = chunk.modifiedMs
@@ -195,6 +202,66 @@ final class WorkspaceBrowserSession {
             guard chunk.nextOffset > offset else { throw WorkspaceBrowserError.unavailable }
             offset = chunk.nextOffset
         }
+    }
+
+    // MARK: Images
+
+    /// rpc `ChatFileRoot`: a folder the chat's files may be read in.
+    struct FileRoot: Decodable, Sendable {
+        /// nil for the chat's own folder; a granted project's space id.
+        var spaceId: String?
+        var name: String
+        /// Canonical absolute folder on the host.
+        var path: String
+    }
+
+    /// The folders the chat may read (`ListChatFileRoots`): its own, then a
+    /// workspace's granted projects. Just the chat's folder for a host that
+    /// can't say.
+    func fileRoots() async -> [FileRoot] {
+        guard !isDemo, (try? check()) != nil else { return [] }
+        let roots: [FileRoot]? = try? await call("ListChatFileRoots")
+        return roots ?? []
+    }
+
+    /// Where a chat image's local path resolves (`ImageSource.Context`): the
+    /// chat's folder as written, then each folder it may read. The host's
+    /// home is read off a `~` folder and its canonical path.
+    func imageContext() async -> ImageSource.Context {
+        let cwd = chat.cwd ?? ""
+        let roots = await fileRoots()
+        return Self.imageContext(cwd: cwd, roots: roots.map(\.path))
+    }
+
+    nonisolated static func imageContext(cwd: String, roots: [String]) -> ImageSource.Context {
+        var home: String?
+        if cwd == "~" {
+            home = roots.first
+        } else if cwd.hasPrefix("~/"), let own = roots.first, own.hasSuffix(String(cwd.dropFirst())) {
+            home = String(own.dropLast(cwd.count - 1))
+        }
+        var all = cwd.isEmpty ? [] : [cwd]
+        for root in roots where !all.contains(root) { all.append(root) }
+        return ImageSource.Context(cwd: cwd.isEmpty ? nil : cwd, roots: all, home: home)
+    }
+
+    /// One candidate's bytes: in the chat's own folder, or in the granted
+    /// project whose folder it names.
+    func imageBytes(_ candidate: ImageSource.Candidate) async throws -> Data {
+        let cwd = chat.cwd ?? ""
+        if candidate.root == cwd || candidate.root == ImageSource.normalize(cwd) {
+            return try await fileBytes(candidate.path, limit: ImageSource.maxBytes)
+        }
+        let roots = await fileRoots()
+        let home = Self.imageContext(cwd: cwd, roots: roots.map(\.path)).home
+        let ownExpanded = home.map { ImageSource.normalize($0 + cwd.dropFirst()) }
+        if candidate.root == ownExpanded || roots.contains(where: { $0.path == candidate.root && $0.spaceId == nil }) {
+            return try await fileBytes(candidate.path, limit: ImageSource.maxBytes)
+        }
+        guard let space = roots.first(where: { $0.path == candidate.root })?.spaceId else {
+            throw ImageLoadError.outside
+        }
+        return try await fileBytes(candidate.path, limit: ImageSource.maxBytes, rootSpaceId: space)
     }
 
     /// Where a reference or link a reply wrote lands in this checkout

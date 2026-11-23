@@ -200,6 +200,7 @@ extension MDBlock {
                 row.map { $0.map(\.text).joined() }.joined(separator: "\t")
             }.joined(separator: "\n")
         case .rule: return ""
+        case .image(_, let alt): return alt
         }
     }
 }

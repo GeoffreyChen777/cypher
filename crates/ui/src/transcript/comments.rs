@@ -288,6 +288,7 @@ impl Transcript {
                 let index = self.artifacts.clone();
                 Rc::new(move |row: &str, code: &str| index.borrow().patch_outcome(row, code))
             }),
+            images: Some(self.image_ui(cx)),
             live,
             justify: false,
         };
@@ -298,6 +299,8 @@ impl Transcript {
         // A landing diagram is taller than the source it replaces: remeasure
         // its row, keeping the scroll anchor.
         let diagram_row = row_id.clone();
+        let streaming_tail = live && block_ix + 1 == tree.blocks.len();
+        self.request_images(&top.block, row_id, streaming_tail, cx);
         markdown::mermaid::request_block(
             &top.block,
             theme,
@@ -331,7 +334,7 @@ impl Transcript {
 
     /// Remeasure one row whose height changed in place (a diagram landed or
     /// switched to its source), keeping the scroll anchor.
-    fn remeasure_row(&mut self, row_id: &SharedString, cx: &mut Context<Self>) {
+    pub(super) fn remeasure_row(&mut self, row_id: &SharedString, cx: &mut Context<Self>) {
         if let Some(ix) = self.rows.iter().position(|row| &row.id == row_id) {
             self.list.remeasure_items(ix..ix + 1);
         }

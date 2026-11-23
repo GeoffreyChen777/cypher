@@ -102,6 +102,9 @@ pub struct RenderOptions {
     /// How the tree's patch fences went, for their cards; `None` renders
     /// them inert (surfaces that index no pages).
     pub artifact_patches: Option<super::artifact::PatchLookup>,
+    /// Loads and opens image blocks ([`super::image`]); `None` shows only
+    /// their captions.
+    pub images: Option<super::image::ImageUi>,
     /// The row is still streaming: an artifact whose fence hasn't closed
     /// is still being written.
     pub live: bool,
@@ -192,6 +195,7 @@ impl RenderOptions {
             code_refs: None,
             artifact: None,
             artifact_patches: None,
+            images: None,
             live: false,
             justify: false,
         }
@@ -460,6 +464,7 @@ pub fn render_block(
             rows,
             align,
         } => render_table(header, rows, align, ctx, window),
+        Block::Image { src, alt } => super::image::render(src, alt, ctx),
         Block::Rule => div()
             .h(px(1.0))
             .w_full()
@@ -1117,6 +1122,8 @@ pub fn count_block_matches(block: &Block, query: &str) -> usize {
             cells(header) + rows.iter().map(|row| cells(row)).sum::<usize>()
         }
         Block::Rule => 0,
+        // Captions are not part of the selectable text.
+        Block::Image { .. } => 0,
     }
 }
 

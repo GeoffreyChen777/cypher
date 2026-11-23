@@ -475,6 +475,9 @@ struct ToolChipRow: View {
                 .truncationMode(.middle)
                 .layoutPriority(-1)
             Spacer(minLength: 0)
+            if let image = tool.call.imagePath, tool.status == .completed {
+                ImageThumbnail(src: image)
+            }
             if let permission = tool.permission {
                 PermissionBadge(permission: permission)
             }

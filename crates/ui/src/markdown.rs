@@ -18,6 +18,8 @@ pub mod artifact;
 pub mod code_ref;
 pub mod diff_fence;
 pub mod find;
+pub mod image;
+pub mod image_source;
 pub mod justified;
 pub mod math;
 pub mod mend;

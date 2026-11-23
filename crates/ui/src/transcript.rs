@@ -61,6 +61,7 @@ mod chips;
 pub use chips::*;
 mod code_ref;
 mod highlight;
+mod images;
 use highlight::*;
 mod artifacts;
 mod attachments;
@@ -346,6 +347,8 @@ pub struct Transcript {
     attachment_preview: Option<crate::attachments::PreviewImage>,
     /// Focused while the lightbox is open so Escape reaches it.
     attachment_preview_focus: gpui::FocusHandle,
+    /// The reply image open full-size (click an image block).
+    image_viewer: Option<images::ImageViewer>,
     /// In-flight ReadAttachmentChunk loads, keyed `(deviceId, path)` — one per
     /// source; results land in the global attachment cache.
     attachment_loads: HashMap<(String, String), Task<()>>,
@@ -604,6 +607,7 @@ impl Transcript {
             copied_message_clear: None,
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
+            image_viewer: None,
             attachment_loads: HashMap::new(),
             attachment_retries: HashMap::new(),
             blob_details: HashMap::new(),
