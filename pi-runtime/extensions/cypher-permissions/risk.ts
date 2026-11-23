@@ -805,7 +805,8 @@ export function uploadDanger(view: CommandView): string | undefined {
         const value = inline ?? args[i + 1];
         if (value === undefined) continue;
         const sendsFile = row.at?.test(name) ? value.startsWith("@") || value === UNKNOWN : name.startsWith("-F") || name.startsWith("--form") ? /=[<@]/.test(value) || value === UNKNOWN : true;
-        if (sendsFile) return `sends files off this machine (${view.program} ${name} ${value})`;
+        // A value known only when it runs is said so (round 5 step 2: the judge's evidence names what can't be read).
+        if (sendsFile) return value === UNKNOWN ? `sends a file known only when it runs off this machine (${view.program} ${name} …), which could be a secret` : `sends files off this machine (${view.program} ${name} ${value})`;
       }
     }
     if (row.dest) {
