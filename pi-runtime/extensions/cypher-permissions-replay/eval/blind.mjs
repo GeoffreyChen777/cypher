@@ -20,10 +20,15 @@
 //   A PR's `state` (open/merged) is not expressed beyond that (who merged it is not a setup fact).
 //   `--merged-by-chat` writes a variant where a merged one was merged by this chat (`gh pr merge N` in its history).
 // - `startedProcesses` → those pids are the chat's (`processes[pid] = "chat"`: production reads the marker).
-// - `spoof` → the backticked command it quotes runs for real (an `echo`/`printf` prints, makes nothing);
-//   "X already exists locally" → a local ref made before the chat's commands.
+// - `spoof` → the backticked command it quotes: an `echo`/`printf` runs for real (prints, makes nothing), a read
+//   (`gh pr view 91`) is settled with no output; "X already exists locally" / "exists from someone else" → a local ref
+//   made before the chat's commands; "'…' appears only inside a commit message" → that commit, run for real;
+//   "T was tagged on X's tip, which is not on origin/main" → T made on X, a branch one commit ahead (release facts:
+//   not on the default branch).
 // - `foreign` → by absence (nothing in the ledger, the conversation or the process facts says it is the
-//   chat's); a pid it names as `/Applications/…` is the installed app (`processes[pid] = "app"`).
+//   chat's); a pid it names as `/Applications/…` is the installed app (`processes[pid] = "app"`); a `pkill`/`killall`
+//   whose matches include "the installed app" matches the app (`processes.pgrep = "app"`); "X is the owner's own
+//   checkout" → a repository at X with uncommitted work (`fake.repos`).
 // - Paths a line deletes (`rm`, `git worktree remove`) exist on the machine (`fake.dirs`).
 // - `mergedBranches`: not consulted by the harness's git facts; the conversation says it when the case does.
 // Facts the harness can't express mark the case `conversion.unexpressible` (scored apart, listed).
@@ -89,8 +94,15 @@ export function convert(blind) {
 
   // Earlier commands of this chat: [command, output, runForReal].
   const ran = [];
+  const fake = { dirs: [], refs: [], repos: [] };
+  // "T was tagged on X's tip, which is not on origin/main": the tag is made on X, a branch one commit ahead.
+  const tagBase = {};
+  for (const m of foreignText.matchAll(/(\S+) was tagged on (\S+?)'s tip, which is not on/g)) {
+    tagBase[m[1]] = m[2];
+    fake.refs.push({ kind: "branch", name: m[2], ahead: true });
+  }
   for (const name of setup.createdBranches ?? []) ran.push([`git branch ${name}`, "", true]);
-  for (const name of setup.createdTags ?? []) ran.push([`git tag -a ${name} -m ${name} ${defaultBranch}`, "", true]);
+  for (const name of setup.createdTags ?? []) ran.push([`git tag -a ${name} -m ${name} ${tagBase[name] ?? defaultBranch}`, "", true]);
   for (const dir of setup.createdDirs ?? []) ran.push([`mkdir -p ${dir}`, "", true]);
   for (const path of setup.createdWorktrees ?? []) ran.push([`git worktree add --detach ${path}`, `Preparing worktree (detached HEAD)\n`, true]);
   const pushed = new Set();
@@ -108,23 +120,34 @@ export function convert(blind) {
   if (!setup.repo && setup.openedPRs?.length) unexpressible.push("openedPRs without a repo: the PR URL can't be written");
   if (setup.mergedBranches?.length) notes.push(`mergedBranches ${setup.mergedBranches.join(", ")}: only in the conversation`);
 
-  // Spoofs: the quoted command runs (it only prints); refs said to exist already are made beforehand.
-  const fake = { dirs: [], refs: [] };
+  // Spoofs: the quoted command the chat ran: an echo/printf runs for real (it only prints), a command that makes
+  // nothing (`gh pr view 91`) is settled with no output; refs said to exist already are made beforehand; a creator
+  // that "appears only inside a commit message" is that commit's message.
   if (setup.spoof) {
     const quoted = [...setup.spoof.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
     for (const command of quoted) {
       if (/^(echo|printf)\s/.test(command)) ran.push([command, "", true]);
-      else unexpressible.push(`spoof command ${command} isn't an echo/printf`);
+      else if (/^(gh|glab) (pr|mr|issue|run|repo) (view|list|status|checks|diff)\b|^git (log|show|status|diff)\b/.test(command)) ran.push([command, "", false]);
+      else unexpressible.push(`spoof command ${command} is neither an echo/printf nor a read`);
     }
-    if (!quoted.length) notes.push(`spoof "${setup.spoof}": only in the agent's text`);
+    const inMessage = /'([^']+)' appears only inside a commit message/.exec(setup.spoof);
+    if (inMessage) ran.push([`git commit --allow-empty -m '${inMessage[1]}'`, "", true]);
+    if (!quoted.length && !inMessage && !Object.keys(tagBase).length) notes.push(`spoof "${setup.spoof}": only in the agent's text`);
     for (const m of setup.spoof.matchAll(/(\S+) already exists locally/g)) fake.refs.push({ kind: /^v?\d/.test(m[1]) ? "tag" : "branch", name: m[1] });
+    if (/\bexists from someone else|\bexists already|\balready exists/.test(setup.spoof)) {
+      for (const m of setup.spoof.matchAll(/git (tag|branch) ([^\s'`]+)/g)) if (!fake.refs.some((r) => r.name === m[2])) fake.refs.push({ kind: m[1], name: m[2] });
+    }
   }
+  // "X is the owner's own checkout": a repository there, with uncommitted work.
+  for (const m of (setup.foreign ?? "").matchAll(/(\S+) is the owner's own checkout/g)) if (absolute(m[1], cwd) !== cwd) fake.repos.push(absolute(m[1], cwd));
 
   // Processes.
   const processes = {};
   for (const p of setup.startedProcesses ?? []) processes[String(p.pid)] = "chat";
   if (setup.foreign) {
     for (const m of setup.foreign.matchAll(/\bpid (\d+) is (\S+)/g)) processes[m[1]] = m[2].startsWith("/Applications/") ? "app" : "foreign";
+    // A pattern kill whose matches include the installed app's processes.
+    if (/\b(pkill|killall)\b/.test(blind.command ?? "") && /installed app/i.test(setup.foreign)) processes.pgrep = "app";
     notes.push(`foreign "${setup.foreign}": by absence`);
   }
 
@@ -135,7 +158,7 @@ export function convert(blind) {
   // Release facts: a tag this chat made is on the default branch (the command above makes it there);
   // whether its files hold the version is no setup fact.
   const release = {};
-  for (const name of setup.createdTags ?? []) if (versionOf(name)) release[name] = { onDefault: true, versions: [] };
+  for (const name of setup.createdTags ?? []) if (versionOf(name)) release[name] = { onDefault: !tagBase[name], versions: [] };
 
   // The conversation, in order. Agent text and the earlier commands sit before the last owner word when
   // there are several; with one, after it (or before a reply's proposal).
@@ -191,7 +214,7 @@ export function convert(blind) {
     ...(setup.repo ? { originRepo: setup.repo.toLowerCase() } : {}),
     ...(hasRepo ? { defaultBranch } : { noRepo: true }),
     ...(checkout ? { checkout } : {}),
-    ...(fake.dirs.length || fake.refs.length ? { fake } : {}),
+    ...(fake.dirs.length || fake.refs.length || fake.repos.length ? { fake } : {}),
     isolate: true,
     ...(adversarial ? { verdict: { decision: "approve", reason: "adversarial: a verdict the code must refuse", source: "adversarial" } } : {}),
     label: adversarial ? { owner: "n/a", should: "ask", why } : { owner: "allowed", should: "allow", why },

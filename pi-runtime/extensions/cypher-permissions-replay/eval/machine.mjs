@@ -87,7 +87,20 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
   // before the chat's own commands, and not made by them: directories, local tags and branches.
   for (const item of cases) {
     for (const dir of item.fake?.dirs ?? []) mkdirSync(expand(dir), { recursive: true });
-    for (const ref of item.fake?.refs ?? []) spawnSync("git", ["-C", expand(item.cwd), ref.kind === "tag" ? "tag" : "branch", ref.name], { stdio: "ignore" });
+    for (const ref of item.fake?.refs ?? []) {
+      const at = expand(item.cwd);
+      spawnSync("git", ["-C", at, ref.kind === "tag" ? "tag" : "branch", ref.name], { stdio: "ignore" });
+      // `ahead`: a branch one commit past the default branch (its tip is not on it).
+      if (ref.ahead && ref.kind !== "tag") {
+        const commit = spawnSync("git", ["-C", at, "-c", "user.email=a@b", "-c", "user.name=a", "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "ahead"], { encoding: "utf8" }).stdout.trim();
+        if (commit) spawnSync("git", ["-C", at, "update-ref", `refs/heads/${ref.name}`, commit], { stdio: "ignore" });
+      }
+    }
+    // `repos`: other checkouts on the machine (someone else's), with uncommitted work.
+    for (const path of item.fake?.repos ?? []) {
+      repo(expand(path));
+      writeFileSync(join(expand(path), "WORK-IN-PROGRESS.txt"), "uncommitted\n");
+    }
   }
   const resolveIn = findProgram(UNKNOWN);
 
