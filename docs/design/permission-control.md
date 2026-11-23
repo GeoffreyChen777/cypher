@@ -716,10 +716,13 @@ reversible, non-public row whose approver is the judge and that names an `own` f
 all this task's own (the ledger's `branch` entries, or the chat's own workspace branch;
 never a default or protected branch, `HEAD` meaning the current branch), to a remote by
 name, with only plain options (`-u`, `-q`, `--no-verify`, …; no force, tags, delete,
-mirror, push options, no refspec mapping to another name); `gh pr create` in the
-repository at hand (no `--repo`), head this task's own branch (`--head` or the current
-branch, never `owner:branch`), base absent or a default branch; `gh pr edit`/`ready` of
-the current own branch's pull request or one the ledger says this chat opened, without
+mirror, push options, no refspec mapping to another name; before `push` only `-C` and
+output-only globals such as `--no-pager`); opening a review (`REVIEW_CLIS`, data: `gh pr
+create`, `glab mr create`, each with its own head/base/repo options) in the repository at
+hand (no `--repo`), head this task's own branch (the head option or the current branch,
+never `owner:branch`), base absent or a default branch, and only options that say what it
+holds (title, body, draft, labels, reviewers); updating one (`gh pr edit`/`ready`, `glab mr
+update`) of the current own branch or that the ledger says this chat opened, without
 changing its base or head. Such a command is `local` with its grade in the kind
 ("… (reversible, seen by the team: …)") and `once` (never remembered), so the judge decides
 it with the task's context and no owner quote; anything else of these programs stays a
