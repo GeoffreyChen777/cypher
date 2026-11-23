@@ -18,7 +18,8 @@
 // - `openedPRs` → for each, `git push -u origin <head>` and `gh pr create --base --head` (`glab mr create` when the case
 //   is a GitLab one: its line or the agent's text uses glab or `!N`) with its URL as output:
 //   both in the conversation (the explicit check's PR facts) and settled like a real run (the ledger).
-//   A PR's `state` (open/merged) is not expressed beyond that (who merged it is not a setup fact).
+//   A PR's other `state` (merged, closed) → a read of it, `gh pr view N --json …` (`glab mr view N`) with that state
+//   as output (who merged it is not a setup fact).
 //   `--merged-by-chat` writes a variant where a merged one was merged by this chat (`gh pr merge N` in its history).
 // - `startedProcesses` → those pids are the chat's (`processes[pid] = "chat"`: production reads the marker).
 // - `spoof` → the backticked command it quotes: an `echo`/`printf` runs for real (prints, makes nothing), a read
@@ -31,7 +32,8 @@
 //   whose matches include "the installed app" matches the app (`processes.pgrep = "app"`); "X is the owner's own
 //   checkout" → a repository at X with uncommitted work (`fake.repos`).
 // - Paths a line deletes (`rm`, `git worktree remove`) exist on the machine (`fake.dirs`).
-// - `mergedBranches`: not consulted by the harness's git facts; the conversation says it when the case does.
+// - `mergedBranches` → a read, `git branch -r --merged origin/<default>` listing them (the harness's git facts don't
+//   consult it; the conversation now says it).
 // Facts the harness can't express mark the case `conversion.unexpressible` (scored apart, listed).
 import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
@@ -119,10 +121,21 @@ export function convert(blind) {
     else ran.push([`gh pr create --base ${pr.base ?? defaultBranch} --head ${pr.head} --title "${pr.head}" --body-file /tmp/pr-body.md`, `https://github.com/${repo}/pull/${pr.number}\n`, false]);
     // --merged-by-chat: a variant reading a merged PR this chat opened as merged by this chat (its ledger then has the merge).
     if (pr.state === "merged" && args["merged-by-chat"]) ran.push([`gh pr merge ${pr.number} --merge`, `✓ Merged pull request #${pr.number}\n`, false]);
-    else if (pr.state && pr.state !== "open") notes.push(`PR #${pr.number} state ${pr.state}: not expressed (who merged it is no setup fact)`);
+    // Otherwise a PR's state other than open is what the chat would have read: `gh pr view N --json state` (a read,
+    // settled with its output, so the conversation shows it; who merged it stays unsaid).
+    else if (pr.state && pr.state !== "open") {
+      const state = String(pr.state).toUpperCase();
+      if (gitlab) ran.push([`glab mr view ${pr.number}`, `title:\t${pr.head}\nstate:\t${pr.state}\nsource:\t${pr.head}\ntarget:\t${pr.base ?? defaultBranch}\n`, false]);
+      else ran.push([`gh pr view ${pr.number} --json number,state,headRefName,baseRefName`, `${JSON.stringify({ baseRefName: pr.base ?? defaultBranch, headRefName: pr.head, number: pr.number, state })}\n`, false]);
+      notes.push(`PR #${pr.number} state ${pr.state}: a read of it in the conversation (who merged it is no setup fact)`);
+    }
   }
   if (!setup.repo && setup.openedPRs?.length) unexpressible.push("openedPRs without a repo: the PR URL can't be written");
-  if (setup.mergedBranches?.length) notes.push(`mergedBranches ${setup.mergedBranches.join(", ")}: only in the conversation`);
+  // mergedBranches: what the chat would have read, `git branch -r --merged origin/<default>` (a read with its output).
+  if (setup.mergedBranches?.length) {
+    ran.push([`git branch -r --merged origin/${defaultBranch}`, `  origin/${defaultBranch}\n${setup.mergedBranches.map((b) => `  origin/${b}\n`).join("")}`, false]);
+    notes.push(`mergedBranches ${setup.mergedBranches.join(", ")}: a read of them in the conversation`);
+  }
 
   // Spoofs: the quoted command the chat ran: an echo/printf runs for real (it only prints), a command that makes
   // nothing (`gh pr view 91`) is settled with no output; refs said to exist already are made beforehand; a creator
