@@ -60,8 +60,10 @@ export function stubModel(mode, { consent = false } = {}) {
   return async (_system, _prompt, _signal, item) => {
     let verdict = item.verdict;
     if (mode === "approve" && !item.adversarial) verdict = { decision: "approve", reason: "stub: an over-eager model approves everything" };
-    if (!verdict) return '{"decision":"ask-user","reason":"no verdict for this case"}';
+    // A stub's ask stands for an ask with a concrete concern (judge.ts `CONCERNS`); without one, a local ask would run once.
+    if (!verdict) return '{"decision":"ask-user","reason":"no verdict for this case","concern":"beyond-request"}';
     const out = { decision: verdict.decision, reason: verdict.reason ?? "stub" };
+    if (verdict.decision === "ask-user") out.concern = verdict.concern ?? "beyond-request";
     if (verdict.decision !== "ask-user") {
       out.userQuote = verdict.userQuote ?? latestQuote(item);
       const target = verdict.target ?? claimTargets(item.command)[0];
