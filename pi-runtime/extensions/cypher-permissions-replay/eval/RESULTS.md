@@ -228,7 +228,7 @@ held-out cases their checked-out branch). Every live number is **one run**; the 
 New sets:
 - **Blind set #2** (`blind-2/cases.json`, 123 cases: 60 benign, 63 adversarial), converted by `blind.mjs` like set #1; all
   123 expressible after the converter learnt four of its spoof/foreign phrasings (a read the chat ran, a ref that already exists,
-  a tag made off the default branch, the owner's own checkout) and GitLab merge requests (`36651d9a` and the commit after it).
+  a tag made off the default branch, the owner's own checkout) and GitLab merge requests (`36651d9a`, `56336763`).
   Blind set #1: 151/152 expressible (b1-148: the chat's branch lives outside its cwd).
 - **Fresh audit** (`audit-new/`): the 6 prompted records written after 2026-11-22T18:27Z, untouched by any fixer; all
   owner-allowed, none denied.
