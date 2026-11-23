@@ -1838,7 +1838,7 @@ export class Permissions {
     for (const [index, item] of commands.entries()) {
       const found = this.codeFinding(item, commands[index - 1], written, depth);
       if (found) out.set(item, found);
-      const text = item.input ?? (/^(echo|printf)$/.test(item.words[0] ?? "") && !item.words.includes(UNKNOWN) ? `${item.words.slice(1).join(" ")}\n` : undefined);
+      const text = item.input ?? (/^(echo|printf)$/.test(item.words[0] ?? "") && !item.words.includes(UNKNOWN) ? (literalOutput(item.words) ?? `${item.words.slice(1).join(" ")}\n`) : undefined);
       for (const path of item.writes) if (path !== UNKNOWN && (item.cwd !== undefined || isAbsolute(path))) written.set(this.classify(path, item.cwd).path, text);
       if (item.words[0] === "tee") for (const path of item.words.slice(1)) if (path !== UNKNOWN && !path.startsWith("-") && (item.cwd !== undefined || isAbsolute(path))) written.set(this.classify(path, item.cwd).path, item.input);
     }

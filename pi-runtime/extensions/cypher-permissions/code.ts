@@ -19,7 +19,7 @@
  * `opaque-code`), never as local work.
  */
 
-export type Language = "python" | "javascript" | "ruby" | "perl" | "php" | "applescript" | "lua" | "r" | "tcl" | "shell" | "julia" | "powershell" | "swift" | "awk" | "sed" | "unread";
+export type Language = "python" | "javascript" | "ruby" | "perl" | "php" | "applescript" | "lua" | "r" | "tcl" | "shell" | "julia" | "powershell" | "swift" | "awk" | "sed" | "make" | "unread";
 
 export interface Interpreter {
   language: Language;
@@ -75,6 +75,8 @@ export const INTERPRETERS: readonly Interpreter[] = [
   { language: "tcl", programs: /^expect$/, inline: ["-c"], values: ["-D"], stdin: true, extensions: [".exp"] },
   { language: "awk", programs: /^(awk|gawk|mawk|nawk|busybox-awk)$/, inline: ["-e", "--source"], scripts: ["-f", "--file"], codeOperand: true, filter: true, values: ["-F", "-v", "--field-separator", "--assign", "-i", "--include", "-l", "--load"], stdin: false, extensions: [".awk"] },
   { language: "sed", programs: /^(sed|gsed)$/, inline: ["-e", "--expression"], scripts: ["-f", "--file"], codeOperand: true, filter: true, values: ["-l", "--line-length"], optionalValues: { "-i": /^$|^\.[\w.~-]+$/ }, stdin: false, extensions: [".sed"] },
+  // A makefile's recipes are shell lines (`COMMAND_FORMS`); `make` alone reads ./Makefile, which isn't this line's code.
+  { language: "make", programs: /^(make|gmake|bmake)$/, inline: [], scripts: ["-f", "--file", "--makefile"], values: ["-C", "--directory", "-j", "--jobs", "-l", "-o", "-W", "-I"], stdin: false, extensions: [".mk"] },
   // Languages Cypher has no capability table for: their code is opaque (`scanCode`), never local work.
   { language: "unread", programs: /^(guile|racket|elixir|iex|erl|escript|groovy|scala|scala-cli|clojure|clj|bb|ghc|runghc|runhaskell|ocaml|kotlin|kotlinc|dart|crystal|nim|v|zig|gst|sbcl|clisp|ecl|chicken|csi|gforth|io|pike|rexx|regina|scheme|chez|petite|janet|fennel|hy|xonsh|nu|elvish|ion)$/, inline: ["-c", "-e", "--eval", "-eval", "-E", "--expr", "-x"], values: [], stdin: true, extensions: [".scm", ".rkt", ".exs", ".erl", ".groovy", ".scala", ".clj", ".hs", ".ml", ".kts", ".dart", ".cr", ".nim", ".janet", ".fnl", ".hy", ".xsh", ".nu"] },
   { language: "tcl", programs: /^(tclsh|wish)(\d[\d.]*)?$/, inline: [], values: ["-encoding"], stdin: true, extensions: [".tcl"] },
@@ -468,6 +470,7 @@ export const COMMAND_FORMS: Partial<Record<Language, { runs?: readonly RegExp[];
     opaque: [{ form: /(?:^|[;\n{}]|[0-9$/!])\s*s(.)(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[gpIiMm0-9w]*e/, why: "it runs the text it substitutes as a command (sed `s///e`)" }, { form: /(?:^|[;\n{}]|[0-9$/!])\s*e\s*(?:$|[;\n}])/, why: "it runs its input lines as commands (sed `e`)" }],
   },
   julia: { runs: [/`([^`]+)`/g] },
+  make: { runs: [/^\t+@?-?(.+)$/gm] },
 };
 
 /** Languages whose paths are bare words, not only string literals (`-InFile .env`). */
@@ -579,6 +582,7 @@ export const COMMAND_OPTIONS: readonly { programs: RegExp; options?: readonly st
   { programs: /^(less|more)$/, options: ["--lesskey-src"] },
   { programs: /^(vim|vi|nvim|ex)$/, options: ["-c", "--cmd"] },
   { programs: /^git$/, keyOption: "-c" },
+  { programs: /^(npm|pnpm)$/ },
 ];
 
 /**
@@ -620,6 +624,13 @@ export function optionCommands(words: readonly string[], unknown: string): strin
         const line = gitCommandValue(key, value);
         if (line) out.push(line);
       } else if (row.keys?.test(key)) out.push(value);
+    }
+  }
+  // `npm pkg set scripts.x='…'`: a script `npm run x` runs (round 5 step 2: configuration that is a command).
+  if (/^(npm|pnpm)$/.test(program) && args[0] === "pkg" && args[1] === "set") {
+    for (const word of args.slice(2)) {
+      const match = /^scripts\.[^=]+=(.+)$/s.exec(word);
+      if (match && word !== unknown) out.push(match[1]);
     }
   }
   // `git config [--global] key value`: a value that is a command.
