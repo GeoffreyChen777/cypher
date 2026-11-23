@@ -265,6 +265,11 @@ test("redteam 5: a project's Pi settings and extensions are the permission syste
     assert.equal(floorOf(permissions, line), "permission-system", line);
   }
   for (const line of ["tar xzf /tmp/cfg.tgz -C dist", "unzip -o /tmp/x.zip -d dist", "git --work-tree=. status", `find ${home}/.cypher/logs -name '*.json' -exec rm {} \\;`]) assert.notEqual(floorOf(permissions, line), "permission-system", line);
+  // A path from the command's own assignment, read inside code: the value is the code's string.
+  assert.equal(floorOf(permissions, `HOME_CFG=$HOME/.cypher/pi-runtime/agent node -e "require('fs').writeFileSync(process.env.HOME_CFG+'/permissions.json','{}')"`), "permission-system");
+  assert.equal(floorOf(permissions, `D=${agentDir} python3 -c "import os; open(os.environ['D'] + '/settings.json', 'w').write('{}')"`), "permission-system");
+  assert.notEqual(floorOf(permissions, `OUT=dist node -e "require('fs').writeFileSync(process.env.OUT+'/a.txt','x')"`), "permission-system");
+  assert.notEqual(floorOf(permissions, `D=${agentDir} node -e "console.log(require('fs').readFileSync(process.env.D+'/settings.json','utf8'))"`), "permission-system");
   // An extraction creates files: into a folder holding one of the permission system's literal places it could make
   // them (an empty `extensions/`); a folder a pattern's wildcard could name is no such place (the owner's replay
   // #599 extracts a Runtime into `~/.cypher-development/pi-runtime-x/`). `find` acts on what is there (step 1's

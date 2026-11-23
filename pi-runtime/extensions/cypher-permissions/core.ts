@@ -505,6 +505,24 @@ function readsCode(words: readonly string[]): boolean {
   return codeOf(words, UNKNOWN)?.source.from === "stdin";
 }
 
+/**
+ * Code with the values the command's own assignments give its environment (round 5 step 2: `D=~/.cypher/…
+ * node -e "fs.writeFileSync(process.env.D+'/permissions.json', …)"`): each read of such a variable, in any
+ * language's spelling (`ENV_READ`), becomes the value's string literal, so the scanner sees the path it builds.
+ */
+const ENV_READ = (name: string) =>
+  new RegExp(`(?:process\\.env\\.${name}\\b|process\\.env\\[['"]${name}['"]\\]|os\\.environ\\[['"]${name}['"]\\]|os\\.environ\\.get\\(\\s*['"]${name}['"]\\s*\\)|os\\.getenv\\(\\s*['"]${name}['"]\\s*\\)|ENV\\[['"]${name}['"]\\]|\\$ENV\\{${name}\\}|Sys\\.getenv\\(\\s*['"]${name}['"]\\s*\\)|getenv\\(\\s*['"]${name}['"]\\s*\\)|Deno\\.env\\.get\\(\\s*['"]${name}['"]\\s*\\)|\\$env:${name}\\b)`, "g");
+
+function withAssignments(text: string, item: { env?: readonly string[]; envValues?: readonly string[] }): string {
+  let out = text;
+  for (const [index, name] of (item.env ?? []).entries()) {
+    const value = item.envValues?.[index];
+    if (value === undefined || value === UNKNOWN || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
+    out = out.replace(ENV_READ(name), () => JSON.stringify(value));
+  }
+  return out;
+}
+
 /** How many entries and folders deep a folder is searched for a secret inside it (`secretInside`). */
 const SECRET_SCAN_LIMIT = 4000;
 const SECRET_SCAN_DEPTH = 8;
@@ -1926,7 +1944,7 @@ export class Permissions {
     if (text !== undefined && item.stdinCode) item.stdinCode = false;
     const language = interpreter.language;
     if (opaque !== undefined || text === undefined) return { language, origin, opaque: opaque ?? "it can't be read" };
-    return this.scanFinding(text, language, item.cwd, depth, origin);
+    return this.scanFinding(withAssignments(text, item), language, item.cwd, depth, origin);
   }
 
   /** What a command pipes into an interpreter as its program: `echo`/`printf` of literal words (shell.ts `literalOutput`), or `cat` of a script this task wrote. */

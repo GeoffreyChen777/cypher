@@ -297,8 +297,8 @@ export const CAPABILITIES: readonly { capability: Capability; languages: readonl
   { capability: "read", languages: ["swift"], names: ["contentsOf", "contentsOfFile", "FileManager", "FileHandle", "fopen("] },
   { capability: "read", languages: ["awk"], names: ["getline"] },
   // Writing a file (round 5 step 2: with a permission-system path among its literals, the floor).
-  { capability: "write", languages: ["python"], names: ["'w'", '"w"', "'a'", '"a"', "'wb'", '"wb"', "write_text", "write_bytes", "shutil.copy", "shutil.copyfile", "shutil.move", "os.rename", "os.replace", "os.remove", "os.unlink", "os.symlink", "os.link"] },
-  { capability: "write", languages: ["javascript"], names: ["writeFile", "writeFileSync", "appendFile", "appendFileSync", "createWriteStream", "renameSync", "rename(", "unlinkSync", "rmSync", "copyFile", "copyFileSync", "symlinkSync", "linkSync", "Deno.writeTextFile", "Deno.writeFile", "Bun.write"] },
+  { capability: "write", languages: ["python"], names: ["'w'", '"w"', "'a'", '"a"', "'wb'", '"wb"', "write_text", "write_bytes", ".write_text", ".write_bytes", "shutil.copy", "shutil.copyfile", "shutil.move", "os.rename", "os.replace", "os.remove", "os.unlink", "os.symlink", "os.link"] },
+  { capability: "write", languages: ["javascript"], names: [".writeFile", ".writeFileSync", ".appendFile", ".createWriteStream", ".rename", ".unlink", ".rm", ".copyFile", ".symlink", ".link", "writeFile", "writeFileSync", "appendFile", "appendFileSync", "createWriteStream", "renameSync", "rename(", "unlinkSync", "rmSync", "copyFile", "copyFileSync", "symlinkSync", "linkSync", "Deno.writeTextFile", "Deno.writeFile", "Bun.write"] },
   { capability: "write", languages: ["ruby"], names: ["File.write", "IO.write", "'w'", '"w"', "'a'", '"a"', "FileUtils", "File.rename", "File.delete", "File.symlink"] },
   { capability: "write", languages: ["perl"], names: ["'>", '">', "'>>", '">>', "unlink", "rename", "symlink"] },
   { capability: "write", languages: ["php"], names: ["file_put_contents", "fwrite", "'w'", '"w"', "rename(", "unlink(", "copy("] },
@@ -432,27 +432,33 @@ export function argvGroups(code: string, literals: readonly Literal[]): string[]
 export function joinedPaths(code: string, literals: readonly Literal[]): string[] {
   const out: string[] = [];
   let current: Literal[] = [];
-  /** Whether the literals were joined only by concatenation (`+`, `..`, `.`, `&`): their text, not a path join. */
-  let concatenated = true;
+  /** The current run of literals joined by concatenation (`+`, `..`, `.`, `&`): one string, its text as written (round 5 step 2). */
+  let run: string[] = [];
+  const endRun = () => {
+    if (run.length > 1) out.push(run.join(""));
+    run = [];
+  };
   const flush = () => {
     if (current.length > 1) {
       const parts = current.map((item) => item.text.replace(/^\/+|\/+$/g, "")).filter(Boolean);
       out.push(`${current[0].text.startsWith("/") ? "/" : ""}${parts.join("/")}`);
-      // `'~/.cy' + 'pher/…'` is one string: its text as written too (round 5 step 2).
-      if (concatenated) out.push(current.map((item) => item.text).join(""));
     }
+    endRun();
     current = [];
-    concatenated = true;
   };
   for (const literal of literals) {
     const last = current.at(-1);
     const between = last ? code.slice(last.end, literal.at) : "";
     if (last && /^\s*(?:,|\+|\/|\.\.|\.|&)\s*$/.test(between)) {
-      if (/[,/]/.test(between)) concatenated = false;
+      if (/[,/]/.test(between)) {
+        endRun();
+        run = [literal.text];
+      } else run.push(literal.text);
       current.push(literal);
     } else {
       flush();
       current = [literal];
+      run = [literal.text];
     }
   }
   flush();
