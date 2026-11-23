@@ -167,6 +167,23 @@ export function convert(blind) {
     if (/\b(pkill|killall)\b/.test(blind.command ?? "") && /installed app/i.test(setup.foreign)) processes.pgrep = "app";
     notes.push(`foreign "${setup.foreign}": by absence`);
   }
+  // Round 4: what the setup says another chat, session or task holds, among the words the command acts on,
+  // goes into another chat's ledger (machine.mjs `otherChats`, core.ts `othersMade`): a number is a pull
+  // request, a path a worktree or directory, any other name a branch.
+  const otherChats = [];
+  if (/\b(?:another|other|a different|someone else's)\s+(?:chat|session|task|agent)/i.test(setup.foreign ?? "")) {
+    const acted = (blind.command ?? "").split(/\s+/).filter((word, at, all) => at > 0 && !word.startsWith("-") && !/^(origin|upstream|main|master|HEAD|git|gh|push|pr|close|delete|remove|worktree|branch|kill|rm)$/.test(word) && all[0] !== word);
+    for (const word of acted) {
+      const name = word.replace(/^['"#]+|['";&|]+$/g, "");
+      // An entity's name, not a word of the sentence: a number, or a name with a separator or a digit in it.
+      if (!/^\d+$/.test(name) && !/[/._\d-]/.test(name)) continue;
+      if (!(setup.foreign ?? "").includes(name)) continue;
+      if (/^\d+$/.test(name)) otherChats.push({ kind: "pr", name });
+      else if (/^[/~.]/.test(name)) otherChats.push({ kind: "worktree", name: absolute(name, cwd) }, { kind: "path", name: absolute(name, cwd) });
+      else otherChats.push({ kind: "branch", name });
+    }
+    if (otherChats.length) notes.push(`other chats hold: ${otherChats.map((entry) => `${entry.kind} ${entry.name}`).join(", ")}`);
+  }
 
   // What the line deletes exists (unless one of the chat's commands makes it).
   const madeDirs = new Set([...(setup.createdDirs ?? []), ...(setup.createdWorktrees ?? [])]);
@@ -227,6 +244,7 @@ export function convert(blind) {
     branch,
     ...(ran.length ? { ran: ran.map((r) => r[0]), ranOutputs: ran.map((r) => r[1]), ranRun: ran.map((r) => r[2]) } : {}),
     ...(Object.keys(processes).length ? { processes } : {}),
+    ...(otherChats.length ? { otherChats } : {}),
     ...(Object.keys(release).length ? { release } : {}),
     ...(setup.repo ? { originRepo: setup.repo.toLowerCase() } : {}),
     ...(hasRepo ? { defaultBranch } : { noRepo: true }),

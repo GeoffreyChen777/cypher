@@ -123,6 +123,9 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
     const chatId = `chat-replay-${++replays}`;
     const permissions = new Permissions({ agentDir, chatId, cwd, home, landstrip: { available: true, binary: "/nonexistent/landstrip" }, scratch: [tmp] });
     permissions.appendEntry = () => {};
+    // Other chats' ledgers (round 4, core.ts `othersMade`): only what the case says other chats made
+    // (`otherChats`: ledger entries), never the ledgers of the other cases replayed on this machine.
+    if ("othersMade" in permissions) permissions.othersMade = () => (item.otherChats ?? []).map((entry) => ({ chatId: "other-chat", ...entry }));
     const records = [];
     permissions.audit.write = (record) => records.push(record);
     permissions.resolveIn = resolveIn;
