@@ -62,6 +62,8 @@ function consentFor(item, quote) {
  * that names none runs once in a round-3 extension; `beyond-request` keeps older extensions' asks.
  */
 export const STUB_CONCERNS = [
+  // Round 5: code Cypher can't read (core.ts `withCode`), or a path known only when it runs that could be the permission system.
+  ["opaque-code", /runs code Cypher can't read|opaque code|known only when it runs: it could be the permission system/],
   ["secret", /auth\.json|credentials|security find|keychain|\.ssh\/|secret/],
   ["installed-app", /installed Cypher app|@HOME@\/\.cypher\/(?!worktrees)|~\/\.cypher\/(?!worktrees)/],
   ["destroys-data", /\bkill\b|pkill|stops|shutdown|\brm -|worktree remove|branch -[dD]|--delete|deletes|removes/],
