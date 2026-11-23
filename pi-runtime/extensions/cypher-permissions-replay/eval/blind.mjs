@@ -15,7 +15,8 @@
 // - `createdBranches` / `createdTags` / `createdDirs` / `createdWorktrees` → earlier commands this chat ran
 //   (`git branch`, `git tag -a … <default>`, `mkdir -p`, `git worktree add --detach`), run for real on the
 //   case's own fake machine between plan and settle (`ranRun`), so the ledger observes what they made.
-// - `openedPRs` → for each, `git push -u origin <head>` and `gh pr create --base --head` with its URL as output:
+// - `openedPRs` → for each, `git push -u origin <head>` and `gh pr create --base --head` (`glab mr create` when the case
+//   is a GitLab one: its line or the agent's text uses glab or `!N`) with its URL as output:
 //   both in the conversation (the explicit check's PR facts) and settled like a real run (the ledger).
 //   A PR's `state` (open/merged) is not expressed beyond that (who merged it is not a setup fact).
 //   `--merged-by-chat` writes a variant where a merged one was merged by this chat (`gh pr merge N` in its history).
@@ -105,6 +106,7 @@ export function convert(blind) {
   for (const name of setup.createdTags ?? []) ran.push([`git tag -a ${name} -m ${name} ${tagBase[name] ?? defaultBranch}`, "", true]);
   for (const dir of setup.createdDirs ?? []) ran.push([`mkdir -p ${dir}`, "", true]);
   for (const path of setup.createdWorktrees ?? []) ran.push([`git worktree add --detach ${path}`, `Preparing worktree (detached HEAD)\n`, true]);
+  const gitlab = /\bglab\b|gitlab/i.test(`${blind.command ?? ""}\n${(blind.agentText ?? []).join("\n")}`) || (blind.agentText ?? []).some((t) => /(^|\s)!\d+\b/.test(t));
   const pushed = new Set();
   for (const pr of setup.openedPRs ?? []) {
     if (!pushed.has(pr.head)) {
@@ -112,7 +114,9 @@ export function convert(blind) {
       ran.push([`git push -u origin ${pr.head}`, `branch '${pr.head}' set up to track 'origin/${pr.head}'.\n`, false]);
     }
     const repo = setup.repo ?? "owner/repo";
-    ran.push([`gh pr create --base ${pr.base ?? defaultBranch} --head ${pr.head} --title "${pr.head}" --body-file /tmp/pr-body.md`, `https://github.com/${repo}/pull/${pr.number}\n`, false]);
+    // A GitLab project (the case's line or the agent's text uses glab / a !N merge request): glab's merge request.
+    if (gitlab) ran.push([`glab mr create --source-branch ${pr.head} --target-branch ${pr.base ?? defaultBranch} --title "${pr.head}" --description x`, `https://gitlab.com/${repo}/-/merge_requests/${pr.number}\n`, false]);
+    else ran.push([`gh pr create --base ${pr.base ?? defaultBranch} --head ${pr.head} --title "${pr.head}" --body-file /tmp/pr-body.md`, `https://github.com/${repo}/pull/${pr.number}\n`, false]);
     // --merged-by-chat: a variant reading a merged PR this chat opened as merged by this chat (its ledger then has the merge).
     if (pr.state === "merged" && args["merged-by-chat"]) ran.push([`gh pr merge ${pr.number} --merge`, `✓ Merged pull request #${pr.number}\n`, false]);
     else if (pr.state && pr.state !== "open") notes.push(`PR #${pr.number} state ${pr.state}: not expressed (who merged it is no setup fact)`);
