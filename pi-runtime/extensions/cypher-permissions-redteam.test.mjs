@@ -265,6 +265,14 @@ test("redteam 5: a project's Pi settings and extensions are the permission syste
     assert.equal(floorOf(permissions, line), "permission-system", line);
   }
   for (const line of ["tar xzf /tmp/cfg.tgz -C dist", "unzip -o /tmp/x.zip -d dist", "git --work-tree=. status", `find ${home}/.cypher/logs -name '*.json' -exec rm {} \\;`]) assert.notEqual(floorOf(permissions, line), "permission-system", line);
+  // An extraction creates files: into a folder holding one of the permission system's literal places it could make
+  // them (an empty `extensions/`); a folder a pattern's wildcard could name is no such place (the owner's replay
+  // #599 extracts a Runtime into `~/.cypher-development/pi-runtime-x/`). `find` acts on what is there (step 1's
+  // SUBTREE_EFFECTS still floors `find <a folder holding it> -delete` as a whole).
+  assert.equal(floorOf(permissions, `tar xzf /tmp/x.tgz -C ${agentDir}/extensions`), "permission-system");
+  assert.equal(floorOf(permissions, `tar xzf /tmp/x.tgz -C ${home}/.cypher`), "permission-system");
+  put(join(home, ".cypher-development", "readme"), "x");
+  for (const line of [`tar xzf /tmp/rt.tgz -C ${home}/.cypher-development/pi-runtime-x-1.0 --strip-components=1`]) assert.notEqual(floorOf(permissions, line), "permission-system", line);
   assert.ok(DESTINATION_OPTIONS.length >= 4);
 });
 

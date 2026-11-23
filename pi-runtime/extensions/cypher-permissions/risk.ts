@@ -302,6 +302,8 @@ export interface RiskFacts extends PackFacts {
   tainted?(path: string): string | undefined;
   /** A repository (its top folder, canonical) where this chat staged or committed a secret: the secret, else undefined. */
   taintedRepo?(dir: string): string | undefined;
+  /** The permission system's folders the table names literally (the agent folder, a project's `.pi`): a write into a folder holding one could make its files. */
+  permissionPlaces?(): readonly string[];
   /** The first sensitive file inside an existing directory (bounded), for an archiver or sender of the whole of it. */
   secretInside?(dir: string): string | undefined;
 }
@@ -591,18 +593,27 @@ export const DESTINATION_OPTIONS: readonly { programs: RegExp; options: readonly
 
 /** Writes of files a command doesn't name, into a folder it does (`tar x -C D`, `git --work-tree=D checkout`, `find D -exec …`): the floor where that folder holds the permission system. */
 function destinationRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): Assessment | undefined {
-  for (const { glob, existing } of destinationGlobs(command, view, facts)) {
+  for (const { glob, dir, creates } of destinationGlobs(command, view, facts)) {
     const found = facts.couldBe?.(glob, undefined, { subtree: true });
-    // `find` acts only on what is there: the permission-system files among its matches now. An extraction or checkout may make them.
-    if (existing && !found?.matches.some((item) => facts.permissionSystem?.(item.path))) continue;
+    // A permission-system file there now (what `find` acts on, what an extraction overwrites), or a folder inside one
+    // of its places (`-C <agent>/extensions`): not a folder that a pattern's wildcard could make one of (an
+    // extraction into `~/.cypher-dev/pi-runtime-x/` makes a Runtime, not another instance's agent folder).
+    const there =
+      found?.matches.some((item) => facts.permissionSystem?.(item.path)) ||
+      facts.permissionSystem?.(`${dir}/${INSIDE_PROBE}`) ||
+      (creates && (facts.permissionPlaces?.() ?? []).some((place) => isUnder(place, dir)));
+    if (!there) continue;
     if (found?.permissionSystem) return { tier: "danger", kind: `changes the permission system itself (it writes inside ${shownPattern(glob)}, which holds ${found.permissionSystem})`, key: "permission-system", floor: true };
   }
   return undefined;
 }
 
 /** The folders (as globs) a command writes inside without naming the files (`DESTINATION_OPTIONS`, `find -exec`). */
-function destinationGlobs(command: RiskCommand, view: CommandView, facts: RiskFacts): { glob: string; existing?: boolean }[] {
-  const out: { glob: string; existing?: boolean }[] = [];
+/** A name no file has: `dir/<it>` is inside a permission-system place only when every path in `dir` is. */
+const INSIDE_PROBE = "\u0000cypher-inside";
+
+function destinationGlobs(command: RiskCommand, view: CommandView, facts: RiskFacts): { glob: string; dir: string; creates?: boolean }[] {
+  const out: { glob: string; dir: string; creates?: boolean }[] = [];
   const dir = operandDir(command, view);
   const place = (word: string) => {
     if (word === UNKNOWN) return undefined;
@@ -615,7 +626,8 @@ function destinationGlobs(command: RiskCommand, view: CommandView, facts: RiskFa
       for (const option of row.options) {
         const value = word === option ? view.args[i + 1] : word.startsWith(`${option}=`) ? word.slice(option.length + 1) : /^-[A-Za-z]$/.test(option) && word.startsWith(option) && word.length > 2 && !word.startsWith("--") ? word.slice(2) : undefined;
         const at = value === undefined ? undefined : place(value);
-        if (at !== undefined) out.push({ glob: `${at}/**` });
+        // An extraction or checkout creates files: a folder holding a permission-system place could get one.
+        if (at !== undefined) out.push({ glob: `${at}/**`, dir: facts.classify(value!, dir)!.path, creates: true });
       }
     }
   }
@@ -625,8 +637,9 @@ function destinationGlobs(command: RiskCommand, view: CommandView, facts: RiskFa
     for (const root of roots.length ? roots : ["."]) {
       const at = place(root);
       if (at === undefined) continue;
-      if (names.length) for (const name of names) out.push({ glob: `${at}/**/${name}`, existing: true });
-      else out.push({ glob: `${at}/**`, existing: true });
+      const path = facts.classify(root, dir)!.path;
+      if (names.length) for (const name of names) out.push({ glob: `${at}/**/${name}`, dir: path });
+      else out.push({ glob: `${at}/**`, dir: path });
     }
   }
   return out;

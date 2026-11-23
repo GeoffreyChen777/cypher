@@ -1675,6 +1675,18 @@ export class Permissions {
     return this.taint.all().find((entry) => entry.kind === "repo" && (isUnder(at, entry.name) || isUnder(entry.name, at)))?.from;
   }
 
+  /** The folders of the permission system's patterns that have no wildcard (`<agent>/permissions.json` → `<agent>`), canonical. */
+  permissionPlaces(): string[] {
+    const places = new Set<string>();
+    for (const pattern of this.config.permissionSystem) {
+      if (pattern.startsWith("!") || pattern.startsWith("**")) continue;
+      const dir = pattern.replace(/\/\*\*$/, "").replace(/\/[^/]*$/, "");
+      if (!dir || /[*?[{]/.test(dir)) continue;
+      places.add(this.paths.canonical(dir, this.cwd));
+    }
+    return [...places];
+  }
+
   /** The first sensitive file inside an existing folder, hidden ones too (as an archiver reads it): breadth first, bounded. */
   secretInside(dir: string): string | undefined {
     const queue: [string, number][] = [[dir, 0]];
@@ -2955,6 +2967,7 @@ export class Permissions {
       tainted: (path) => this.taintedPath(path),
       taintedRepo: (dir) => this.taintedRepo(dir),
       secretInside: (dir) => this.secretInside(dir),
+      permissionPlaces: () => this.permissionPlaces(),
       installedApp: (path) => this.installedApp(path),
       git: (dir) => this.gitAt(dir),
       inWorkspace: (dir) => this.paths.inWorkspace(this.paths.canonical(dir, this.cwd)),
