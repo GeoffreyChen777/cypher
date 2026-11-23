@@ -2140,6 +2140,7 @@ impl Transcript {
             .child(rail)
             .children(self.translation_button(window, cx))
             .children(self.code_ref_card(window, cx))
+            .children(self.git_ref_card(window, cx))
             .children(self.image_viewer(window, cx));
         // The shared Comment pill/editor lives in the SHELL's deferred layer
         // (paints above every clipped surface). The transcript only guards

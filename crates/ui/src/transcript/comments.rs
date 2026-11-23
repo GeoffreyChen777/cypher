@@ -283,6 +283,7 @@ impl Transcript {
             link: self.link_handler.clone(),
             diagram_toggled: Some(self.diagram_toggled_for(row_id, cx)),
             code_refs: Some(self.code_ref_ui(cx)),
+            git_refs: self.git_ref_ui(cx),
             artifact: self.artifact_handler.clone(),
             artifact_patches: Some({
                 let index = self.artifacts.clone();

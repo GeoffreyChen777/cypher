@@ -130,6 +130,19 @@ impl Shell {
                     .is_ok()
             }));
         });
+        // Commits its replies mention open in this tile's Git view, as a
+        // click in the Git history does.
+        let shell = cx.weak_entity();
+        transcript.update(cx, |transcript, _| {
+            transcript.set_commit_opener(std::rc::Rc::new(move |commit, _, cx| {
+                shell
+                    .update(cx, |shell, cx| {
+                        shell.ensure_dock_open(sid, cx);
+                        shell.add_commit_diff_surface(sid, commit, cx);
+                    })
+                    .ok();
+            }));
+        });
         // Its artifacts open in this tile's side panel.
         let (shell, revise) = (cx.weak_entity(), cx.weak_entity());
         transcript.update(cx, |transcript, _| {

@@ -21,6 +21,7 @@ pub mod diff_fence;
 #[allow(dead_code)]
 pub mod file_preview;
 pub mod find;
+pub mod git_ref;
 pub mod image;
 pub mod image_source;
 pub mod justified;

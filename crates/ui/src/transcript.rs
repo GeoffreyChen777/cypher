@@ -60,6 +60,7 @@ pub use rows::*;
 mod chips;
 pub use chips::*;
 mod code_ref;
+mod git_refs;
 mod highlight;
 mod images;
 use highlight::*;
@@ -330,6 +331,9 @@ pub struct Transcript {
     /// The replies' file-reference chips: the hovered one's preview card
     /// and the resolved files behind it.
     code_refs: code_ref::CodeRefPreview,
+    /// The replies' pull request / issue / commit references: the hovered
+    /// one's card and the lookups behind it.
+    git_refs: git_refs::GitRefCards,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
     /// strip (zeron chat-view.tsx `group-hover`; the rows report hover
     /// themselves). Keyed by ROW so a row→row move within one entry can't
@@ -600,6 +604,7 @@ impl Transcript {
             synced_revision: None,
             rail_hover: None,
             code_refs: Default::default(),
+            git_refs: Default::default(),
             hovered_entry: None,
             copied_code: None,
             copied_clear: None,
