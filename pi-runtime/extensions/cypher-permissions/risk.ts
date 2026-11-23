@@ -721,36 +721,82 @@ function ownBranch(branch: string | undefined, git: GitFacts, facts: RiskFacts):
 /** `git push` options that change nothing about what is published or how. */
 const PLAIN_PUSH = /^(-u|--set-upstream|-q|--quiet|-v|--verbose|--porcelain|--progress|--no-progress|--no-verify|--verify)$/;
 
-/** The `gh pr` options that take a value (as `gh` reads them). */
-const GH_PR_VALUES = /^(-t|--title|-b|--body|-F|--body-file|-B|--base|-H|--head|-R|--repo|-a|--assignee|-l|--label|-m|--milestone|-r|--reviewer|-p|--project|-T|--template|--add-label|--remove-label|--add-reviewer|--remove-reviewer|--add-assignee|--remove-assignee|--add-project|--remove-project)$/;
+/**
+ * The hosting CLIs' pull/merge request commands a team step may be (data): the subcommands that open
+ * and update one, the options naming its head, base and repository, the options that take a value,
+ * and the options that only say what it holds (title, body, draft, labels, reviewers). Any other
+ * option makes the command no team step.
+ */
+interface ReviewCli {
+  program: string;
+  noun: string;
+  open: string;
+  update: readonly string[];
+  head: readonly string[];
+  base: readonly string[];
+  repo: readonly string[];
+  values: RegExp;
+  plain: RegExp;
+}
 
-/** `gh pr` options a team step may carry: what it says, never where it goes. */
-const GH_PR_PLAIN = /^(-t|--title|-b|--body|-F|--body-file|-d|--draft|-f|--fill|--fill-first|--fill-verbose|-l|--label|-a|--assignee|-r|--reviewer|-m|--milestone|-p|--project|-T|--template|--no-maintainer-edit|--dry-run|--add-label|--remove-label|--add-reviewer|--remove-reviewer|--add-assignee|--remove-assignee|--add-project|--remove-project|-B|--base|-H|--head|--undo)$/;
+const REVIEW_CLIS: readonly ReviewCli[] = [
+  {
+    program: "gh",
+    noun: "pr",
+    open: "create",
+    update: ["edit", "ready"],
+    head: ["-H", "--head"],
+    base: ["-B", "--base"],
+    repo: ["-R", "--repo"],
+    values: /^(-t|--title|-b|--body|-F|--body-file|-B|--base|-H|--head|-R|--repo|-a|--assignee|-l|--label|-m|--milestone|-r|--reviewer|-p|--project|-T|--template|--add-label|--remove-label|--add-reviewer|--remove-reviewer|--add-assignee|--remove-assignee|--add-project|--remove-project)$/,
+    plain: /^(-t|--title|-b|--body|-F|--body-file|-d|--draft|-f|--fill|--fill-first|--fill-verbose|-l|--label|-a|--assignee|-r|--reviewer|-m|--milestone|-p|--project|-T|--template|--no-maintainer-edit|--dry-run|--add-label|--remove-label|--add-reviewer|--remove-reviewer|--add-assignee|--remove-assignee|--add-project|--remove-project|--undo)$/,
+  },
+  {
+    program: "glab",
+    noun: "mr",
+    open: "create",
+    update: ["update"],
+    head: ["-s", "--source-branch"],
+    base: ["-b", "--target-branch"],
+    repo: ["-R", "--repo"],
+    values: /^(-t|--title|-d|--description|-s|--source-branch|-b|--target-branch|-R|--repo|-l|--label|-a|--assignee|--reviewer|-m|--milestone|--unlabel)$/,
+    plain: /^(-t|--title|-d|--description|--draft|--wip|-f|--fill|--fill-commit-body|-l|--label|-a|--assignee|--reviewer|-m|--milestone|--unlabel|-y|--yes|--ready|--no-editor)$/,
+  },
+];
 
-/** A `gh pr` line's options and operands: values by option, the rest in order. Undefined when one is known only when it runs. */
-function ghPrWords(args: readonly string[]): { options: Map<string, string>; operands: string[] } | undefined {
+/** A review command's options and operands: values by option, the rest in order. Undefined when an option isn't one a team step may carry, or a name is known only when it runs. */
+function reviewWords(cli: ReviewCli, args: readonly string[]): { options: Map<string, string>; operands: string[] } | undefined {
+  const named = [...cli.head, ...cli.base, ...cli.repo];
+  const allowed = (option: string) => cli.plain.test(option) || named.includes(option);
   const options = new Map<string, string>();
   const operands: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const word = args[i];
     if (word.startsWith("--") && word.includes("=")) {
-      const [name, value] = [word.slice(0, word.indexOf("=")), word.slice(word.indexOf("=") + 1)];
-      if (!GH_PR_PLAIN.test(name)) return undefined;
-      options.set(name, value);
+      const name = word.slice(0, word.indexOf("="));
+      if (!allowed(name)) return undefined;
+      options.set(name, word.slice(word.indexOf("=") + 1));
     } else if (word.startsWith("-") && word !== "-") {
-      if (!GH_PR_PLAIN.test(word)) return undefined;
-      if (GH_PR_VALUES.test(word)) {
+      if (!allowed(word)) return undefined;
+      if (cli.values.test(word)) {
         const value = args[++i];
         if (value === undefined) return undefined;
         options.set(word, value);
       } else options.set(word, "");
     } else operands.push(word);
   }
-  const head = options.get("-H") ?? options.get("--head");
-  const base = options.get("-B") ?? options.get("--base");
-  if (head === UNKNOWN || base === UNKNOWN || operands.includes(UNKNOWN)) return undefined;
+  if (named.some((option) => options.get(option) === UNKNOWN) || operands.includes(UNKNOWN)) return undefined;
   return { options, operands };
 }
+
+/** The value of the first of `names` given. */
+function optionOf(options: Map<string, string>, names: readonly string[]): string | undefined {
+  for (const name of names) if (options.has(name)) return options.get(name);
+  return undefined;
+}
+
+/** git options before the subcommand that change nothing about what a push publishes. */
+const PLAIN_GIT_GLOBAL = /^(--no-pager|-P|--no-optional-locks|--paginate|-p|--no-replace-objects|--literal-pathspecs)$/;
 
 /**
  * A reversible, team-visible step on what this task made (grades.ts rows the judge decides):
@@ -766,10 +812,10 @@ export function teamStep(command: RiskCommand, view: CommandView, facts: RiskFac
     const dir = gitDirectory(command, view);
     const git = dir === undefined ? undefined : facts.git(dir);
     if (!git) return undefined;
-    // Global options before `push` (`-C dir`) are read by gitDirectory; anything else there is not plain.
+    // Global options before `push`: `-C dir` (read by gitDirectory) and the ones that only change output.
     const at = view.args.indexOf("push");
     const before = view.args.slice(0, at);
-    if (before.some((word, index) => word !== "-C" && before[index - 1] !== "-C")) return undefined;
+    if (before.some((word, index) => word !== "-C" && before[index - 1] !== "-C" && !PLAIN_GIT_GLOBAL.test(word))) return undefined;
     const rest = view.args.slice(at + 1);
     if (rest.some((word) => word.startsWith("-") && !PLAIN_PUSH.test(word))) return undefined;
     const [remote, ...refspecs] = rest.filter((word) => !word.startsWith("-"));
@@ -784,29 +830,30 @@ export function teamStep(command: RiskCommand, view: CommandView, facts: RiskFac
     if (branches.length === 0 || !branches.every((branch) => ownBranch(branch, git, facts))) return undefined;
     return graded("push-branch", `pushes ${branches.join(", ")}, this task's own branch`);
   }
-  if (view.program === "gh" && view.positionals[0] === "pr") {
+  const cli = REVIEW_CLIS.find((candidate) => candidate.program === view.program && view.positionals[0] === candidate.noun);
+  if (cli) {
     const sub = view.positionals[1];
     const at = view.args.indexOf(sub ?? "");
-    if (at < 0 || view.args.slice(0, at).some((word) => word !== "pr")) return undefined;
-    const read = ghPrWords(view.args.slice(at + 1));
-    if (!read || read.options.has("-R") || read.options.has("--repo")) return undefined;
+    if (at < 0 || view.args.slice(0, at).some((word) => word !== cli.noun)) return undefined;
+    const read = reviewWords(cli, view.args.slice(at + 1));
+    if (!read || optionOf(read.options, cli.repo) !== undefined) return undefined;
     const git = command.cwd === undefined ? undefined : facts.git(command.cwd);
     if (!git) return undefined;
-    if (sub === "create") {
+    const head = optionOf(read.options, cli.head);
+    const base = optionOf(read.options, cli.base);
+    if (sub === cli.open) {
       if (read.operands.length) return undefined;
-      const head = read.options.get("-H") ?? read.options.get("--head") ?? git.current;
-      const base = read.options.get("-B") ?? read.options.get("--base");
+      const from = head ?? git.current;
       // Into the default branch (or the repository's default when none is named), from this task's own branch.
       if (base !== undefined && !git.defaults.includes(base)) return undefined;
-      if (head?.includes(":") || !ownBranch(head, git, facts)) return undefined;
-      return graded("pr-open", `opens a pull request from ${head}, this task's own branch, into ${base ?? "the default branch"}`);
+      if (from?.includes(":") || !ownBranch(from, git, facts)) return undefined;
+      return graded("pr-open", `opens a pull request from ${from}, this task's own branch, into ${base ?? "the default branch"}`);
     }
-    if (sub === "edit" || sub === "ready") {
-      if (read.options.has("-B") || read.options.has("--base") || read.options.has("-H") || read.options.has("--head")) return undefined;
-      if (read.operands.length > 1) return undefined;
+    if (sub !== undefined && cli.update.includes(sub)) {
+      if (head !== undefined || base !== undefined || read.operands.length > 1) return undefined;
       const [operand] = read.operands;
       if (operand === undefined) return ownBranch(git.current, git, facts) ? graded("pr-update", `changes the pull request of ${git.current}, this task's own branch`) : undefined;
-      const number = operand.replace(/^#/, "");
+      const number = operand.replace(/^[#!]/, "");
       if (/^\d+$/.test(number) && facts.created?.pullRequest?.(number) === true) return graded("pr-update", `changes pull request #${number}, which this task opened`);
       if (ownBranch(operand, git, facts)) return graded("pr-update", `changes the pull request of ${operand}, this task's own branch`);
       return undefined;

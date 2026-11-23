@@ -87,6 +87,9 @@ test("team steps: pushing this task's own branch and opening a pull request from
     ["gh", "pr", "create", "--draft", "--fill"],
     ["gh", "pr", "ready"],
     ["gh", "pr", "edit", "--title", "Better title"],
+    ["git", "--no-pager", "push", "-u", "origin", "cypher/fix-x"],
+    ["glab", "mr", "create", "--source-branch", "cypher/fix-x", "--target-branch", "main", "--title", "Fix x", "--draft"],
+    ["glab", "mr", "update", "--title", "Better"],
   ]) {
     const got = assess(words, mine);
     assert.equal(got.tier, "local", words.join(" "));
@@ -122,6 +125,11 @@ test("team steps: the default branch, another remote or repository, force, tags,
     ["gh", "pr", "edit", "78", "--title", "x"],
     ["gh", "pr", "edit", "77", "--base", "other"],
     ["gh", "pr", "close", "78"],
+    ["glab", "mr", "create", "--source-branch", "someone/else", "--target-branch", "main"],
+    ["glab", "mr", "create", "--source-branch", "cypher/fix-x", "--target-branch", "develop"],
+    ["glab", "mr", "merge", "77"],
+    ["glab", "mr", "create", "--head", "cypher/fix-x"],
+    ["git", "--git-dir=/elsewhere/.git", "push", "origin", "cypher/fix-x"],
   ]) {
     assert.equal(assess(words, mine).tier, "danger", words.join(" "));
   }

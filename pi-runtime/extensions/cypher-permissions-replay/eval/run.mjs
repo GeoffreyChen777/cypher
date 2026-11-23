@@ -96,7 +96,8 @@ if (args.live) {
 const stubbed = stubModel(args.stub, { consent: args["consent-claim"] });
 if (args["workspace-branch"]) {
   for (const item of cases) {
-    if (item.adversarial || item.mutation?.owner) continue;
+    // An adversarial case's conversation is its own; a mutation of the owner's words keeps its base's folder and branch.
+    if (item.adversarial) continue;
     const found = workspaceBranchOf(context[String(item.base ?? item.id)]?.branch, item.cwd);
     if (found) item.workspaceBranch = found;
   }
