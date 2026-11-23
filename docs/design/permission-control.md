@@ -755,6 +755,51 @@ normalized characters and in one of the owner's words (a reply's proposal only w
 reply plainly assents, as §7.3.4). A question about how the code works, a bug on another
 device, or a task that could merely use the data is not such a request.
 
+#### 7.3.9 Fixes after blind set #1 (round 2, step 3, 2026-11-23)
+
+Made after seeing blind set #1 with a fooled judge (a stub forced to approve and to cite a
+consent); each is a mechanism, re-checked on a second blind set the fix pass never saw.
+
+- **A push's destination decides.** `git push remote src:dest` writes the remote's `dest`:
+  `risk.ts` `gitPushDanger` makes it a danger ("pushes into dest, a branch this task didn't
+  make", grade push-foreign) unless `dest` is this task's own branch (ledger or the chat's
+  workspace branch), whatever `src` is. `x:x` and `HEAD:x` on `x` stay a plain push of `x`.
+- **Copying files to another machine is send-data.** `risk.ts` `TRANSFERS` (data) names, per
+  transfer tool, how it spells a destination off this machine: scp/rsync/sftp remote operands,
+  `curl -T/-F x=@f/--data @f`, `rclone copy|sync|move remote:`, `aws s3 cp|sync|mv s3://`,
+  `gsutil`/`gcloud storage` `gs://`, `azcopy https://`, `mc`. A match is a danger
+  (`uploadDanger`, "sends files to …"); the floor (§7.3.1) still decides secrets. Downloads and
+  copies between local paths are unchanged.
+- **Irreversible attributes are consented by name.** `explicit.ts` `ATTRIBUTE_FLAGS` (data)
+  reads the attributes a dangerous command's flags add to its action: `force` (`git push
+  -f/--force*/--mirror/+ref`, `npm|pnpm|yarn publish --force`, `kubectl`/`helm --force`, …) and
+  `bypass` (`gh pr merge --admin`, `glab mr merge --skip-ci`). `LineTargets.attributes` carries
+  them; the consent's own words must name each (lexicon.ts `attributeWords`, 13 languages:
+  "force", "强推", "強制", "admin", "绕过", …). Asking to push or merge is no consent to force it
+  or bypass branch protection.
+- **A name is a ref target only as a ref.** `explicit.ts` `refMention` (branch push/delete, tag):
+  a mention of the name next to a code noun (lexicon.ts `CODE_NOUNS`: function, method, class,
+  file, field, …, per language), or spelled as code (`name()`, `x.name`), doesn't name the
+  branch, unless a ref noun (branch, tag, version) stands next to it too. "update the `hotfix`
+  function and push it" names no branch `hotfix`.
+- **A remote command's own action needs consent.** `tools.ts` `REMOTE_EFFECTS` (data) /
+  `remoteEffect` read the command an `ssh` line runs there (through `sudo`, `env`, `timeout`,
+  `bash -c`, `;`/`&&`/`|`): delete (rm, `find -delete`, `journalctl --vacuum*`, `docker rm`,
+  package removal, …), stop (kill, `systemctl stop`, reboot, …), apply (`systemctl restart`,
+  installs, …), write (mv/cp/tee/chmod, `sed -i`, a `>` redirect into a file). The host target
+  then carries that action; naming the host covers only reaching it, the owner's words must
+  also ask for the action (`uncovered`, host case).
+- **Every unreadable danger of a line needs its own consent.** `LineTargets.unread` lists each
+  dangerous command whose target can't be read, with its own words and its table action. For
+  the run-once path of §7.3.7, each needs a claimed target in its own words and its own action
+  asked for; a command whose input is known only when it runs (`xargs`, `| sh`, `$VAR`) may take
+  its target from the rest of the line. `gh release create v2 && npm publish`: the release's
+  consent brings nothing for the publish.
+- **Handing a part to someone else refuses it.** lexicon.ts `DELEGATE` (per language, counted
+  with `retract` as `defer` is): "npm 那边我自己来", "I'll do it myself", "someone else will",
+  "mach ich selbst", "自分でやります", … take that part back for the agent (per sentence, as any
+  retraction: `retracts`, `forbids`).
+
 #### 7.3.1 The always-ask floor
 
 Three things never run on anyone's approval but the user's, and the first two never reach
