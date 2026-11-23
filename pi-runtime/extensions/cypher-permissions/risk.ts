@@ -1915,6 +1915,12 @@ function fileWords(command: RiskCommand, view: CommandView, patterns: string[] =
       if (pattern !== undefined) patterns.push(pattern);
       continue;
     }
+    // `--post-file=f`, `--upload-file=f`: an option's attached file (round 5 step 2).
+    const attached = /^(--[\w-]+)=(.+)$/.exec(word);
+    if (attached && DOWNLOADERS.has(view.program) && TAKES_FILE.test(attached[1]) && !WRITES_OUTPUT.test(attached[1])) {
+      out.push(attached[2]);
+      continue;
+    }
     if (word.startsWith("-") || !localOperand(view, word, before)) continue;
     out.push(word);
   }
