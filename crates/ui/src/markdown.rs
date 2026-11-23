@@ -17,6 +17,8 @@
 pub mod artifact;
 pub mod code_ref;
 pub mod diff_fence;
+// The preview blocks that use these rules are still being built.
+#[allow(dead_code)]
 pub mod file_preview;
 pub mod find;
 pub mod image;

@@ -219,17 +219,6 @@ pub fn local_path(src: &str) -> Option<String> {
     (!path.is_empty()).then(|| path.to_owned())
 }
 
-/// Where a cleaned local path ([`local_path`]) resolves in `context`, by the
-/// same rules as a local image, for any kind of file the chat previews: the
-/// candidates to read in order, or `Err` with the path outside every root.
-pub fn resolve_local(path: &str, context: &Context) -> Result<Vec<Candidate>, String> {
-    match local(path, Format::Png, context) {
-        Source::Local { candidates, .. } => Ok(candidates),
-        Source::Outside { path } => Err(path),
-        _ => Err(path.to_owned()),
-    }
-}
-
 /// The image a whole reply paragraph names, given as its Markdown source
 /// (trimmed): one path or URL, bare, in backticks or in `<…>`, that names a
 /// supported image file. `None` for anything else (prose, a link, several
