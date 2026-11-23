@@ -91,6 +91,17 @@ extension RenderToolCall {
         }
     }
 
+    /// The image a call read or wrote (Pi's `read` of a png, a screenshot
+    /// saved to a file), which its row shows as a thumbnail. The transcript
+    /// keeps no tool result's image bytes, so the file is read again from
+    /// the host.
+    var imagePath: String? {
+        guard tag == "readFile" || tag == "writeFile", let path = string("path"),
+            case .local = ImageSource.classify(path, ImageSource.Context(roots: ["/"]))
+        else { return nil }
+        return path
+    }
+
     private func shortPath(_ path: String) -> String {
         let comps = path.split(separator: "/")
         guard comps.count > 2 else { return path }

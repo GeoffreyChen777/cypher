@@ -256,7 +256,7 @@ enum TranscriptTextStyle {
             return true
         case .list(_, let items):
             return items.allSatisfy { $0.children.allSatisfy(isProse) }
-        case .codeBlock, .artifact, .blockquote, .table, .rule:
+        case .codeBlock, .artifact, .blockquote, .table, .rule, .image:
             return false
         }
     }
@@ -328,7 +328,7 @@ enum TranscriptTextStyle {
                     appendProse(child, to: result, indent: indent + listIndent, spacingBefore: listItemGap)
                 }
             }
-        case .codeBlock, .artifact, .blockquote, .table, .rule:
+        case .codeBlock, .artifact, .blockquote, .table, .rule, .image:
             // Not prose: callers only pass `isProse` blocks.
             break
         }
@@ -423,6 +423,9 @@ enum TranscriptTextStyle {
 /// Preserve the rounded inline-code wash and file reference chips without a
 /// second text overlay.
 final class TranscriptTextLayoutManager: NSLayoutManager {
+    /// Image chips' thumbnails, by the chip's inline code.
+    var thumbnails: [String: UIImage] = [:]
+
     override init() {
         super.init()
         delegate = FileReferenceChipLineBreaks.shared
@@ -436,8 +439,10 @@ final class TranscriptTextLayoutManager: NSLayoutManager {
     override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: CGPoint) {
         if let storage = textStorage, let container = textContainers.first {
             let characters = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
+            let thumbnails = thumbnails
             FileReferenceChip.paint(
-                self, storage: storage, container: container, characters: characters, origin: origin)
+                self, storage: storage, container: container, characters: characters, origin: origin,
+                thumbnail: { thumbnails[$0] })
             InlineCodeBox.paint(self, storage: storage, container: container, characters: characters, origin: origin)
             paintMentions(storage: storage, container: container, characters: characters, origin: origin)
         }
@@ -534,6 +539,7 @@ struct SelectableTranscriptText: UIViewRepresentable {
     @Environment(\.fileReferenceContext) private var referenceContext
     @Environment(\.fileReferenceSnippet) private var referenceSnippet
     @Environment(\.openBotChat) private var openSession
+    @Environment(\.transcriptImageFiles) private var imageFiles
 
     func makeUIView(context: Context) -> TranscriptUITextView {
         let storage = NSTextStorage()
@@ -571,6 +577,7 @@ struct SelectableTranscriptText: UIViewRepresentable {
         context.coordinator.files = .init(
             open: openWorkspace, context: referenceContext, snippet: referenceSnippet)
         context.coordinator.openSession = openSession
+        context.coordinator.imageFiles = imageFiles
         context.coordinator.update(view, attributed: attributed, drafts: drafts)
         return view
     }
@@ -581,6 +588,7 @@ struct SelectableTranscriptText: UIViewRepresentable {
         context.coordinator.files = .init(
             open: openWorkspace, context: referenceContext, snippet: referenceSnippet)
         context.coordinator.openSession = openSession
+        context.coordinator.imageFiles = imageFiles
         context.coordinator.update(view, attributed: attributed, drafts: drafts)
     }
 
@@ -597,6 +605,9 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
     var files = TranscriptFiles()
     /// Where a `cypher://session/<id>` link opens its session.
     var openSession: ((String) -> Void)?
+    /// Where image chips' thumbnails are read.
+    var imageFiles: TranscriptImageFiles?
+    private var thumbnailLoads: Set<String> = []
 
     /// What file chips and file links reach: the session's Files sheet.
     struct TranscriptFiles {
@@ -674,6 +685,35 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
         view.selectedRange = NSRange(location: 0, length: 0)
         view.invalidateIntrinsicContentSize()
         applying = false
+        loadThumbnails(in: view)
+    }
+
+    /// Give each chip naming an image file its thumbnail, once loaded; the
+    /// chip shows its file glyph until then (and if it can't be read).
+    private func loadThumbnails(in view: UITextView) {
+        guard let files = imageFiles, let layout = view.layoutManager as? TranscriptTextLayoutManager else { return }
+        let storage = view.textStorage
+        var raws: [String] = []
+        storage.enumerateAttribute(.cypherFileRef, in: NSRange(location: 0, length: storage.length)) { value, _, _ in
+            if let raw = value as? String, !raw.isEmpty, !raws.contains(raw), FileReferenceChip.namesImage(raw) {
+                raws.append(raw)
+            }
+        }
+        for raw in raws where layout.thumbnails[raw] == nil && !thumbnailLoads.contains(raw) {
+            let path = FileReference.detect(raw)?.path ?? raw
+            if let hit = ImageLoader.shared.cached(path, files: files, size: .thumbnail)?.bitmap {
+                layout.thumbnails[raw] = hit
+                continue
+            }
+            thumbnailLoads.insert(raw)
+            Task { @MainActor [weak view, weak layout] in
+                let result = await ImageLoader.shared.load(path, files: files, size: .thumbnail)
+                guard case .success(let image) = result, let bitmap = image.bitmap, let layout, let view else { return }
+                layout.thumbnails[raw] = bitmap
+                layout.invalidateDisplay(forCharacterRange: NSRange(location: 0, length: view.textStorage.length))
+                view.setNeedsDisplay()
+            }
+        }
     }
 
     func textViewDidChangeSelection(_ textView: UITextView) {
