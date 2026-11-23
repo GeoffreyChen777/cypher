@@ -1,6 +1,6 @@
 import { importPKCS8, SignJWT } from "jose";
 import type { Env } from "../env";
-import { noticeText, type NoticeKind } from "./notifications-model";
+import { noticeText, type NeedsKind, type NoticeKind } from "./notifications-model";
 
 export const APNS_TOPIC = "ai.mvp-lab.cypher.ios";
 const SAFE_APNS_REASONS = new Set([
@@ -44,6 +44,11 @@ async function providerToken(env: Env): Promise<string> {
 export interface BadgeSnapshot { badgeCount: number; badgeRevision: number }
 interface AlertPushMessage extends Partial<BadgeSnapshot> {
   id: string; scope: string; chatId: string; projectId: string; kind: NoticeKind; expires: number;
+  /** Set (= `projectId`, a bot id) when the notice belongs to a workspace's
+   * own chat rather than a project's session. */
+  workspaceId?: string;
+  /** The Needs you item an `input` notice announces. */
+  itemKind?: NeedsKind; itemId?: string;
 }
 interface BadgePushMessage extends BadgeSnapshot {
   id: string; scope: string; kind: "badge"; expires: number;
@@ -81,11 +86,13 @@ export async function sendAPNs(
       },
       body: JSON.stringify({
         aps: {
-          ...(!badgeOnly ? { alert: noticeText(message.kind), sound: "default", "thread-id": collapse } : {}),
+          ...(!badgeOnly ? { alert: noticeText(message.kind, !!message.workspaceId), sound: "default", "thread-id": collapse } : {}),
           ...(message.badgeCount === undefined ? {} : { badge: message.badgeCount })
         },
         cypher: { version: 1, scope: message.scope, kind: message.kind, eventId: message.id,
           ...(!badgeOnly ? { chatId: message.chatId, projectId: message.projectId } : {}),
+          ...(!badgeOnly && message.workspaceId ? { workspaceId: message.workspaceId } : {}),
+          ...(!badgeOnly && message.itemKind && message.itemId ? { itemKind: message.itemKind, itemId: message.itemId } : {}),
           ...(message.badgeCount === undefined ? {} :
             { badgeCount: message.badgeCount, badgeRevision: message.badgeRevision })
         }

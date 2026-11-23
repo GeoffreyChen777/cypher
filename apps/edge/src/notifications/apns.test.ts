@@ -92,6 +92,23 @@ describe("APNs transport", () => {
     expect(new Headers(requests[1]?.headers).get("apns-push-type")).toBe("alert");
     expect(new Headers(requests[1]?.headers).get("apns-priority")).toBe("5");
   });
+  it("names a workspace notice's workspace and Needs you item, and only those", async () => {
+    const requests: RequestInit[] = [];
+    vi.stubGlobal("fetch", async (_: string, options: RequestInit) => {
+      requests.push(options); return new Response(null, { status: 200 });
+    });
+    const env = await configured();
+    await sendAPNs(env, "0".repeat(64), "production", { ...message(), chatId: "wschat", projectId: "ws",
+      kind: "input", workspaceId: "ws", itemKind: "plan", itemId: "w1" });
+    await sendAPNs(env, "0".repeat(64), "production", { ...message(), chatId: "wschat", projectId: "ws",
+      kind: "completed", workspaceId: "ws" });
+    const [item, own] = requests.map(r => JSON.parse(r.body as string));
+    expect(item.aps.alert).toEqual({ title: "Your input is needed", body: "Open Cypher to view the workspace." });
+    expect(item.cypher).toMatchObject({ kind: "input", chatId: "wschat", projectId: "ws",
+      workspaceId: "ws", itemKind: "plan", itemId: "w1" });
+    expect(Object.keys(own.cypher).sort())
+      .toEqual(["chatId", "eventId", "kind", "projectId", "scope", "version", "workspaceId"]);
+  });
   it("rejects malformed badge counts before contacting Apple", async () => {
     const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
     const env = await configured();

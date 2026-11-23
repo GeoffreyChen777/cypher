@@ -117,6 +117,7 @@ struct SessionView: View {
                 if docked, destination != nil { showInspector(.workspace) }
             }
             .onChange(of: inspectorKey, initial: true) { _, _ in publishInspector() }
+            .task(id: boardRequestKey) { await openRequestedBoard() }
             .onAppear {
                 model.sessionOnScreen(chatId)
                 publishInspector()
@@ -426,6 +427,28 @@ struct SessionView: View {
         guard canControl(chat) else { return false }
         return liveStatus(chat: chat) == .working
             ? store.sendSteer(prompt: text) : store.sendRun(prompt: text, chat: chat)
+    }
+
+    /// What `openRequestedBoard` waits on: a request, this workspace and
+    /// whether its screen is frontmost.
+    private var boardRequestKey: String {
+        let request = model.notifications.pendingBoard?.id.uuidString ?? ""
+        return "\(request)|\(workspaceBot?.id ?? "")|\(path.last == ownRoute)"
+    }
+
+    /// A tapped workspace notice's board page (`NotificationBoardRequest`):
+    /// opened once this workspace's screen is frontmost and its push has
+    /// settled (a sheet presented mid-transition is dropped).
+    private func openRequestedBoard() async {
+        guard let request = model.notifications.pendingBoard, let bot = workspaceBot, request.botId == bot.id,
+            path.last == ownRoute
+        else { return }
+        try? await Task.sleep(for: .milliseconds(700))
+        guard !Task.isCancelled, model.notifications.pendingBoard?.id == request.id, path.last == ownRoute
+        else { return }
+        model.notifications.pendingBoard = nil
+        guard !request.expired() else { return }
+        openBoard(request.page, botId: bot.id)
     }
 
     /// Launch rig: `-sheet board[:<spec>]` opens the workspace's board

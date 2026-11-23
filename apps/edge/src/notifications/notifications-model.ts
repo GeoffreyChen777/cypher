@@ -8,7 +8,19 @@ export const ACTIVITY_LEASE_MS = 45_000;
 export const SEEN_SLACK_MS = 2_000;
 const INTERACTION_MS = 120_000;
 export const SHORT_RUN_MS = 30_000;
+/** How long an unanswered question (or Needs you item) stays deliverable. */
+export const INPUT_EXPIRY_MS = 8 * 3_600_000;
 export type NoticeKind = "completed" | "failed" | "input";
+/** One item on a workspace's **Needs you** card (`cypher_proto::NeedsYou`):
+ * a plan awaiting approval (work id), an action awaiting approval (approval
+ * id), a peer answer drafted for review (exchange id), or one of the
+ * workspace's hidden threads asking (that thread's chat id). */
+export type NeedsKind = "plan" | "approval" | "review" | "asking";
+export interface NeedsItem { kind: NeedsKind; id: string }
+/** The registry row kinds behind the record items (`bot_records.rs`). */
+export const NEEDS_RECORD_KINDS: Readonly<Record<string, Exclude<NeedsKind, "asking">>> = {
+  botWork: "plan", botApprovals: "approval", botExchanges: "review"
+};
 export interface NotificationSettings {
   mode: "smart" | "actionable" | "always" | "off";
   completed: boolean;
@@ -46,6 +58,12 @@ export interface Notice {
   /** Host timestamp of the transition; the synced seen marker is compared
    * against it. Absent on events queued before this field existed. */
   eventAt?: number;
+  /** `projectId` names a workspace (its `bots` row), not a project: the
+   * notice belongs to the workspace's own chat. */
+  workspace?: boolean;
+  /** The Needs you item this notice announces; absent for a session's own
+   * status notice. */
+  item?: NeedsItem;
 }
 export function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("invalid object");
@@ -109,6 +127,47 @@ export function chatAttention(fields: Record<string, unknown>): ChatAttention {
     (typeof thread === "object" && !Array.isArray(thread) && (thread as Record<string, unknown>).kind === "main");
   return owner && main ? "all" : "none";
 }
+/** The workspace (bot id) a chat's marker names, whatever thread it is. */
+export function botIdOf(fields: Record<string, unknown>): string | undefined {
+  const bot = fields.bot;
+  if (!bot || typeof bot !== "object" || Array.isArray(bot)) return undefined;
+  const id = (bot as Record<string, unknown>).botId;
+  return typeof id === "string" && ID_RE.test(id) ? id : undefined;
+}
+/** The workspace a hidden thread's questions belong to: a plan's work
+ * thread, a routine's thread or a project routine's session, whose questions
+ * wait in that workspace's Needs you. Peer threads, threads from a newer
+ * engine, memory passes and sessions a workspace started (those notify as
+ * themselves) are not. */
+export function askingThreadOf(fields: Record<string, unknown>): string | undefined {
+  const present = (value: unknown) => value !== undefined && value !== null;
+  if (present(fields.startedBy) || present(fields.memory)) return undefined;
+  const botId = botIdOf(fields);
+  if (!botId) return undefined;
+  const { origin, thread } = fields.bot as Record<string, unknown>;
+  if (present(origin) && origin !== "owner" && origin !== "routine") return undefined;
+  if (!thread || typeof thread !== "object" || Array.isArray(thread)) return undefined;
+  const kind = (thread as Record<string, unknown>).kind;
+  return kind === "work" || kind === "routine" || kind === "routineSession" ? botId : undefined;
+}
+/** Does this record row wait on its owner (`BotWork::awaiting_approval`,
+ * `BotApproval::awaiting`, `BotExchange::awaiting_review`)? Missing fields
+ * read as the Rust defaults: a work row's `state` is `proposed`, an
+ * approval's `pending`. */
+export function needsOwner(rowKind: string, fields: Record<string, unknown>): boolean {
+  const absent = (value: unknown) => value === undefined || value === null;
+  switch (NEEDS_RECORD_KINDS[rowKind]) {
+    case "plan": return (absent(fields.state) || fields.state === "proposed") && absent(fields.decision);
+    case "approval": return (absent(fields.state) || fields.state === "pending") && absent(fields.decision);
+    case "review": return fields.direction === "incoming" && fields.state === "awaitingReview" && absent(fields.review);
+    default: return false;
+  }
+}
+/** When a record item was created, on its host's clock. */
+export function needsStamp(rowKind: string, fields: Record<string, unknown>): number | undefined {
+  const stamp = NEEDS_RECORD_KINDS[rowKind] === "review" ? fields.askedAt : fields.createdAt;
+  return typeof stamp === "number" ? stamp : undefined;
+}
 /** The stricter of a chat's and its parent's attention: a subagent of a
  * hidden thread is hidden too. */
 export function narrower(a: ChatAttention, b: ChatAttention): ChatAttention {
@@ -133,9 +192,9 @@ export function notificationDecision(
   if (iosViewingChat(notice.chatId, activities, now)) return "drop";
   return "send";
 }
-export function noticeText(kind: NoticeKind): { title: string; body: string } {
+export function noticeText(kind: NoticeKind, workspace = false): { title: string; body: string } {
   const title = { completed: "Task completed", failed: "Task failed", input: "Your input is needed" }[kind];
-  return { title, body: "Open Cypher to view the session." };
+  return { title, body: workspace ? "Open Cypher to view the workspace." : "Open Cypher to view the session." };
 }
 export async function readNotificationJSON(request: Request): Promise<unknown> {
   if (!request.body) throw new Error("missing body");

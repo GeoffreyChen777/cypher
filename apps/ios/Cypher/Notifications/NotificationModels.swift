@@ -52,12 +52,43 @@ struct NotificationPreferences: Codable, Equatable {
     }
 }
 
+/// The Needs you item a workspace's `input` notice announces (the Worker's
+/// `itemKind` / `itemId`).
+enum PushItem: Equatable, Sendable {
+    /// A plan awaiting approval (work id).
+    case plan(String)
+    /// An action awaiting approval (approval id).
+    case approval(String)
+    /// A peer's answer awaiting review (exchange id).
+    case review(String)
+    /// One of the workspace's hidden threads asking (its chat id): a plan's
+    /// work thread, a routine's thread or a project routine's session.
+    case asking(String)
+
+    /// nil for a kind this build doesn't know: the tap opens the workspace.
+    init?(kind: String, id: String) {
+        switch kind {
+        case "plan": self = .plan(id)
+        case "approval": self = .approval(id)
+        case "review": self = .review(id)
+        case "asking": self = .asking(id)
+        default: return nil
+        }
+    }
+}
+
 struct PushPayload: Identifiable, Equatable, Sendable {
     let eventId: String
     let scope: String
     let chatId: String
+    /// A session's project; for a workspace's own chat, the workspace (bot
+    /// id), so it mutes like a project.
     let projectId: String
     let kind: String
+    /// Set (a bot id) when the notice is a workspace's own chat's.
+    var workspaceId: String? = nil
+    /// What on the workspace's Needs you the notice is about.
+    var item: PushItem? = nil
     var id: String { eventId }
     var title: String {
         switch kind {
@@ -75,7 +106,22 @@ struct PushPayload: Identifiable, Equatable, Sendable {
             let project = data["projectId"] as? String, validID(project),
             let kind = data["kind"] as? String, ["completed", "failed", "input"].contains(kind)
         else { return nil }
-        return PushPayload(eventId: event, scope: scope, chatId: chat, projectId: project, kind: kind)
+        // A workspace id that isn't a plain id is a foreign shape, not a
+        // session notice: routing it as a session would open the wrong place.
+        var workspace: String?
+        if let value = data["workspaceId"] {
+            guard let id = value as? String, validID(id) else { return nil }
+            workspace = id
+        }
+        // The item only narrows where a workspace tap lands: a kind this
+        // build doesn't know, or a malformed id, still opens the workspace.
+        var item: PushItem?
+        if workspace != nil, let kind = data["itemKind"] as? String, let id = data["itemId"] as? String, validID(id) {
+            item = PushItem(kind: kind, id: id)
+        }
+        return PushPayload(
+            eventId: event, scope: scope, chatId: chat, projectId: project, kind: kind,
+            workspaceId: workspace, item: item)
     }
     private static func validID(_ id: String) -> Bool {
         id.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil
