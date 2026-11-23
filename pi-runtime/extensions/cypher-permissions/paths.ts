@@ -22,7 +22,7 @@
 import { homedir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 import { globBase, globToRegExp } from "./glob.ts";
-import { canonicalize, escapeGlob, existingMatches, expandHome, floating, globsIntersect } from "./resolve.ts";
+import { canonicalize, escapeGlob, existingMatches, expandHome, floating, globsIntersect, sameInodeAs } from "./resolve.ts";
 import type { Zone } from "./config.ts";
 
 // One resolver for every path (resolve.ts): literal paths here, patterns in `classifyPattern`.
@@ -169,7 +169,19 @@ export class PathContext {
 
   /** A file of the permission system itself: changing it always asks the user. */
   isPermissionSystem(path: string): string | undefined {
-    return matchPatterns(path, this.permissionSystem);
+    const matched = matchPatterns(path, this.permissionSystem);
+    if (matched !== undefined) return matched;
+    // Another name of one of its files (a hard link): the files there now, by the rooted patterns.
+    const linked = sameInodeAs(path, this.permissionFiles());
+    return linked === undefined ? undefined : `${matchPatterns(linked, this.permissionSystem) ?? "the permission system"} (a hard link of ${linked})`;
+  }
+
+  /** The permission system's files that exist now (rooted patterns only; bounded by `existingMatches`). */
+  private *permissionFiles(): Generator<string> {
+    for (const pattern of this.permissionSystem) {
+      if (pattern.exception || floating(pattern.glob)) continue;
+      yield* existingMatches(pattern.glob).paths;
+    }
   }
 
   inScratch(path: string): boolean {
@@ -186,7 +198,9 @@ export class PathContext {
       if (pattern.exception) continue;
       // A pattern that names a file anywhere by its name counts when the glob's own name says that name
       // (`"$D/.pi/permissions.json"`), never because some path it may be could be called so (`/tmp/x-$$`).
-      if (floating(pattern.glob) && (!anywhereNames || /[*?[]/.test(glob.slice(glob.lastIndexOf("/") + 1)))) continue;
+      // Every fixed name of the pattern (`.pi`, `extensions`) must be in the glob's own text (round 5 step 2: `**/.pi/extensions/**`
+      // is no part of `repos/x/…/logs`, though `…` could be anything).
+      if (floating(pattern.glob) && (!anywhereNames || !fixedNames(pattern.glob).every((name) => glob.split("/").includes(name)) || (!pattern.glob.endsWith("/**") && /[*?[]/.test(glob.slice(glob.lastIndexOf("/") + 1))))) continue;
       if (own !== undefined && pattern.regex.test(own)) continue;
       const hit = globsIntersect(glob, pattern.glob) || (subtree && !floating(pattern.glob) && this.holds(glob, pattern.glob));
       if (!hit) continue;
@@ -242,6 +256,14 @@ export class PathContext {
     if (self) return { path, zone, guard: "self", match: self };
     const guarded = matchPatterns(path, this.protectedPatterns);
     if (guarded) return { path, zone, guard: "protected", match: guarded };
+    // The permission system is guarded wherever it is, by any name of its files (a hard link, round 5 step 2).
+    const system = this.isPermissionSystem(path);
+    if (system) return { path, zone, guard: "protected", match: system };
     return scratch ? { path, zone, scratch } : { path, zone };
   }
+}
+
+/** The segments of a glob with no glob character: the names it fixes. */
+function fixedNames(glob: string): string[] {
+  return glob.split("/").filter((segment) => segment !== "" && !/[*?[{\\]/.test(segment));
 }

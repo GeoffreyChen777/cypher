@@ -939,6 +939,12 @@ function read(
       const name = source.slice(i + 2, close);
       const expanded = /^[#!]?([A-Za-z_][A-Za-z0-9_]*)/.exec(name)?.[1];
       if (expanded !== undefined) vars.expanded.add(expanded);
+      // `${!NAME}`: the variable NAME's value names (round 5 step 2). Known, that variable is expanded too;
+      // known only when it runs, it could be any of them: `!NAME` says so (risk.ts `lineFlow`).
+      if (expanded !== undefined && name.startsWith("!") && /^![A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        const target = knownValue(expanded, true);
+        vars.expanded.add(target !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(target) ? target : `!${expanded}`);
+      }
       const value = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? knownValue(name, inQuotes) : undefined;
       if (value !== undefined) expand(value);
       else {

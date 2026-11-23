@@ -25,7 +25,7 @@
  * means (the permission system: the floor asks).
  */
 
-import { lstatSync, readdirSync, realpathSync } from "node:fs";
+import { lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
@@ -64,8 +64,16 @@ export function resolveText(text: string, home = homedir(), cwd?: string): strin
   return expandHome(text, home);
 }
 
-/** Follow symlinks through the nearest existing ancestor; keep the missing tail as written. */
-export function canonicalize(path: string, cwd: string, home = homedir()): string {
+/** The most symlinks one path is followed through (as the kernel's ELOOP bound). */
+const MAX_LINKS = 40;
+
+/**
+ * Follow symlinks through the nearest existing ancestor; keep the missing tail as written. A link
+ * whose target is missing (dangling: `ln -s ~/.cypher/…/permissions.json x`) is followed by its text
+ * (`readlink`), as a write through it would create the target (round 5 step 2): the path is where the
+ * link points, not the link.
+ */
+export function canonicalize(path: string, cwd: string, home = homedir(), links = 0): string {
   const absolute = resolve(cwd, expandHome(path.startsWith("@") ? path.slice(1) : path, home));
   const tail: string[] = [];
   let current = absolute;
@@ -74,12 +82,48 @@ export function canonicalize(path: string, cwd: string, home = homedir()): strin
       const real = realpathSync.native(current);
       return tail.length === 0 ? real : join(real, ...tail.reverse());
     } catch {
+      if (links < MAX_LINKS) {
+        let target: string | undefined;
+        try {
+          if (lstatSync(current).isSymbolicLink()) target = readlinkSync(current);
+        } catch {
+          target = undefined;
+        }
+        if (target !== undefined) {
+          const through = resolve(dirname(current), target);
+          return canonicalize(tail.length === 0 ? through : join(through, ...[...tail].reverse()), "/", home, links + 1);
+        }
+      }
       const parent = dirname(current);
       if (parent === current) return absolute;
       tail.push(basename(current));
       current = parent;
     }
   }
+}
+
+/**
+ * Whether a file has another name among `files` (a hard link: the same device and inode). A write
+ * through any name of an inode writes them all, and no path says so (round 5 step 2): a file with more
+ * than one link is compared with the given ones (the permission system's files that exist).
+ */
+export function sameInodeAs(path: string, files: Iterable<string>): string | undefined {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    return undefined;
+  }
+  if (!stat.isFile() || stat.nlink < 2) return undefined;
+  for (const file of files) {
+    try {
+      const other = statSync(file);
+      if (other.ino === stat.ino && other.dev === stat.dev) return file;
+    } catch {
+      // Not there.
+    }
+  }
+  return undefined;
 }
 
 // --- Patterns ----------------------------------------------------------------------

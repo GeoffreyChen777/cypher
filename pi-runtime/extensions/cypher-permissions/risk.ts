@@ -36,7 +36,7 @@ import type { Classification } from "./paths.ts";
 import { UNKNOWN } from "./shell.ts";
 import { ANY, ENV_CLOSE, ENV_OPEN, escapeGlob, resolveText } from "./resolve.ts";
 import { interpreterOf } from "./code.ts";
-import { unwrapped } from "./effects.ts";
+import { refsWritten, unwrapped } from "./effects.ts";
 import { genericDestroyer, TOLD_BY_PLACE } from "./catalogue.ts";
 import { gradeOf, judgeDecides } from "./grades.ts";
 
@@ -566,6 +566,21 @@ function named(path: string, facts: RiskFacts): Classification | undefined {
   return classification.zone === "sensitive" || classification.guard !== undefined ? classification : undefined;
 }
 
+/**
+ * Commands that make a link (data, round 5 step 2): another name for their sources, through which a later
+ * write changes them. `options`: what makes the program one (`cp -l`); none, any use.
+ */
+export const LINK_MAKERS: readonly { program: string; options?: RegExp }[] = [
+  { program: "ln" },
+  { program: "link" },
+  { program: "cp", options: /^(-[A-Za-z]*[ls][A-Za-z]*|--link|--symbolic-link)$/ },
+  { program: "gcp", options: /^(-[A-Za-z]*[ls][A-Za-z]*|--link|--symbolic-link)$/ },
+];
+
+function makesLink(view: CommandView): boolean {
+  return LINK_MAKERS.some((row) => row.program === view.program && (!row.options || view.args.some((word) => row.options!.test(word))));
+}
+
 /** Programs that send a file named `@file` (`curl -d @f`, `-F x=@f`, `http x=@f`). */
 const SENDS_AT_FILES = /^(curl|http|https|xh)$/;
 
@@ -611,7 +626,8 @@ function pathRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): As
     const classification = facts.classify(word, dir);
     if (!classification) continue;
     const effect = pathEffect(command, view, word);
-    if (facts.permissionSystem?.(classification.path) && effect === "write") {
+    // A link to a file is a way to write it later (`ln -s <permissions.json> x`, then a write through x).
+    if (facts.permissionSystem?.(classification.path) && (effect === "write" || makesLink(view))) {
       return { tier: "danger", kind: `changes the permission system itself (${word})`, key: "permission-system", floor: true };
     }
     if (classification.zone === "sensitive" && !NAME_ONLY.has(view.program)) {
@@ -1242,14 +1258,13 @@ function gitDiscardDanger(command: RiskCommand, view: CommandView, facts: RiskFa
     if (facts.inWorkspace(classification.path) || facts.created?.worktree(classification.path) || facts.created?.has(classification.path)) return undefined;
     return `removes a worktree outside this chat's workspace (${target})`;
   }
-  if (sub === "branch" && view.args.some((word) => /^-[A-Za-z]*D$/.test(word) || word === "--delete" || word === "-d")) {
-    // Deleting branches this task created undoes its own work.
-    const names = view.positionals.slice(1).filter((word) => word !== UNKNOWN);
+  const written = refsWritten(view);
+  if (written) {
+    // Deleting, moving or resetting branches this task created undoes or redoes its own work.
     const own = (name: string) => facts.created?.branch(name) === true || facts.workspaceBranches?.().includes(name) === true;
-    if (names.length && names.length === view.positionals.length - 1 && names.every(own)) return undefined;
-    // Anyone else's branch, in any checkout: its owner decides.
-    const others = view.positionals.slice(1).filter((name) => name === UNKNOWN || !own(name));
-    return others.includes(UNKNOWN) ? "deletes a branch known only when it runs" : `deletes ${others.join(", ")}, a branch this chat didn't create`;
+    const others = written.refs.filter((name) => name === UNKNOWN || !own(name));
+    if (!others.length) return undefined;
+    return others.includes(UNKNOWN) ? `${written.verb} a branch known only when it runs` : `${written.verb} ${others.join(", ")}, a branch this chat didn't create`;
   }
   const discards =
     (sub === "reset" && view.args.some((word) => word === "--hard" || word === "--merge" || word === "--keep")) ||
@@ -1607,7 +1622,7 @@ const SECRET_WRITE_VERB =
  * `SECRET_SOURCES` with the sensitive file patterns (config.ts `DEFAULT_SENSITIVE`); the floor is
  * their data flow (`exfiltrates`).
  */
-export const NETWORK_SINKS: readonly { id: string; programs: readonly string[]; verbs?: RegExp }[] = [
+export const NETWORK_SINKS: readonly { id: string; programs: readonly string[]; verbs?: RegExp; urls?: boolean; module?: RegExp }[] = [
   { id: "http", programs: ["curl", "wget", "http", "https", "xh", "aria2c"] },
   { id: "socket", programs: ["nc", "ncat", "netcat", "socat", "telnet", "ftp", "lftp", "openssl-s_client"] },
   { id: "remote-shell", programs: ["ssh", "mosh", "scp", "sftp", "rsync"] },
@@ -1615,8 +1630,18 @@ export const NETWORK_SINKS: readonly { id: string; programs: readonly string[]; 
   { id: "paste", programs: ["pastebinit", "wgetpaste", "termbin", "ix", "sprunge", "0x0", "pbin", "haste", "gist"] },
   { id: "hosting-cli", programs: ["gh", "glab", "tea", "hub"], verbs: /^(api|gist|secret|variable|release|pr|mr|issue|repo|snippet|create|upload)$/ },
   { id: "git-push", programs: ["git"], verbs: /^(push|send-email|request-pull)$/ },
+  // Round 5 step 2: what a lookup or a probe carries in its name or payload (`dig $(… .env).evil.dev`, `ping -p HEX`).
+  { id: "dns", programs: ["dig", "nslookup", "host", "drill", "kdig", "delv", "dnsget", "resolvectl", "dscacheutil", "getent"] },
+  { id: "icmp", programs: ["ping", "ping6", "traceroute", "traceroute6", "tracepath", "mtr", "hping3", "nping", "arping"] },
+  // A launcher hands a URL to a browser, which fetches it: a sink only with a URL (`open .env` opens it here). `urls`.
+  { id: "url-launcher", programs: ["open", "xdg-open", "gio", "sensible-browser", "x-www-browser", "firefox", "google-chrome", "chromium", "chromium-browser", "lynx", "w3m", "links", "elinks"], urls: true },
+  // An interpreter's standard module run as a program (`python3 -m webbrowser URL`, `-m smtplib`).
+  { id: "module", programs: ["python", "python3", "pypy3"], module: /^(webbrowser|smtplib|ftplib|telnetlib|http\.client|urllib\.request)$/ },
   { id: "cloud-cli", programs: ["aws", "gcloud", "az", "op", "vault", "doppler", "heroku", "fly", "flyctl", "vercel", "netlify", "wrangler", "railway", "firebase", "supabase"] },
 ];
+
+/** bash's (and zsh's, ksh's) network redirections: a write or read of one is a connection (round 5 step 2). */
+export const NETWORK_FILES = /^\/dev\/(tcp|udp|sctp)\//;
 
 /** Every program some sink row names, the transfer tools' too: what a line the reader can't follow is checked for. */
 const SINK_PROGRAMS: ReadonlySet<string> = new Set([...NETWORK_SINKS.flatMap((row) => row.programs), ...TRANSFER_PROGRAMS()]);
@@ -1625,6 +1650,15 @@ const SINK_PROGRAMS: ReadonlySet<string> = new Set([...NETWORK_SINKS.flatMap((ro
 export function sinkOf(view: CommandView): string | undefined {
   for (const row of NETWORK_SINKS) {
     if (!row.programs.includes(view.program)) continue;
+    if (row.module) {
+      const at = view.args.indexOf("-m");
+      if (at >= 0 && (view.args[at + 1] === UNKNOWN || row.module.test(view.args[at + 1] ?? ""))) return row.id;
+      continue;
+    }
+    if (row.urls) {
+      if (view.positionals.some((word) => word === UNKNOWN || /^[a-z][\w+.-]*:/i.test(word))) return row.id;
+      continue;
+    }
     if (!row.verbs || view.positionals.some((word) => word === UNKNOWN || row.verbs!.test(word))) return row.id;
   }
   return TRANSFER_PROGRAMS().includes(view.program) ? "transfer" : undefined;
@@ -1637,10 +1671,19 @@ export function sinkOf(view: CommandView): string | undefined {
  * `~/.netrc`, `~/.config/gh/**`, …) and a credential's variable when its name says so (`secretName`).
  * Such a command is a source for the line's other commands: `aws configure get …` alone prints it here.
  */
-export const SECRET_SOURCES: readonly { id: string; program: string; verbs: readonly (string | RegExp)[] }[] = [
+export const SECRET_SOURCES: readonly { id: string; program: string; verbs: readonly (string | RegExp)[]; bare?: boolean; options?: RegExp }[] = [
   { id: "the keychain", program: "security", verbs: [/^(find-generic-password|find-internet-password|dump-keychain|export|find-key|find-certificate|unlock-keychain)$/] },
   { id: "the environment", program: "printenv", verbs: [] },
   { id: "the environment", program: "env", verbs: [] },
+  // Round 5 step 2: the shell's own printers of its exported variables, and a process's environment.
+  // `bare`: a source with no words after it; `options`: with one of these.
+  { id: "the environment", program: "export", verbs: [], bare: true, options: /^-[A-Za-z]*p$/ },
+  { id: "the environment", program: "declare", verbs: [], bare: true, options: /^-[A-Za-z]*[xp]/ },
+  { id: "the environment", program: "typeset", verbs: [], bare: true, options: /^-[A-Za-z]*[xp]/ },
+  { id: "the environment", program: "set", verbs: [], bare: true },
+  { id: "the environment", program: "compgen", verbs: [], options: /^-[A-Za-z]*[ev]/ },
+  { id: "the environment", program: "ps", verbs: [], options: /^-?[A-Za-z]*[eE][A-Za-z]*$/ },
+  { id: "the environment", program: "launchctl", verbs: [/^(getenv|print|export)$/] },
   { id: "a stored token", program: "gh", verbs: ["auth", "token"] },
   { id: "a stored token", program: "glab", verbs: ["auth", "status"] },
   { id: "a stored credential", program: "git", verbs: ["credential", /^(fill|get)$/] },
@@ -1662,6 +1705,10 @@ export const SECRET_SOURCES: readonly { id: string; program: string; verbs: read
 function credentialSource(view: CommandView): string | undefined {
   for (const row of SECRET_SOURCES) {
     if (row.program !== view.program) continue;
+    if (row.bare || row.options) {
+      if ((row.bare && view.args.length === 0) || (row.options && view.args.some((word) => word !== UNKNOWN && row.options!.test(word)))) return row.id;
+      continue;
+    }
     if (row.program === "printenv") {
       if (view.positionals.length === 0 || view.positionals.some((word) => word === UNKNOWN || secretName(word))) return row.id;
       continue;
@@ -1723,6 +1770,9 @@ function namesSecret(word: string): boolean {
  */
 const TOUCHES_ONLY: ReadonlySet<string> = new Set([...NAME_ONLY, "chmod", "chown", "chgrp", "chflags", "xattr", "touch", "rm", "rmdir", "unlink", "ssh-add", "ssh-keygen"]);
 
+/** A socat address that is a file it reads (round 5 step 2). */
+const SOCAT_FILE = /^(?:FILE|OPEN|GOPEN|READ):([^,]+)/i;
+
 /** Options whose value is a key or certificate a connection is made with: used, not read out. */
 const USES_KEY = /^(-i|-E|--identity|--key|--cert|--cacert|--capath|--client-cert|--pubkey|--proxy-cert|--proxy-key|--proxy-cacert)$/;
 
@@ -1766,6 +1816,8 @@ function localOperand(view: CommandView, word: string, before = ""): boolean {
  */
 function fileWords(command: RiskCommand, view: CommandView, patterns: string[] = []): string[] {
   if (TOUCHES_ONLY.has(view.program) || /^(ssh|mosh)$/.test(view.program)) return [];
+  // socat's address words: a file it opens (`FILE:.env`, `OPEN:…`, `GOPEN:…`), the rest are sockets.
+  if (view.program === "socat") return view.positionals.flatMap((word) => SOCAT_FILE.exec(word)?.[1] ?? []);
   if (view.program === "scp" || view.program === "rsync") {
     const copy = copyOperands(view.words);
     if (copy) {
@@ -1843,6 +1895,13 @@ export function lineFlow(commands: readonly RiskCommand[], facts: RiskFacts, exp
   for (const command of commands) {
     // What a redirection feeds a command is a file it reads, whatever the command.
     for (const path of command.reads) if (path !== UNKNOWN && holdsSecret(path, command, true)) secret ??= path;
+    // bash's network files (`> /dev/tcp/host/port`, `exec 3<>/dev/udp/…`): a redirection to one is a sink.
+    for (const path of [...command.writes, ...command.reads]) {
+      if (path !== UNKNOWN && NETWORK_FILES.test(path)) {
+        sinks.add(command);
+        sink ??= `a network socket (${path.split("/").slice(0, 4).join("/")})`;
+      }
+    }
     // Code an interpreter runs (code.ts): its network capability is a sink, the secrets it reads are sources.
     const flow = code?.get(command);
     if (flow?.sink) {
@@ -1894,6 +1953,8 @@ export function lineFlow(commands: readonly RiskCommand[], facts: RiskFacts, exp
   }
   // A variable named like a credential that the line's own shell expands for its commands.
   if (expands.some(secretName)) secret ??= "a value in this line";
+  // An indirect expansion whose name is known only when it runs (`${!v}`, shell.ts): it could be any variable, a credential's too.
+  if (sink !== undefined && expands.some((name) => name.startsWith("!"))) secret ??= "a variable whose name is known only when it runs";
   return { ...(sink !== undefined ? { sink } : {}), ...(secret !== undefined ? { secret } : {}) };
 }
 

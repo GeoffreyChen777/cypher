@@ -19,7 +19,7 @@
  * `opaque-code`), never as local work.
  */
 
-export type Language = "python" | "javascript" | "ruby" | "perl" | "php" | "applescript" | "lua" | "r" | "tcl" | "shell";
+export type Language = "python" | "javascript" | "ruby" | "perl" | "php" | "applescript" | "lua" | "r" | "tcl" | "shell" | "julia" | "powershell" | "swift" | "awk" | "sed" | "unread";
 
 export interface Interpreter {
   language: Language;
@@ -39,6 +39,19 @@ export interface Interpreter {
   loads?: readonly string[];
   /** With no script (or `-`), it reads its program from its input. */
   stdin: boolean;
+  /** Its first operand is its program (`awk '{…}' f`, `sed 's/…/' f`), unless an inline flag gave one; the rest are data. */
+  codeOperand?: boolean;
+  /** Options whose value is a script file it runs (`awk -f prog.awk`, `sed -f s.sed`). */
+  scripts?: readonly string[];
+  /** Options whose value is code that can't be read here (`pwsh -EncodedCommand`). */
+  opaqueInline?: readonly string[];
+  /**
+   * A text filter whose program often carries the shell's variables (`sed "s/x/$V/"`, `awk -v`): a program
+   * known only when it runs is no finding of its own (the shell's reading of the line stands).
+   */
+  filter?: boolean;
+  /** Options with an optional value: the next word is theirs only when it matches (`sed -i ''`, `sed -i .bak`). */
+  optionalValues?: Readonly<Record<string, RegExp>>;
   /** Its scripts' extensions, for a script run as `./x` without a `#!` line. */
   extensions: readonly string[];
 }
@@ -54,7 +67,16 @@ export const INTERPRETERS: readonly Interpreter[] = [
   { language: "php", programs: /^php(\d[\d.]*)?$/, inline: ["-r"], values: ["-c", "-d", "-z"], stdin: true, extensions: [".php"] },
   { language: "applescript", programs: /^osascript$/, inline: ["-e"], values: ["-l", "-s"], stdin: true, extensions: [".applescript", ".scpt", ".js"] },
   { language: "lua", programs: /^(lua|luajit|lua5\.\d)$/, inline: ["-e"], values: ["-l"], stdin: true, extensions: [".lua"] },
-  { language: "r", programs: /^Rscript$/, inline: ["-e"], values: [], stdin: true, extensions: [".r", ".R"] },
+  { language: "r", programs: /^(Rscript|R)$/, inline: ["-e"], values: ["--file"], stdin: true, extensions: [".r", ".R"] },
+  // Round 5 step 2: the rest of the inline-code programs.
+  { language: "julia", programs: /^julia$/, inline: ["-e", "--eval", "-E", "--print"], clusters: "eE", loads: [], values: ["-L", "--load", "-J", "--sysimage", "-t", "--threads", "-p", "--procs", "--project"], stdin: true, extensions: [".jl"] },
+  { language: "powershell", programs: /^(pwsh|powershell|pwsh-preview)(\.exe)?$/i, inline: ["-c", "-C", "-Command", "-command", "-cmd"], opaqueInline: ["-e", "-ec", "-enc", "-EncodedCommand", "-encodedcommand"], values: ["-f", "-File", "-ExecutionPolicy", "-ep", "-WorkingDirectory", "-wd", "-OutputFormat", "-InputFormat", "-ConfigurationName", "-Version"], stdin: true, extensions: [".ps1", ".psm1"] },
+  { language: "swift", programs: /^swift$/, inline: ["-e"], values: ["-I", "-L", "-F", "-module-name", "-sdk", "-target"], stdin: true, extensions: [".swift"] },
+  { language: "tcl", programs: /^expect$/, inline: ["-c"], values: ["-D"], stdin: true, extensions: [".exp"] },
+  { language: "awk", programs: /^(awk|gawk|mawk|nawk|busybox-awk)$/, inline: ["-e", "--source"], scripts: ["-f", "--file"], codeOperand: true, filter: true, values: ["-F", "-v", "--field-separator", "--assign", "-i", "--include", "-l", "--load"], stdin: false, extensions: [".awk"] },
+  { language: "sed", programs: /^(sed|gsed)$/, inline: ["-e", "--expression"], scripts: ["-f", "--file"], codeOperand: true, filter: true, values: ["-l", "--line-length"], optionalValues: { "-i": /^$|^\.[\w.~-]+$/ }, stdin: false, extensions: [".sed"] },
+  // Languages Cypher has no capability table for: their code is opaque (`scanCode`), never local work.
+  { language: "unread", programs: /^(guile|racket|elixir|iex|erl|escript|groovy|scala|scala-cli|clojure|clj|bb|ghc|runghc|runhaskell|ocaml|kotlin|kotlinc|dart|crystal|nim|v|zig|gst|sbcl|clisp|ecl|chicken|csi|gforth|io|pike|rexx|regina|scheme|chez|petite|janet|fennel|hy|xonsh|nu|elvish|ion)$/, inline: ["-c", "-e", "--eval", "-eval", "-E", "--expr", "-x"], values: [], stdin: true, extensions: [".scm", ".rkt", ".exs", ".erl", ".groovy", ".scala", ".clj", ".hs", ".ml", ".kts", ".dart", ".cr", ".nim", ".janet", ".fnl", ".hy", ".xsh", ".nu"] },
   { language: "tcl", programs: /^(tclsh|wish)(\d[\d.]*)?$/, inline: [], values: ["-encoding"], stdin: true, extensions: [".tcl"] },
   // A shell's `-c` is read by the shell evaluator itself (shell.ts); its scripts and its input are code here.
   { language: "shell", programs: /^(sh|bash|zsh|dash|ksh|fish)$/, inline: ["-c"], clusters: "c", values: ["-o", "+o", "-O", "+O", "--rcfile", "--init-file"], stdin: true, extensions: [".sh", ".bash", ".zsh"] },
@@ -141,6 +163,17 @@ export function codeOf(words: readonly string[], unknown: string, patterns?: rea
       return { interpreter, source: script === unknown ? { from: "script-unknown" } : { from: "script", path: script } };
     }
     if (word.startsWith("-") && word !== "-") {
+      if (interpreter.scripts?.includes(word)) {
+        const path = args[i + 1];
+        if (path === undefined) return undefined;
+        return { interpreter, source: path === unknown ? { from: "script-unknown" } : { from: "script", path } };
+      }
+      if (interpreter.opaqueInline?.includes(word)) return { interpreter, source: { from: "inline-unknown" } };
+      const optional = interpreter.optionalValues?.[word];
+      if (optional) {
+        if (args[i + 1] !== undefined && optional.test(args[i + 1])) i++;
+        continue;
+      }
       if (interpreter.inline.includes(word)) {
         at = ++i;
         take(args[i]);
@@ -164,12 +197,21 @@ export function codeOf(words: readonly string[], unknown: string, patterns?: rea
         continue;
       }
       if (interpreter.modules?.includes(word) || interpreter.modules?.some((flag) => word.startsWith(flag) && word.length > flag.length)) return inline.length ? { interpreter, source: { from: "inline", text: inline.join("\n") } } : undefined;
-      if (interpreter.values.includes(word)) i++;
+      if (interpreter.values.includes(word)) {
+        i++;
+        continue;
+      }
       // `--version`, `-h`: no code.
       if (/^(-v|-V|--version|-h|--help)$/.test(word) && !inline.length) return undefined;
       continue;
     }
     if (inline.length || unknownInline) break;
+    // `awk '{…}' file`: the first operand is the program, the rest is data.
+    if (interpreter.codeOperand) {
+      at = i;
+      take(word);
+      break;
+    }
     const sub = interpreter.subcommands?.[word];
     if (sub === "inline") {
       at = i + 1;
@@ -220,6 +262,10 @@ export const CAPABILITIES: readonly { capability: Capability; languages: readonl
   { capability: "network", languages: ["lua"], names: ["socket.http", "ssl.https", "require('socket')", 'require("socket")', "luasocket", "http.request"] },
   { capability: "network", languages: ["r"], names: ["httr", "httr2", "RCurl", "curl::", "download.file", "url(", "POST(", "GET(", "socketConnection", "req_perform"] },
   { capability: "network", languages: ["tcl"], names: ["socket", "http::geturl", "tls::socket"] },
+  { capability: "network", languages: ["julia"], names: ["Downloads", "HTTP.", "Sockets", "connect(", "download(", "LibCURL"] },
+  { capability: "network", languages: ["powershell"], names: ["Invoke-WebRequest", "Invoke-RestMethod", "iwr", "irm", "Net.WebClient", "System.Net.", "Net.Sockets", "Send-MailMessage", "Start-BitsTransfer", "HttpClient", "WebRequest"] },
+  { capability: "network", languages: ["swift"], names: ["URLSession", "URLRequest", "NSURLConnection", "NWConnection", "CFStream", "URL(string"] },
+  { capability: "network", languages: ["awk"], names: ["/inet/", "/inet4/", "/inet6/"] },
   // Running a program (its words are read as a shell line).
   { capability: "spawn", languages: ["python"], names: ["subprocess", "os.system", "os.popen", "os.exec", "os.execv", "os.execvp", "os.spawn", "os.spawnv", "pty.spawn", "commands.getoutput", "sh.", "plumbum", "Popen"] },
   { capability: "spawn", languages: ["javascript"], names: ["child_process", "node:child_process", "execSync", "exec(", "execFile", "execFileSync", "spawn(", "spawnSync", "Deno.Command", "Deno.run", "Bun.spawn", "Bun.spawnSync", "Bun.$", "$`", "execa", "zx"] },
@@ -229,7 +275,11 @@ export const CAPABILITIES: readonly { capability: Capability; languages: readonl
   { capability: "spawn", languages: ["applescript"], names: ["do shell script", "doShellScript", "NSTask", "Application('Terminal')"] },
   { capability: "spawn", languages: ["lua"], names: ["os.execute", "io.popen"] },
   { capability: "spawn", languages: ["r"], names: ["system(", "system2(", "shell(", "processx"] },
-  { capability: "spawn", languages: ["tcl"], names: ["exec", "open |"] },
+  { capability: "spawn", languages: ["tcl"], names: ["exec", "open |", "spawn"] },
+  { capability: "spawn", languages: ["julia"], names: ["run(", "pipeline(", "`"] },
+  { capability: "spawn", languages: ["powershell"], names: ["Start-Process", "Invoke-Command", "cmd /c", "cmd.exe", "& "] },
+  { capability: "spawn", languages: ["swift"], names: ["Process(", "NSTask", "system(", "posix_spawn", "popen("] },
+  { capability: "spawn", languages: ["awk"], names: ["system(", "|&", "|"] },
   // Reading a file.
   { capability: "read", languages: ["python"], names: ["open(", "io.open", "read_text", "read_bytes", "Path(", "pathlib", "codecs.open", "fileinput", "shutil.copy", "dotenv", "load_dotenv", "dotenv_values", "configparser", "json.load", "yaml.safe_load", "toml.load", "np.load", "pd.read_csv", "linecache", "mmap"] },
   { capability: "read", languages: ["javascript"], names: ["readFileSync", "readFile(", "createReadStream", "fs.read", "fs/promises", "node:fs", "require('fs')", 'require("fs")', "Deno.readTextFile", "Deno.readTextFileSync", "Deno.readFile", "Deno.readFileSync", "Deno.open", "Deno.openSync", "Bun.file", "dotenv", "require(", "import("] },
@@ -240,6 +290,10 @@ export const CAPABILITIES: readonly { capability: Capability; languages: readonl
   { capability: "read", languages: ["lua"], names: ["io.open", "io.lines", "io.read", "dofile", "loadfile"] },
   { capability: "read", languages: ["r"], names: ["readLines", "read.csv", "read.table", "readRDS", "scan(", "file(", "readRenviron", "readChar", "readBin", "source("] },
   { capability: "read", languages: ["tcl"], names: ["open", "read", "fcopy", "source"] },
+  { capability: "read", languages: ["julia"], names: ["open(", "read(", "readlines(", "readline(", "eachline(", "include("] },
+  { capability: "read", languages: ["powershell"], names: ["Get-Content", "gc ", "-InFile", "ReadAllText", "ReadAllBytes", "ReadAllLines", "Import-Csv", "type ", "cat "] },
+  { capability: "read", languages: ["swift"], names: ["contentsOf", "contentsOfFile", "FileManager", "FileHandle", "fopen("] },
+  { capability: "read", languages: ["awk"], names: ["getline"] },
   // The environment (a credential variable read by its name; or the whole of it).
   { capability: "env", languages: ["python"], names: ["os.environ", "os.getenv", "environ.get", "getenv("] },
   { capability: "env", languages: ["javascript"], names: ["process.env", "Deno.env", "Bun.env"] },
@@ -250,6 +304,10 @@ export const CAPABILITIES: readonly { capability: Capability; languages: readonl
   { capability: "env", languages: ["lua"], names: ["os.getenv"] },
   { capability: "env", languages: ["r"], names: ["Sys.getenv"] },
   { capability: "env", languages: ["tcl"], names: ["$env", "$::env", "env("] },
+  { capability: "env", languages: ["julia"], names: ["ENV"] },
+  { capability: "env", languages: ["powershell"], names: ["$env:", "GetEnvironmentVariable", "Get-ChildItem env:", "gci env:", "ls env:", "dir env:"] },
+  { capability: "env", languages: ["swift"], names: ["environment", "getenv("] },
+  { capability: "env", languages: ["awk"], names: ["ENVIRON"] },
   // The home folder (a path joined to it: `os.path.expanduser('~') + '/.ssh/id_rsa'`).
   { capability: "home", languages: ["python"], names: ["expanduser", "Path.home", "os.environ['HOME']", 'os.environ["HOME"]', "getenv('HOME')", 'getenv("HOME")'] },
   { capability: "home", languages: ["javascript"], names: ["homedir(", "os.homedir", "process.env.HOME", "Deno.env.get('HOME')", 'Deno.env.get("HOME")'] },
@@ -259,6 +317,10 @@ export const CAPABILITIES: readonly { capability: Capability; languages: readonl
   { capability: "home", languages: ["applescript"], names: ["path to home folder", "NSHomeDirectory", "system attribute \"HOME\""] },
   { capability: "home", languages: ["lua"], names: ["os.getenv('HOME')", 'os.getenv("HOME")'] },
   { capability: "home", languages: ["r"], names: ["path.expand", "Sys.getenv('HOME')", 'Sys.getenv("HOME")', "normalizePath('~"] },
+  { capability: "home", languages: ["julia"], names: ["homedir("] },
+  { capability: "home", languages: ["powershell"], names: ["$HOME", "$env:HOME", "$env:USERPROFILE", "~/"] },
+  { capability: "home", languages: ["swift"], names: ["homeDirectoryForCurrentUser", "NSHomeDirectory", "expandingTildeInPath"] },
+  { capability: "home", languages: ["awk"], names: ["ENVIRON[\"HOME\"]"] },
   // Code built or decoded at run time: what runs can't be read here.
   { capability: "dynamic", languages: ["python"], names: ["exec(", "eval(", "compile(", "__import__(", "importlib", "b64decode", "b32decode", "a85decode", "b85decode", "codecs.decode", "marshal.loads", "pickle.loads", "zlib.decompress", "bytes.fromhex", "rot13", "getattr(__builtins__"] },
   { capability: "dynamic", languages: ["javascript"], names: ["eval(", "Function(", "new Function", "vm.runIn", "vm.Script", "runInThisContext", "atob(", "'base64')", '"base64")', "fromCharCode", "require(process", "import(process"] },
@@ -269,6 +331,9 @@ export const CAPABILITIES: readonly { capability: Capability; languages: readonl
   { capability: "dynamic", languages: ["lua"], names: ["load(", "loadstring", "string.char"] },
   { capability: "dynamic", languages: ["r"], names: ["eval(", "parse(text", "base64enc", "rawToChar"] },
   { capability: "dynamic", languages: ["tcl"], names: ["eval", "uplevel", "binary decode", "subst"] },
+  { capability: "dynamic", languages: ["julia"], names: ["eval(", "Meta.parse", "include_string", "base64decode", "@eval"] },
+  { capability: "dynamic", languages: ["powershell"], names: ["Invoke-Expression", "iex", "FromBase64String", "ScriptBlock", "-EncodedCommand"] },
+  { capability: "dynamic", languages: ["swift"], names: ["dlopen", "dlsym", "NSClassFromString", "base64Encoded"] },
 ];
 
 function escapeRegex(text: string): string {
@@ -355,17 +420,25 @@ export function argvGroups(code: string, literals: readonly Literal[]): string[]
 export function joinedPaths(code: string, literals: readonly Literal[]): string[] {
   const out: string[] = [];
   let current: Literal[] = [];
+  /** Whether the literals were joined only by concatenation (`+`, `..`, `.`, `&`): their text, not a path join. */
+  let concatenated = true;
   const flush = () => {
     if (current.length > 1) {
       const parts = current.map((item) => item.text.replace(/^\/+|\/+$/g, "")).filter(Boolean);
       out.push(`${current[0].text.startsWith("/") ? "/" : ""}${parts.join("/")}`);
+      // `'~/.cy' + 'pher/…'` is one string: its text as written too (round 5 step 2).
+      if (concatenated) out.push(current.map((item) => item.text).join(""));
     }
     current = [];
+    concatenated = true;
   };
   for (const literal of literals) {
     const last = current.at(-1);
-    if (last && /^\s*(?:,|\+|\/|\.\.|\.|&)\s*$/.test(code.slice(last.end, literal.at))) current.push(literal);
-    else {
+    const between = last ? code.slice(last.end, literal.at) : "";
+    if (last && /^\s*(?:,|\+|\/|\.\.|\.|&)\s*$/.test(between)) {
+      if (/[,/]/.test(between)) concatenated = false;
+      current.push(literal);
+    } else {
       flush();
       current = [literal];
     }
@@ -373,6 +446,22 @@ export function joinedPaths(code: string, literals: readonly Literal[]): string[
   flush();
   return out;
 }
+
+/**
+ * Per language, forms whose first group is a shell line the code runs (data, round 5 step 2): sed's `e`
+ * command (`1e curl …`), julia's backtick commands. The `opaque` forms run text that is computed (sed's
+ * `s///e`, which runs the line it makes).
+ */
+export const COMMAND_FORMS: Partial<Record<Language, { runs?: readonly RegExp[]; opaque?: readonly { form: RegExp; why: string }[] }>> = {
+  sed: {
+    runs: [/(?:^|[;\n{}]|[0-9$/!])\s*e\s+([^;\n}]+)/g],
+    opaque: [{ form: /(?:^|[;\n{}]|[0-9$/!])\s*s(.)(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[gpIiMm0-9w]*e/, why: "it runs the text it substitutes as a command (sed `s///e`)" }, { form: /(?:^|[;\n{}]|[0-9$/!])\s*e\s*(?:$|[;\n}])/, why: "it runs its input lines as commands (sed `e`)" }],
+  },
+  julia: { runs: [/`([^`]+)`/g] },
+};
+
+/** Languages whose paths are bare words, not only string literals (`-InFile .env`). */
+const BARE_PATHS: ReadonlySet<Language> = new Set(["powershell"]);
 
 /** How much escaped or computed text makes code obfuscated: more than this many escapes, or computed characters. */
 const MAX_ESCAPES = 8;
@@ -410,8 +499,16 @@ const ENV_ALL = /^\s*(?:[),;}\]]|$|\.(?:items|keys|values|copy|to_h|to_a|each|en
 export function scanCode(code: string, language: Language, secretName: (name: string) => boolean): CodeScan {
   const literals = literalsOf(code);
   const scan: CodeScan = { network: [], spawn: [], commands: [], paths: [], reads: false, env: [], opaque: [], urls: [] };
+  if (language === "unread") {
+    scan.opaque.push("it is code in a language Cypher can't read");
+    return scan;
+  }
+  const forms = COMMAND_FORMS[language];
+  for (const regex of forms?.runs ?? []) for (const match of code.matchAll(regex)) if (match[1]?.trim()) scan.commands.push(match[1].trim());
+  for (const item of forms?.opaque ?? []) if (item.form.test(code)) scan.opaque.push(item.why);
   scan.network = capabilityNames(code, language, "network");
   scan.spawn = capabilityNames(code, language, "spawn");
+  if (scan.commands.length && !scan.spawn.length) scan.spawn.push("a command form");
   scan.reads = capabilityNames(code, language, "read").length > 0;
   const dynamic = capabilityNames(code, language, "dynamic");
   if (dynamic.length) scan.opaque.push(`it builds or decodes code at run time (${dynamic.slice(0, 3).join(", ")})`);
@@ -434,7 +531,8 @@ export function scanCode(code: string, language: Language, secretName: (name: st
   }
   // Paths its literals may name: as written, joined, and from home when it finds the home folder.
   const home = capabilityNames(code, language, "home").length > 0;
-  for (const text of [...literals.map((literal) => literal.text), ...joinedPaths(code, literals)]) {
+  const bare = BARE_PATHS.has(language) ? [...code.matchAll(/(?<=^|[\s=(,])(?:~|\.{1,2})?\/?[\w.-]*[./][\w.-]+(?:\/[\w.-]+)*/g)].map((match) => match[0]).filter((word) => !/^[\w-]+\.[A-Z]/.test(word)) : [];
+  for (const text of [...literals.map((literal) => literal.text), ...joinedPaths(code, literals), ...bare]) {
     if (/^[a-z][\w+.-]*:\/\//i.test(text)) {
       scan.urls.push(text);
       continue;
@@ -449,4 +547,78 @@ export function scanCode(code: string, language: Language, secretName: (name: st
     for (const group of argvGroups(code, literals)) scan.commands.push(group.map((word) => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`)).join(" "));
   }
   return scan;
+}
+
+// --- Options whose value is a command ---------------------------------------------------
+
+/**
+ * Programs whose options take a command line they run (data, round 5 step 2): `man -P 'sh -c …'`,
+ * `rsync -e '…'`, `tar --to-command=…`, `ssh -o ProxyCommand=…`. Their values are read as shell lines
+ * (core.ts `codeFinding`), so what they send and read is the floor's like any other line's.
+ * `keys`: for `-o Key=Value` programs, the keys whose value is a command.
+ */
+export const COMMAND_OPTIONS: readonly { programs: RegExp; options?: readonly string[]; keyOption?: string; keys?: RegExp }[] = [
+  { programs: /^man$/, options: ["-P", "--pager", "-H", "--html"] },
+  { programs: /^rsync$/, options: ["-e", "--rsh", "--rsync-path"] },
+  { programs: /^(ssh|scp|sftp)$/, keyOption: "-o", keys: /^(ProxyCommand|LocalCommand|KnownHostsCommand|RemoteCommand)$/i },
+  { programs: /^(tar|gtar|bsdtar)$/, options: ["-I", "--use-compress-program", "--to-command", "--info-script", "--new-volume-script", "-F", "--checkpoint-action"] },
+  { programs: /^zip$/, options: ["-TT", "--unzip-command"] },
+  { programs: /^(less|more)$/, options: ["--lesskey-src"] },
+  { programs: /^(vim|vi|nvim|ex)$/, options: ["-c", "--cmd"] },
+  { programs: /^git$/, keyOption: "-c" },
+];
+
+/**
+ * git configuration keys whose value is a command git runs (data, round 5 step 2): set by `git -c k=v`
+ * or `git config k v`. `alias.*` and `credential.helper` run a shell line when the value starts with `!`.
+ */
+export const GIT_COMMAND_KEYS =
+  /^(core\.(pager|sshcommand|editor|fsmonitor|askpass)|sequence\.editor|diff\.external|diff\.[^.]+\.(textconv|command)|merge\.[^.]+\.driver|filter\.[^.]+\.(clean|smudge|process)|credential\.helper|credential\.[^.]+\.helper|gpg\.program|gpg\.[^.]+\.program|pager\.[^.]+|alias\.[^.]+|uploadpack\.packobjectshook|interactive\.difffilter|instaweb\.httpd|web\.browser|browser\.[^.]+\.cmd|man\.[^.]+\.cmd|sendemail\.(smtpserver|tocmd|cccmd)|remote\.[^.]+\.(uploadpack|receivepack|proxy)|core\.gitproxy)$/i;
+
+/** A git configuration value as the shell line it runs (`!cmd` for aliases and helpers), or undefined. */
+function gitCommandValue(key: string, value: string): string | undefined {
+  if (!GIT_COMMAND_KEYS.test(key)) return undefined;
+  if (/^(alias|credential)\./i.test(key)) return value.startsWith("!") ? value.slice(1) : undefined;
+  return value;
+}
+
+/** The shell lines a command's options or configuration run (`COMMAND_OPTIONS`, `GIT_COMMAND_KEYS`). */
+export function optionCommands(words: readonly string[], unknown: string): string[] {
+  const program = (words[0] ?? "").split("/").pop() ?? "";
+  const row = COMMAND_OPTIONS.find((candidate) => candidate.programs.test(program));
+  if (!row) return [];
+  const out: string[] = [];
+  const args = words.slice(1);
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i];
+    if (word === unknown) continue;
+    for (const option of row.options ?? []) {
+      if (word === option && args[i + 1] !== undefined && args[i + 1] !== unknown) out.push(args[i + 1]);
+      else if (option.startsWith("--") && word.startsWith(`${option}=`)) out.push(word.slice(option.length + 1));
+    }
+    if (row.keyOption && (word === row.keyOption || (word.startsWith(row.keyOption) && word.length > row.keyOption.length && !word.startsWith("--")))) {
+      const setting = word === row.keyOption ? args[i + 1] : word.slice(row.keyOption.length);
+      if (setting === undefined || setting === unknown) continue;
+      const eq = setting.indexOf("=");
+      if (eq < 0) continue;
+      const key = setting.slice(0, eq);
+      const value = setting.slice(eq + 1);
+      if (program === "git") {
+        const line = gitCommandValue(key, value);
+        if (line) out.push(line);
+      } else if (row.keys?.test(key)) out.push(value);
+    }
+  }
+  // `git config [--global] key value`: a value that is a command.
+  if (program === "git") {
+    const at = args.findIndex((word) => !word.startsWith("-"));
+    if (args[at] === "config") {
+      const rest = args.slice(at + 1).filter((word) => !word.startsWith("-"));
+      if (rest.length >= 2 && rest[0] !== unknown && rest[1] !== unknown) {
+        const line = gitCommandValue(rest[0], rest[1]);
+        if (line) out.push(line);
+      }
+    }
+  }
+  return out;
 }

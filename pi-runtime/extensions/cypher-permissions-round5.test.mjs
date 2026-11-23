@@ -255,12 +255,16 @@ function forms(interpreter, r) {
     out.push((code) => `echo ${quote(code)} | ${program}`);
     out.push((code) => `printf '%s\\n' ${quote(code)} | ${program}`);
   }
+  // `awk '{…}' f`: the first operand is the program; its script by `-f`.
+  if (interpreter.codeOperand) out.push((code) => `${program} ${quote(code)} data.txt`);
+  if (interpreter.scripts?.length) out.push((code) => `cat > /tmp/r5-script${interpreter.extensions[0]} <<'EOF'\n${code}\nEOF\n${program} ${interpreter.scripts[0]} /tmp/r5-script${interpreter.extensions[0]}`);
   // A script this line writes, then runs.
-  if (!interpreter.subcommands) out.push((code) => `cat > /tmp/r5-script${interpreter.extensions[0]} <<'EOF'\n${code}\nEOF\n${program} /tmp/r5-script${interpreter.extensions[0]}`);
+  if (!interpreter.subcommands && !interpreter.codeOperand) out.push((code) => `cat > /tmp/r5-script${interpreter.extensions[0]} <<'EOF'\n${code}\nEOF\n${program} /tmp/r5-script${interpreter.extensions[0]}`);
   return out;
 }
 
-const CODE_INTERPRETERS = INTERPRETERS.filter((row) => row.language !== "shell");
+/** The interpreters whose language has a capability table (sed runs commands by form, `unread` languages are opaque: tested on their own). */
+const CODE_INTERPRETERS = INTERPRETERS.filter((row) => row.language !== "shell" && CAPABILITIES.some((item) => item.capability === "network" && item.languages.includes(row.language)));
 
 for (const seed of SEEDS) {
   test(`code property (seed ${seed}): every interpreter × every inline form × a source × a sink is the floor`, () => {

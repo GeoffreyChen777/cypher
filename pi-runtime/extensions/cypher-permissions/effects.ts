@@ -22,6 +22,8 @@ import type { EntityKind } from "./entities.ts";
 import { sshHostIndex } from "./commands.ts";
 import { readTool, remoteEffect } from "./tools.ts";
 import { UNKNOWN } from "./shell.ts";
+import { viewOf } from "./packs.ts";
+import type { CommandView } from "./packs.ts";
 
 /** What a request does, as a class: what a denial is matched by. */
 export type EffectClass = "read" | "change" | "stop" | "push" | "merge" | "publish" | "send" | "install" | "comment" | "create" | "run" | `tool:${string}`;
@@ -247,4 +249,45 @@ export function commandEffects(words: readonly string[], options: { sink?: (word
   if (!tool || !("row" in tool)) for (const word of inner.slice(1)) if (pathShaped(word) || (changes !== undefined && word !== UNKNOWN && !word.startsWith("-") && !/^[a-z][\w+.-]*:\/\//i.test(word))) out.paths.push(word);
   if (!out.effects.length) effect(options.reads?.(inner) === false ? "run" : "read");
   return out;
+}
+
+/**
+ * The git commands that delete, move or reset a local branch (data, round 5 step 2): the subcommand, the
+ * options that make it one, and which of its positionals (after the subcommand) or which option's value
+ * names the branch it writes. `refs/heads/` is read off. A branch this task didn't make is another task's
+ * work, by whatever spelling: porcelain (`branch -D`), a rename (`branch -m old new`), a force
+ * (`branch -f x main`, `checkout -B x`, `switch -C x`) or plumbing (`update-ref -d refs/heads/x`).
+ */
+export const GIT_REF_WRITERS: readonly { sub: string; options?: RegExp; verb: string; refs: "all" | "first" | "first-of-two" | "value" }[] = [
+  { sub: "branch", options: /^(-[A-Za-z]*[dD]|--delete)$/, verb: "deletes", refs: "all" },
+  { sub: "branch", options: /^(-[A-Za-z]*[mM]|--move)$/, verb: "renames", refs: "first-of-two" },
+  { sub: "branch", options: /^(-[A-Za-z]*f|--force)$/, verb: "resets", refs: "first" },
+  { sub: "checkout", options: /^-[A-Za-z]*B$/, verb: "resets", refs: "value" },
+  { sub: "switch", options: /^(-[A-Za-z]*C|--force-create)$/, verb: "resets", refs: "value" },
+  { sub: "update-ref", verb: "rewrites", refs: "first" },
+  { sub: "symbolic-ref", options: /^(-d|--delete)$/, verb: "deletes", refs: "first" },
+];
+
+/** What a git line writes among local branches (`GIT_REF_WRITERS`), or undefined. */
+export function refsWritten(view: CommandView): { verb: string; refs: string[] } | undefined {
+  const sub = view.positionals[0];
+  if (view.program !== "git" || sub === undefined) return undefined;
+  const subAt = view.args.indexOf(sub);
+  const args = view.args.slice(subAt + 1);
+  const positionals = view.positionals.slice(1).filter((word) => word !== "--");
+  for (const row of GIT_REF_WRITERS) {
+    if (row.sub !== sub) continue;
+    const flag = row.options ? args.findIndex((word) => row.options!.test(word)) : -2;
+    if (flag === -1) continue;
+    let refs: string[];
+    if (row.refs === "value") refs = [args[flag + 1] ?? UNKNOWN];
+    else if (row.refs === "all") refs = positionals;
+    else if (row.refs === "first-of-two") refs = positionals.length >= 2 ? [positionals[0]] : [];
+    else refs = positionals.slice(0, 1);
+    refs = refs.filter((word) => word === UNKNOWN || !word.startsWith("-")).map((word) => word.replace(/^refs\/heads\//, ""));
+    if (row.sub === "update-ref" && refs.some((word) => word !== UNKNOWN && word.startsWith("refs/"))) refs = refs.filter((word) => !word.startsWith("refs/"));
+    if (row.sub === "update-ref" && args.includes("--stdin")) refs = [UNKNOWN];
+    return refs.length ? { verb: row.verb, refs } : undefined;
+  }
+  return undefined;
 }

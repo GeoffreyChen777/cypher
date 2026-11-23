@@ -59,7 +59,7 @@ import type { CommandRule } from "./commands.ts";
 import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, lineFlow, normalRefspec, redirectRisk, secretName, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
 import type { PatternFinding } from "./risk.ts";
 import { resolvePattern, resolveText } from "./resolve.ts";
-import { codeOf, INTERPRETERS as INTERPRETER_TABLE, interpreterOf, scanCode, shebangInterpreter } from "./code.ts";
+import { codeOf, INTERPRETERS as INTERPRETER_TABLE, interpreterOf, optionCommands, scanCode, shebangInterpreter } from "./code.ts";
 import type { Interpreter } from "./code.ts";
 import type { Assessment, GitFacts, KillTarget, ProcessFacts, RiskFacts, Tier } from "./risk.ts";
 import { INSPECT, inspectMatches, viewOf } from "./packs.ts";
@@ -1800,6 +1800,9 @@ export class Permissions {
     };
     // Through what runs it (`sudo`, `xargs`, `find -exec`): the interpreter is the command it runs.
     const runs = runWords(item.words);
+    // The command lines its options or configuration run (`man -P …`, `git -c core.pager=…`, code.ts `optionCommands`).
+    const optionLines = optionCommands(runs, UNKNOWN);
+    if (optionLines.length) return this.scanFinding(optionLines.join("\n"), "shell", item.cwd, depth, "the command its options run");
     const read = codeOf(runs, UNKNOWN, runs.length === item.words.length ? item.patterns : undefined);
     if (read) {
       interpreter = read.interpreter;
@@ -1807,6 +1810,7 @@ export class Permissions {
       // A shell's `-c` and the scripts it reads from its input are read by the shell evaluator itself.
       if (interpreter.language === "shell" && (source.from === "inline" || source.from === "inline-unknown" || item.script === true)) return undefined;
       if (source.from === "inline") text = source.text;
+      else if (source.from === "inline-unknown" && interpreter.filter) return undefined;
       else if (source.from === "inline-unknown") opaque = "it is known only when it runs";
       else if (source.from === "script") {
         const found = script(source.path, item.cwd);

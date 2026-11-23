@@ -53,6 +53,8 @@ import { UNKNOWN } from "./shell.ts";
 import { actionWords, allWords, attributeWords, carriesOnOnly, codeNounWords, listWords, nounWords, uncoveredScript } from "./lexicon.ts";
 import type { AttributeKey } from "./lexicon.ts";
 import { readTool, remoteEffect } from "./tools.ts";
+import { refsWritten } from "./effects.ts";
+import { viewOf } from "./packs.ts";
 import type { ToolRead } from "./tools.ts";
 
 /** The variable the harness sets when it spawns Pi (`crates/harness/src/pi/spawn.rs`). */
@@ -567,6 +569,15 @@ function readLineTargets(commands: readonly TargetCommand[], facts: TargetFacts)
       }
       if (sub !== undefined && MOVES_HEAD.test(sub)) headMoved = true;
       if (!command.danger) continue;
+      // A local branch it deletes, renames or resets, by any spelling (effects.ts `GIT_REF_WRITERS`).
+      const rewritten = sub === undefined ? undefined : refsWritten(viewOf(["git", sub, ...rest]));
+      if (rewritten) {
+        for (const name of rewritten.refs) {
+          if (name === UNKNOWN) cannot({ unknown: `it ${rewritten.verb} a branch known only when it runs` });
+          else targets.push({ kind: "branch", value: name, action: "delete", dir, entity: { kind: "branch", name } });
+        }
+        continue;
+      }
       if (sub !== "push") {
         // Any other git command by the table (`git worktree remove x`), where `-C` took it.
         const read = sub === undefined ? undefined : readTool(["git", sub, ...rest]);

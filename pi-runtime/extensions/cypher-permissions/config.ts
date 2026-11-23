@@ -112,6 +112,9 @@ export const DEFAULT_SENSITIVE: readonly string[] = [
   "~/.mozilla/**",
   "~/.config/google-chrome/**",
   "~/.config/chromium/**",
+  // A process's environment, as a file (Linux).
+  "/proc/*/environ",
+  "/proc/self/environ",
   // Secrets in any project.
   "**/.env",
   "**/.env.*",
@@ -174,6 +177,11 @@ export const DEFAULT_PROTECTED: readonly string[] = [
   "~/.pi/agent/cypher-permissions/**",
   // A project's own rules can only tighten (deny or ask): removing one loosens them.
   "<root>/.pi/permissions.json",
+  // A project's Pi settings and the code Pi loads from it (extensions, packages).
+  "<root>/.pi/settings.json",
+  "<root>/.pi/extensions/**",
+  "<root>/.pi/npm/**",
+  "<root>/.pi/git/**",
   "<root>/.gitmodules",
   "<root>/.envrc",
   "<root>/.vscode/tasks.json",
@@ -219,8 +227,12 @@ export const DEFAULT_PERMISSION_SYSTEM: readonly string[] = [
   "~/.cypher*/*/pi-runtime/agent/permission-audit.jsonl",
   "~/.cypher*/pi-runtime/agent/cypher-permissions/**",
   "~/.cypher*/*/pi-runtime/agent/cypher-permissions/**",
+  // Which provider and model answer as the reviewing model (a base URL the agent set could always approve).
+  "~/.cypher*/pi-runtime/agent/models.json",
+  "~/.cypher*/*/pi-runtime/agent/models.json",
   "~/.pi/agent/permissions.json",
   "~/.pi/agent/settings.json",
+  "~/.pi/agent/models.json",
   "~/.pi/agent/extensions/**",
   "~/.pi/agent/sessions/**",
   "~/.pi/agent/permission-audit.jsonl",
@@ -230,8 +242,14 @@ export const DEFAULT_PERMISSION_SYSTEM: readonly string[] = [
   "~/.cypher*/pi-runtime/versions/*/extensions/cypher-permissions/**",
   "~/.cypher*/*/pi-runtime/versions/*/extensions/cypher-permissions*",
   "~/.cypher*/*/pi-runtime/versions/*/extensions/cypher-permissions/**",
-  // A project's own rules, in any checkout.
+  // A project's own rules, settings and the code Pi loads from it, in any checkout (Pi reads
+  // `<cwd>/.pi/settings.json` and loads `<cwd>/.pi/extensions/` and the packages it installs under
+  // `.pi/npm`, `.pi/git` in a trusted project).
   "**/.pi/permissions.json",
+  "**/.pi/settings.json",
+  "**/.pi/extensions/**",
+  "**/.pi/npm/**",
+  "**/.pi/git/**",
 ];
 
 /** The permission-system list for the instance whose agent directory this is. */
@@ -247,6 +265,7 @@ export function permissionSystemPatterns(agentDir: string | undefined): string[]
     ...new Set([
       `${dir}/${CONFIG_FILE}`,
       `${dir}/settings.json`,
+      `${dir}/models.json`,
       `${dir}/extensions/**`,
       `${dir}/sessions/**`,
       `${dir}/permission-audit.jsonl`,
