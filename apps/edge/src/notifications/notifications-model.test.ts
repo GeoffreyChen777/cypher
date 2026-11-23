@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  active, attends, chatAttention, defaultNotificationSettings, narrower, notificationDecision, parseActivity, parseSettings,
-  type Activity, type Notice
+  active, askingThreadOf, attends, botIdOf, chatAttention, defaultNotificationSettings, narrower, needsOwner, needsStamp,
+  notificationDecision, parseActivity, parseSettings, type Activity, type Notice
 } from "./notifications-model";
 const now = 1_000_000;
 const notice = (kind: Notice["kind"] = "completed"): Notice => ({
@@ -94,5 +94,45 @@ describe("which chats reach the owner (the desktop's Dock badge rule)", () => {
     expect(narrower("all", "all")).toBe("all");
     expect(narrower("all", "input")).toBe("input");
     expect(narrower("input", "none")).toBe("none");
+  });
+});
+
+describe("what a workspace waits on (its Needs you card)", () => {
+  it("files a chat under the workspace its marker names", () => {
+    expect(botIdOf({ bot: { botId: "ws" } })).toBe("ws");
+    expect(botIdOf({ bot: { botId: "ws", thread: { kind: "routine", routineId: "r" } } })).toBe("ws");
+    expect(botIdOf({ spaceId: "p" })).toBeUndefined();
+    expect(botIdOf({ bot: "ws" })).toBeUndefined();
+    expect(botIdOf({ bot: { botId: "../x" } })).toBeUndefined();
+  });
+  it.each([
+    ["work thread", { bot: { botId: "ws", thread: { kind: "work", workId: "w" } } }, "ws"],
+    ["routine thread", { bot: { botId: "ws", origin: "routine", thread: { kind: "routine", routineId: "r" } } }, "ws"],
+    ["routine session", { spaceId: "p", bot: { botId: "ws", origin: "routine", thread: { kind: "routineSession", routineId: "r" } } }, "ws"],
+    ["main chat", { bot: { botId: "ws" } }, undefined],
+    ["peer thread", { bot: { botId: "ws", origin: "peer", thread: { kind: "peer", connectionId: "c" } } }, undefined],
+    ["peer-origin routine thread", { bot: { botId: "ws", origin: "peer", thread: { kind: "routine", routineId: "r" } } }, undefined],
+    ["thread from a newer engine", { bot: { botId: "ws", thread: { kind: "later" } } }, undefined],
+    ["memory pass", { memory: { kind: "consolidate" }, bot: { botId: "ws", thread: { kind: "routine", routineId: "r" } } }, undefined],
+    ["session a workspace started", { spaceId: "p", startedBy: { botId: "ws" }, bot: { botId: "ws", thread: { kind: "work", workId: "w" } } }, undefined]
+  ])("a %s asks through Needs you: %s", (_, fields, botId) => {
+    expect(askingThreadOf(fields as Record<string, unknown>)).toBe(botId);
+  });
+  it("reads the record rows as the Rust records do, missing fields as their defaults", () => {
+    expect(needsOwner("botWork", { botId: "ws" })).toBe(true);
+    expect(needsOwner("botWork", { state: "proposed", decision: null })).toBe(true);
+    expect(needsOwner("botWork", { state: "proposed", decision: { approve: true, at: 1 } })).toBe(false);
+    expect(needsOwner("botWork", { state: "running" })).toBe(false);
+    expect(needsOwner("botApprovals", {})).toBe(true);
+    expect(needsOwner("botApprovals", { state: "pending", decision: { approve: false, at: 1 } })).toBe(false);
+    expect(needsOwner("botApprovals", { state: "expired" })).toBe(false);
+    expect(needsOwner("botExchanges", { direction: "incoming", state: "awaitingReview" })).toBe(true);
+    expect(needsOwner("botExchanges", { direction: "incoming", state: "awaitingReview", review: { send: true, at: 1 } })).toBe(false);
+    expect(needsOwner("botExchanges", { direction: "outgoing", state: "awaitingReview" })).toBe(false);
+    expect(needsOwner("botExchanges", { direction: "incoming", state: "working" })).toBe(false);
+    expect(needsOwner("botNotes", {})).toBe(false);
+    expect(needsStamp("botWork", { createdAt: 5 })).toBe(5);
+    expect(needsStamp("botExchanges", { askedAt: 7, createdAt: 5 })).toBe(7);
+    expect(needsStamp("botApprovals", {})).toBeUndefined();
   });
 });
