@@ -902,9 +902,11 @@ export function refMention(text: string, value: string): boolean {
   const haystack = text.normalize("NFKC");
   const code = codeNounWords();
   const ref = anyOf(nounWords("branch"), nounWords("tag"), nounWords("version"));
+  // A ref role right before the name: the push verb whose object it is, or a base/head marker ("push x", "into x", "from x").
+  const role = anyOf(SAYS.push, listWords("baseBefore"), listWords("headBefore"), ref);
   const codeBefore = new RegExp(`(?:${code.source})[\\s\\p{P}\\p{S}]*$`, "iu");
   const codeAfter = new RegExp(`^[\\s\\p{P}\\p{S}]*(?:${code.source})`, "iu");
-  const refBefore = new RegExp(`(?:${ref.source})[\\s\\p{P}\\p{S}]*$`, "iu");
+  const refBefore = new RegExp(`(?:${role.source})[\\s\\p{P}\\p{S}]*$`, "iu");
   const refAfter = new RegExp(`^[\\s\\p{P}\\p{S}]*(?:${ref.source})`, "iu");
   const pattern = new RegExp(`(?<![A-Za-z0-9_./-])${escapeRegex(value.normalize("NFKC"))}(?![A-Za-z0-9_/-]|\\.[A-Za-z0-9])`, "giu");
   for (const match of haystack.matchAll(pattern)) {
