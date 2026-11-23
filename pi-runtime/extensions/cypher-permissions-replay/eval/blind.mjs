@@ -89,7 +89,7 @@ const versionOf = (tag) => /^v?(\d+\.\d+\.\d+)/.exec(tag)?.[1];
 
 export function convert(blind) {
   // `agentText`: a list of the agent's messages, or one (a string).
-  const agentText = typeof blind.agentText === "string" ? [blind.agentText] : (blind.agentText ?? []);
+  const agentText = typeof blind.agentText === "string" ? [blind.agentText] : [...(blind.agentText ?? [])];
   const setup = blind.setup ?? {};
   const notes = [];
   const unexpressible = [];
@@ -171,11 +171,26 @@ export function convert(blind) {
   // "X is the owner's own checkout": a repository there, with uncommitted work.
   for (const m of (setup.foreign ?? "").matchAll(/(\S+) is the owner's own checkout/g)) if (absolute(m[1], cwd) !== cwd) fake.repos.push(absolute(m[1], cwd));
 
+  // "this chat ran `X` earlier" / "this chat created simulator U earlier": a creator this chat ran, settled with the
+  // output it prints (a container id for `docker run -d`, the UDID for `simctl create`), as a real run records it.
+  for (const m of (setup.foreign ?? "").matchAll(/this chat (?:ran|started) `([^`]+)`(?: earlier)?/g)) {
+    const command = m[1];
+    const output = /^(docker|podman) (run|create)\b/.test(command) ? `${"3f2a9c1b2d4e".repeat(5).slice(0, 64)}\n` : "";
+    ran.push([command, output, false]);
+    notes.push(`this chat's earlier \`${command}\`: settled with its output`);
+  }
+  for (const m of (setup.foreign ?? "").matchAll(/this chat created simulator ([0-9A-Fa-f-]{36})/g)) {
+    ran.push([`xcrun simctl create replay-sim "iPhone 17"`, `${m[1]}\n`, false]);
+    notes.push(`this chat's earlier simulator ${m[1]}: \`simctl create\` settled with its UDID`);
+  }
+
   // Processes.
   const processes = {};
-  for (const p of setup.startedProcesses ?? []) processes[String(p.pid)] = "chat";
+  // A started process: `{pid}` (sets #1–#3) or the pid itself (set #4).
+  for (const p of setup.startedProcesses ?? []) processes[String(typeof p === "object" ? p.pid : p)] = "chat";
   if (setup.foreign) {
-    for (const m of setup.foreign.matchAll(/\bpid (\d+) is (\S+)/g)) processes[m[1]] = m[2].startsWith("/Applications/") ? "app" : "foreign";
+    // A pid the setup also lists as this chat's (`startedProcesses`, "started by this chat") stays the chat's.
+    for (const m of setup.foreign.matchAll(/\bpid (\d+) is (\S+)/g)) if (processes[m[1]] !== "chat") processes[m[1]] = m[2].startsWith("/Applications/") ? "app" : "foreign";
     // A pattern kill whose matches include the installed app's processes.
     if (/\b(pkill|killall)\b/.test(blind.command ?? "") && /installed app/i.test(setup.foreign)) processes.pgrep = "app";
     notes.push(`foreign "${setup.foreign}": by absence`);
@@ -245,6 +260,14 @@ export function convert(blind) {
   // The conversation, in order. Agent text and the earlier commands sit before the last owner word when
   // there are several; with one, after it (or before a reply's proposal).
   const words = [...(blind.owner ?? [])].sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+  // A reply that names no proposal answers the agent's last message (`agentText`): that is its proposal, in the
+  // owner's word (as build_corpus.py writes `proposal`) and in the conversation, right before the reply.
+  const lastReply = words.findLastIndex((word) => word.source === "reply");
+  if (lastReply >= 0 && !words[lastReply].proposal && agentText.length) {
+    words[lastReply] = { ...words[lastReply], proposal: agentText.at(-1) };
+    agentText.splice(-1, 1);
+    notes.push("reply: the agent's last text is its proposal");
+  }
   const work = [...ran.flatMap(([command, output]) => toolCall(command, output)), ...agentText.map(assistant)];
   const entryOf = (word) => {
     switch (word.source) {
