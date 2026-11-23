@@ -6,8 +6,12 @@
  * installed app, lines the reader can't follow, other hosts — goes to the judge, and its verdict
  * decides (core.ts). The classifier's other findings are evidence in the judge's prompt, never a gate.
  *
- * - `secret-off-machine`: a secret or credential leaving this machine (risk.ts `exfiltrates`,
- *   `pathRisk`: `@file` sends, uploads of secret files, expanded credential variables).
+ * - `secret-off-machine`: a secret or credential leaving this machine, by data flow (round 4): a
+ *   line that reads a sensitive source and has any network sink (risk.ts `exfiltrates`). Both sides
+ *   are tables: sources are the sensitive file patterns (config.ts `DEFAULT_SENSITIVE`, `.env*`),
+ *   credential commands (`SECRET_SOURCES`: the keychain, `gh auth token`, `printenv`, …) and
+ *   credential-named variables (`secretName`); sinks are `NETWORK_SINKS` and `TRANSFERS`. The data may
+ *   go by an argument, `@file`, `< file`, a pipe or `$(…)`; a file a sink reads is a secret by its name.
  * - `permission-system`: a change to the permission system itself (§3.6: its policy files, the
  *   settings that load it, its extension's code, its audit log and ledger, the session files a grant
  *   is restored from), by a command or a file tool.
