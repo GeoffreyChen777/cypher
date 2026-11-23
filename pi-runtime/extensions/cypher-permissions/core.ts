@@ -37,10 +37,13 @@ import {
 import { globBase, hasGlob } from "./glob.ts";
 import { GRANT_ENTRY, GrantStore, newGrant, REVOKE_ENTRY, ROOT_ENTRY } from "./grants.ts";
 import type { Grant, GrantScope } from "./grants.ts";
-import { checkExplicit, describeTarget, lineTargets, repoName } from "./explicit.ts";
+import { checkExplicit, citedIn, describeTarget, lineTargets, normalize, repoName } from "./explicit.ts";
 import type { ExplicitClaim, ExplicitFacts, ExplicitResult, LineTargets, OwnerWords, Target, TargetFacts } from "./explicit.ts";
 import { conversationContext, judgePrompt, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
-import type { JudgeRequest } from "./judge.ts";
+import type { Concern, JudgeRequest } from "./judge.ts";
+
+/** The shortest quote (normalized characters) that may ask for reading the installed app's data. */
+const INSTALLED_QUOTE_MIN = 6;
 import { isUnder, PathContext } from "./paths.ts";
 import type { Classification } from "./paths.ts";
 import { decide, describe } from "./policy.ts";
@@ -199,6 +202,19 @@ interface Review {
   audit?: Pick<AuditRecord, "judgeVerdict">;
   /** What the model quoted and named, for a danger (explicit.ts checks it). */
   claim?: ExplicitClaim;
+  /** The concern an ask named (judge.ts `CONCERNS`). */
+  concern?: Concern;
+}
+
+/**
+ * Whether an ask on this request must name a concern from the closed list (judge.ts `CONCERNS`) to
+ * stand: a local bash line, or a file request outside the sensitive zone, with no concern the code
+ * itself established. Network, tool calls and dangers keep every ask.
+ */
+export function asksNeedConcern(request: Pick<JudgeRequest, "tier" | "capability" | "zone" | "knownConcern">): boolean {
+  if (request.tier !== "local" || request.knownConcern !== undefined) return false;
+  if (request.capability === "escalate") return true;
+  return (request.capability === "read" || request.capability === "write") && request.zone !== "sensitive";
 }
 
 type ElevateOutcome = { allowed: true; scope: Scope; by: Grant["approvedBy"] } | { allowed: false; reason: string; abort?: boolean };
@@ -950,6 +966,16 @@ export class Permissions {
     }
     this.noteReview("ok");
     const verdict = parseVerdict(text);
+    // An ask on a local request with no concern from the closed list runs once: the classifier found no danger.
+    if (verdict.kind === "ask-user" && verdict.concern === undefined && asksNeedConcern(request)) {
+      return {
+        decision: "approve",
+        once: true,
+        reason: `${verdict.reason} (it named no concrete concern, so it runs once)`,
+        state: "approved",
+        audit: { judgeVerdict: "ask-user" },
+      };
+    }
     return {
       decision: verdict.decision,
       once: verdict.once,
@@ -957,6 +983,7 @@ export class Permissions {
       state: verdict.decision === "approve" ? "approved" : "asked",
       audit: { judgeVerdict: verdict.kind },
       ...(verdict.quote || verdict.targets ? { claim: { quote: verdict.quote, ...(verdict.source ? { source: verdict.source } : {}), targets: verdict.targets } } : {}),
+      ...(verdict.concern ? { concern: verdict.concern } : {}),
     };
   }
 
@@ -1746,6 +1773,9 @@ export class Permissions {
         const purpose = [proposal.label && `Purpose: ${proposal.label}`, proposal.reason && `Reason: ${proposal.reason}`].filter(Boolean).join("\n");
         // An approval is remembered for the commands' own categories, never for patterns the agent proposed; a danger's, never.
         const memo = dangerous ? [] : patterns.filter((pattern) => !pattern.proposed);
+        // Concerns the classifier itself established: an ask on them stands; the installed app's data runs only on cited owner words.
+        const concerns = new Set([line.concern, ...(line.assessments ?? []).map((assessment) => assessment.concern)].filter((concern) => concern !== undefined));
+        const installedRead = !dangerous && concerns.has("installed-app");
         const verdict = await this.review(
           {
             capability: "escalate",
@@ -1760,10 +1790,19 @@ export class Permissions {
             ...(targets && "targets" in targets ? { targets: targets.targets.map((target) => describeTarget(target)) } : {}),
             ...(targets && "unknown" in targets ? { targets: (targets.known ?? []).map((target) => describeTarget(target)), unknownTarget: targets.unknown } : {}),
             created: this.createdSummary(line),
+            ...(installedRead ? { installedRead: true } : {}),
+            ...(concerns.size ? { knownConcern: concerns.has("installed-app") ? "installed-app" : "secret" } : {}),
           },
           ctx,
         );
         audit.judge = verdict.state;
+        // The installed app's data: the owner's words must ask for it, and the model must cite them.
+        const installedConsent = installedRead && verdict.decision === "approve" ? this.installedConsent(verdict.claim) : undefined;
+        if (installedConsent && !installedConsent.ok) {
+          audit.explicit = { ok: false, reason: installedConsent.reason, targets: [], passed: [] };
+          verdict.decision = "ask-user";
+          verdict.reason = `It reads the installed app's data, and ${installedConsent.reason}.`;
+        }
         Object.assign(audit, verdict.audit);
         let explicit: ExplicitResult | undefined;
         if (dangerous && targets && (verdict.decision === "approve" || verdict.claim)) {
@@ -1845,6 +1884,24 @@ export class Permissions {
         }
       }
     });
+  }
+
+  /**
+   * Whether the model cited owner words that ask for reading the installed app's data: a quote of
+   * some substance found in one of the owner's words (citedIn: a reply's proposal only when the
+   * reply plainly assents and the model said so). The quote is the model's; that it is the owner's
+   * is the code's.
+   */
+  installedConsent(claim: ExplicitClaim | undefined): { ok: true; quote: string } | { ok: false; reason: string } {
+    const quote = claim?.quote?.trim();
+    if (!quote) return { ok: false, reason: "the reviewing model cited none of your words asking for it" };
+    const wanted = normalize(quote);
+    if (wanted.length < INSTALLED_QUOTE_MIN) return { ok: false, reason: `the words it cited ("${quote}") are too short to ask for it` };
+    for (const word of this.ownerWords?.messages ?? []) {
+      const hit = citedIn(word, wanted, quote);
+      if (hit && (hit.source !== "reply" || claim?.source === "reply")) return { ok: true, quote };
+    }
+    return { ok: false, reason: `"${quote}" is not in your words` };
   }
 
   /** Ask the engine for the owner's words as of now; a failure keeps the ones at hand. */
@@ -2141,6 +2198,7 @@ export class Permissions {
         worktree: (path) => this.created.worktree(path),
         branch: (name) => this.created.branch(name),
         named: (name) => this.created.named(name),
+        pullRequest: (number) => this.created.all().entities.some((entry) => entry.kind === "pr" && (entry.action ?? "create") === "create" && entry.name === number),
         destroys: (command) => {
           const found = this.created.destroys({ ...command, cwd: command.cwd }, this.catalogueFacts());
           return found ? { own: found.own, op: found.op, why: found.why, kinds: found.kinds } : undefined;
@@ -2156,11 +2214,28 @@ export class Permissions {
         const resolved = this.resolveIn(words[0] ?? "", this.cwd);
         return resolved !== undefined && this.writableRoots().some((root) => isUnder(resolved, root));
       },
-      projectTool: (name) =>
+      projectTool: (name, cwd) =>
         name !== UNKNOWN &&
         /^[@\w./-]+$/.test(name) &&
-        [this.cwd, ...this.roots].some((root) => [join(root, "node_modules", ".bin", basename(name)), join(root, ".venv", "bin", basename(name))].some((path) => existsSync(path))),
+        this.toolDirs(cwd).some((root) => [join(root, "node_modules", ".bin", basename(name)), join(root, ".venv", "bin", basename(name))].some((path) => existsSync(path))),
     };
+  }
+
+  /**
+   * Where a project tool may resolve from (`npx` walks up from where it runs): the chat's cwd and
+   * project folders, and every directory from `cwd` up to the project folder holding it.
+   */
+  private toolDirs(cwd: string | undefined): string[] {
+    const dirs = [this.cwd, ...this.roots];
+    if (cwd === undefined) return dirs;
+    let dir = this.paths.canonical(cwd, this.cwd);
+    const root = this.roots.find((candidate) => isUnder(dir, candidate));
+    if (root === undefined) return dirs;
+    for (let depth = 0; depth < 32 && dir !== root && isUnder(dir, root); depth++) {
+      dirs.push(dir);
+      dir = dirname(dir);
+    }
+    return dirs;
   }
 
   private gitAt(dir: string): GitFacts | undefined {

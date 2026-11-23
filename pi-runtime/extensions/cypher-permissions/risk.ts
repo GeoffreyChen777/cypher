@@ -29,12 +29,13 @@ import { basename, isAbsolute } from "node:path";
 import { statSync } from "node:fs";
 
 import { copyOperands, patternMatches, remoteOperand, ruleCannotVouch, sshHostIndex, unwrap } from "./commands.ts";
-import { DANGER, dangerMatches, INSPECT, inspectMatches, viewOf } from "./packs.ts";
+import { asksOnly, DANGER, dangerMatches, INSPECT, inspectMatches, viewOf } from "./packs.ts";
 import { isUnder } from "./paths.ts";
 import type { CommandView, PackFacts } from "./packs.ts";
 import type { Classification } from "./paths.ts";
 import { UNKNOWN } from "./shell.ts";
 import { genericDestroyer, TOLD_BY_PLACE } from "./catalogue.ts";
+import { gradeOf, judgeDecides } from "./grades.ts";
 
 export type Tier = "inspect" | "local" | "danger";
 
@@ -59,6 +60,12 @@ export interface Assessment {
   floor?: true;
   /** An approval covers this call alone and is never remembered (a secret read). */
   once?: true;
+  /**
+   * A concern the classifier itself established for a local command (judge.ts `CONCERNS`): a secret
+   * read, a read of the installed app's data. The reviewing model's ask on it always stands; an
+   * installed-app read also runs only on owner words cited as consent (core.ts).
+   */
+  concern?: "secret" | "installed-app";
 }
 
 /**
@@ -264,6 +271,8 @@ export interface RiskFacts extends PackFacts {
     destroys?(command: RiskCommand): { own: boolean; op: "destroy" | "stop"; why: string[]; kinds: readonly string[] } | undefined;
     /** The ledger holds something of any kind by this name. */
     named?(name: string): boolean;
+    /** A pull request this chat opened (the ledger's), by number. */
+    pullRequest?(number: string): boolean;
   };
   /** A canonical path of the permission system itself (config.ts): a change there always asks. */
   permissionSystem?(path: string): boolean;
@@ -357,7 +366,7 @@ export function redirectRisk(command: Pick<RiskCommand, "reads" | "writes" | "cw
     if (!classification) continue;
     // Reading a secret sends it to the model provider: the model may approve
     // it for the request at hand, once, and nothing is remembered.
-    if (classification.zone === "sensitive") soft ??= { tier: "local", kind: `reads a secret (${path})`, once: true };
+    if (classification.zone === "sensitive") soft ??= { tier: "local", kind: `reads a secret (${path})`, once: true, concern: "secret" };
   }
   for (const path of command.writes) {
     if (path === UNKNOWN) {
@@ -422,7 +431,7 @@ function pathRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): As
     if (classification.zone === "sensitive" && !NAME_ONLY.has(view.program)) {
       if (effect === "write") return { tier: "danger", kind: `writes a secret (${word})`, key: "writes a secret" };
       // A bare name that is not there holds nothing to read.
-      if (isAbsolute(word) || word.startsWith("~") || present(classification.path)) soft ??= { tier: "local", kind: `reads a secret (${word})`, once: true };
+      if (isAbsolute(word) || word.startsWith("~") || present(classification.path)) soft ??= { tier: "local", kind: `reads a secret (${word})`, once: true, concern: "secret" };
       continue;
     }
     if (WRITERS.has(view.program) && view.program !== "git" && effect === "write") {
@@ -606,6 +615,9 @@ function installedMention(text: string, facts: RiskFacts, home: string | undefin
   return undefined;
 }
 
+/** The installed app's and Runtime's program files (not the owner's data): `/Applications/Cypher.app`, a Runtime version outside its `agent/` folder. */
+const INSTALLED_PROGRAM = /^\/Applications\/Cypher\.app(\/|$)|\/\.cypher\/pi-runtime\/(current|versions\/[^/]+)(\/(?!agent(\/|$))|$)/;
+
 /**
  * Touching the installed Cypher app (`/Applications/Cypher.app`, its data in
  * `~/.cypher` outside the chats' worktrees, its Runtime): a human decides,
@@ -619,7 +631,8 @@ function installedAppRisk(command: RiskCommand, view: CommandView, facts: RiskFa
   const changes = (path: string): Assessment => ({ tier: "danger", kind: `changes the installed Cypher app or its data (${path})`, key: "installed Cypher app" });
   // Reading the installed app's logs and data is how a report about it gets
   // diagnosed: ordinary work the model decides on.
-  const reads = (path: string): Assessment => ({ tier: "local", kind: `reads the installed Cypher app's data (${path})` });
+  // The owner's data (chats, journals, databases) is a concern the model must find asked for; the app's and Runtime's program files are not.
+  const reads = (path: string): Assessment => ({ tier: "local", kind: `reads the installed Cypher app's data (${path})`, ...(INSTALLED_PROGRAM.test(path) ? {} : { concern: "installed-app" as const }) });
   let soft: Assessment | undefined;
   if (command.cwd !== undefined) {
     const cwd = facts.classify(command.cwd, undefined);
@@ -629,19 +642,21 @@ function installedAppRisk(command: RiskCommand, view: CommandView, facts: RiskFa
       soft ??= reads(command.cwd);
     }
   }
-  for (const word of [...command.words, ...command.reads, ...command.writes, ...(command.carried ?? [])]) {
+  // Running one of the installed app's programs only to ask it for its help or version reads it.
+  const asking = asksOnly(view);
+  for (const [index, word] of [...command.words, ...command.reads, ...command.writes, ...(command.carried ?? [])].entries()) {
     if (word === UNKNOWN) continue;
     if (pathWords([word]).length || command.reads.includes(word) || command.writes.includes(word)) {
       const classification = facts.classify(word, command.cwd);
       if (classification && installed(classification.path)) {
-        if (pathEffect(command, view, word) === "write") return changes(word);
+        if (!(index === 0 && asking) && pathEffect(command, view, word) === "write") return changes(word);
         soft ??= reads(word);
       }
     }
     // Inside a script or an option's value: its own text says whether it writes.
     const inside = installedMention(word, facts, home);
     if (inside) {
-      if (WRITE_HINT.test(word) || pathEffect(command, view, inside) === "write") return changes(inside);
+      if (WRITE_HINT.test(word) || (!(index === 0 && asking) && pathEffect(command, view, inside) === "write")) return changes(inside);
       soft ??= reads(inside);
     }
   }
@@ -692,6 +707,112 @@ export function normalRefspec(refspec: string, current: string | undefined): str
   const from = heads(source) === "HEAD" && current ? current : heads(source);
   const to = heads(target);
   return from === to ? to : `${from}:${to}`;
+}
+
+/**
+ * A branch this task made, as code-checked facts say: the ledger's (created.ts) or the chat's own
+ * workspace branch (Cypher gives a chat a worktree on its own branch). Never a default or protected branch.
+ */
+function ownBranch(branch: string | undefined, git: GitFacts, facts: RiskFacts): boolean {
+  if (!branch || branch === UNKNOWN || branch === "HEAD" || isDefault(branch, git, facts)) return false;
+  return facts.created?.branch(branch) === true || (facts.workspaceBranches?.() ?? []).includes(branch);
+}
+
+/** `git push` options that change nothing about what is published or how. */
+const PLAIN_PUSH = /^(-u|--set-upstream|-q|--quiet|-v|--verbose|--porcelain|--progress|--no-progress|--no-verify|--verify)$/;
+
+/** The `gh pr` options that take a value (as `gh` reads them). */
+const GH_PR_VALUES = /^(-t|--title|-b|--body|-F|--body-file|-B|--base|-H|--head|-R|--repo|-a|--assignee|-l|--label|-m|--milestone|-r|--reviewer|-p|--project|-T|--template|--add-label|--remove-label|--add-reviewer|--remove-reviewer|--add-assignee|--remove-assignee|--add-project|--remove-project)$/;
+
+/** `gh pr` options a team step may carry: what it says, never where it goes. */
+const GH_PR_PLAIN = /^(-t|--title|-b|--body|-F|--body-file|-d|--draft|-f|--fill|--fill-first|--fill-verbose|-l|--label|-a|--assignee|-r|--reviewer|-m|--milestone|-p|--project|-T|--template|--no-maintainer-edit|--dry-run|--add-label|--remove-label|--add-reviewer|--remove-reviewer|--add-assignee|--remove-assignee|--add-project|--remove-project|-B|--base|-H|--head|--undo)$/;
+
+/** A `gh pr` line's options and operands: values by option, the rest in order. Undefined when one is known only when it runs. */
+function ghPrWords(args: readonly string[]): { options: Map<string, string>; operands: string[] } | undefined {
+  const options = new Map<string, string>();
+  const operands: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i];
+    if (word.startsWith("--") && word.includes("=")) {
+      const [name, value] = [word.slice(0, word.indexOf("=")), word.slice(word.indexOf("=") + 1)];
+      if (!GH_PR_PLAIN.test(name)) return undefined;
+      options.set(name, value);
+    } else if (word.startsWith("-") && word !== "-") {
+      if (!GH_PR_PLAIN.test(word)) return undefined;
+      if (GH_PR_VALUES.test(word)) {
+        const value = args[++i];
+        if (value === undefined) return undefined;
+        options.set(word, value);
+      } else options.set(word, "");
+    } else operands.push(word);
+  }
+  const head = options.get("-H") ?? options.get("--head");
+  const base = options.get("-B") ?? options.get("--base");
+  if (head === UNKNOWN || base === UNKNOWN || operands.includes(UNKNOWN)) return undefined;
+  return { options, operands };
+}
+
+/**
+ * A reversible, team-visible step on what this task made (grades.ts rows the judge decides):
+ * pushing its own branch, opening a pull request from it into the default branch, editing or
+ * marking ready a pull request it opened. Its grade's action, with what it says; undefined for
+ * anything else (a default branch, another remote's or repository's, a force, a tag, a name
+ * known only when it runs), which stays a danger.
+ */
+export function teamStep(command: RiskCommand, view: CommandView, facts: RiskFacts): { action: string; kind: string } | undefined {
+  if (command.words.includes(UNKNOWN)) return undefined;
+  const graded = (action: string, what: string) => (judgeDecides(action) ? { action, kind: `${what} (reversible, seen by the team: ${gradeOf(action)!.says})` } : undefined);
+  if (view.program === "git" && view.positionals[0] === "push") {
+    const dir = gitDirectory(command, view);
+    const git = dir === undefined ? undefined : facts.git(dir);
+    if (!git) return undefined;
+    // Global options before `push` (`-C dir`) are read by gitDirectory; anything else there is not plain.
+    const at = view.args.indexOf("push");
+    const before = view.args.slice(0, at);
+    if (before.some((word, index) => word !== "-C" && before[index - 1] !== "-C")) return undefined;
+    const rest = view.args.slice(at + 1);
+    if (rest.some((word) => word.startsWith("-") && !PLAIN_PUSH.test(word))) return undefined;
+    const [remote, ...refspecs] = rest.filter((word) => !word.startsWith("-"));
+    // A remote by name (`origin`), never a URL or a path.
+    if (remote !== undefined && !/^[\w.-]+$/.test(remote)) return undefined;
+    const branches = refspecs.length === 0 ? [git.current] : refspecs.map((spelled) => {
+      if (spelled.startsWith("+") || spelled.includes("refs/tags/")) return undefined;
+      const refspec = normalRefspec(spelled, git.current);
+      if (refspec.includes(":")) return undefined;
+      return refspec === "HEAD" ? git.current : refspec;
+    });
+    if (branches.length === 0 || !branches.every((branch) => ownBranch(branch, git, facts))) return undefined;
+    return graded("push-branch", `pushes ${branches.join(", ")}, this task's own branch`);
+  }
+  if (view.program === "gh" && view.positionals[0] === "pr") {
+    const sub = view.positionals[1];
+    const at = view.args.indexOf(sub ?? "");
+    if (at < 0 || view.args.slice(0, at).some((word) => word !== "pr")) return undefined;
+    const read = ghPrWords(view.args.slice(at + 1));
+    if (!read || read.options.has("-R") || read.options.has("--repo")) return undefined;
+    const git = command.cwd === undefined ? undefined : facts.git(command.cwd);
+    if (!git) return undefined;
+    if (sub === "create") {
+      if (read.operands.length) return undefined;
+      const head = read.options.get("-H") ?? read.options.get("--head") ?? git.current;
+      const base = read.options.get("-B") ?? read.options.get("--base");
+      // Into the default branch (or the repository's default when none is named), from this task's own branch.
+      if (base !== undefined && !git.defaults.includes(base)) return undefined;
+      if (head?.includes(":") || !ownBranch(head, git, facts)) return undefined;
+      return graded("pr-open", `opens a pull request from ${head}, this task's own branch, into ${base ?? "the default branch"}`);
+    }
+    if (sub === "edit" || sub === "ready") {
+      if (read.options.has("-B") || read.options.has("--base") || read.options.has("-H") || read.options.has("--head")) return undefined;
+      if (read.operands.length > 1) return undefined;
+      const [operand] = read.operands;
+      if (operand === undefined) return ownBranch(git.current, git, facts) ? graded("pr-update", `changes the pull request of ${git.current}, this task's own branch`) : undefined;
+      const number = operand.replace(/^#/, "");
+      if (/^\d+$/.test(number) && facts.created?.pullRequest?.(number) === true) return graded("pr-update", `changes pull request #${number}, which this task opened`);
+      if (ownBranch(operand, git, facts)) return graded("pr-update", `changes the pull request of ${operand}, this task's own branch`);
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 function isDefault(branch: string, git: GitFacts, facts: RiskFacts): boolean {
@@ -992,7 +1113,7 @@ function assessWords(command: RiskCommand, facts: RiskFacts): Assessment {
     if (assessment.tier === "danger") return assessment;
     const redirected = redirectRisk(command, facts);
     if (redirected?.tier === "danger") return redirected;
-    return { tier: "local", kind: assessment.kind ?? redirected?.kind ?? `runs ${basename(next[0] ?? "a program")} through ${view.program}`, ...(assessment.once || redirected?.once ? { once: true as const } : {}) };
+    return { tier: "local", kind: assessment.kind ?? redirected?.kind ?? `runs ${basename(next[0] ?? "a program")} through ${view.program}`, ...(assessment.once || redirected?.once ? { once: true as const } : {}), ...(assessment.concern || redirected?.concern ? { concern: assessment.concern ?? redirected?.concern } : {}) };
   }
   // What `find -exec` runs is a command of its own, on the files `find`
   // starts from (`find build -exec rm {} +` deletes in `build`).
@@ -1017,19 +1138,24 @@ function assessWords(command: RiskCommand, facts: RiskFacts): Assessment {
     if (check?.tier === "danger") return check;
     soft ??= check;
   }
+  // A reversible, team-visible step on this task's own branch or pull request (grades.ts): the judge's, not a danger.
+  const team = teamStep(command, view, facts);
+  // The project's own tools resolve from where the command runs (`cd apps/edge && npx wrangler`).
+  const here: RiskFacts = command.cwd === undefined ? facts : { ...facts, projectTool: (name, cwd) => facts.projectTool(name, cwd ?? command.cwd) };
   const danger =
     destroyDanger(command, view, facts) ??
     copyDanger(command, view, facts) ??
     protectedTarget(view, facts) ??
     (view.program === "git"
-      ? (gitOptionDanger(view, command.hints) ?? gitConfigDanger(view) ?? gitPushDanger(command, view, facts) ?? gitDiscardDanger(command, view, facts) ?? gitHistoryDanger(view))
+      ? (gitOptionDanger(view, command.hints) ?? gitConfigDanger(view) ?? (team ? undefined : gitPushDanger(command, view, facts)) ?? gitDiscardDanger(command, view, facts) ?? gitHistoryDanger(view))
       : undefined) ??
-    DANGER.map((entry) => dangerMatches(entry, view, facts)).find((kind) => kind !== undefined);
+    (team ? undefined : DANGER.map((entry) => dangerMatches(entry, view, here)).find((kind) => kind !== undefined));
+  if (team && !danger) return { tier: "local", kind: team.kind, key: team.action, once: true };
   if (danger) {
     // Reading a secret or the environment on this machine is the model's to
     // approve, once; writing or signing in with one is not (a secret that
     // leaves the machine is the floor, `exfiltrates`).
-    if (SECRET_READ_KINDS.has(danger) && !view.positionals.some((word) => SECRET_WRITE_VERB.test(word))) return { tier: "local", kind: danger, once: true };
+    if (SECRET_READ_KINDS.has(danger) && !view.positionals.some((word) => SECRET_WRITE_VERB.test(word))) return { tier: "local", kind: danger, once: true, concern: "secret" };
     return { tier: "danger", kind: danger, key: dangerKey(danger) };
   }
   if (kill) return kill;

@@ -41,8 +41,8 @@ export interface PackFacts {
   kubeContext(args: readonly string[]): string | undefined;
   /** The program resolves inside a place the agent can write (a virtualenv, `node_modules/.bin`). */
   programIsLocal(words: readonly string[]): boolean;
-  /** A tool of that name is installed in the project (`node_modules/.bin`, `.venv/bin`). */
-  projectTool(name: string): boolean;
+  /** A tool of that name is installed in the project (`node_modules/.bin`, `.venv/bin`), seen from `cwd` (where the command runs) up to the project folders. */
+  projectTool(name: string, cwd?: string): boolean;
 }
 
 export interface InspectEntry {
@@ -295,7 +295,7 @@ function ghApiWrites(view: CommandView): boolean {
  * activates, changes a property or runs a shell command. Then it changes
  * nothing, like `ps`.
  */
-function osascriptReadsOnly(view: CommandView): boolean {
+function osascriptReadsOnly(view: CommandView, raise = false): boolean {
   const scripts: string[] = [];
   for (let i = 0; i < view.args.length; i++) {
     const word = view.args[i];
@@ -314,7 +314,48 @@ function osascriptReadsOnly(view: CommandView): boolean {
     return false;
   }
   if (scripts.length === 0) return false;
-  return scripts.every((script) => !CONTROLS_APPS.test(script) && !CHANGES_PROPERTY.test(script) && !/\bset\b(?!\s+[A-Za-z_]\w*\s+to\b)/.test(script));
+  // Raising a window (`activate`, `set frontmost … to true`) changes only what is in front: undone by a click, seen by no one else.
+  const asked = raise ? scripts.map((script) => script.replace(RAISES, " ")) : scripts;
+  return asked.every((script) => !CONTROLS_APPS.test(script) && !CHANGES_PROPERTY.test(script) && !/\bset\b(?!\s+[A-Za-z_]\w*\s+to\b)/.test(script));
+}
+
+/** AppleScript that only brings an app or a process to the front. */
+const RAISES = /\bset\s+(?:the\s+)?frontmost\b(?:\s+of\s+(?:\([^()]*\)|[^"()]*?))?\s+to\s+true\b|\bactivate\b/gi;
+
+/**
+ * Read-only forms of the programs that change the machine's setup (data): the first argument
+ * that only prints the setting. Anything else of theirs stays a danger.
+ */
+export const SYSTEM_QUERIES: Readonly<Record<string, RegExp>> = {
+  pmset: /^-g$/,
+  networksetup: /^-(get|list|show|print|version|help)/i,
+  systemsetup: /^-(get|help|print)/i,
+  spctl: /^(--status|--assess|-a|--test-devid-status)$/,
+  csrutil: /^status$/,
+  nvram: /^(-p|-x)$/,
+  kmutil: /^(showloaded|inspect|print-diagnostics)$/,
+};
+
+/** Options that only ask a program for its help or version. */
+const HELP_ARG = /^(-h|--help|-help|help|--version|-V|version|--usage)$/;
+
+/**
+ * A command that only asks a program about itself: its arguments are help/version flags alone
+ * (`pi --help`, `pmset --version`), or a CLI's subcommands followed by `--help` (`gh pr create --help`).
+ */
+export function asksOnly(view: CommandView): boolean {
+  const args = view.args.filter((word) => !/^\d?>&?\d?$/.test(word));
+  if (args.length === 0 || args.includes(UNKNOWN)) return false;
+  if (args.every((word) => HELP_ARG.test(word))) return true;
+  const last = args[args.length - 1];
+  return /^(-h|--help)$/.test(last) && args.slice(0, -1).every((word) => /^[a-z][a-z-]*$/.test(word));
+}
+
+/** A system-setup program asked only to print (SYSTEM_QUERIES), or about itself. */
+function systemQuery(view: CommandView): boolean {
+  if (asksOnly(view)) return true;
+  const form = SYSTEM_QUERIES[view.program];
+  return form !== undefined && view.args.length > 0 && form.test(view.args[0]) && !view.args.includes(UNKNOWN);
 }
 
 /** What an AppleScript or JXA does when it is more than a question. */
@@ -332,7 +373,7 @@ export const DANGER: readonly DangerEntry[] = [
   { pack: "core", program: "systemctl", sub: ["enable|disable|mask|unmask|daemon-reload|edit|set-default|reboot|poweroff|halt|suspend"], kind: SYSTEM },
   { pack: "core", program: "crontab", kind: "changes scheduled jobs", when: (view) => !(view.args.length === 1 && view.args[0] === "-l") },
   { pack: "core", program: "defaults", sub: ["write|delete|import|rename"], kind: SYSTEM },
-  { pack: "core", program: ["chsh", "dscl", "scutil", "networksetup", "pmset", "spctl", "csrutil", "nvram", "tccutil", "systemsetup", "kextload", "kmutil", "mkfs", "fdisk", "parted", "shutdown", "reboot", "halt"], kind: SYSTEM, when: (view) => view.program !== "scutil" || has(view, "--set") },
+  { pack: "core", program: ["chsh", "dscl", "scutil", "networksetup", "pmset", "spctl", "csrutil", "nvram", "tccutil", "systemsetup", "kextload", "kmutil", "mkfs", "fdisk", "parted", "shutdown", "reboot", "halt"], kind: SYSTEM, when: (view) => !systemQuery(view) && (view.program !== "scutil" || has(view, "--set")) },
   { pack: "core", program: "diskutil", sub: ["erase*|partition*|reformat|zeroDisk|randomDisk|secureErase|apfs"], kind: "erases or changes a disk" },
   { pack: "core", program: "dd", kind: "writes raw data", when: (view) => view.args.some((word) => word === UNKNOWN || word.startsWith("of=")) },
   // Secrets.
@@ -353,7 +394,7 @@ export const DANGER: readonly DangerEntry[] = [
   // Send.
   { pack: "core", program: ["mail", "mailx", "sendmail", "mutt", "msmtp", "neomutt"], kind: SEND },
   { pack: "core", program: ["slack", "slackcat", "slack-cli", "telegram-send", "signal-cli", "matrix-commander", "discord-send", "twilio", "ntfy", "apprise", "pushover"], kind: SEND, when: (view) => !view.args.every((word) => /^(-h|--help|--version|help)$/.test(word)) || view.args.length === 0 },
-  { pack: "core", program: "osascript", kind: "controls apps on this machine (it can send mail and messages)", when: (view) => !osascriptReadsOnly(view) },
+  { pack: "core", program: "osascript", kind: "controls apps on this machine (it can send mail and messages)", when: (view) => !osascriptReadsOnly(view, true) },
   { pack: "core", program: ["open", "xdg-open"], kind: "opens a link, which can send data to a site", when: (view) => view.positionals.some((word) => word === UNKNOWN || (/^[a-z][\w+.-]*:/i.test(word) && !/^file:/i.test(word) && !/^(https?:\/\/)?(localhost|127\.\d+\.\d+\.\d+|\[::1\])([:/]|$)/i.test(word))) },
   { pack: "core", program: ["curl", "wget"], kind: "sends data to a server", when: sendsData },
   // scp and rsync are decided in risk.ts: by the machines and local files they copy between.
