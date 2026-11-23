@@ -1978,7 +1978,30 @@ export class Permissions {
       release: (dir, commit, version) => this.releaseFacts(dir, commit, version),
       pullRequestsWithHead: (dir, branch) => this.pullRequestsWithHead(dir, branch),
       worktreeBranch: (path) => this.catalogueFacts().worktreeBranch?.(path),
+      own: () => this.ownEntities(),
     };
+  }
+
+  /**
+   * This task's own branches and pull requests, by code-checked facts: the
+   * branch checked out in each of the chat's project folders (not a default
+   * one), the branches the ledger says it made, the heads of pull requests
+   * it opened; the pull requests it opened, and those gh lists with its one
+   * branch as their head. A consent that names an action and no target binds
+   * to the one of these that fits (explicit.ts `ownTarget`).
+   */
+  private ownEntities(): { branches: string[]; prs: PullRequestFact[] } {
+    const entries = this.created.ledger.all();
+    const prs: PullRequestFact[] = entries
+      .filter((entry) => entry.kind === "pr" && (entry.action ?? "create") === "create")
+      .map((entry) => ({ number: entry.name, ...(entry.head ? { head: entry.head } : {}), ...(entry.repo && !entry.repo.startsWith("/") ? { repo: entry.repo.toLowerCase() } : {}) }));
+    const branches = new Set<string>([
+      ...this.workspaceBranches(),
+      ...entries.filter((entry) => entry.kind === "branch" && entry.remote === undefined && (entry.action ?? "create") === "create").map((entry) => entry.name),
+      ...prs.flatMap((pr) => (pr.head ? [pr.head] : [])),
+    ]);
+    if (branches.size === 1) for (const pr of this.pullRequestsWithHead(this.cwd, [...branches][0])) if (!prs.some((known) => known.number === pr.number)) prs.push(pr);
+    return { branches: [...branches], prs };
   }
 
   /** Pull requests by head branch, as gh last said (per directory and branch). */

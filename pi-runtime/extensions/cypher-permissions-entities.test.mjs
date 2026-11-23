@@ -529,7 +529,10 @@ test("replies (property): an unmarked reply binds iff the judge says it assents;
     if (!marked && got.ok === false) assert.match(got.reason ?? "", /doesn't plainly agree|says not|wrote later|answer was/, `"${text}": ${got.reason}`);
   }
   assert.ok(bound > unmarked.length / 2, `most unmarked replies bind on the judge's word (${bound}/${unmarked.length})`);
-  for (const text of ["按照建议", "go ahead with that", "sounds good, do it"]) assert.equal(reply(text).ok, true, text);
+  for (const text of ["按照建议", "go ahead", "sounds good, do it"]) assert.equal(reply(text).ok, true, text);
+  // Longer than an assent, a reply must cite the proposal's action: whatever the model reads into it, these bind to nothing.
+  for (const text of ["go ahead with that", "thanks, looks good", "danke, sieht gut aus", "ログを見せて", "show me the logs first"]) assert.equal(reply(text).ok, false, text);
+  for (const text of ["yes, merge it now", "合并吧，没问题的话", "ok merge it once it's green"]) assert.equal(reply(text).ok, true, text);
   // Marked replies never bind, whatever the judge says.
   let checked = 0;
   const bases = ["ok", "好", "はい", "네", "ja", "oui", "sí", "sim", "sì", "да", pick(unmarked)];

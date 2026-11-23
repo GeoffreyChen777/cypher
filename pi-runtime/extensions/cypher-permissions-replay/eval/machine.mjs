@@ -52,6 +52,9 @@ function processFacts(item) {
 /** Load `<extensions>/cypher-permissions/{core,shell}.ts` and build the fake machine for `cases`. */
 export async function createMachine({ extensions, cases, ownerWords = "full", judgeTimeoutMs }) {
   const { Permissions } = await import(pathToFileURL(join(extensions, "cypher-permissions", "core.ts")).href);
+  // The fake machine's read-only directories, on any host (an extension older than the hook reads the real disk).
+  const commandsModule = await import(pathToFileURL(join(extensions, "cypher-permissions", "commands.ts")).href);
+  commandsModule.setSystemDirectory?.((path) => /^\/(Applications|Library|System|usr|opt\/local)\//.test(path));
   const { UNKNOWN } = await import(pathToFileURL(join(extensions, "cypher-permissions", "shell.ts")).href);
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), "cypher-eval-")));
   const home = join(scratch, "home");
@@ -95,7 +98,10 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
     // real run records it, so a lone creator's printed name counts), else noted from the command alone.
     for (const [index, earlier] of (item.ran ?? []).entries()) {
       try {
-        const output = item.ranOutputs?.[index];
+        // The transcript shows the result with the extension's own note after it ("[permissions] Ran outside the
+        // sandbox …"); the run settles on the command's output without it (cypher-permissions.ts `bashOutcome`).
+        const shown = item.ranOutputs?.[index];
+        const output = typeof shown === "string" ? shown.replace(/\n*\[permissions\][^\n]*(?:\n[^\n]*)*$/, "") : shown;
         if (typeof output === "string" && typeof permissions.planCreated === "function") {
           const plan = permissions.planCreated(expand(earlier), cwd);
           if (plan) permissions.settleCreated(plan, { exitCode: 0, output: expand(output) });

@@ -468,10 +468,49 @@ const DANGEROUS_ENV =
 const BENIGN_ENV =
   /^(NODE_ENV|NODE_NO_WARNINGS|RUST_LOG|RUST_BACKTRACE|RUST_MIN_STACK|CARGO_INCREMENTAL|CARGO_TERM_\w+|CARGO_TARGET_DIR|CARGO_BUILD_JOBS|CARGO_PROFILE_\w+_(DEBUG|OPT_LEVEL|INCREMENTAL|CODEGEN_UNITS|LTO|STRIP|SPLIT_DEBUGINFO)|PYTHONUNBUFFERED|PYTHONDONTWRITEBYTECODE|PYTHONIOENCODING|PYTHONHASHSEED|GIT_TERMINAL_PROMPT)$/;
 
-/** Whether a variable may stand assigned in front of a command: it does not change how programs load or run. */
-export function benignEnv(name: string): boolean {
+/** Variables that pick the directory a toolchain loads from (`DEVELOPER_DIR`, `SDKROOT`, `JAVA_HOME`, `*_ROOT`). */
+const LOCATION_ENV = /^(DEVELOPER_DIR|SDKROOT|\w*_HOME|\w*ROOT)$/;
+
+/**
+ * Whether a variable may stand assigned in front of a command: it does not
+ * change how programs load or run. A location variable may when its value
+ * is a system location: a literal absolute directory that exists, outside
+ * the home folder, that this user can't write (`DEVELOPER_DIR=/Applications/
+ * Xcode.app/Contents/Developer`): it picks one installed toolchain, not code
+ * the agent could have put there.
+ */
+export function benignEnv(name: string, value?: string): boolean {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return false;
-  return BENIGN_ENV.test(name) || !DANGEROUS_ENV.test(name);
+  if (BENIGN_ENV.test(name) || !DANGEROUS_ENV.test(name)) return true;
+  return LOCATION_ENV.test(name) && value !== undefined && systemLocation(value);
+}
+
+/** A literal absolute directory outside the home folder that exists and this user can't write. */
+export function systemLocation(value: string): boolean {
+  if (value === UNKNOWN || !isAbsolute(value) || /(^|\/)\.\.(\/|$)|[\s$`*?[\]{}~]/.test(value)) return false;
+  return systemDirectory(value);
+}
+
+let systemDirectory = (path: string): boolean => {
+  try {
+    const real = realpathSync(value);
+    const home = process.env.HOME ? realpathSync(process.env.HOME) : undefined;
+    if (home && (real === home || real.startsWith(`${home}/`))) return false;
+    if (!statSync(real).isDirectory()) return false;
+    try {
+      accessSync(real, constants.W_OK);
+      return false;
+    } catch {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+};
+
+/** Replays and tests: the machine's read-only directories, as a fake machine has them. */
+export function setSystemDirectory(check: (path: string) => boolean): void {
+  systemDirectory = check;
 }
 
 /** A command seen through the wrappers that only run it (`nohup`, `timeout 30`, `env NAME=value`). */
@@ -537,7 +576,7 @@ export function unwrap(words: readonly string[]): Unwrapped | undefined {
           if (word === UNKNOWN || word.startsWith("-")) return undefined;
           const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(word);
           if (!assignment) break;
-          if (!benignEnv(assignment[1])) return undefined;
+          if (!benignEnv(assignment[1], word.slice(assignment[0].length))) return undefined;
           env.push(assignment[1]);
         }
         break;
