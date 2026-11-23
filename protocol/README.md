@@ -23,6 +23,7 @@ Every language loads the same JSON file and runs every case in it.
 | Device trust: chain entries (`signingBytes`, hash, replay rules, refusal reasons), pairing code and MACs, Noise IK transcript and fragmenting | [`crates/trust/src`](../crates/trust/src); generator and check [`crates/trust/tests/vectors.rs`](../crates/trust/tests/vectors.rs) | [`apps/edge/src/trust/trust-chain.ts`](../apps/edge/src/trust/trust-chain.ts) (chain only); [`trust-chain.test.ts`](../apps/edge/src/trust/trust-chain.test.ts), [`trust-room.workerd.test.ts`](../apps/edge/test/workerd/trust-room.workerd.test.ts) | [`Sync/DeviceTrust.swift`](../apps/ios/Cypher/Sync/DeviceTrust.swift); [`scripts/tests/device-trust-vectors.swift`](../scripts/tests/device-trust-vectors.swift) | [`device-trust-v1.json`](vectors/device-trust-v1.json) |
 | Signed durable commands and launch records: the bytes a signature covers, from the entry's Loro value tree | [`crates/doc/src/command_auth.rs`](../crates/doc/src/command_auth.rs); generator and check [`crates/doc/tests/command_vectors.rs`](../crates/doc/tests/command_vectors.rs) | — (the Edge never sees inside commands) | [`Sync/CommandSignature.swift`](../apps/ios/Cypher/Sync/CommandSignature.swift); [`scripts/tests/command-signing-vectors.swift`](../scripts/tests/command-signing-vectors.swift), [`DeviceTrustTests.swift`](../apps/ios/CypherTests/Sync/DeviceTrustTests.swift) | [`command-signing-v1.json`](vectors/command-signing-v1.json) |
 | Git refs in chat text (`#123`, `owner/repo#123`, GitHub pull/issue/commit URLs, commit SHAs) for the hover cards | [`crates/proto/src/git_refs.rs`](../crates/proto/src/git_refs.rs) (`find_git_refs`; inline tests) | — | — (port pending) | [`git-refs-v1.json`](vectors/git-refs-v1.json) |
+| Chat file previews: which paths preview (csv, tsv, pdf, video, html, svg), size caps, the csv/tsv head as a table, path-only paragraphs | [`crates/ui/src/markdown/file_preview.rs`](../crates/ui/src/markdown/file_preview.rs) (inline tests, `shared_*`) | — | — (port pending) | [`file-previews-v1.json`](vectors/file-previews-v1.json) |
 | Preview reducer | [`crates/sync/src/preview_link.rs`](../crates/sync/src/preview_link.rs) (inline tests) | — | [`Sync/PreviewProjection.swift`](../apps/ios/Cypher/Sync/PreviewProjection.swift); [`PreviewProjectionTests.swift`](../apps/ios/CypherTests/Sync/PreviewProjectionTests.swift) | [`preview-reducer-v1.json`](vectors/preview-reducer-v1.json) |
 
 The two preview files are also run without a simulator: the macOS stage of
@@ -142,6 +143,22 @@ exactly `expect`, in text order. Each expectation is
 - `number` for `issue`; `sha` (lowercase) for `commit`.
 
 The rules themselves are documented once, in the Rust module's header.
+
+### `file-previews-v1.json`
+
+An object; its `description` is the full spec (cleaning and resolving paths
+follows `image-sources-v1.json`).
+
+- `caps`: `{tableReadBytes, tableRows, columnChars, pdfMaxBytes, videoMaxBytes,
+  htmlMaxBytes}` (bytes, rows, characters).
+- `kinds`: `{name, path, expect: {kind}}` — `kind(path)` is one of `csv`, `tsv`,
+  `pdf`, `video`, `html`, `svg`, `none`.
+- `table`: `{name, text, delimiter, complete, expect: {header, columns?, rows,
+  totalRows, truncated}}` — parsing `text` (`complete: false`: only the file's
+  head was read) gives exactly `expect`; `columns` is present only with
+  `header: true`.
+- `lines`: `{name, line, src}` — the file a path-only paragraph previews, or
+  `null`.
 
 ### `device-trust-v1.json`
 

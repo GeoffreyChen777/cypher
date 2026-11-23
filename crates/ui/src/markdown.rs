@@ -17,6 +17,7 @@
 pub mod artifact;
 pub mod code_ref;
 pub mod diff_fence;
+pub mod file_preview;
 pub mod find;
 pub mod image;
 pub mod image_source;

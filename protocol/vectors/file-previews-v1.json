@@ -1,0 +1,1230 @@
+{
+  "version": 1,
+  "description": "Rich previews for files a chat reply points at (a file reference, a link, or a paragraph that is only a path), shared by the desktop (crates/ui/src/markdown/file_preview.rs) and iOS. Paths are cleaned and resolved exactly as local paths in image-sources-v1.json (`file://` (optionally `localhost`) and `cypher-file:` stripped, `?query` and `#fragment` dropped, percent-escapes decoded, a trailing `:12`, `:12-20` or `:12:5` line suffix dropped); URLs and other schemes (`https:`, `data:`, `mailto:`) are never previewed here. `caps` (bytes, rows, characters): `tableReadBytes` = only this much of the head of a csv/tsv file is read; `tableRows` = data rows shown; `columnChars` = the most characters a shown cell has; `pdfMaxBytes`, `videoMaxBytes`, `htmlMaxBytes` (html and svg) = larger files show a 'too large' placeholder instead of a preview. `kinds`: `kind(path)` by the cleaned path's extension, any case: `csv` (.csv), `tsv` (.tsv, .tab), `pdf` (.pdf), `video` (.mp4, .mov, .m4v, .webm), `html` (.html, .htm), `svg` (.svg), else `none` (also a name that is only an extension, like `.csv`). `table`: `parseTable(text, delimiter, complete)` where `text` is what was read (UTF-8, invalid bytes replaced), `delimiter` is `,` (csv) or a tab (tsv) and `complete` is false when `text` is only the head of the file. Rules, in order: (1) one leading U+FEFF is dropped. (2) Records end at CRLF, LF or a lone CR outside quotes; fields split at the delimiter outside quotes. A field whose first character is `\"` is quoted: `\"\"` inside is one `\"`, delimiters and line breaks inside are kept, and characters after the closing quote are appended as written; a `\"` elsewhere is literal. In a complete text an unclosed quote runs to the end. Both delimiters use the same rules. (3) When `complete` is false the last record is dropped unless the text ends with a line break outside quotes (it may be cut). (4) Records that are one empty field (blank lines) are dropped. (5) Each cell shows as: every CRLF, CR or LF replaced by one space, then trimmed of whitespace. (6) The first record is a header when at least one record follows it and its cells are all non-empty, none is numeric, and no two are equal. Numeric: an optional + or -, digits with an optional fraction (or a fraction alone, `.5`), an optional exponent (`e`/`E`, optional sign, digits), an optional trailing `%`; thousands separators are not numeric. (7) `totalRows` = data records (the header excluded); `rows` = the first `tableRows` of them; `columns` = the header's cells (absent when `header` is false). Every shown row and `columns` is padded with empty cells to the widest of them. (8) A cell longer than `columnChars` Unicode scalar values (Swift: `unicodeScalars`, not `count`) keeps its first `columnChars - 1` and ends with `…` (U+2026). (9) `truncated` = not `complete`: the count is then shown as `totalRows`+ (\"20+ rows\"), else exactly. `lines`: `line` is a whole reply paragraph's Markdown source; `src` is the file it shows as a preview block, or null: the paragraph is one token by the image-sources-v1.json `lines` rules (bare, in backticks or in <…>; no whitespace; bare tokens without * [ ] ( ) < > ` !) whose `kind` is not `none`; an svg is null here because it is an image (image-sources-v1.json shows it).",
+  "caps": {
+    "tableReadBytes": 262144,
+    "tableRows": 20,
+    "columnChars": 40,
+    "pdfMaxBytes": 52428800,
+    "videoMaxBytes": 209715200,
+    "htmlMaxBytes": 5242880
+  },
+  "kinds": [
+    {
+      "name": "csv",
+      "path": "out/results.csv",
+      "expect": {
+        "kind": "csv"
+      }
+    },
+    {
+      "name": "csv upper case",
+      "path": "/w/proj/DATA.CSV",
+      "expect": {
+        "kind": "csv"
+      }
+    },
+    {
+      "name": "tsv",
+      "path": "table.tsv",
+      "expect": {
+        "kind": "tsv"
+      }
+    },
+    {
+      "name": "tab is tsv",
+      "path": "export.TAB",
+      "expect": {
+        "kind": "tsv"
+      }
+    },
+    {
+      "name": "pdf",
+      "path": "~/papers/paper.pdf",
+      "expect": {
+        "kind": "pdf"
+      }
+    },
+    {
+      "name": "pdf mixed case",
+      "path": "Report.Pdf",
+      "expect": {
+        "kind": "pdf"
+      }
+    },
+    {
+      "name": "mp4",
+      "path": "renders/clip.mp4",
+      "expect": {
+        "kind": "video"
+      }
+    },
+    {
+      "name": "mov",
+      "path": "/tmp/screen.MOV",
+      "expect": {
+        "kind": "video"
+      }
+    },
+    {
+      "name": "m4v",
+      "path": "a.m4v",
+      "expect": {
+        "kind": "video"
+      }
+    },
+    {
+      "name": "webm",
+      "path": "a.webm",
+      "expect": {
+        "kind": "video"
+      }
+    },
+    {
+      "name": "html",
+      "path": "site/index.html",
+      "expect": {
+        "kind": "html"
+      }
+    },
+    {
+      "name": "htm",
+      "path": "page.HTM",
+      "expect": {
+        "kind": "html"
+      }
+    },
+    {
+      "name": "svg",
+      "path": "chart.svg",
+      "expect": {
+        "kind": "svg"
+      }
+    },
+    {
+      "name": "line suffix #L",
+      "path": "data/x.csv#L12",
+      "expect": {
+        "kind": "csv"
+      }
+    },
+    {
+      "name": "line suffix :12",
+      "path": "data/x.csv:12",
+      "expect": {
+        "kind": "csv"
+      }
+    },
+    {
+      "name": "line range suffix",
+      "path": "data/x.tsv:12-20",
+      "expect": {
+        "kind": "tsv"
+      }
+    },
+    {
+      "name": "line and column suffix",
+      "path": "doc.pdf:3:5",
+      "expect": {
+        "kind": "pdf"
+      }
+    },
+    {
+      "name": "query string",
+      "path": "page.html?theme=dark",
+      "expect": {
+        "kind": "html"
+      }
+    },
+    {
+      "name": "file url",
+      "path": "file:///Users/me/out/a.pdf",
+      "expect": {
+        "kind": "pdf"
+      }
+    },
+    {
+      "name": "file url with localhost",
+      "path": "file://localhost/tmp/b.mov",
+      "expect": {
+        "kind": "video"
+      }
+    },
+    {
+      "name": "cypher-file scheme",
+      "path": "cypher-file:/w/proj/x.csv",
+      "expect": {
+        "kind": "csv"
+      }
+    },
+    {
+      "name": "percent-encoded name",
+      "path": "out/my%20table.csv",
+      "expect": {
+        "kind": "csv"
+      }
+    },
+    {
+      "name": "percent-encoded extension",
+      "path": "a.%63sv",
+      "expect": {
+        "kind": "csv"
+      }
+    },
+    {
+      "name": "https url is not previewed",
+      "path": "https://example.com/a.pdf",
+      "expect": {
+        "kind": "none"
+      }
+    },
+    {
+      "name": "http url is not previewed",
+      "path": "http://example.com/a.csv",
+      "expect": {
+        "kind": "none"
+      }
+    },
+    {
+      "name": "data uri",
+      "path": "data:text/csv;base64,YSxi",
+      "expect": {
+        "kind": "none"
+      }
+    },
+    {
+      "name": "mailto",
+      "path": "mailto:a@b.csv",
+      "expect": {
+        "kind": "none"
+      }
+    },
+    {
+      "name": "image is not a file preview",
+      "path": "shot.png",
+      "expect": {
+        "kind": "none"
+      }
+    },
+    {
+      "name": "markdown",
+      "path": "README.md",
+      "expect": {
+        "kind": "none"
+      }
+    },
+    {
+      "name": "no extension",
+      "path": "Makefile",
+      "expect": {
+        "kind": "none"
+      }
+    },
+    {
+      "name": "dotfile only",
+      "path": ".csv",
+      "expect": {
+        "kind": "none"
+      }
+    },
+    {
+      "name": "extension in a folder name only",
+      "path": "a.csv/readme",
+      "expect": {
+        "kind": "none"
+      }
+    },
+    {
+      "name": "double extension uses the last",
+      "path": "a.csv.gz",
+      "expect": {
+        "kind": "none"
+      }
+    },
+    {
+      "name": "double extension ending in csv",
+      "path": "a.backup.csv",
+      "expect": {
+        "kind": "csv"
+      }
+    },
+    {
+      "name": "empty",
+      "path": "",
+      "expect": {
+        "kind": "none"
+      }
+    },
+    {
+      "name": "whitespace around",
+      "path": "  out/a.csv  ",
+      "expect": {
+        "kind": "csv"
+      }
+    }
+  ],
+  "table": [
+    {
+      "name": "header and numbers",
+      "text": "name,score\nada,3\nbob,4\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "name",
+          "score"
+        ],
+        "rows": [
+          [
+            "ada",
+            "3"
+          ],
+          [
+            "bob",
+            "4"
+          ]
+        ],
+        "totalRows": 2,
+        "truncated": false
+      }
+    },
+    {
+      "name": "all text still has a header",
+      "text": "name,city\nAda,London\nBob,Paris",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "name",
+          "city"
+        ],
+        "rows": [
+          [
+            "Ada",
+            "London"
+          ],
+          [
+            "Bob",
+            "Paris"
+          ]
+        ],
+        "totalRows": 2,
+        "truncated": false
+      }
+    },
+    {
+      "name": "numeric first row is data",
+      "text": "1,2\n3,4\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": false,
+        "rows": [
+          [
+            "1",
+            "2"
+          ],
+          [
+            "3",
+            "4"
+          ]
+        ],
+        "totalRows": 2,
+        "truncated": false
+      }
+    },
+    {
+      "name": "first row with an empty cell is data",
+      "text": "a,,c\nd,e,f\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": false,
+        "rows": [
+          [
+            "a",
+            "",
+            "c"
+          ],
+          [
+            "d",
+            "e",
+            "f"
+          ]
+        ],
+        "totalRows": 2,
+        "truncated": false
+      }
+    },
+    {
+      "name": "duplicate first-row cells are data",
+      "text": "x,x\n1,2\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": false,
+        "rows": [
+          [
+            "x",
+            "x"
+          ],
+          [
+            "1",
+            "2"
+          ]
+        ],
+        "totalRows": 2,
+        "truncated": false
+      }
+    },
+    {
+      "name": "first row with a percentage is data",
+      "text": "rate,12%\nb,3\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": false,
+        "rows": [
+          [
+            "rate",
+            "12%"
+          ],
+          [
+            "b",
+            "3"
+          ]
+        ],
+        "totalRows": 2,
+        "truncated": false
+      }
+    },
+    {
+      "name": "thousands separators are text",
+      "text": "\"1,000\",name\nx,y\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "1,000",
+          "name"
+        ],
+        "rows": [
+          [
+            "x",
+            "y"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "one row only is data",
+      "text": "name,score\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": false,
+        "rows": [
+          [
+            "name",
+            "score"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "empty text",
+      "text": "",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": false,
+        "rows": [],
+        "totalRows": 0,
+        "truncated": false
+      }
+    },
+    {
+      "name": "only blank lines",
+      "text": "\n\r\n\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": false,
+        "rows": [],
+        "totalRows": 0,
+        "truncated": false
+      }
+    },
+    {
+      "name": "quoted comma",
+      "text": "a,b\n\"x, y\",2\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "x, y",
+            "2"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "escaped quotes",
+      "text": "a,b\n\"say \"\"hi\"\"\",2\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "say \"hi\"",
+            "2"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "newline inside quotes becomes a space",
+      "text": "a,b\n\"line one\nline two\",2\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "line one line two",
+            "2"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "crlf inside quotes becomes one space",
+      "text": "a,b\r\n\"p\r\nq\",2\r\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "p q",
+            "2"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "text after a closing quote is kept",
+      "text": "a,b\n\"x\"y,2\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "xy",
+            "2"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "a quote mid-field is literal",
+      "text": "a,b\nsay \"hi\",2\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "say \"hi\"",
+            "2"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "unclosed quote runs to the end of a complete text",
+      "text": "a,b\n\"open,1\n2,3",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "open,1 2,3",
+            ""
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "bom is dropped",
+      "text": "\ufeffid,name\n1,a\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "id",
+          "name"
+        ],
+        "rows": [
+          [
+            "1",
+            "a"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "crlf records",
+      "text": "a,b\r\n1,2\r\n3,4\r\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "1",
+            "2"
+          ],
+          [
+            "3",
+            "4"
+          ]
+        ],
+        "totalRows": 2,
+        "truncated": false
+      }
+    },
+    {
+      "name": "lone cr records",
+      "text": "a,b\r1,2\r",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "1",
+            "2"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "blank lines are skipped",
+      "text": "a,b\n\n1,2\n\n\n3,4\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "1",
+            "2"
+          ],
+          [
+            "3",
+            "4"
+          ]
+        ],
+        "totalRows": 2,
+        "truncated": false
+      }
+    },
+    {
+      "name": "a row of empty fields is kept",
+      "text": "a,b\n,\n1,2\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "",
+            ""
+          ],
+          [
+            "1",
+            "2"
+          ]
+        ],
+        "totalRows": 2,
+        "truncated": false
+      }
+    },
+    {
+      "name": "ragged rows are padded",
+      "text": "a,b,c\n1\n1,2,3,4\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b",
+          "c",
+          ""
+        ],
+        "rows": [
+          [
+            "1",
+            "",
+            "",
+            ""
+          ],
+          [
+            "1",
+            "2",
+            "3",
+            "4"
+          ]
+        ],
+        "totalRows": 2,
+        "truncated": false
+      }
+    },
+    {
+      "name": "cells are trimmed",
+      "text": "a , b\n 1 ,\t2 \n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "1",
+            "2"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "long cells are clipped to 40 characters",
+      "text": "a,b\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,2\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…",
+            "2"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "a 40-character cell is not clipped",
+      "text": "a\nyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a"
+        ],
+        "rows": [
+          [
+            "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "clipping counts unicode scalars",
+      "text": "a\nééééééééééééééééééééééééééééééééééééééééé\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a"
+        ],
+        "rows": [
+          [
+            "ééééééééééééééééééééééééééééééééééééééé…"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "the header is clipped too",
+      "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,b\n1,2\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…",
+          "b"
+        ],
+        "rows": [
+          [
+            "1",
+            "2"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "rows past 20 are counted, not shown",
+      "text": "name,score\nr1,1\nr2,2\nr3,3\nr4,4\nr5,5\nr6,6\nr7,7\nr8,8\nr9,9\nr10,10\nr11,11\nr12,12\nr13,13\nr14,14\nr15,15\nr16,16\nr17,17\nr18,18\nr19,19\nr20,20\nr21,21\nr22,22\nr23,23\nr24,24\nr25,25\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "name",
+          "score"
+        ],
+        "rows": [
+          [
+            "r1",
+            "1"
+          ],
+          [
+            "r2",
+            "2"
+          ],
+          [
+            "r3",
+            "3"
+          ],
+          [
+            "r4",
+            "4"
+          ],
+          [
+            "r5",
+            "5"
+          ],
+          [
+            "r6",
+            "6"
+          ],
+          [
+            "r7",
+            "7"
+          ],
+          [
+            "r8",
+            "8"
+          ],
+          [
+            "r9",
+            "9"
+          ],
+          [
+            "r10",
+            "10"
+          ],
+          [
+            "r11",
+            "11"
+          ],
+          [
+            "r12",
+            "12"
+          ],
+          [
+            "r13",
+            "13"
+          ],
+          [
+            "r14",
+            "14"
+          ],
+          [
+            "r15",
+            "15"
+          ],
+          [
+            "r16",
+            "16"
+          ],
+          [
+            "r17",
+            "17"
+          ],
+          [
+            "r18",
+            "18"
+          ],
+          [
+            "r19",
+            "19"
+          ],
+          [
+            "r20",
+            "20"
+          ]
+        ],
+        "totalRows": 25,
+        "truncated": false
+      }
+    },
+    {
+      "name": "head only: the cut last record is dropped",
+      "text": "name,score\nada,3\nbob,4\nca",
+      "delimiter": ",",
+      "complete": false,
+      "expect": {
+        "header": true,
+        "columns": [
+          "name",
+          "score"
+        ],
+        "rows": [
+          [
+            "ada",
+            "3"
+          ],
+          [
+            "bob",
+            "4"
+          ]
+        ],
+        "totalRows": 2,
+        "truncated": true
+      }
+    },
+    {
+      "name": "head only: ending on a line break keeps the last record",
+      "text": "name,score\nada,3\nbob,4\n",
+      "delimiter": ",",
+      "complete": false,
+      "expect": {
+        "header": true,
+        "columns": [
+          "name",
+          "score"
+        ],
+        "rows": [
+          [
+            "ada",
+            "3"
+          ],
+          [
+            "bob",
+            "4"
+          ]
+        ],
+        "totalRows": 2,
+        "truncated": true
+      }
+    },
+    {
+      "name": "head only: a cut quoted field is dropped",
+      "text": "a,b\n1,2\n\"open\nstill",
+      "delimiter": ",",
+      "complete": false,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "1",
+            "2"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": true
+      }
+    },
+    {
+      "name": "head only: a line break inside quotes does not end the text",
+      "text": "a,b\n1,2\n\"x\n",
+      "delimiter": ",",
+      "complete": false,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "1",
+            "2"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": true
+      }
+    },
+    {
+      "name": "tsv",
+      "text": "name\tscore\nada\t3\n",
+      "delimiter": "\t",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "name",
+          "score"
+        ],
+        "rows": [
+          [
+            "ada",
+            "3"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "tsv keeps commas",
+      "text": "a\tb\nx, y\t2\n",
+      "delimiter": "\t",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "x, y",
+            "2"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "tsv quoting",
+      "text": "a\tb\n\"x\ty\"\t2\n",
+      "delimiter": "\t",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "a",
+          "b"
+        ],
+        "rows": [
+          [
+            "x\ty",
+            "2"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    },
+    {
+      "name": "numeric forms",
+      "text": "k,v\na,-1.5\nb,.5\nc,+2e10\nd,3E-2\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "k",
+          "v"
+        ],
+        "rows": [
+          [
+            "a",
+            "-1.5"
+          ],
+          [
+            "b",
+            ".5"
+          ],
+          [
+            "c",
+            "+2e10"
+          ],
+          [
+            "d",
+            "3E-2"
+          ]
+        ],
+        "totalRows": 4,
+        "truncated": false
+      }
+    },
+    {
+      "name": "signs, dots and exponents alone are not numeric",
+      "text": "-,.\ne,1\n",
+      "delimiter": ",",
+      "complete": true,
+      "expect": {
+        "header": true,
+        "columns": [
+          "-",
+          "."
+        ],
+        "rows": [
+          [
+            "e",
+            "1"
+          ]
+        ],
+        "totalRows": 1,
+        "truncated": false
+      }
+    }
+  ],
+  "lines": [
+    {
+      "name": "bare csv path",
+      "line": "out/results.csv",
+      "src": "out/results.csv"
+    },
+    {
+      "name": "in backticks",
+      "line": "`data/table.tsv`",
+      "src": "data/table.tsv"
+    },
+    {
+      "name": "in angle brackets",
+      "line": "<renders/clip.mp4>",
+      "src": "renders/clip.mp4"
+    },
+    {
+      "name": "with a line suffix",
+      "line": "`out/results.csv:3`",
+      "src": "out/results.csv:3"
+    },
+    {
+      "name": "trimmed",
+      "line": "  report.pdf  ",
+      "src": "report.pdf"
+    },
+    {
+      "name": "html page",
+      "line": "site/index.html",
+      "src": "site/index.html"
+    },
+    {
+      "name": "svg is an image, not a file preview",
+      "line": "chart.svg",
+      "src": null
+    },
+    {
+      "name": "prose",
+      "line": "see out/results.csv",
+      "src": null
+    },
+    {
+      "name": "bold path",
+      "line": "**out/results.csv**",
+      "src": null
+    },
+    {
+      "name": "a link",
+      "line": "[results](out/results.csv)",
+      "src": null
+    },
+    {
+      "name": "an https url",
+      "line": "https://example.com/a.pdf",
+      "src": null
+    },
+    {
+      "name": "other file",
+      "line": "src/main.rs",
+      "src": null
+    }
+  ]
+}

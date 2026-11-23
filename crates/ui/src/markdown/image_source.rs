@@ -185,22 +185,49 @@ pub fn classify(src: &str, context: &Context) -> Source {
             url: src.to_owned(),
         };
     }
+    let Some(path) = local_path(src) else {
+        return Source::NotImage;
+    };
+    let Some(format) = Format::for_path(&path) else {
+        return Source::NotImage;
+    };
+    local(&path, format, context)
+}
+
+/// The host path a source names, as written but cleaned: `file://`
+/// (optionally `localhost`) and `cypher-file:` stripped, `?query` and
+/// `#fragment` dropped, percent-escapes decoded and a `:12`, `:12-20` or
+/// `:12:5` line suffix dropped. `None` for URLs and other schemes (`https:`,
+/// `data:`, `mailto:`) and for an empty source.
+pub fn local_path(src: &str) -> Option<String> {
+    let src = src.trim();
+    if src.is_empty() {
+        return None;
+    }
     let path = if let Some(rest) = strip_prefix_ci(src, "file://") {
         rest.strip_prefix("localhost").unwrap_or(rest)
     } else if let Some(rest) = strip_prefix_ci(src, "cypher-file:") {
         rest
     } else if has_scheme(src) {
-        return Source::NotImage;
+        return None;
     } else {
         src
     };
     let path = path.split(['#', '?']).next().unwrap_or_default();
     let path = percent_decode(path).unwrap_or_else(|| path.to_owned());
     let path = strip_line_suffix(&path);
-    let Some(format) = Format::for_path(path) else {
-        return Source::NotImage;
-    };
-    local(path, format, context)
+    (!path.is_empty()).then(|| path.to_owned())
+}
+
+/// Where a cleaned local path ([`local_path`]) resolves in `context`, by the
+/// same rules as a local image, for any kind of file the chat previews: the
+/// candidates to read in order, or `Err` with the path outside every root.
+pub fn resolve_local(path: &str, context: &Context) -> Result<Vec<Candidate>, String> {
+    match local(path, Format::Png, context) {
+        Source::Local { candidates, .. } => Ok(candidates),
+        Source::Outside { path } => Err(path),
+        _ => Err(path.to_owned()),
+    }
 }
 
 /// The image a whole reply paragraph names, given as its Markdown source
@@ -208,6 +235,21 @@ pub fn classify(src: &str, context: &Context) -> Source {
 /// supported image file. `None` for anything else (prose, a link, several
 /// tokens, a path to another kind of file, plain `http://`).
 pub fn image_line(line: &str) -> Option<String> {
+    let inner = line_token(line)?;
+    let named = match classify(inner, &Context::default()) {
+        Source::Local { .. } | Source::Outside { .. } => true,
+        // A bare URL is an image only when its path says so.
+        Source::Remote { url } => {
+            remote_extension(&url).is_some_and(|ext| Format::for_extension(ext).is_some())
+        }
+        Source::Data { .. } | Source::Rejected(_) | Source::NotImage => false,
+    };
+    named.then(|| inner.to_owned())
+}
+
+/// The one token a whole paragraph is (trimmed): bare, in backticks or in
+/// `<…>`, without whitespace; bare tokens hold none of `* [ ] ( ) < > ` !`.
+pub(crate) fn line_token(line: &str) -> Option<&str> {
     let line = line.trim();
     let inner = if let Some(code) = line.strip_prefix('`').and_then(|l| l.strip_suffix('`')) {
         code.trim()
@@ -222,15 +264,7 @@ pub fn image_line(line: &str) -> Option<String> {
     if inner.is_empty() || inner.contains(char::is_whitespace) || inner.contains('`') {
         return None;
     }
-    let named = match classify(inner, &Context::default()) {
-        Source::Local { .. } | Source::Outside { .. } => true,
-        // A bare URL is an image only when its path says so.
-        Source::Remote { url } => {
-            remote_extension(&url).is_some_and(|ext| Format::for_extension(ext).is_some())
-        }
-        Source::Data { .. } | Source::Rejected(_) | Source::NotImage => false,
-    };
-    named.then(|| inner.to_owned())
+    Some(inner)
 }
 
 fn data_uri(rest: &str) -> Source {
@@ -378,7 +412,7 @@ fn strip_line_suffix(path: &str) -> &str {
     out
 }
 
-fn extension(path: &str) -> Option<&str> {
+pub(crate) fn extension(path: &str) -> Option<&str> {
     let name = path.rsplit('/').next()?;
     let dot = name.rfind('.').filter(|dot| *dot > 0)?;
     Some(&name[dot + 1..])
