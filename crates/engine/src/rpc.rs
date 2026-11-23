@@ -879,6 +879,7 @@ impl RpcService for EngineRpc {
                 Box::pin(github::search_github_issues(self, params)).await
             }
             methods::GET_GITHUB_ISSUE => Box::pin(github::get_github_issue(self, params)).await,
+            methods::RESOLVE_GIT_REF => Box::pin(github::resolve_git_ref(self, params)).await,
             methods::GITHUB_ACCOUNT_STATUS => RpcReply::value(&self.github()?.status().await),
             methods::START_GITHUB_LOGIN => {
                 let start = self.github()?.start_login().await.map_err(failed)?;

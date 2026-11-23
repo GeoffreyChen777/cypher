@@ -587,6 +587,18 @@ pub(super) struct GithubIssueParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct ResolveGitRefParams {
+    pub(super) chat_id: String,
+    /// A workspace's own chat: resolve in this granted project's checkout
+    /// (see [`WorkspaceFileParams::root_space_id`]).
+    #[serde(default)]
+    pub(super) root_space_id: Option<String>,
+    #[serde(rename = "ref")]
+    pub(super) git_ref: cypher_proto::GitRef,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct GithubLoginParams {
     pub(super) login_id: String,
 }

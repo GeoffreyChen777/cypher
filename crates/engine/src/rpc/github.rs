@@ -1,4 +1,4 @@
-//! GitHub issue lookup and the device sign-in flow.
+//! GitHub issue lookup, chat ref previews and the device sign-in flow.
 
 use serde_json::Value;
 
@@ -34,6 +34,21 @@ pub(super) async fn get_github_issue(rpc: &EngineRpc, params: Value) -> Result<R
         .await
         .map_err(failed)?;
     RpcReply::value(&snapshot)
+}
+
+/// `ResolveGitRef`: the hover card of a ref in a chat on this device. An
+/// unknown chat or malformed ref is an error; everything about the lookup
+/// itself answers quietly (`notFound` / `unavailable`).
+pub(super) async fn resolve_git_ref(rpc: &EngineRpc, params: Value) -> Result<RpcReply, RpcError> {
+    let p: ResolveGitRefParams = parse_params(params)?;
+    if !p.git_ref.is_valid() {
+        return Err(RpcError::BadParams("invalid git reference".into()));
+    }
+    let root = rpc
+        .chat_file_root(&p.chat_id, p.root_space_id.as_deref())
+        .await?;
+    let resolution = crate::git::ref_previews::resolve(rpc.github().ok(), &root, &p.git_ref).await;
+    RpcReply::value(&resolution)
 }
 
 pub(super) fn github_login(

@@ -211,6 +211,12 @@ pub mod methods {
     pub const SEARCH_GITHUB_ISSUES: &str = "SearchGithubIssues";
     /// Bounded send-time snapshot of one issue; {repo, number}.
     pub const GET_GITHUB_ISSUE: &str = "GetGithubIssue";
+    /// The hover card of a pull request, issue or commit a chat reply
+    /// mentions, answered on the chat's host; {chatId, rootSpaceId?, ref:
+    /// `GitRef`} → `GitRefResolution`. Commits come from the checkout's git,
+    /// numbers from GitHub (cached briefly); a failure is a quiet
+    /// `unavailable`, never an error.
+    pub const RESOLVE_GIT_REF: &str = "ResolveGitRef";
     // GitHub sign-in (relay-forwardable — every device holds its own login).
     pub const GITHUB_ACCOUNT_STATUS: &str = "GithubAccountStatus";
     /// Device-flow sign-in with the Cypher GitHub App; the target engine
@@ -568,6 +574,7 @@ pub mod methods {
         MethodSpec::unary(SEARCH_FILES).forwardable(),
         MethodSpec::unary(SEARCH_GITHUB_ISSUES).forwardable(),
         MethodSpec::unary(GET_GITHUB_ISSUE).forwardable(),
+        MethodSpec::unary(RESOLVE_GIT_REF).forwardable(),
         // GitHub logins are per-device, like agent CLI logins.
         MethodSpec::unary(GITHUB_ACCOUNT_STATUS).forwardable(),
         MethodSpec::unary(START_GITHUB_LOGIN).forwardable(),
