@@ -1113,10 +1113,11 @@ add`); a later send of such a file, or a push from such a repository, is the flo
 archiver's or sender's folder operand holding a sensitive file is a source. Writes into a folder
 a command names but whose files it doesn't (`tar -x -C`, `unzip -d`, `git --work-tree`, `find
 ROOT -exec`) are the floor where that folder could hold the permission system, as is code with
-a write capability that names one of its files. Pasted or quoted text in the owner's message
+a write capability that names one of its files (the command's own assignments are read into
+its code: `D=<agent> node -e "…process.env.D+'/permissions.json'…"`). Pasted or quoted text in the owner's message
 (fences, `>` quotes, `$ ` prompt lines) counts as a request only when the owner's own words
 around it ask for it. Still judge-only (with evidence naming the danger): a shell function's
-arguments, a path from an assignment prefix read inside code, downloaded code run, a hook
+arguments, downloaded code run, a hook
 written then triggered, a file sent to the clipboard; and an approved plan card's agent-written
 text counting as consent (kept by design; open question). Details: RESULTS.md "Round 5, step 2".
 
