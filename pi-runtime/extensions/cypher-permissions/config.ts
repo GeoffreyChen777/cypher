@@ -168,6 +168,10 @@ export const DEFAULT_PROTECTED: readonly string[] = [
   "~/.cypher*/*/pi-runtime/agent/extensions/**",
   "~/.cypher*/pi-runtime/versions/**",
   "~/.cypher*/*/pi-runtime/versions/**",
+  // The permission system's own state: what each chat made (ledger.ts), the judge's health.
+  "~/.cypher*/pi-runtime/agent/cypher-permissions/**",
+  "~/.cypher*/*/pi-runtime/agent/cypher-permissions/**",
+  "~/.pi/agent/cypher-permissions/**",
   // A project's own rules can only tighten (deny or ask): removing one loosens them.
   "<root>/.pi/permissions.json",
   "<root>/.gitmodules",
@@ -416,15 +420,17 @@ export const DEFAULT_LEVELS: Record<LevelName, LevelMatrix> = {
 };
 
 /**
- * Model first for what is not dangerous: the reviewing model approves what
- * plainly serves the user's request and asks them about the rest. Writes to
+ * Model first for every kind of request (round 3, 2026-11-23): the reviewing
+ * model decides, and asks the owner only with a concrete concern. Writes to
  * Cypher's own data (`self.write`) and protected files (`protected.write`)
- * are a human's alone (`approvalMode`), as is every dangerous command
- * (risk.ts).
+ * are dangers it approves once, never remembered; only the floor (floor.ts:
+ * the permission system's own files, a secret leaving the machine, no
+ * reviewing model) asks without it. The owner may set any kind to `ask`.
  */
 export const DEFAULT_APPROVAL: Record<string, ApprovalMode> = {
   "external.write": "assisted",
   "protected.write": "assisted",
+  "self.write": "assisted",
   "sensitive.read": "assisted",
   "sensitive.write": "assisted",
   network: "assisted",
@@ -438,7 +444,8 @@ export function defaultConfig(agentDir?: string): PermissionsConfig {
     defaultLevel: "standard",
     levels: structuredClone(DEFAULT_LEVELS),
     approval: { ...DEFAULT_APPROVAL },
-    judge: { model: null, timeoutMs: 20_000 },
+    // Per attempt; core.ts asks once more when it times out (`JUDGE_ATTEMPTS`).
+    judge: { model: null, timeoutMs: 60_000 },
     ask: { timeoutMs: null },
     sensitive: [...DEFAULT_SENSITIVE],
     protected: [...DEFAULT_PROTECTED],
@@ -695,14 +702,12 @@ export function resolveLevel(env: string | undefined, config: PermissionsConfig)
 }
 
 /**
- * How a kind of request is decided. A write to Cypher's own data never goes
- * to the model, whatever a file says: one wrong approval there could switch
- * every check off.
+ * How a kind of request is decided: as the owner's settings say, model first
+ * by default. What could switch every check off (the permission system's own
+ * files) is the floor's (floor.ts), whatever a mode says; a write to the rest
+ * of Cypher's own data or to a protected file is a danger the model may
+ * approve once (round 3: before, both were a human's alone).
  */
 export function approvalMode(config: PermissionsConfig, key: string): ApprovalMode {
-  const mode = config.approval[key] ?? "ask";
-  // A protected write runs code later (a hook, a shell startup file): it is
-  // dangerous (risk.ts R2), so the model never approves one either.
-  if (key === "self.write" || key === "protected.write") return mode === "deny" ? "deny" : "ask";
-  return mode;
+  return config.approval[key] ?? DEFAULT_APPROVAL[key] ?? "ask";
 }

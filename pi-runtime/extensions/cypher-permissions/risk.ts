@@ -29,11 +29,13 @@ import { basename, isAbsolute } from "node:path";
 import { statSync } from "node:fs";
 
 import { copyOperands, patternMatches, remoteOperand, ruleCannotVouch, sshHostIndex, unwrap } from "./commands.ts";
-import { DANGER, dangerMatches, INSPECT, inspectMatches, viewOf } from "./packs.ts";
+import { asksOnly, DANGER, dangerMatches, INSPECT, inspectMatches, viewOf } from "./packs.ts";
 import { isUnder } from "./paths.ts";
 import type { CommandView, PackFacts } from "./packs.ts";
 import type { Classification } from "./paths.ts";
 import { UNKNOWN } from "./shell.ts";
+import { genericDestroyer, TOLD_BY_PLACE } from "./catalogue.ts";
+import { gradeOf, judgeDecides } from "./grades.ts";
 
 export type Tier = "inspect" | "local" | "danger";
 
@@ -58,6 +60,14 @@ export interface Assessment {
   floor?: true;
   /** An approval covers this call alone and is never remembered (a secret read). */
   once?: true;
+  /**
+   * A concern the classifier itself established for a local command (judge.ts `CONCERNS`): a secret
+   * read, a read of the installed app's data. The reviewing model's ask on it always stands; an
+   * installed-app read also runs only on owner words cited as consent (core.ts).
+   */
+  concern?: "secret" | "installed-app";
+  /** For an installed-app read: the data's path, whose names a consent must say (explicit.ts `checkDataConsent`). */
+  data?: string;
 }
 
 /**
@@ -201,6 +211,8 @@ export interface RiskCommand {
   carried?: readonly string[];
   /** What each word known only when it runs surely starts with (shell.ts `hints`), one per word. */
   hints?: readonly (string | undefined)[];
+  /** It is a shell or interpreter that runs code from its input, which is known only when it runs (`… | sh`, `sh < file`). */
+  stdinCode?: boolean;
 }
 
 /** What `kill`, `pkill` and `killall` would stop. */
@@ -248,7 +260,22 @@ export interface RiskFacts extends PackFacts {
   /** The branches checked out in the chat's project folders, bar a default branch: the chat's own work. */
   workspaceBranches?(): readonly string[];
   /** What this task made (created.ts): what it may undo without asking anyone. */
-  created?: { has(path: string): boolean; worktree(path: string): boolean; branch(name: string): boolean };
+  created?: {
+    has(path: string): boolean;
+    worktree(path: string): boolean;
+    branch(name: string): boolean;
+    /**
+     * What a command deletes or stops (catalogue.ts), and whether every
+     * target is a follow-up of what the ledger holds (lifecycle.ts): what
+     * this task created or started, the head branch of a pull request it
+     * merged. `why`: the lifecycle rules.
+     */
+    destroys?(command: RiskCommand): { own: boolean; op: "destroy" | "stop"; why: string[]; kinds: readonly string[] } | undefined;
+    /** The ledger holds something of any kind by this name. */
+    named?(name: string): boolean;
+    /** A pull request this chat opened (the ledger's), by number. */
+    pullRequest?(number: string): boolean;
+  };
   /** A canonical path of the permission system itself (config.ts): a change there always asks. */
   permissionSystem?(path: string): boolean;
 }
@@ -341,7 +368,7 @@ export function redirectRisk(command: Pick<RiskCommand, "reads" | "writes" | "cw
     if (!classification) continue;
     // Reading a secret sends it to the model provider: the model may approve
     // it for the request at hand, once, and nothing is remembered.
-    if (classification.zone === "sensitive") soft ??= { tier: "local", kind: `reads a secret (${path})`, once: true };
+    if (classification.zone === "sensitive") soft ??= { tier: "local", kind: `reads a secret (${path})`, once: true, concern: "secret" };
   }
   for (const path of command.writes) {
     if (path === UNKNOWN) {
@@ -406,7 +433,7 @@ function pathRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): As
     if (classification.zone === "sensitive" && !NAME_ONLY.has(view.program)) {
       if (effect === "write") return { tier: "danger", kind: `writes a secret (${word})`, key: "writes a secret" };
       // A bare name that is not there holds nothing to read.
-      if (isAbsolute(word) || word.startsWith("~") || present(classification.path)) soft ??= { tier: "local", kind: `reads a secret (${word})`, once: true };
+      if (isAbsolute(word) || word.startsWith("~") || present(classification.path)) soft ??= { tier: "local", kind: `reads a secret (${word})`, once: true, concern: "secret" };
       continue;
     }
     if (WRITERS.has(view.program) && view.program !== "git" && effect === "write") {
@@ -455,6 +482,73 @@ function copyDanger(command: RiskCommand, view: CommandView, facts: RiskFacts): 
     const target = facts.classify(`${dest.path}/${name}`, command.cwd);
     const landed = target && writeDanger(target);
     if (landed) return `${landed} (${dest.path}/${name})`;
+  }
+  return undefined;
+}
+
+/**
+ * Transfer tools (data): how each one names a destination off this machine. Copying files there is
+ * "send-data" (grades.ts): consent-gated, whatever the files are; the floor (`exfiltrates`) still decides secrets.
+ * - `dest`: the last operand is the destination, off this machine when it matches.
+ * - `options`: options whose value is a file sent (`curl -T f`, `-F x=@f`, `--data @f`).
+ */
+interface Transfer {
+  programs: readonly string[];
+  /** Subcommand words before the operands (`s3 cp`, `copy`). */
+  sub?: readonly (readonly string[])[];
+  dest?: (word: string) => string | undefined;
+  options?: RegExp;
+  /** An option's value is a file only when it starts with `@` (`--data @f`); else any value is. */
+  at?: RegExp;
+}
+
+const SCHEME_DEST = (schemes: string) => (word: string) => new RegExp(`^(?:${schemes})://([^/]+)`, "i").exec(word)?.[1];
+export const TRANSFERS: readonly Transfer[] = [
+  { programs: ["scp", "rsync", "sftp"], dest: (word) => remoteOperand(word)?.host },
+  { programs: ["curl"], options: /^(-T|--upload-file|-F|--form|--form-string|-d|--data|--data-binary|--data-urlencode|--json)$/, at: /^(-d|--data|--data-binary|--data-urlencode|--json)$/ },
+  { programs: ["rclone"], sub: [["copy"], ["copyto"], ["sync"], ["move"], ["moveto"], ["bisync"]], dest: (word) => /^([A-Za-z0-9_.-]+):/.exec(word)?.[1] },
+  { programs: ["aws"], sub: [["s3", "cp"], ["s3", "sync"], ["s3", "mv"]], dest: SCHEME_DEST("s3") },
+  { programs: ["gsutil"], sub: [["cp"], ["rsync"], ["mv"], ["-m", "cp"], ["-m", "rsync"]], dest: SCHEME_DEST("gs") },
+  { programs: ["gcloud"], sub: [["storage", "cp"], ["storage", "rsync"], ["storage", "mv"]], dest: SCHEME_DEST("gs") },
+  { programs: ["azcopy"], sub: [["copy"], ["sync"]], dest: SCHEME_DEST("https") },
+  { programs: ["mc"], sub: [["cp"], ["mirror"], ["mv"]], dest: (word) => /^([A-Za-z0-9_.-]+)\/./.exec(word)?.[1] },
+];
+
+/** The programs of the TRANSFERS rows (a function: the table is defined after the sinks that use it). */
+function TRANSFER_PROGRAMS(): readonly string[] {
+  return TRANSFERS.flatMap((row) => row.programs);
+}
+
+/** Copying or uploading files to another machine, by the TRANSFERS table: "sends files to <where>". */
+export function uploadDanger(view: CommandView): string | undefined {
+  for (const row of TRANSFERS) {
+    if (!row.programs.includes(view.program)) continue;
+    let args = view.args;
+    if (row.sub) {
+      const sub = row.sub.find((words) => words.every((word, i) => args[i] === word));
+      if (!sub) continue;
+      args = args.slice(sub.length);
+    }
+    if (row.options) {
+      for (let i = 0; i < args.length; i++) {
+        const word = args[i];
+        const [name, inline] = word.startsWith("--") && word.includes("=") ? [word.slice(0, word.indexOf("=")), word.slice(word.indexOf("=") + 1)] : [word, undefined];
+        if (!row.options.test(name)) continue;
+        const value = inline ?? args[i + 1];
+        if (value === undefined) continue;
+        const sendsFile = row.at?.test(name) ? value.startsWith("@") || value === UNKNOWN : name.startsWith("-F") || name.startsWith("--form") ? /=[<@]/.test(value) || value === UNKNOWN : true;
+        if (sendsFile) return `sends files off this machine (${view.program} ${name} ${value})`;
+      }
+    }
+    if (row.dest) {
+      const operands = args.filter((word) => !word.startsWith("-"));
+      const last = operands.at(-1);
+      if (operands.length < 2 || last === undefined) continue;
+      if (last === UNKNOWN) return `sends files to a place known only when it runs (${view.program})`;
+      const where = row.dest(last);
+      // The sources must be this machine's: between two other places is copyDanger's.
+      if (where !== undefined && !operands.slice(0, -1).some((word) => row.dest!(word) !== undefined)) return `sends files to ${where}, another machine`;
+    }
   }
   return undefined;
 }
@@ -590,6 +684,14 @@ function installedMention(text: string, facts: RiskFacts, home: string | undefin
   return undefined;
 }
 
+/** The installed app's and Runtime's program files (not the owner's data): `/Applications/Cypher.app`, a Runtime version outside its `agent/` folder. */
+const INSTALLED_PROGRAM = /^\/Applications\/Cypher\.app(\/|$)|\/\.cypher\/pi-runtime\/(current|versions\/[^/]+)(\/(?!agent(\/|$))|$)/;
+
+/** Whether a canonical path is the installed app's or Runtime's program files, not the owner's data (`INSTALLED_PROGRAM`). */
+export function installedProgram(path: string): boolean {
+  return INSTALLED_PROGRAM.test(path);
+}
+
 /**
  * Touching the installed Cypher app (`/Applications/Cypher.app`, its data in
  * `~/.cypher` outside the chats' worktrees, its Runtime): a human decides,
@@ -603,7 +705,8 @@ function installedAppRisk(command: RiskCommand, view: CommandView, facts: RiskFa
   const changes = (path: string): Assessment => ({ tier: "danger", kind: `changes the installed Cypher app or its data (${path})`, key: "installed Cypher app" });
   // Reading the installed app's logs and data is how a report about it gets
   // diagnosed: ordinary work the model decides on.
-  const reads = (path: string): Assessment => ({ tier: "local", kind: `reads the installed Cypher app's data (${path})` });
+  // The owner's data (chats, journals, databases) is a concern the model must find asked for; the app's and Runtime's program files are not.
+  const reads = (path: string): Assessment => ({ tier: "local", kind: `reads the installed Cypher app's data (${path})`, ...(INSTALLED_PROGRAM.test(path) ? {} : { concern: "installed-app" as const, data: path }) });
   let soft: Assessment | undefined;
   if (command.cwd !== undefined) {
     const cwd = facts.classify(command.cwd, undefined);
@@ -613,19 +716,21 @@ function installedAppRisk(command: RiskCommand, view: CommandView, facts: RiskFa
       soft ??= reads(command.cwd);
     }
   }
-  for (const word of [...command.words, ...command.reads, ...command.writes, ...(command.carried ?? [])]) {
+  // Running one of the installed app's programs only to ask it for its help or version reads it.
+  const asking = asksOnly(view);
+  for (const [index, word] of [...command.words, ...command.reads, ...command.writes, ...(command.carried ?? [])].entries()) {
     if (word === UNKNOWN) continue;
     if (pathWords([word]).length || command.reads.includes(word) || command.writes.includes(word)) {
       const classification = facts.classify(word, command.cwd);
       if (classification && installed(classification.path)) {
-        if (pathEffect(command, view, word) === "write") return changes(word);
+        if (!(index === 0 && asking) && pathEffect(command, view, word) === "write") return changes(word);
         soft ??= reads(word);
       }
     }
     // Inside a script or an option's value: its own text says whether it writes.
     const inside = installedMention(word, facts, home);
     if (inside) {
-      if (WRITE_HINT.test(word) || pathEffect(command, view, inside) === "write") return changes(inside);
+      if (WRITE_HINT.test(word) || (!(index === 0 && asking) && pathEffect(command, view, inside) === "write")) return changes(inside);
       soft ??= reads(inside);
     }
   }
@@ -648,8 +753,10 @@ function gitPushDanger(command: RiskCommand, view: CommandView, facts: RiskFacts
     if (!git || !git.current) return "pushes a branch known only when it runs";
     return isDefault(git.current, git, facts) ? `publishes to ${git.current}` : undefined;
   }
-  for (const refspec of refspecs) {
-    if (refspec.startsWith("+")) return "force-pushes a branch";
+  for (const spelled of refspecs) {
+    if (spelled.startsWith("+")) return "force-pushes a branch";
+    // One spelling for one push: `refs/heads/x:refs/heads/x`, `x:x` and `HEAD:x` (on x) are `x`.
+    const refspec = normalRefspec(spelled, git?.current);
     const [source, target = source] = refspec.split(":");
     if (source === "") return "deletes a remote branch";
     const name = target.replace(/^refs\/heads\//, "");
@@ -658,6 +765,176 @@ function gitPushDanger(command: RiskCommand, view: CommandView, facts: RiskFacts
     if (!branch || !git) return "pushes to a branch it cannot tell";
     if (!refspec.includes(":") && !git.isBranch(branch) && name !== "HEAD") return `pushes ${branch}, which is no local branch (a tag publishes a release)`;
     if (isDefault(branch, git, facts)) return `publishes to ${branch}`;
+    // `src:dest` writes the remote's `dest`: what is checked is the DESTINATION ref, which must be this task's own branch
+    // (a source of its own says nothing about whose branch it lands on).
+    if (refspec.includes(":") && !ownBranch(branch, git, facts)) return `pushes into ${branch}, a branch this task didn't make`;
+  }
+  return undefined;
+}
+
+/** A refspec as its shortest spelling: `refs/heads/` dropped, `x:x` and `HEAD:x` (x checked out) as `x`. */
+export function normalRefspec(refspec: string, current: string | undefined): string {
+  const heads = (ref: string) => ref.replace(/^refs\/heads\//, "");
+  if (!refspec.includes(":")) return refspec.startsWith("refs/tags/") ? refspec : heads(refspec);
+  const [source, target] = refspec.split(":", 2);
+  if (source === "" || source.startsWith("refs/tags/") || target.startsWith("refs/tags/")) {
+    const tag = (ref: string) => ref.replace(/^refs\/tags\//, "");
+    return source !== "" && tag(source) === tag(target) ? `refs/tags/${tag(target)}` : refspec;
+  }
+  const from = heads(source) === "HEAD" && current ? current : heads(source);
+  const to = heads(target);
+  return from === to ? to : `${from}:${to}`;
+}
+
+/**
+ * A branch this task made, as code-checked facts say: the ledger's (created.ts) or the chat's own
+ * workspace branch (Cypher gives a chat a worktree on its own branch). Never a default or protected branch.
+ */
+function ownBranch(branch: string | undefined, git: GitFacts, facts: RiskFacts): boolean {
+  if (!branch || branch === UNKNOWN || branch === "HEAD" || isDefault(branch, git, facts)) return false;
+  return facts.created?.branch(branch) === true || (facts.workspaceBranches?.() ?? []).includes(branch);
+}
+
+/** `git push` options that change nothing about what is published or how. */
+const PLAIN_PUSH = /^(-u|--set-upstream|-q|--quiet|-v|--verbose|--porcelain|--progress|--no-progress|--no-verify|--verify)$/;
+
+/**
+ * The hosting CLIs' pull/merge request commands a team step may be (data): the subcommands that open
+ * and update one, the options naming its head, base and repository, the options that take a value,
+ * and the options that only say what it holds (title, body, draft, labels, reviewers). Any other
+ * option makes the command no team step.
+ */
+interface ReviewCli {
+  program: string;
+  noun: string;
+  open: string;
+  update: readonly string[];
+  head: readonly string[];
+  base: readonly string[];
+  repo: readonly string[];
+  values: RegExp;
+  plain: RegExp;
+}
+
+const REVIEW_CLIS: readonly ReviewCli[] = [
+  {
+    program: "gh",
+    noun: "pr",
+    open: "create",
+    update: ["edit", "ready"],
+    head: ["-H", "--head"],
+    base: ["-B", "--base"],
+    repo: ["-R", "--repo"],
+    values: /^(-t|--title|-b|--body|-F|--body-file|-B|--base|-H|--head|-R|--repo|-a|--assignee|-l|--label|-m|--milestone|-r|--reviewer|-p|--project|-T|--template|--add-label|--remove-label|--add-reviewer|--remove-reviewer|--add-assignee|--remove-assignee|--add-project|--remove-project)$/,
+    plain: /^(-t|--title|-b|--body|-F|--body-file|-d|--draft|-f|--fill|--fill-first|--fill-verbose|-l|--label|-a|--assignee|-r|--reviewer|-m|--milestone|-p|--project|-T|--template|--no-maintainer-edit|--dry-run|--add-label|--remove-label|--add-reviewer|--remove-reviewer|--add-assignee|--remove-assignee|--add-project|--remove-project|--undo)$/,
+  },
+  {
+    program: "glab",
+    noun: "mr",
+    open: "create",
+    update: ["update"],
+    head: ["-s", "--source-branch"],
+    base: ["-b", "--target-branch"],
+    repo: ["-R", "--repo"],
+    values: /^(-t|--title|-d|--description|-s|--source-branch|-b|--target-branch|-R|--repo|-l|--label|-a|--assignee|--reviewer|-m|--milestone|--unlabel)$/,
+    plain: /^(-t|--title|-d|--description|--draft|--wip|-f|--fill|--fill-commit-body|-l|--label|-a|--assignee|--reviewer|-m|--milestone|--unlabel|-y|--yes|--ready|--no-editor)$/,
+  },
+];
+
+/** A review command's options and operands: values by option, the rest in order. Undefined when an option isn't one a team step may carry, or a name is known only when it runs. */
+function reviewWords(cli: ReviewCli, args: readonly string[]): { options: Map<string, string>; operands: string[] } | undefined {
+  const named = [...cli.head, ...cli.base, ...cli.repo];
+  const allowed = (option: string) => cli.plain.test(option) || named.includes(option);
+  const options = new Map<string, string>();
+  const operands: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i];
+    if (word.startsWith("--") && word.includes("=")) {
+      const name = word.slice(0, word.indexOf("="));
+      if (!allowed(name)) return undefined;
+      options.set(name, word.slice(word.indexOf("=") + 1));
+    } else if (word.startsWith("-") && word !== "-") {
+      if (!allowed(word)) return undefined;
+      if (cli.values.test(word)) {
+        const value = args[++i];
+        if (value === undefined) return undefined;
+        options.set(word, value);
+      } else options.set(word, "");
+    } else operands.push(word);
+  }
+  if (named.some((option) => options.get(option) === UNKNOWN) || operands.includes(UNKNOWN)) return undefined;
+  return { options, operands };
+}
+
+/** The value of the first of `names` given. */
+function optionOf(options: Map<string, string>, names: readonly string[]): string | undefined {
+  for (const name of names) if (options.has(name)) return options.get(name);
+  return undefined;
+}
+
+/** git options before the subcommand that change nothing about what a push publishes. */
+const PLAIN_GIT_GLOBAL = /^(--no-pager|-P|--no-optional-locks|--paginate|-p|--no-replace-objects|--literal-pathspecs)$/;
+
+/**
+ * A reversible, team-visible step on what this task made (grades.ts rows the judge decides):
+ * pushing its own branch, opening a pull request from it into the default branch, editing or
+ * marking ready a pull request it opened. Its grade's action, with what it says; undefined for
+ * anything else (a default branch, another remote's or repository's, a force, a tag, a name
+ * known only when it runs), which stays a danger.
+ */
+export function teamStep(command: RiskCommand, view: CommandView, facts: RiskFacts): { action: string; kind: string } | undefined {
+  if (command.words.includes(UNKNOWN)) return undefined;
+  const graded = (action: string, what: string) => (judgeDecides(action) ? { action, kind: `${what} (reversible, seen by the team: ${gradeOf(action)!.says})` } : undefined);
+  if (view.program === "git" && view.positionals[0] === "push") {
+    const dir = gitDirectory(command, view);
+    const git = dir === undefined ? undefined : facts.git(dir);
+    if (!git) return undefined;
+    // Global options before `push`: `-C dir` (read by gitDirectory) and the ones that only change output.
+    const at = view.args.indexOf("push");
+    const before = view.args.slice(0, at);
+    if (before.some((word, index) => word !== "-C" && before[index - 1] !== "-C" && !PLAIN_GIT_GLOBAL.test(word))) return undefined;
+    const rest = view.args.slice(at + 1);
+    if (rest.some((word) => word.startsWith("-") && !PLAIN_PUSH.test(word))) return undefined;
+    const [remote, ...refspecs] = rest.filter((word) => !word.startsWith("-"));
+    // A remote by name (`origin`), never a URL or a path.
+    if (remote !== undefined && !/^[\w.-]+$/.test(remote)) return undefined;
+    const branches = refspecs.length === 0 ? [git.current] : refspecs.map((spelled) => {
+      if (spelled.startsWith("+") || spelled.includes("refs/tags/")) return undefined;
+      const refspec = normalRefspec(spelled, git.current);
+      if (refspec.includes(":")) return undefined;
+      return refspec === "HEAD" ? git.current : refspec;
+    });
+    if (branches.length === 0 || !branches.every((branch) => ownBranch(branch, git, facts))) return undefined;
+    return graded("push-branch", `pushes ${branches.join(", ")}, this task's own branch`);
+  }
+  const cli = REVIEW_CLIS.find((candidate) => candidate.program === view.program && view.positionals[0] === candidate.noun);
+  if (cli) {
+    const sub = view.positionals[1];
+    const at = view.args.indexOf(sub ?? "");
+    if (at < 0 || view.args.slice(0, at).some((word) => word !== cli.noun)) return undefined;
+    const read = reviewWords(cli, view.args.slice(at + 1));
+    if (!read || optionOf(read.options, cli.repo) !== undefined) return undefined;
+    const git = command.cwd === undefined ? undefined : facts.git(command.cwd);
+    if (!git) return undefined;
+    const head = optionOf(read.options, cli.head);
+    const base = optionOf(read.options, cli.base);
+    if (sub === cli.open) {
+      if (read.operands.length) return undefined;
+      const from = head ?? git.current;
+      // Into the default branch (or the repository's default when none is named), from this task's own branch.
+      if (base !== undefined && !git.defaults.includes(base)) return undefined;
+      if (from?.includes(":") || !ownBranch(from, git, facts)) return undefined;
+      return graded("pr-open", `opens a pull request from ${from}, this task's own branch, into ${base ?? "the default branch"}`);
+    }
+    if (sub !== undefined && cli.update.includes(sub)) {
+      if (head !== undefined || base !== undefined || read.operands.length > 1) return undefined;
+      const [operand] = read.operands;
+      if (operand === undefined) return ownBranch(git.current, git, facts) ? graded("pr-update", `changes the pull request of ${git.current}, this task's own branch`) : undefined;
+      const number = operand.replace(/^[#!]/, "");
+      if (/^\d+$/.test(number) && facts.created?.pullRequest?.(number) === true) return graded("pr-update", `changes pull request #${number}, which this task opened`);
+      if (ownBranch(operand, git, facts)) return graded("pr-update", `changes the pull request of ${operand}, this task's own branch`);
+      return undefined;
+    }
   }
   return undefined;
 }
@@ -769,6 +1046,9 @@ function gitDiscardDanger(command: RiskCommand, view: CommandView, facts: RiskFa
     const names = view.positionals.slice(1).filter((word) => word !== UNKNOWN);
     const own = (name: string) => facts.created?.branch(name) === true || facts.workspaceBranches?.().includes(name) === true;
     if (names.length && names.length === view.positionals.length - 1 && names.every(own)) return undefined;
+    // Anyone else's branch, in any checkout: its owner decides.
+    const others = view.positionals.slice(1).filter((name) => name === UNKNOWN || !own(name));
+    return others.includes(UNKNOWN) ? "deletes a branch known only when it runs" : `deletes ${others.join(", ")}, a branch this chat didn't create`;
   }
   const discards =
     (sub === "reset" && view.args.some((word) => word === "--hard" || word === "--merge" || word === "--keep")) ||
@@ -876,11 +1156,68 @@ function runsNext(view: CommandView): string[] | undefined {
 }
 
 /** The tier of one command seen through its wrappers. */
+/**
+ * The tier of one command seen through its wrappers, held to provenance: a
+ * command the catalogue reads as destroying or stopping something (a
+ * simulator, a container, a repository, a release, …) that this chat's ledger
+ * doesn't hold, and whose kind no place tells the owner of (catalogue.ts
+ * `TOLD_BY_PLACE`), may be another party's: a danger, whatever else says.
+ */
 export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessment {
+  // Code read from its input, known only when it runs: never local work.
+  if (command.stdinCode) return { tier: "danger", kind: "runs code known only when it runs (from its input)", key: "stdin-code" };
+  const assessment = assessWords(command, facts);
+  if (assessment.tier === "danger" || command.words.length === 0 || command.words[0] === UNKNOWN) return assessment;
+  const undo = facts.created?.destroys?.(command);
+  if (!undo) return genericDestroy(command, assessment, facts);
+  if (undo.own) return assessment;
+  const foreign = undo.kinds.filter((kind) => !(kind in TOLD_BY_PLACE));
+  if (foreign.length === 0) return assessment;
+  const kind = `${undo.op === "stop" ? "stops" : "deletes"} ${foreign.map((item) => (item === "repo" ? "a repository" : item === "pr" ? "a pull request" : `a ${item}`)).join(" or ")} this chat didn't create or start`;
+  return { tier: "danger", kind, key: `foreign-${foreign[0]}` };
+}
+
+/**
+ * A program no catalogue row reads, given a destroy verb as its subcommand
+ * (catalogue.ts `genericDestroyer`): what it destroys has an owner Cypher
+ * can't tell, unless every operand is in the ledger or a path in the chat's
+ * own folders. Inspections, interpreters and the project's own scripts stay
+ * as they are.
+ */
+function genericDestroy(command: RiskCommand, assessment: Assessment, facts: RiskFacts): Assessment {
+  if (assessment.tier === "inspect") return assessment;
+  const program = basename(command.words[0]);
+  if (INTERPRETERS.test(program) || SHELLS.test(program) || facts.programIsLocal?.(command.words)) return assessment;
+  // The project's own script (`./scripts/dev.sh stop`): its effect is the project's, for the model.
+  if (command.words[0].includes("/")) {
+    const script = facts.classify(command.words[0], command.cwd);
+    if (script && disposable(script.path, facts)) return assessment;
+  }
+  const found = genericDestroyer(command.words);
+  if (!found) return assessment;
+  const own = (word: string) => {
+    if (word === UNKNOWN) return false;
+    if (facts.created?.named?.(word)) return true;
+    if (!word.includes("/") && !word.startsWith(".")) return false;
+    const classification = facts.classify(word, command.cwd);
+    return classification !== undefined && disposable(classification.path, facts);
+  };
+  if (found.operands.length && found.operands.every(own)) return assessment;
+  const said = command.words.slice(0, command.words.indexOf(found.verb) + 1).map((word) => (word === command.words[0] ? program : word)).join(" ");
+  return { tier: "danger", kind: `destroys or stops something whose owner Cypher can't tell (\`${said}\`)`, key: `destroys-${program}` };
+}
+
+function assessWords(command: RiskCommand, facts: RiskFacts): Assessment {
   const words = command.words;
   if (words.length === 0) return { tier: "inspect" };
   const view = viewOf(words);
   if (words[0] === UNKNOWN) return { tier: "local", kind: "runs a program known only when it runs" };
+  // Undoing what this task made or started, or what the lifecycle of what it did implies (a merged pull
+  // request's head branch): its own work, for the reviewing model to decide (created.ts, lifecycle.ts).
+  if (command.writes.length === 0) {
+    const undo = facts.created?.destroys?.(command);
+    if (undo?.own) return { tier: "local", kind: `${undo.op === "stop" ? "stops" : "undoes"} what this task did (${undo.why.join("; ")})` };
+  }
   const inner = innerLine(view);
   if (inner) {
     // What ssh runs is the other machine's: its variables and files are not this one's secrets.
@@ -900,7 +1237,7 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
     if (assessment.tier === "danger") return assessment;
     const redirected = redirectRisk(command, facts);
     if (redirected?.tier === "danger") return redirected;
-    return { tier: "local", kind: assessment.kind ?? redirected?.kind ?? `runs ${basename(next[0] ?? "a program")} through ${view.program}`, ...(assessment.once || redirected?.once ? { once: true as const } : {}) };
+    return { tier: "local", kind: assessment.kind ?? redirected?.kind ?? `runs ${basename(next[0] ?? "a program")} through ${view.program}`, ...(assessment.once || redirected?.once ? { once: true as const } : {}), ...(assessment.concern || redirected?.concern ? { concern: assessment.concern ?? redirected?.concern } : {}), ...(assessment.data ? { data: assessment.data } : {}) };
   }
   // What `find -exec` runs is a command of its own, on the files `find`
   // starts from (`find build -exec rm {} +` deletes in `build`).
@@ -921,23 +1258,32 @@ export function assessCommand(command: RiskCommand, facts: RiskFacts): Assessmen
   const system = permissionSystemRisk(command, view, facts);
   if (system) return system;
   let soft: Assessment | undefined = ran;
-  for (const check of [pathRisk(command, view, facts), installedAppRisk(command, view, facts)]) {
+  const installed = installedAppRisk(command, view, facts);
+  for (const check of [pathRisk(command, view, facts), installed]) {
     if (check?.tier === "danger") return check;
     soft ??= check;
   }
+  // A secret that is also the installed app's data (`~/.cypher/orgs/…`) is both: once, and only on a consent naming it (core.ts).
+  if (soft && soft !== installed && installed?.concern === "installed-app") soft = { ...soft, concern: "installed-app", data: installed.data };
+  // A reversible, team-visible step on this task's own branch or pull request (grades.ts): the judge's, not a danger.
+  const team = teamStep(command, view, facts);
+  // The project's own tools resolve from where the command runs (`cd apps/edge && npx wrangler`).
+  const here: RiskFacts = command.cwd === undefined ? facts : { ...facts, projectTool: (name, cwd) => facts.projectTool(name, cwd ?? command.cwd) };
   const danger =
     destroyDanger(command, view, facts) ??
     copyDanger(command, view, facts) ??
+    uploadDanger(view) ??
     protectedTarget(view, facts) ??
     (view.program === "git"
-      ? (gitOptionDanger(view, command.hints) ?? gitConfigDanger(view) ?? gitPushDanger(command, view, facts) ?? gitDiscardDanger(command, view, facts) ?? gitHistoryDanger(view))
+      ? (gitOptionDanger(view, command.hints) ?? gitConfigDanger(view) ?? (team ? undefined : gitPushDanger(command, view, facts)) ?? gitDiscardDanger(command, view, facts) ?? gitHistoryDanger(view))
       : undefined) ??
-    DANGER.map((entry) => dangerMatches(entry, view, facts)).find((kind) => kind !== undefined);
+    (team ? undefined : DANGER.map((entry) => dangerMatches(entry, view, here)).find((kind) => kind !== undefined));
+  if (team && !danger) return { tier: "local", kind: team.kind, key: team.action, once: true };
   if (danger) {
     // Reading a secret or the environment on this machine is the model's to
     // approve, once; writing or signing in with one is not (a secret that
     // leaves the machine is the floor, `exfiltrates`).
-    if (SECRET_READ_KINDS.has(danger) && !view.positionals.some((word) => SECRET_WRITE_VERB.test(word))) return { tier: "local", kind: danger, once: true };
+    if (SECRET_READ_KINDS.has(danger) && !view.positionals.some((word) => SECRET_WRITE_VERB.test(word))) return { tier: "local", kind: danger, once: true, concern: "secret" };
     return { tier: "danger", kind: danger, key: dangerKey(danger) };
   }
   if (kill) return kill;
@@ -993,9 +1339,92 @@ const SECRET_READ_KINDS: ReadonlySet<string> = new Set(["reads a secret", "print
 const SECRET_WRITE_VERB =
   /^(login|logout|signin|signout|add|add-.*|set|set-.*|delete|delete-.*|remove|rm|unlock|import|configure|write|store|create|rotate|edit|unset|inject|approve|reject|fill|refresh|switch|setup-git)$/i;
 
-/** Programs that can carry what they are given off this machine. */
-const SENDERS =
-  /^(curl|wget|http|https|xh|nc|ncat|netcat|socat|telnet|ftp|ssh|scp|sftp|rsync|mosh|mail|mailx|sendmail|mutt|neomutt|msmtp|slack|slackcat|telegram-send|signal-cli|discord-send|ntfy|apprise|pushover|twilio|gh|glab|aws|gcloud|az|op|vault)$/;
+/**
+ * The floor's network sinks (data, round 4): programs that can carry what they read off this machine.
+ * `verbs`: a hosting or version-control CLI sends only with one of these words among its positionals
+ * (`gh gist create`, `gh api -f`, `git push`); without `verbs`, any use is one. The TRANSFERS rows
+ * (rclone, gsutil, azcopy, mc, …) are sinks too (`SINK_PROGRAMS`). What counts as a secret source is
+ * `SECRET_SOURCES` with the sensitive file patterns (config.ts `DEFAULT_SENSITIVE`); the floor is
+ * their data flow (`exfiltrates`).
+ */
+export const NETWORK_SINKS: readonly { id: string; programs: readonly string[]; verbs?: RegExp }[] = [
+  { id: "http", programs: ["curl", "wget", "http", "https", "xh", "aria2c"] },
+  { id: "socket", programs: ["nc", "ncat", "netcat", "socat", "telnet", "ftp", "lftp", "openssl-s_client"] },
+  { id: "remote-shell", programs: ["ssh", "mosh", "scp", "sftp", "rsync"] },
+  { id: "mail-chat", programs: ["mail", "mailx", "sendmail", "mutt", "neomutt", "msmtp", "swaks", "slack", "slackcat", "telegram-send", "signal-cli", "discord-send", "ntfy", "apprise", "pushover", "twilio"] },
+  { id: "paste", programs: ["pastebinit", "wgetpaste", "termbin", "ix", "sprunge", "0x0", "pbin", "haste", "gist"] },
+  { id: "hosting-cli", programs: ["gh", "glab", "tea", "hub"], verbs: /^(api|gist|secret|variable|release|pr|mr|issue|repo|snippet|create|upload)$/ },
+  { id: "git-push", programs: ["git"], verbs: /^(push|send-email|request-pull)$/ },
+  { id: "cloud-cli", programs: ["aws", "gcloud", "az", "op", "vault", "doppler", "heroku", "fly", "flyctl", "vercel", "netlify", "wrangler", "railway", "firebase", "supabase"] },
+];
+
+/** Every program some sink row names, the transfer tools' too: what a line the reader can't follow is checked for. */
+const SINK_PROGRAMS: ReadonlySet<string> = new Set([...NETWORK_SINKS.flatMap((row) => row.programs), ...TRANSFER_PROGRAMS()]);
+
+/** Whether a command is a network sink (`NETWORK_SINKS`, `TRANSFERS`): the row's id, or undefined. */
+export function sinkOf(view: CommandView): string | undefined {
+  for (const row of NETWORK_SINKS) {
+    if (!row.programs.includes(view.program)) continue;
+    if (!row.verbs || view.positionals.some((word) => word === UNKNOWN || row.verbs!.test(word))) return row.id;
+  }
+  return TRANSFER_PROGRAMS().includes(view.program) ? "transfer" : undefined;
+}
+
+/**
+ * The floor's secret sources besides files (data, round 4): commands whose output is a credential.
+ * `verbs`: the positionals that must come first (in order). A file is a source when its path is
+ * sensitive (config.ts `DEFAULT_SENSITIVE` and the owner's patterns: `.env*`, keys, `~/.aws`,
+ * `~/.netrc`, `~/.config/gh/**`, …) and a credential's variable when its name says so (`secretName`).
+ * Such a command is a source for the line's other commands: `aws configure get …` alone prints it here.
+ */
+export const SECRET_SOURCES: readonly { id: string; program: string; verbs: readonly (string | RegExp)[] }[] = [
+  { id: "the keychain", program: "security", verbs: [/^(find-generic-password|find-internet-password|dump-keychain|export|find-key|find-certificate|unlock-keychain)$/] },
+  { id: "the environment", program: "printenv", verbs: [] },
+  { id: "the environment", program: "env", verbs: [] },
+  { id: "a stored token", program: "gh", verbs: ["auth", "token"] },
+  { id: "a stored token", program: "glab", verbs: ["auth", "status"] },
+  { id: "a stored credential", program: "git", verbs: ["credential", /^(fill|get)$/] },
+  { id: "a stored credential", program: "git", verbs: [/^credential-/] },
+  { id: "a stored credential", program: "aws", verbs: ["configure", /^(get|export-credentials)$/] },
+  { id: "a stored token", program: "gcloud", verbs: ["auth", /^(print-access-token|print-identity-token|application-default)$/] },
+  { id: "a stored token", program: "az", verbs: ["account", "get-access-token"] },
+  { id: "a stored secret", program: "op", verbs: [/^(read|inject)$/] },
+  { id: "a stored secret", program: "op", verbs: ["item", "get"] },
+  { id: "a stored secret", program: "vault", verbs: [/^(read|kv)$/] },
+  { id: "a stored secret", program: "pass", verbs: ["show"] },
+  { id: "a stored secret", program: "doppler", verbs: ["secrets"] },
+  { id: "a stored secret", program: "secret-tool", verbs: ["lookup"] },
+  { id: "a stored token", program: "npm", verbs: ["token"] },
+  { id: "a stored token", program: "heroku", verbs: ["auth:token"] },
+];
+
+/** The source row a command is, by `SECRET_SOURCES` (its program and leading positionals). */
+function credentialSource(view: CommandView): string | undefined {
+  for (const row of SECRET_SOURCES) {
+    if (row.program !== view.program) continue;
+    if (row.program === "printenv") {
+      if (view.positionals.length === 0 || view.positionals.some((word) => word === UNKNOWN || secretName(word))) return row.id;
+      continue;
+    }
+    if (row.program === "env") {
+      if (view.positionals.length === 0) return row.id;
+      continue;
+    }
+    if (row.verbs.every((verb, i) => {
+      const word = view.positionals[i];
+      return word !== undefined && (word === UNKNOWN || (typeof verb === "string" ? word === verb : verb.test(word)));
+    })) return row.id;
+  }
+  return undefined;
+}
+
+/** git verbs that put a file's contents into a commit a push in the line then sends. */
+const GIT_STAGES = /^(add|commit|stash)$/;
+
+/** Programs whose output is what the files they read hold: one feeding a sink (`cat .env | nc …`, `"$(cat .env)"`) reads a named file for it. */
+const CONTENT_READERS: ReadonlySet<string> = new Set([
+  "cat", "tac", "head", "tail", "less", "more", "nl", "base64", "base32", "xxd", "od", "hexdump", "strings", "gzip", "gunzip", "zcat", "bzip2", "bzcat", "xz", "xzcat", "zstd", "tar", "zip", "7z", "jq", "yq", "sed", "awk", "grep", "egrep", "rg", "cut", "sort", "uniq", "tr", "paste", "openssl", "gpg", "tee", "dd", "sops", "envsubst", "dotenv", "source", "column", "fold", "rev",
+]);
 
 /** What a variable's name holds anywhere in it when its value is a secret (`DB_PASSWORD`, `clientSecret`, `SESSION_COOKIE`). */
 const SECRET_NAME = /secret|passw|apikey|api_key|credential|private_key|cookie/;
@@ -1040,8 +1469,6 @@ const USES_KEY = /^(-i|-E|--identity|--key|--cert|--cacert|--capath|--client-cer
 /** Options of the downloaders whose value is a file they write. */
 const WRITES_OUTPUT = /^(-o|-O|--output|--output-document|--output-file|--output-dir|-D|--dump-header|-c|--cookie-jar|--trace|--trace-ascii|--stderr|-P|--directory-prefix|-a|--append-output)$/;
 
-/** `security` subcommands that print a secret from the keychain. */
-const KEYCHAIN_READS = /^(find-generic-password|find-internet-password|dump-keychain|export|find-key|unlock-keychain)$/;
 
 function present(path: string): boolean {
   try {
@@ -1123,42 +1550,67 @@ function fileWords(command: RiskCommand, view: CommandView): string[] {
  * line makes) holds nothing to send.
  */
 export function exfiltrates(commands: readonly RiskCommand[], facts: RiskFacts, expands: readonly string[] = []): string | undefined {
-  let sender: string | undefined;
+  let sink: string | undefined;
   let secret: string | undefined;
   /** A name some other command of the line also uses: it may make the file this one sends. */
   const elsewhere = (word: string, self: RiskCommand) => commands.some((other) => other !== self && (other.words.includes(word) || other.writes.includes(word)));
-  const holdsSecret = (word: string, command: RiskCommand): boolean => {
+  /**
+   * Whether a word names a secret file. Named in full (`~/.aws/credentials`), it is the secret whether or
+   * not it can be seen from here; a bare name must be a file that is there, unless the command reads its
+   * contents for the line (`direct`: a sink's own file, a redirection's input, a content reader such as
+   * `cat`): then the name alone says it (`gh gist create .env.production`, `cat .env | nc …`).
+   */
+  const holdsSecret = (word: string, command: RiskCommand, direct: boolean): boolean => {
     const classification = facts.classify(word, command.cwd);
     if (classification?.zone !== "sensitive") return false;
-    // Named in full (`~/.aws/credentials`), it is the secret whether or not it
-    // can be seen from here; a bare name must be a file that is there.
-    return isAbsolute(word) || word.startsWith("~") || present(classification.path) || elsewhere(word, command);
+    return direct || isAbsolute(word) || word.startsWith("~") || present(classification.path) || elsewhere(word, command);
   };
+  /** Credential commands (`SECRET_SOURCES`): a source for the line's other commands. */
+  const printers = new Set<RiskCommand>();
+  const sinks = new Set<RiskCommand>();
   for (const command of commands) {
     // What a redirection feeds a command is a file it reads, whatever the command.
-    for (const path of command.reads) if (path !== UNKNOWN && holdsSecret(path, command)) secret ??= path;
+    for (const path of command.reads) if (path !== UNKNOWN && holdsSecret(path, command, true)) secret ??= path;
     const words = command.words;
     if (words.length === 0) continue;
     const view = viewOf(words);
-    if (SENDERS.test(view.program)) {
-      // A hosting CLI only sends what a writing verb carries.
-      const sends = !/^(gh|glab)$/.test(view.program) || view.positionals.some((word) => /^(api|gist|secret|variable|release|pr|issue|repo)$/.test(word));
-      if (sends) sender ??= view.program;
+    const row = sinkOf(view);
+    if (row) {
+      sinks.add(command);
+      sink ??= view.program;
     }
-    for (const word of fileWords(command, view)) if (holdsSecret(word, command)) secret ??= word;
-    // The keychain and the environment hold secrets whatever file they name.
-    if (view.program === "security" && view.positionals.some((word) => word === UNKNOWN || KEYCHAIN_READS.test(word))) secret ??= "the keychain";
-    if (view.program === "printenv" && (view.positionals.length === 0 || view.positionals.some((word) => word === UNKNOWN || secretName(word)))) secret ??= "the environment";
-    if (view.program === "env" && view.positionals.length === 0) secret ??= "the environment";
+    // Staging a file into a commit (`git add .env`) reads it for the line's push.
+    const direct = row !== undefined || CONTENT_READERS.has(view.program) || (view.program === "git" && GIT_STAGES.test(view.positionals[0] ?? ""));
+    for (const word of fileWords(command, view)) if (holdsSecret(word, command, direct)) secret ??= word;
+    // A sink's `@file` and `name=@file` values (`gh api -f body=@.env`, `http x=@f`): files it sends.
+    if (row) for (const word of view.args) {
+      const file = /^(?:[^=@\s]*=)?@([^;@]+)$/.exec(word)?.[1];
+      if (file && file !== "-" && holdsSecret(file, command, true)) secret ??= file;
+    }
+    const printed = credentialSource(view);
+    if (printed) {
+      printers.add(command);
+      // The keychain and the environment hold secrets whatever the line does with them.
+      if (printed === "the keychain" || printed === "the environment") secret ??= printed;
+    }
     // `$TOKEN` in a word this shell leaves as written, for a program that expands it here
     // (`bash -c '…'`). What ssh runs on the other machine reads that machine's variables.
     const remote = /^(ssh|mosh)$/.test(view.program) ? sshHostIndex(words) : undefined;
     if (words.some((word, at) => word !== UNKNOWN && (remote === undefined || at <= remote) && namesSecret(word))) secret ??= "a value in this line";
   }
+  // A stored credential printed for another command that sends (`gh auth token | curl -d @- …`).
+  if (secret === undefined) {
+    for (const printer of printers) {
+      if ([...sinks].some((other) => other !== printer)) {
+        secret = credentialSource(viewOf(printer.words));
+        break;
+      }
+    }
+  }
   // A variable named like a credential that the line's own shell expands for its commands.
   if (expands.some(secretName)) secret ??= "a value in this line";
-  if (sender === undefined || secret === undefined) return undefined;
-  return `sends a secret off this machine (${secret}) through ${sender}`;
+  if (sink === undefined || secret === undefined) return undefined;
+  return `sends a secret off this machine (${secret}) through ${sink}`;
 }
 
 /** The files a download writes: `-o`/`-O` values, a redirection, or the URL's file name (`curl -O`, `wget`). */
@@ -1222,7 +1674,7 @@ export function downloadsAndRuns(commands: readonly { words: readonly string[]; 
  * sends. Not for `remote`, the line ssh runs on another machine: its
  * variables and files are that machine's.
  */
-export function assessOpaque(line: string, facts: RiskFacts, remote = false): Assessment {
+export function assessOpaque(line: string, facts: RiskFacts, remote = false, cwd?: string): Assessment {
   // Its words with `$` are unknown: look for the installed app in its text
   // instead. Only a line that writes where it names it is dangerous; one
   // that reads it is local work like any other read.
@@ -1241,12 +1693,16 @@ export function assessOpaque(line: string, facts: RiskFacts, remote = false): As
   const all = segments.flat();
   // A secret leaving the machine is the always-ask floor here too: a
   // credential's variable anywhere in a line that runs a program that sends.
-  const sender = remote ? undefined : all.find((word) => SENDERS.test(basename(word)));
+  const sender = remote ? undefined : all.find((word) => SINK_PROGRAMS.has(basename(word)));
   if (sender) {
     const file = all.find((word, at) => {
       if (word === UNKNOWN || word.startsWith("-") || USES_KEY.test(all[at - 1] ?? "") || /IdentityFile/i.test(all[at - 1] ?? "")) return false;
-      const classification = facts.classify(word, undefined);
-      return classification?.zone === "sensitive" && present(classification.path);
+      // The word, or the file a sender reads it as (`@.env`, `key=@file`), from where the line runs.
+      const names = [word, word.replace(/^[^=@]*=?@/, "")].filter((name, index, list) => name && list.indexOf(name) === index);
+      return names.some((name) => {
+        const classification = facts.classify(name, cwd);
+        return classification?.zone === "sensitive" && present(classification.path);
+      });
     });
     const secret = file ?? (namesSecret(line) ? "a value in this line" : undefined);
     if (secret) return { tier: "danger", kind: `may send a secret off this machine (${secret}) through ${basename(sender)}`, key: "secret-off-machine", floor: true };

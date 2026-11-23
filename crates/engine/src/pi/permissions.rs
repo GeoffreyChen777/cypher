@@ -157,16 +157,16 @@ fn assisted() -> ApprovalMode {
     ApprovalMode::Assisted
 }
 
-/// Model first, as the extension's `DEFAULT_APPROVAL`: the judge approves
-/// what plainly serves the user's request and asks them about the rest.
-/// Writes to protected files (they run code later) are a human's, whatever
-/// the file says; writes to Cypher's own data have no setting: always a
-/// human.
+/// Model first for every kind, as the extension's `DEFAULT_APPROVAL` (round 3,
+/// 2026-11-23): the judge decides and asks the user only with a concrete
+/// concern. A write to a protected file (it runs code later) is a danger the
+/// judge approves once, never for the chat; the permission system's own files
+/// have no setting: always the user (the extension's floor).
 impl Default for PermissionApprovals {
     fn default() -> Self {
         Self {
             external_write: ApprovalMode::Assisted,
-            protected_write: ApprovalMode::Ask,
+            protected_write: ApprovalMode::Assisted,
             sensitive_read: ApprovalMode::Assisted,
             sensitive_write: ApprovalMode::Assisted,
             network: ApprovalMode::Assisted,

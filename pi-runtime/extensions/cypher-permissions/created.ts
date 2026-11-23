@@ -1,15 +1,19 @@
 /**
  * What this task made: the facts that let the reviewing model approve a
  * dangerous-looking action that only touches the chat's own leavings (its
- * worktrees and branches, its private development instance, its scratch
- * files and the processes it started).
+ * worktrees and branches, its simulators and containers, its private
+ * development instance, its scratch files, its pull requests).
  *
  * The facts are read from the commands the chat actually ran, not from what
- * the model says: every bash call this extension lets through is parsed here
- * (`creationsOf`), and what it creates is recorded (`CreatedStore`, kept in
- * the Pi session like a grant, tagged with the chat id). A later `git
- * worktree remove`, `git branch -D`, `rm -rf` or `kill` is then checked
- * against that record (risk.ts `facts.created`): what the chat made is local
+ * the model says. Every bash call this extension lets through is read
+ * against the creator/destroyer catalogue (catalogue.ts): before it runs,
+ * `planCreated` lists what it may create and what is there already; after,
+ * `settleCreated` keeps what it surely made (its exit status, its own
+ * output, what exists now), and the provenance ledger (ledger.ts) records
+ * it per chat, on disk, where commands in the sandbox can't write. A later
+ * `git worktree remove`, `git branch -D`, `xcrun simctl delete`, `docker
+ * rm` or `rm -rf` is then checked against that record (risk.ts
+ * `facts.created`, `CreatedStore.covers`): what the chat made is local
  * work, everything else stays dangerous.
  *
  * Nothing sensitive, protected, Cypher's own, or the installed app's is ever
@@ -17,27 +21,19 @@
  * user approved once into a free hand to delete it later.
  */
 
-import { basename, isAbsolute, join, resolve } from "node:path";
-
-import { UNKNOWN } from "./shell.ts";
+import { Ledger } from "./ledger.ts";
+import type { LedgerEntity, LedgerEntry } from "./ledger.ts";
+import { planCreations, settleCreations, targetsOf } from "./catalogue.ts";
+import type { CatalogueCommand, CatalogueFacts, Candidate, Destruction } from "./catalogue.ts";
+import { followUpOf } from "./lifecycle.ts";
+import type { Acted, FollowUp, LifecycleFacts } from "./lifecycle.ts";
 
 export const CREATED_ENTRY = "cypher-permissions.created";
 
 /** One command of a line, as core.ts reads it. */
-export interface CreationCommand {
-  words: readonly string[];
-  /** The directory it runs in; undefined when known only when it runs. */
-  cwd: string | undefined;
-  /** Files its redirections write, as written. */
-  writes: readonly string[];
-  /** Values assigned in front of it and its wrappers' words. */
-  carried?: readonly string[];
-  /** Variables assigned in front of it, by name, with their values in order. */
-  env?: readonly string[];
-  envValues?: readonly string[];
-}
+export type CreationCommand = CatalogueCommand;
 
-/** What a line creates, as paths and git names. */
+/** What a line creates, as paths and git names (the session's record). */
 export interface Creations {
   /** Directories and files it makes (canonical paths). */
   paths: string[];
@@ -47,7 +43,7 @@ export interface Creations {
   branches: string[];
 }
 
-/** What recording needs from the machine. */
+/** What recording needs from the machine (the older, single-step reading). */
 export interface CreationFacts {
   /** A path as the permission engine canonicalizes it, from `cwd`; undefined when that is not known. */
   canonical(path: string, cwd: string | undefined): string | undefined;
@@ -64,161 +60,29 @@ export interface CreationFacts {
 
 const EMPTY: Creations = { paths: [], worktrees: [], branches: [] };
 
-/** Options of `git worktree add` that take a value. */
-const WORKTREE_VALUES = new Set(["-b", "-B", "--reason", "--orphan-branch"]);
-
-/** Options of `mkdir` and `install` that take a value. */
-const MODE_VALUES = new Set(["-m", "--mode", "-o", "--owner", "-g", "--group"]);
-
-/** A dev instance's data directories: `~/.cypher-development/<mode>-<part>[-<name>]`. */
-function devInstanceDirs(name: string, home: string): string[] {
-  // Never the whole `~/.cypher-development`: other chats keep their instances there too.
-  const root = join(home, ".cypher-development");
-  const dirs: string[] = [];
-  for (const mode of ["local", "dev"]) {
-    for (const part of ["engine", "ui"]) {
-      const base = `${mode}-${part}${name ? `-${name}` : ""}`;
-      dirs.push(join(root, base), join(root, `${base}.log`));
-    }
-  }
-  if (name) dirs.push(join(root, `dev-engine-${name}`), join(root, `dev-ui-${name}`));
-  return dirs;
-}
-
-/** `NAME=value` as a command carries it, for the names a dev instance is named by. */
-const INSTANCE_ASSIGNMENT = /^(CYPHER_DEV_INSTANCE|CYPHER_DATA_DIR|CYPHER_ENGINE_DATA_DIR|CYPHER_CAPTURE_DIR)=(.*)$/;
-
-/** Everything one line creates, from its commands as the shell reader read them. */
+/**
+ * Everything one line names as created, read before it runs, without
+ * confirming that it ran: paths that are not there yet, worktrees, local
+ * branches. Kept for the session's record; the ledger takes only what
+ * `settleCreated` confirms.
+ */
 export function creationsOf(commands: readonly CreationCommand[], facts: CreationFacts): Creations {
+  const plan = planCreations(commands, {
+    home: facts.home,
+    canonical: facts.canonical,
+    recordable: facts.recordable,
+    exists: () => false,
+    // Branches by name alone, as the session has always kept them.
+    repository: () => "",
+    refExists: () => false,
+  });
   const out: Creations = { paths: [], worktrees: [], branches: [] };
-  const add = (list: string[], path: string | undefined) => {
-    if (path === undefined || !facts.recordable(path) || list.includes(path)) return;
-    list.push(path);
-  };
-  const resolved = (word: string, cwd: string | undefined) => (word === UNKNOWN || word.startsWith("-") ? undefined : facts.canonical(word, cwd));
-  for (const command of commands) {
-    const words = command.words;
-    if (words.length === 0) continue;
-    const program = basename(words[0] === UNKNOWN ? "" : words[0]);
-    const args = words.slice(1);
-    const operands = args.filter((word) => word !== UNKNOWN && !word.startsWith("-"));
-    for (const path of command.writes) add(out.paths, resolved(path, command.cwd));
-    // A dev instance names its own data directories, whoever starts it.
-    const assignments = (command.env ?? []).map((name, index) => `${name}=${command.envValues?.[index] ?? UNKNOWN}`);
-    for (const word of [...words, ...(command.carried ?? []), ...assignments]) {
-      const match = INSTANCE_ASSIGNMENT.exec(word);
-      if (!match) continue;
-      const [, name, value] = match;
-      if (value === UNKNOWN) continue;
-      if (name === "CYPHER_DEV_INSTANCE") {
-        if (!/^[A-Za-z0-9._-]*$/.test(value)) continue;
-        for (const dir of devInstanceDirs(value, facts.home)) add(out.paths, dir);
-      } else {
-        const dir = facts.canonical(value, command.cwd);
-        if (dir === undefined) continue;
-        add(out.paths, dir);
-        add(out.paths, `${dir}.log`);
-      }
-    }
-    switch (program) {
-      case "git": {
-        const { sub, rest, dir } = gitParts(words, command.cwd);
-        if (sub === "worktree" && rest[0] === "add") {
-          let branch: string | undefined;
-          const places: string[] = [];
-          for (let i = 1; i < rest.length; i++) {
-            const word = rest[i];
-            if (WORKTREE_VALUES.has(word)) {
-              const value = rest[++i];
-              if (value !== undefined && value !== UNKNOWN && (word === "-b" || word === "-B" || word === "--orphan-branch")) branch = value;
-              continue;
-            }
-            if (word.startsWith("-")) continue;
-            places.push(word);
-          }
-          const place = places[0];
-          if (place !== undefined && place !== UNKNOWN) {
-            const path = facts.canonical(place, dir);
-            add(out.worktrees, path);
-            add(out.paths, path);
-          }
-          if (branch) add(out.branches, branch);
-          break;
-        }
-        if (sub === "clone") {
-          const places = rest.filter((word) => word !== UNKNOWN && !word.startsWith("-"));
-          const place = places[1] ?? (places[0] ? basename(places[0].replace(/\/+$/, "").replace(/\.git$/, "")) : undefined);
-          if (place) add(out.paths, facts.canonical(place, dir));
-          break;
-        }
-        if (sub === "switch" || sub === "checkout") {
-          const at = rest.findIndex((word) => /^(-c|-C|-b|-B|--create|--force-create)$/.test(word));
-          const name = at >= 0 ? rest[at + 1] : undefined;
-          if (name !== undefined && name !== UNKNOWN && !name.startsWith("-")) add(out.branches, name);
-          break;
-        }
-        if (sub === "branch") {
-          // `git branch <name> [start]`, never a delete, a rename or a listing.
-          if (rest.some((word) => /^(-d|-D|-m|-M|-c|-C|--delete|--move|--copy|--list|-l|-a|-r)$/.test(word))) break;
-          const name = rest.find((word) => word !== UNKNOWN && !word.startsWith("-"));
-          if (name) add(out.branches, name);
-          break;
-        }
-        break;
-      }
-      case "mkdir":
-      case "install": {
-        if (program === "install" && !args.some((word) => word === "-d" || word === "--directory")) break;
-        for (let i = 0; i < args.length; i++) {
-          const word = args[i];
-          if (MODE_VALUES.has(word)) {
-            i++;
-            continue;
-          }
-          if (word === UNKNOWN || word.startsWith("-")) continue;
-          add(out.paths, facts.canonical(word, command.cwd));
-        }
-        break;
-      }
-      case "touch":
-      case "tee": {
-        for (const word of operands) add(out.paths, facts.canonical(word, command.cwd));
-        break;
-      }
-      case "cp":
-      case "mv":
-      case "rsync":
-      case "ditto": {
-        // Its destination: the last operand (a local one).
-        const dest = operands.at(-1);
-        if (dest !== undefined && !/^[^/]*:/.test(dest)) add(out.paths, facts.canonical(dest, command.cwd));
-        break;
-      }
-      case "mktemp": {
-        // The template says where, not which name: record the directory.
-        const template = operands[0];
-        if (template && template.includes("/")) add(out.paths, facts.canonical(template.replace(/\/[^/]*$/, ""), command.cwd));
-        break;
-      }
-    }
+  for (const { entity, confirm, before, needs } of plan) {
+    if (before || needs || confirm === "output" || entity.name === "") continue;
+    const list = entity.kind === "path" ? out.paths : entity.kind === "worktree" ? out.worktrees : entity.kind === "branch" && entity.remote === undefined ? out.branches : undefined;
+    if (list && !list.includes(entity.name)) list.push(entity.name);
   }
   return out;
-}
-
-/** git's global options, and the directory `-C` moves to (as explicit.ts reads them). */
-function gitParts(words: readonly string[], cwd: string | undefined): { sub?: string; rest: string[]; dir: string | undefined } {
-  let dir = cwd;
-  let i = 1;
-  for (; i < words.length; i++) {
-    const word = words[i];
-    if (word === "-C") {
-      const next = words[++i];
-      if (next === undefined || next === UNKNOWN) dir = undefined;
-      else dir = isAbsolute(next) ? next : dir === undefined ? undefined : resolve(dir, next);
-    } else if (word === "-c" || word === "--git-dir" || word === "--work-tree" || word === "--namespace") i++;
-    else if (!word.startsWith("-")) break;
-  }
-  return { sub: words[i], rest: words.slice(i + 1), dir };
 }
 
 /** What one record holds, as it is kept in the session. */
@@ -230,23 +94,26 @@ export interface CreatedRecord {
   createdAt?: string;
 }
 
-/** How much one chat may record (a bound on the session entries and the memory). */
-const MAX_PATHS = 400;
-const MAX_BRANCHES = 200;
+/** A plan made before a line ran, to settle after. */
+export interface CreationPlan {
+  command: string;
+  commands: readonly CreationCommand[];
+  candidates: Candidate[];
+}
 
 /**
- * What the chat has made, in this process and in its earlier turns (the
- * session's `cypher-permissions.created` entries).
+ * What the chat has made: its ledger (on disk, when it has a file), and
+ * the records of its earlier turns kept in the session
+ * (`cypher-permissions.created` entries, from before the ledger).
  */
 export class CreatedStore {
-  private readonly pathSet = new Set<string>();
-  private readonly worktreeSet = new Set<string>();
-  private readonly branchSet = new Set<string>();
+  readonly ledger: Ledger;
 
   private readonly chatId: string | undefined;
 
-  constructor(chatId: string | undefined) {
+  constructor(chatId: string | undefined, file?: string) {
     this.chatId = chatId;
+    this.ledger = new Ledger(file, chatId);
   }
 
   /** Read the records of this chat from the session's entries. */
@@ -256,52 +123,108 @@ export class CreatedStore {
       const record = entry.data as CreatedRecord | undefined;
       if (!record || typeof record !== "object") continue;
       if (this.chatId && record.chatId !== this.chatId) continue;
-      this.take(record);
+      this.ledger.record(recordEntities(record), undefined, false);
     }
   }
 
-  private take(record: CreatedRecord): void {
-    for (const path of record.paths ?? []) if (typeof path === "string" && this.pathSet.size < MAX_PATHS) this.pathSet.add(path);
-    for (const path of record.worktrees ?? []) if (typeof path === "string" && this.worktreeSet.size < MAX_PATHS) this.worktreeSet.add(path);
-    for (const name of record.branches ?? []) if (typeof name === "string" && this.branchSet.size < MAX_BRANCHES) this.branchSet.add(name);
+  /** Record what a line created; returns what was new, to keep in the session. */
+  note(creations: Creations, by?: string): CreatedRecord | undefined {
+    const fresh = this.ledger.record(recordEntities(creations), by);
+    if (fresh.length === 0) return undefined;
+    const record: CreatedRecord = {};
+    for (const entry of fresh) {
+      const list = entry.kind === "path" ? (record.paths ??= []) : entry.kind === "worktree" ? (record.worktrees ??= []) : (record.branches ??= []);
+      list.push(entry.name);
+    }
+    return { ...record, ...(this.chatId ? { chatId: this.chatId } : {}), createdAt: new Date().toISOString() };
   }
 
-  /** Record what a line created; returns what was new, to keep in the session. */
-  note(creations: Creations): CreatedRecord | undefined {
-    const fresh: CreatedRecord = {};
-    const paths = creations.paths.filter((path) => !this.pathSet.has(path));
-    const worktrees = creations.worktrees.filter((path) => !this.worktreeSet.has(path));
-    const branches = creations.branches.filter((name) => !this.branchSet.has(name));
-    if (paths.length) fresh.paths = paths;
-    if (worktrees.length) fresh.worktrees = worktrees;
-    if (branches.length) fresh.branches = branches;
-    if (Object.keys(fresh).length === 0) return undefined;
-    this.take(fresh);
-    return { ...fresh, ...(this.chatId ? { chatId: this.chatId } : {}), createdAt: new Date().toISOString() };
+  /** Before a line runs: what it may create, and what is there already. */
+  plan(command: string, commands: readonly CreationCommand[], facts: CatalogueFacts): CreationPlan {
+    return { command, commands, candidates: planCreations(commands, facts) };
+  }
+
+  /** After it ran: record what it surely made. */
+  settle(plan: CreationPlan, result: { exitCode?: number; output?: string }, facts: CatalogueFacts): LedgerEntry[] {
+    const made = settleCreations(plan.candidates, plan.commands, result, { ...facts, ledgered: (entity) => this.covers(entity) });
+    return this.ledger.record(made, plan.command);
+  }
+
+  /** Whether this chat made the entity (or what holds it). */
+  covers(entity: LedgerEntity): boolean {
+    return this.ledger.covers(entity);
+  }
+
+  /** What the ledger says this chat did, as lifecycle antecedents (lifecycle.ts). */
+  antecedents(): Acted[] {
+    return this.ledger.all().map((entry) => ({ action: entry.action ?? "create", entity: entry }));
+  }
+
+  /** The ledger record and lifecycle rule that make an action on an entity this chat's own follow-up, if any. */
+  followUp(action: string, entity: LedgerEntity, facts: LifecycleFacts = {}): { rule: FollowUp; antecedent: Acted } | undefined {
+    return followUpOf({ action, entity }, this.antecedents(), { ...facts, created: (made) => this.covers(made) });
+  }
+
+  /**
+   * What a command destroys or stops, and whether every target is a
+   * follow-up of what the ledger holds (lifecycle.ts): what this chat
+   * created or started, the head branch and worktree of a pull request it
+   * merged, a branch it made and pushed. `why`: the rules, for the
+   * reviewing model.
+   */
+  destroys(command: CreationCommand, facts: Pick<CatalogueFacts, "canonical" | "repository"> & LifecycleFacts): (Destruction & { own: boolean; why: string[] }) | undefined {
+    const destruction = targetsOf(command, facts);
+    if (!destruction) return undefined;
+    const action = destruction.op === "stop" ? "stop" : "delete";
+    const why = new Set<string>();
+    const own =
+      !destruction.unknown &&
+      destruction.targets.length > 0 &&
+      destruction.targets.every((alternatives) =>
+        alternatives.some((entity) => {
+          const found = this.followUp(action, entity, facts);
+          if (found) why.add(found.rule.why);
+          return found !== undefined;
+        }),
+      );
+    return { ...destruction, own, why: own ? [...why] : [] };
+  }
+
+  /** Whether the ledger holds something of any kind by this name (a destroyer no row reads names it so). */
+  named(name: string): boolean {
+    return this.ledger.all().some((entry) => (entry.action ?? "create") === "create" && (entry.name === name || entry.name.toLowerCase() === name.toLowerCase()));
   }
 
   /** A canonical path this chat made, or one inside a directory it made. */
   has(path: string): boolean {
-    if (this.pathSet.has(path) || this.worktreeSet.has(path)) return true;
-    for (const made of this.pathSet) if (path.startsWith(`${made}/`)) return true;
-    for (const made of this.worktreeSet) if (path.startsWith(`${made}/`)) return true;
-    return false;
+    return this.covers({ kind: "path", name: path }) || this.covers({ kind: "worktree", name: path });
   }
 
   worktree(path: string): boolean {
-    if (this.worktreeSet.has(path)) return true;
-    for (const made of this.worktreeSet) if (path.startsWith(`${made}/`)) return true;
-    return false;
+    return this.covers({ kind: "worktree", name: path });
   }
 
+  /** A local branch this chat made, by name (in any repository). */
   branch(name: string): boolean {
-    return this.branchSet.has(name);
+    return this.ledger.all().some((entry) => entry.kind === "branch" && entry.remote === undefined && entry.name === name);
   }
 
   /** For the status text and tests. */
-  all(): { paths: string[]; worktrees: string[]; branches: string[] } {
-    return { paths: [...this.pathSet], worktrees: [...this.worktreeSet], branches: [...this.branchSet] };
+  all(): { paths: string[]; worktrees: string[]; branches: string[]; entities: LedgerEntry[] } {
+    const entries = this.ledger.all();
+    const names = (kind: string) => entries.filter((entry) => entry.kind === kind && entry.remote === undefined).map((entry) => entry.name);
+    return { paths: names("path"), worktrees: names("worktree"), branches: names("branch"), entities: [...entries] };
   }
+}
+
+/** A session record's (or a reading's) things, as ledger entities. */
+function recordEntities(record: Partial<Creations>): LedgerEntity[] {
+  const strings = (list: unknown) => (Array.isArray(list) ? list.filter((item): item is string => typeof item === "string" && item !== "") : []);
+  return [
+    ...strings(record.paths).map((name): LedgerEntity => ({ kind: "path", name })),
+    ...strings(record.worktrees).map((name): LedgerEntity => ({ kind: "worktree", name })),
+    ...strings(record.branches).map((name): LedgerEntity => ({ kind: "branch", name })),
+  ];
 }
 
 export { EMPTY as NO_CREATIONS };

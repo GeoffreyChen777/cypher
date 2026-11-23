@@ -45,6 +45,26 @@
  * substitution, an unquoted glob or brace list) becomes [`UNKNOWN`]: it may
  * stand for any words, so in a pattern only `**` matches it.
  *
+ * With `evaluate` (an evaluator, so that targets are known), also:
+ * - `for NAME in w1 w2 …; do BODY; done` over literal words: BODY once per
+ *   word, with NAME bound to it (a glob, `$(…)` or unknown word in the list
+ *   keeps NAME unknown, and BODY is read once);
+ * - shell functions the line defines (`f() { …; }`, `function f { …; }`):
+ *   a call runs the body, which is read there (a definition that may not
+ *   have run reads the call as a program too); recursion stays opaque;
+ * - a heredoc or here-string feeding a shell (`bash <<'EOF'`, `sh -s <<<
+ *   '…'`): its body is code, read as the commands of a shell of their own
+ *   (like a subshell); for any command its known text is `input`, for the
+ *   reviewing model;
+ * - an assignment in front of a command that changes how programs run
+ *   (`PATH=… cmd`): no longer opaque, but the program is known only when it
+ *   runs ([`UNKNOWN`], its text a hint), unless `resolveProgram` finds it
+ *   from the assignments' literal values;
+ * - how each command is joined to the next (`joint`) and whether it runs in
+ *   the line's own shell, not in a block, loop, function, substitution,
+ *   subshell or script (`topLevel`): when the line succeeded, which of its
+ *   commands surely did.
+ *
  * Everything else (nested subshells, functions, `(( … ))`, `select`,
  * process substitution, a substitution inside `${…}`, `$((…))` or an
  * unquoted heredoc, an assignment in front of a command that changes how
@@ -83,7 +103,20 @@ export interface SimpleCommand {
   hints?: (string | undefined)[];
   /** In a subshell `( … )`: which one, numbered from 1 in the line. */
   subshell?: number;
+  /** `evaluate`: the operator after it (`&&`, `||`, `;`, `|`, `&`); absent at the end of the line or its group. */
+  joint?: Joint;
+  /** `evaluate`: it runs in the line's own shell, not in a block, loop, function, substitution, subshell or script. */
+  topLevel?: boolean;
+  /** `evaluate`: the text a heredoc or here-string gives it on its input, when known. */
+  input?: string;
+  /** `evaluate`: it reads a heredoc or here-string whose text is known only when it runs. */
+  inputUnknown?: boolean;
+  /** `evaluate`: a shell it feeds (`bash <<EOF`): its input was read as code, its commands follow. */
+  script?: boolean;
 }
+
+/** The operators between commands. */
+export type Joint = "&&" | "||" | ";" | "|" | "&";
 
 export type ParsedLine =
   | {
@@ -98,12 +131,35 @@ export interface ParseOptions {
   /** Whether `NAME=value` alone on a command may stand (it changes nothing a program sees). */
   assignable?: (name: string) => boolean;
   /** Whether `NAME=value` in front of a command may stand (it does not change how programs load or run code). */
-  prefixAllowed?: (name: string) => boolean;
+  prefixAllowed?: (name: string, value?: string) => boolean;
   /** Whether `export NAME=value` may keep its value known (not a variable bash itself reads); without it, `export` forgets every value. */
   exportable?: (name: string) => boolean;
   /** The directory the line starts in: what `$PWD` is, in a line that never changes directory. */
   cwd?: string;
+  /**
+   * Read the line as an evaluator: literal for-loops, functions, scripts in
+   * heredocs, dangerous assignment prefixes as unknown programs, `joint`,
+   * `topLevel` and `input` (see the module comment).
+   */
+  evaluate?: boolean;
+  /**
+   * `evaluate`: the program a command runs when assignments in front of it
+   * change how programs are found (`PATH=/usr/bin git`), from their literal
+   * values; undefined when that is not known.
+   */
+  resolveProgram?: (program: string, assignments: readonly { name: string; value: string | undefined }[]) => string | undefined;
 }
+
+/** At most this many commands come out of expanding loops and calls, else they stay read once. */
+const MAX_EXPANDED = 256;
+/** At most this many words a for-loop is expanded over. */
+const MAX_ITERATIONS = 64;
+/** How many shells' scripts deep the evaluator reads (`bash -c` inside `bash -c` …). */
+const MAX_SCRIPT_DEPTH = 4;
+/** Shells whose input is a script. */
+const SCRIPT_SHELLS = /^(sh|bash|zsh|dash|ksh)$/;
+/** Options of a shell reading its script from its input (no `-c`, no arguments). */
+const SCRIPT_OPTIONS = /^(-[eEuxvsnhBCTP]+|\+[eEuxvnhBCTP]+|--noprofile|--norc|--posix|-)$/;
 
 /** Words that open or close a compound command bash has and this reader does not. */
 const UNSUPPORTED = new Set(["select", "function", "coproc", "]]"]);
@@ -118,6 +174,21 @@ interface Variables {
   poisoned: boolean;
   /** Every variable the line's shell expands, by name (shared by its subshells and substitutions). */
   expanded: Set<string>;
+  /** `evaluate`: the functions the line defined, by name: their bodies, and whether the definition surely ran. */
+  functions: Map<string, { body: string; sure: boolean }>;
+  /** `evaluate`: the bodies of the functions being called, innermost last. */
+  calling: string[];
+  /** How many commands loops and calls have added (bounded by [`MAX_EXPANDED`]). */
+  budget: { used: number };
+  /** How many shells' scripts deep this is (`bash -c '… bash -c …'`). */
+  depth: number;
+  /** `evaluate`: aliases the line defined, by name (shared like functions). */
+  aliases?: Map<string, string>;
+}
+
+/** A copy of the variables for a shell, loop iteration or call of its own; functions and the budget are shared. */
+function forkVariables(vars: Variables, values = new Map(vars.values)): Variables {
+  return { values, poisoned: vars.poisoned, expanded: vars.expanded, functions: vars.functions, calling: vars.calling, budget: vars.budget, depth: vars.depth, aliases: vars.aliases };
 }
 
 /**
@@ -159,7 +230,7 @@ function readLine(line: string, home: string, options: ParseOptions, cwd: string
     // `$HOME` is the home folder `~` stands for, until the line changes it.
     const values = new Map<string, string | undefined>([["HOME", home]]);
     if (cwd !== undefined) values.set("PWD", cwd);
-    const vars: Variables = { values, poisoned: false, expanded: new Set() };
+    const vars: Variables = { values, poisoned: false, expanded: new Set(), functions: new Map(), calling: [], budget: { used: 0 }, depth: 0 };
     read(line, home, options, commands, false, vars, { next: 1 });
     return { kind: "simple", commands, expands: [...vars.expanded] };
   } catch (error) {
@@ -215,8 +286,24 @@ function read(
   let redirect: Redirect | undefined;
   /** The command after `&&`, `||` or `|`. */
   let chained = false;
+  /** The command after `|`: it runs in a pipeline's own shell. */
+  let piped = false;
   /** A subshell just closed: only operators and redirections may follow it. */
   let afterSubshell = false;
+  /** `evaluate`: an assignment in front of the command changes how its program is found or runs. */
+  let hiddenProgram = false;
+  /** `evaluate`: a here-string's text for the command being read (null: known only when it runs). */
+  let hereString: string | null | undefined;
+
+  const evaluate = options.evaluate === true;
+  /** Where the reader is in `source`: when a word ends, the character that ends it. */
+  let pos = 0;
+  /** Per open loop, innermost last: a for-loop's name and literal words, and where its body starts. */
+  const loops: ({ name?: string; values?: string[]; bodyStart?: number; outStart?: number } | undefined)[] = [];
+  /** Per open `{ … }` group: the function it defines. */
+  const groups: ({ name: string; bodyStart: number; outStart: number; sure: boolean } | undefined)[] = [];
+  /** A function definition whose `{` comes next, with its name (none yet: the word after `function`). */
+  let pendingFunction: { name?: string } | undefined;
 
   // Where in the line.
   /** Open `if`, loops, `case` and `{ … }` groups, innermost last. */
@@ -233,8 +320,123 @@ function read(
   let forHeader = 0;
   /** Inside `[[ … ]]`. */
   let test = false;
-  /** Heredocs whose bodies start after this line. */
-  const heredocs: { delimiter: string; tabs: boolean; literal: boolean }[] = [];
+  /** Heredocs whose bodies start after this line, with the command that reads each (null: none). */
+  const heredocs: { delimiter: string; tabs: boolean; literal: boolean; owner?: SimpleCommand | null }[] = [];
+
+  /** A command read again elsewhere (a loop's iteration, a call, a script): it runs only sometimes, or apart. */
+  const apart = (command: SimpleCommand, loop: boolean): SimpleCommand => ({ ...command, scoped: true, loop: command.loop || loop, topLevel: false });
+
+  /** Commands that loops and calls add, within the line's budget; false when it is spent. */
+  const spend = (count: number): boolean => {
+    if (vars.budget.used + count > MAX_EXPANDED) return false;
+    vars.budget.used += count;
+    return true;
+  };
+
+  /** Read `text` as commands, for a loop iteration or a call; undefined when it can't be read so. */
+  const reread = (text: string, inner: Variables): SimpleCommand[] | undefined => {
+    const commands: SimpleCommand[] = [];
+    try {
+      read(text, home, options, commands, nested, inner, subshells, subshell);
+    } catch (error) {
+      if (error instanceof Opaque) return undefined;
+      throw error;
+    }
+    return commands;
+  };
+
+  /**
+   * `done` of a for-loop over literal words was just read: its body, read
+   * once with the name unknown, is read again for each word with the name
+   * bound to it. Too many commands, or a body that can't be read again: the
+   * first reading stands.
+   */
+  const expandLoop = (loop: NonNullable<(typeof loops)[number]>) => {
+    if (!loop.values || loop.name === undefined || loop.bodyStart === undefined || loop.outStart === undefined) return;
+    if (loop.values.length > MAX_ITERATIONS || source.slice(pos - 4, pos) !== "done") return;
+    const body = source.slice(loop.bodyStart, pos - 4);
+    const expanded: SimpleCommand[] = [];
+    for (const value of loop.values) {
+      const inner = forkVariables(vars);
+      inner.values.set(loop.name, value);
+      const commands = reread(body, inner);
+      if (commands === undefined) return;
+      for (const command of commands) expanded.push(apart(command, true));
+      if (expanded.length > MAX_EXPANDED) return;
+    }
+    if (!spend(expanded.length)) return;
+    out.splice(loop.outStart, out.length - loop.outStart, ...expanded);
+  };
+
+  /** `}` of a function's body was just read: its commands run when it is called, not here. */
+  const define = (fn: NonNullable<(typeof groups)[number]>) => {
+    if (source[pos - 1] !== "}") throw new Opaque("a function");
+    vars.functions.set(fn.name, { body: source.slice(fn.bodyStart, pos - 1), sure: fn.sure });
+    out.length = fn.outStart;
+  };
+
+  /**
+   * A call of a function the line defined: its body runs here. Returns
+   * whether the call is surely the function (else the program of that name
+   * may run instead).
+   */
+  const call = (name: string, loop: boolean): boolean => {
+    const fn = vars.functions.get(name)!;
+    // The same body again (not the same name: a body may redefine its own function) is recursion.
+    if (vars.calling.includes(fn.body) || vars.calling.length >= 8) throw new Opaque("a recursive function");
+    const inner = forkVariables(vars);
+    inner.calling = [...vars.calling, fn.body];
+    const commands: SimpleCommand[] = [];
+    read(fn.body, home, options, commands, nested, inner, subshells, subshell);
+    if (!spend(commands.length)) throw new Opaque("a function too long to follow");
+    for (const command of commands) out.push(apart(command, loop));
+    // What the body set, it set in this shell: no longer known.
+    for (const [variable, value] of inner.values) if (vars.values.get(variable) !== value) vars.values.set(variable, undefined);
+    if (inner.poisoned) vars.poisoned = true;
+    return fn.sure;
+  };
+
+  /**
+   * A command reads `text` on its input (a heredoc, a here-string;
+   * undefined: known only when it runs). A shell reading it as its script
+   * runs its commands, in a shell of its own: they are read, after it.
+   */
+  const feed = (command: SimpleCommand, text: string | undefined) => {
+    if (text === undefined) {
+      command.inputUnknown = true;
+      return;
+    }
+    command.input = text;
+    if (!scriptShell(command.words)) return;
+    if (!runScript(command, text)) command.inputUnknown = true;
+  };
+
+  /**
+   * A shell runs `text` as its script (its input, or `-c`): its commands are
+   * read as a shell of their own, after it (like a subshell; inside one, the
+   * same, and then scoped: a `cd` there leaves the directory unknown).
+   * Returns whether they could be read.
+   */
+  const runScript = (command: SimpleCommand, text: string): boolean => {
+    if (vars.depth >= MAX_SCRIPT_DEPTH) return false;
+    // What the shell inherits: the exported `HOME` and `PWD`, as this line knows them.
+    const values = new Map<string, string | undefined>([["HOME", vars.poisoned ? undefined : vars.values.get("HOME")]]);
+    if (!vars.poisoned && vars.values.has("PWD")) values.set("PWD", vars.values.get("PWD"));
+    const inner: Variables = { values, poisoned: false, expanded: vars.expanded, functions: new Map(), calling: [], budget: vars.budget, depth: vars.depth + 1 };
+    const commands: SimpleCommand[] = [];
+    try {
+      read(text, home, options, commands, false, inner, subshells, subshell ?? subshells.next++);
+    } catch (error) {
+      if (!(error instanceof Opaque)) throw error;
+      return false;
+    }
+    if (!spend(commands.length)) return false;
+    command.script = true;
+    const at = out.indexOf(command);
+    const apartToo = command.scoped || subshell !== undefined;
+    out.splice(at < 0 ? out.length : at + 1, 0, ...commands.map((inside) => ({ ...inside, scoped: inside.scoped || apartToo, loop: inside.loop || command.loop, topLevel: false })));
+    return true;
+  };
 
   const resetWord = () => {
     word = "";
@@ -258,7 +460,10 @@ function read(
     if (redirect) {
       const kind = redirect;
       redirect = undefined;
-      if (kind === "herestring") return;
+      if (kind === "herestring") {
+        if (evaluate) hereString = known ? `${text}\n` : null;
+        return;
+      }
       if (kind === "heredoc" || kind === "heredoc-tabs") {
         if (!known) throw new Opaque("a computed heredoc delimiter");
         heredocs.push({ delimiter: text, tabs: kind === "heredoc-tabs", literal: !plain });
@@ -290,21 +495,44 @@ function read(
       // A pattern names no command and no file.
       return;
     }
-    if (forHeader === 3) return;
+    if (forHeader === 3) {
+      // A word of the for-loop's list: a literal stays one, anything else makes the loop's name unknown.
+      const loop = loops.at(-1);
+      if (loop?.values) {
+        if (known) loop.values.push(text);
+        else loop.values = undefined;
+      }
+      return;
+    }
     if (test) {
       if (plain && text === "]]") test = false;
       return;
+    }
+    if (pendingFunction) {
+      // `function NAME`, then `{`.
+      if (!plain || words.length || assigns.length) throw new Opaque("a function");
+      if (pendingFunction.name === undefined) {
+        if (!/^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(text)) throw new Opaque("a function");
+        pendingFunction.name = text;
+        return;
+      }
+      if (text !== "{") throw new Opaque("a function");
     }
     if (words.length === 0 && plain) {
       if (forHeader === 1) {
         if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) throw new Opaque("`for`");
         vars.values.set(text, undefined);
+        const loop = loops.at(-1);
+        if (loop) loop.name = text;
         forHeader = 2;
         return;
       }
       if (forHeader === 2) {
-        if (text === "in") forHeader = 3;
-        else if (text === "do") forHeader = 0;
+        if (text === "in") {
+          forHeader = 3;
+          const loop = loops.at(-1);
+          if (loop) loop.values = [];
+        } else if (text === "do") forHeader = 0;
         else throw new Opaque("`for`");
         return;
       }
@@ -316,16 +544,33 @@ function read(
           case "while":
           case "until":
             blocks.push("loop");
+            loops.push(undefined);
             return;
           case "for":
             blocks.push("loop");
+            loops.push(evaluate ? {} : undefined);
             forHeader = 1;
             return;
           case "fi":
             if (blocks.pop() !== "if") throw new Opaque("an unmatched `fi`");
             return;
-          case "done":
+          case "done": {
             if (blocks.pop() !== "loop") throw new Opaque("an unmatched `done`");
+            const loop = loops.pop();
+            if (loop) expandLoop(loop);
+            return;
+          }
+          case "do": {
+            const loop = loops.at(-1);
+            if (loop && loop.bodyStart === undefined) {
+              loop.bodyStart = pos;
+              loop.outStart = out.length;
+            }
+            return;
+          }
+          case "function":
+            if (!evaluate) break;
+            pendingFunction = {};
             return;
           case "case":
             blocks.push("case");
@@ -335,16 +580,24 @@ function read(
             if (blocks.pop() !== "case") throw new Opaque("an unmatched `esac`");
             cases.pop();
             return;
-          case "{":
+          case "{": {
+            const name = pendingFunction?.name;
+            // A definition surely runs in the line's shell, unless something could skip it.
+            const sure = !nested && !chained && blocks.length === 0 && subshell === undefined && vars.calling.length === 0;
+            groups.push(name !== undefined ? { name, bodyStart: pos, outStart: out.length, sure } : undefined);
+            pendingFunction = undefined;
             blocks.push("group");
             return;
-          case "}":
+          }
+          case "}": {
             if (blocks.pop() !== "group") throw new Opaque("an unmatched `}`");
+            const fn = groups.pop();
+            if (fn) define(fn);
             return;
+          }
           case "then":
           case "elif":
           case "else":
-          case "do":
           case "!":
             return;
           case "[[":
@@ -363,18 +616,29 @@ function read(
       }
     }
     if (assigns.length) {
-      if (!assigns.every((name) => options.prefixAllowed?.(name))) throw new Opaque("a variable assignment in front of a command");
+      const allowed = assigns.every((name, index) => options.prefixAllowed?.(name, assignValues[index]));
+      if (!allowed && !evaluate) throw new Opaque("a variable assignment in front of a command");
       env = assigns;
       envValues = assignValues.map((value) => value ?? UNKNOWN);
       assigns = [];
       assignValues = [];
+      hiddenProgram = !allowed;
+    }
+    if (hiddenProgram) {
+      // `PATH=… cmd`: which program runs is known only when it runs, unless the assignments say where it is.
+      hiddenProgram = false;
+      const resolved = known ? options.resolveProgram?.(text, env.map((name, index) => ({ name, value: envValues[index] === UNKNOWN ? undefined : envValues[index] }))) : undefined;
+      words.push(resolved ?? UNKNOWN);
+      hints.push(resolved === undefined ? (known ? text : hint) : undefined);
+      return;
     }
     words.push(known ? text : UNKNOWN);
     hints.push(hint);
   };
 
-  const endCommand = (next: "and-or" | "pipe" | "background" | "end") => {
+  const endCommand = (next: "and-or" | "pipe" | "background" | "end", joint?: Joint) => {
     endWord();
+    if (pendingFunction) throw new Opaque("a function");
     if (redirect) throw new Opaque("a redirection without a target");
     if (test) throw new Opaque("an unfinished `[[`");
     if (forHeader === 1) throw new Opaque("`for`");
@@ -385,7 +649,8 @@ function read(
     const scoped = nested || chained || next === "pipe" || next === "background" || blocks.length > 0;
     // A value is known after an assignment that surely ran in the line's shell.
     if (words.length === 0) assigns.forEach((name, index) => vars.values.set(name, scoped ? undefined : assignValues[index]));
-    const program = words[0];
+    // A program hidden by an assignment in front of it is still the program its name says, or a builtin of that name.
+    const program = words[0] === UNKNOWN && evaluate && env.length && hints[0] !== undefined && /^[\w.+-]+$/.test(hints[0]) && !SETS_VARIABLES.has(hints[0]) ? hints[0] : words[0];
     if (program === "export" && exported(words, options)) {
       for (const word of words.slice(1)) {
         const [name, ...value] = word.split("=");
@@ -398,20 +663,62 @@ function read(
     } else if (program !== undefined && (program === UNKNOWN || SETS_VARIABLES.has(program) || (program === "printf" && words.some((word) => word === UNKNOWN || word.startsWith("-v"))))) {
       vars.poisoned = true;
     }
-    if (words.length || reads.length || writes.length) {
-      const loop = blocks.includes("loop");
-      out.push({
-        words,
+    const loop = blocks.includes("loop");
+    if (evaluate && program === "alias") {
+      // An alias's text is code a later command of the line may run (`shopt -s expand_aliases`): read it as such.
+      for (const word of words.slice(1)) {
+        if (word === UNKNOWN) throw new Opaque("an alias known only when it runs");
+        const at = word.indexOf("=");
+        if (at <= 0) continue;
+        const commands = reread(word.slice(at + 1), forkVariables(vars));
+        if (commands === undefined || !spend(commands.length)) throw new Opaque("an alias");
+        for (const command of commands) out.push(apart(command, loop));
+        (vars.aliases ??= new Map()).set(word.slice(0, at), word.slice(at + 1));
+      }
+    }
+    // A command named like an alias the line defined runs the alias's text with its words (when aliases expand).
+    const alias = evaluate && words.length > 0 && words[0] !== UNKNOWN ? vars.aliases?.get(words[0]) : undefined;
+    if (alias !== undefined) {
+      if (words.includes(UNKNOWN)) throw new Opaque("an alias given words known only when it runs");
+      const commands = reread(`${alias} ${words.slice(1).map((item) => `'${item.replaceAll("'", `'\\''`)}'`).join(" ")}`, forkVariables(vars));
+      if (commands === undefined || !spend(commands.length)) throw new Opaque("an alias");
+      for (const command of commands) out.push(apart(command, loop));
+    }
+    // A call of a function the line defined runs its body; the call's redirections stay its own.
+    const fn = evaluate && words.length > 0 && words[0] !== UNKNOWN && vars.functions.has(words[0]);
+    const programRuns = !fn || !call(words[0], loop);
+    let pushed: SimpleCommand | undefined;
+    if ((programRuns && words.length) || reads.length || writes.length) {
+      pushed = {
+        words: programRuns ? words : [],
         reads,
         writes,
         loop,
         env,
-        scoped,
+        scoped: fn ? true : scoped,
         ...(envValues.length ? { envValues } : {}),
-        ...(hints.some((hint) => hint !== undefined) ? { hints } : {}),
+        ...(programRuns && hints.some((hint) => hint !== undefined) ? { hints } : {}),
         ...(subshell !== undefined ? { subshell } : {}),
-      });
+        ...(evaluate
+          ? {
+              ...(joint ? { joint } : {}),
+              topLevel: !fn && !nested && blocks.length === 0 && subshell === undefined && !piped && next !== "pipe" && next !== "background",
+            }
+          : {}),
+      };
+      out.push(pushed);
     }
+    if (evaluate) {
+      // The heredocs this command opened are its input; those of a command that isn't one are nobody's.
+      for (const heredoc of heredocs) if (heredoc.owner === undefined) heredoc.owner = pushed ?? null;
+      if (hereString !== undefined && pushed) feed(pushed, hereString ?? undefined);
+      // `bash -c '…'` (through wrappers that only run it): a literal script is read as the shell's commands.
+      const script = pushed && programRuns ? dashC(pushed.words, options) : undefined;
+      if (script !== undefined && pushed) runScript(pushed, script);
+    }
+    hereString = undefined;
+    hiddenProgram = false;
+    piped = next === "pipe";
     afterSubshell = false;
     words = [];
     hints = [];
@@ -524,25 +831,39 @@ function read(
   /** The bodies of this line's heredocs, from `i` (a newline); returns the index of the last body's last character. */
   const heredocBodies = (i: number): number => {
     let at = i + 1;
+    /** Each heredoc's body, with its owner: undefined text when known only when it runs. */
+    const bodies: { owner: SimpleCommand; text: string | undefined }[] = [];
     for (const heredoc of heredocs) {
+      const lines: string[] = [];
+      let known = true;
       for (;;) {
         if (at > source.length) throw new Opaque("an unterminated heredoc");
         const end = source.indexOf("\n", at);
         const text = source.slice(at, end < 0 ? source.length : end);
         at = end < 0 ? source.length + 1 : end + 1;
         if ((heredoc.tabs ? text.replace(/^\t+/, "") : text) === heredoc.delimiter) break;
+        lines.push(heredoc.tabs ? text.replace(/^\t+/, "") : text);
         if (heredoc.literal) continue;
         if (/`|\$\(/.test(text)) throw new Opaque("a substitution in a heredoc");
+        // Expanded before the command reads it: a `$` or `\` makes the text known only when it runs.
+        if (/[$\\]/.test(text)) known = false;
         // The line's shell expands an unquoted heredoc's variables before the command reads it.
         for (const match of text.matchAll(/(?<!\\)\$\{?[#!]?([A-Za-z_][A-Za-z0-9_]*)/g)) vars.expanded.add(match[1]);
       }
+      if (evaluate && heredoc.owner) bodies.push({ owner: heredoc.owner, text: known ? lines.map((line) => `${line}\n`).join("") : undefined });
     }
     heredocs.length = 0;
+    // A command with several heredocs reads the last one on its input.
+    for (const [index, body] of bodies.entries()) {
+      if (bodies.slice(index + 1).some((later) => later.owner === body.owner)) continue;
+      feed(body.owner, body.text);
+    }
     // The newline after the last delimiter, read as the end of a command.
     return at - 2;
   };
 
   for (let i = 0; i < source.length; i++) {
+    pos = i;
     const char = source[i];
     const next = source[i + 1];
     if (test && "&|()<>".includes(char)) {
@@ -558,13 +879,13 @@ function read(
         endWord();
         break;
       case "\n":
-        endCommand("end");
+        endCommand("end", ";");
         if (heredocs.length) i = heredocBodies(i);
         break;
       case ";":
         if (next === ";" || next === "&") {
           // `;;`, `;&` and `;;&` end a `case` clause: its patterns come next.
-          endCommand("end");
+          endCommand("end", ";");
           const clause = openCase();
           if (clause?.phase !== "body") throw new Opaque("`case`");
           clause.phase = "pattern";
@@ -572,11 +893,11 @@ function read(
           i += next === ";" && source[i + 2] === "&" ? 2 : 1;
           break;
         }
-        endCommand("end");
+        endCommand("end", ";");
         break;
       case "&":
         if (next === "&") {
-          endCommand("and-or");
+          endCommand("and-or", "&&");
           i++;
         } else if (next === ">") {
           endWord();
@@ -586,7 +907,7 @@ function read(
         } else {
           // In the background: it runs apart from the line's shell, and
           // what follows runs whether it does or not.
-          if (inWord || words.length || reads.length || writes.length || redirect || afterSubshell) endCommand("background");
+          if (inWord || words.length || reads.length || writes.length || redirect || afterSubshell) endCommand("background", "&");
           else throw new Opaque("a background job");
         }
         break;
@@ -597,10 +918,10 @@ function read(
           break;
         }
         if (next === "|") {
-          endCommand("and-or");
+          endCommand("and-or", "||");
           i++;
         } else {
-          endCommand("pipe");
+          endCommand("pipe", "|");
           if (next === "&") i++;
         }
         break;
@@ -648,13 +969,28 @@ function read(
           clause.started = true;
           break;
         }
+        if (evaluate && next === ")" && words.length === 0 && assigns.length === 0 && !redirect && !test && !forHeader && !afterSubshell) {
+          if (inWord && !quoted && !unknown && raw === word) {
+            // `NAME()` (or `function NAME()`): a function's definition; its body, a `{ … }` group, follows.
+            if (!/^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(word) || pendingFunction?.name !== undefined) throw new Opaque("a function");
+            pendingFunction = { name: word };
+            resetWord();
+            i++;
+            break;
+          }
+          if (!inWord && pendingFunction?.name !== undefined) {
+            // `function NAME ()`.
+            i++;
+            break;
+          }
+        }
         // A subshell starts a command; anywhere else `(` is something this reader does not follow (a function).
         if (inWord || words.length || assigns.length || redirect || test || forHeader || afterSubshell) throw new Opaque("a subshell");
         if (subshell !== undefined || nested) throw new Opaque("a nested subshell");
         if (next === "(") throw new Opaque("arithmetic");
         const close = closingParen(source, i + 1);
         // Its own shell: its assignments and `cd` stay in it, and what it changes no later word sees.
-        const inner: Variables = { values: new Map(vars.values), poisoned: vars.poisoned, expanded: vars.expanded };
+        const inner = forkVariables(vars);
         const commands: SimpleCommand[] = [];
         read(source.slice(i + 1, close), home, options, commands, false, inner, subshells, subshells.next++);
         // Run only sometimes, or apart: then so is each command in it.
@@ -756,9 +1092,84 @@ function read(
         inWord = true;
     }
   }
+  pos = source.length;
   endCommand("end");
   if (heredocs.length) throw new Opaque("an unterminated heredoc");
   if (blocks.length) throw new Opaque(`an unfinished \`${{ if: "if", loop: "loop", case: "case", group: "{" }[blocks.at(-1)!]}\``);
+}
+
+/** Options of `env`, `nice`, `timeout` that take a value; `env` options that do more than set the environment. */
+const WRAPPER_VALUES: Readonly<Record<string, readonly string[]>> = { env: ["-u", "--unset"], nice: ["-n"], timeout: ["-s", "--signal", "-k", "--kill-after"] };
+const WRAPPER_REFUSES: Readonly<Record<string, RegExp>> = { env: /^(-S|--split-string|-C|--chdir|-P)/ };
+/** Wrappers that only run the command after them, and whether a duration comes first (`timeout 30 cmd`). */
+const RUNS_NEXT: Readonly<Record<string, { duration?: boolean }>> = { env: {}, nohup: {}, time: {}, nice: {}, timeout: { duration: true }, command: {} };
+
+/**
+ * The script of `sh -c '…'`, `bash -lc '…'`, `env A=1 bash -c '…'`: the
+ * shell's `-c` text, when every word up to it is known, the wrappers only run
+ * the shell, and the assignments in front of it change nothing about how
+ * programs run (`prefixAllowed`). Undefined otherwise.
+ */
+function dashC(words: readonly string[], options: ParseOptions): string | undefined {
+  let i = 0;
+  for (let guard = 0; guard < 8; guard++) {
+    const program = words[i];
+    if (program === undefined || program === UNKNOWN) return undefined;
+    const name = program.replace(/^.*\//, "");
+    const wrapper = RUNS_NEXT[name];
+    if (!wrapper) break;
+    i++;
+    if (name === "command" && /^-[vV]/.test(words[i] ?? "")) return undefined;
+    for (; i < words.length; i++) {
+      const word = words[i];
+      if (word === UNKNOWN) return undefined;
+      if (WRAPPER_REFUSES[name]?.test(word)) return undefined;
+      const assignment = name === "env" ? /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(word) : null;
+      if (assignment) {
+        if (!options.prefixAllowed?.(assignment[1], word.slice(assignment[0].length))) return undefined;
+        continue;
+      }
+      if (!word.startsWith("-") || word === "-") break;
+      if (WRAPPER_VALUES[name]?.includes(word)) i++;
+    }
+    if (wrapper.duration) {
+      if (!/^\d+(\.\d+)?[smhd]?$/.test(words[i] ?? "")) return undefined;
+      i++;
+    }
+  }
+  const shell = words[i];
+  if (shell === undefined || !SCRIPT_SHELLS.test(shell.replace(/^.*\//, ""))) return undefined;
+  let dashed = false;
+  for (i++; i < words.length; i++) {
+    const word = words[i];
+    if (word === UNKNOWN) return undefined;
+    if (word === "-o" || word === "+o") {
+      if (!/^[a-z]+$/.test(words[++i] ?? "")) return undefined;
+      continue;
+    }
+    if (/^--(login|noprofile|norc|posix)$/.test(word)) continue;
+    if (/^[-+][eEuxvlnhBCTPc]+$/.test(word)) {
+      if (word.startsWith("-") && word.includes("c")) dashed = true;
+      continue;
+    }
+    break;
+  }
+  if (!dashed) return undefined;
+  const text = words[i];
+  return text === undefined || text === UNKNOWN ? undefined : text;
+}
+
+/** A shell that reads its script from its input: no `-c`, no script file, no arguments. */
+function scriptShell(words: readonly string[]): boolean {
+  const program = words[0];
+  if (program === undefined || program === UNKNOWN || !SCRIPT_SHELLS.test(program.replace(/^.*\//, ""))) return false;
+  for (let i = 1; i < words.length; i++) {
+    const word = words[i];
+    if (word === "-o" || word === "+o") {
+      if (!/^[a-z]+$/.test(words[++i] ?? "")) return false;
+    } else if (!SCRIPT_OPTIONS.test(word)) return false;
+  }
+  return true;
 }
 
 /** Whether a word's unquoted part expands to file names or several words. */

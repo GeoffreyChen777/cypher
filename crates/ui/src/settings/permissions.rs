@@ -68,7 +68,7 @@ impl ApprovalKey {
         match self {
             Self::ExternalWrite => "Other projects and folders. Reading them is always allowed.",
             Self::ProtectedWrite => {
-                "Git config and hooks, shell startup files, launch agents: a write there runs code later, so the reviewing model never approves one."
+                "Git config and hooks, shell startup files, launch agents: a write there runs code later, so the reviewing model approves one only once, never for the rest of the chat."
             }
             Self::SensitiveRead => {
                 "Keys, .env files and credentials, for the file tools. Sandboxed commands never read them."
@@ -77,7 +77,7 @@ impl ApprovalKey {
             Self::Network => "With the filtered network: a domain not on the list.",
             Self::Tools => "MCP and extension tools whose setting below is Ask.",
             Self::Escalate => {
-                "A command that needs more than the sandbox (ssh, gh, other processes) runs as you. Inspections run without asking; dangerous commands (publishing, deleting outside the project folders, secrets) always ask you."
+                "A command that needs more than the sandbox (ssh, gh, other processes) runs as you. Inspections run without asking; the reviewing model decides the rest, dangerous ones once. A secret leaving this machine always asks you."
             }
         }
     }
@@ -684,19 +684,12 @@ impl PermissionsPage {
     ) -> AnyElement {
         let mut card = widgets::section_card(theme).mt(px(12.0));
         for (index, key) in ApprovalKey::ALL.into_iter().enumerate() {
-            let mut options = vec![
+            let options = vec![
                 (mode_label(ApprovalMode::Deny), ApprovalMode::Deny),
                 (mode_label(ApprovalMode::Ask), ApprovalMode::Ask),
                 (mode_label(ApprovalMode::Assisted), ApprovalMode::Assisted),
             ];
-            // A protected write is a human's: the extension reads "Model first" as "Ask me".
-            let mut current = key.get(&settings.approval);
-            if key == ApprovalKey::ProtectedWrite {
-                options.pop();
-                if current == ApprovalMode::Assisted {
-                    current = ApprovalMode::Ask;
-                }
-            }
+            let current = key.get(&settings.approval);
             let control = self.segmented(
                 format!("permissions-approval-{}", key.id()),
                 options,
@@ -723,7 +716,7 @@ impl PermissionsPage {
             theme,
             false,
             "Cypher's own settings and data",
-            "Writes always ask you: the reviewing model never approves changes to its own rules.",
+            "Its permission rules, settings, audit log and sessions always ask you: the reviewing model never approves changes to its own rules.",
             widgets::badge(theme, "Ask me").into_any_element(),
         ));
         card.into_any_element()
@@ -780,7 +773,7 @@ impl PermissionsPage {
                 theme,
                 true,
                 "Reviewing model",
-                "\"Model first\" asks this model whether a request plainly serves what you asked for. It has two answers: approve it once, or ask you. It never rejects; if it is unsure or fails, you are asked.",
+                "\"Model first\" asks this model whether a request serves what you asked for. It approves it (what you already asked for always), or asks you about a concrete concern. It never rejects; if it fails, you are asked.",
                 control.into_any_element(),
             ))
             .into_any_element()

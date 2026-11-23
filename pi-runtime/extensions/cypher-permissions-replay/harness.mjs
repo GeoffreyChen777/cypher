@@ -15,6 +15,10 @@ import { fileURLToPath } from "node:url";
 
 import { Permissions } from "../cypher-permissions/core.ts";
 import { UNKNOWN } from "../cypher-permissions/shell.ts";
+import { setSystemDirectory } from "../cypher-permissions/commands.ts";
+
+// The fake machine's read-only directories (a `DEVELOPER_DIR=/Applications/Xcode.app/…` names the installed toolchain), on any host.
+setSystemDirectory((path) => /^\/(Applications|Library|System|usr|opt\/local)\//.test(path));
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -48,7 +52,9 @@ function processFacts(item) {
 
 /** The stubbed reviewing model: the case's (or probe's) recorded, rule-made or assumed verdict. */
 export function stubbedModel(verdict) {
-  return async () => (verdict ? JSON.stringify(verdict) : '{"decision":"ask-user","reason":"no verdict for this case"}');
+  // A recorded or assumed ask carries the concern a judge would name for what the line does (judge.ts
+  // `CONCERN_TABLE`, set per case in the fixture since round 3); an ask without one runs once.
+  return async () => JSON.stringify(verdict ?? { decision: "ask-user", reason: "no verdict for this case" });
 }
 
 /**
@@ -91,11 +97,14 @@ export function createMachine({ judgeTimeoutMs, cases = fixture.cases } = {}) {
    * runner passes the real one, sanitized); `proposal` is the agent's label
    * and reason for an escalation.
    */
+  let replays = 0;
   async function replay(item, probe, { complete, branch: conversation, proposal } = {}) {
     const verdict = probe ? probe.verdict : item.verdict;
     const command = probe?.command ?? item.command;
     const cwd = expand(item.cwd);
-    const permissions = new Permissions({ agentDir, chatId: "chat-replay", cwd, home, landstrip: { available: true, binary: "/nonexistent/landstrip" }, scratch: [tmp] });
+    // A chat of its own: what an earlier case's commands made (its on-disk ledger, created.ts) is never this one's.
+    const chatId = `chat-replay-${++replays}`;
+    const permissions = new Permissions({ agentDir, chatId, cwd, home, landstrip: { available: true, binary: "/nonexistent/landstrip" }, scratch: [tmp] });
     permissions.appendEntry = () => {};
     // The audit record this call writes, kept here so concurrent replays do not read each other's.
     const records = [];
