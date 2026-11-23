@@ -1135,7 +1135,11 @@ Results `$D/results/p3c-*`, script `$D/phase3c/phase3c.sh`. Stubs only, plus 3 l
   ask — #532–534, #622, #625, #981, #993, #1771, #1798, #2190, #2566, #2571, #2824, #3072, #3116 (consent-claim: the
   same less #532–534, #3072's mechanism differs). The approve-all stub cites no consent, and the consent-claim stub's
   quote doesn't name the data or the app, so these ask under the stubs by construction. Whether a live judge finds
-  a quote naming the data for them was not measured here (no held-out live run in this step); before step 3c the live
-  judge already asked on #993/#1771/#3072 (step 2's class (h)).
+  a quote naming the data for them: a live run of just these 15 cases, twice (`$D/results/p3c-newasks-live{1,2}.json`,
+  identical): 4 run (#532–534, #2824), 11 ask. Step 3b's two full live runs had asked on 4 of them (#1771, #1798, #3072,
+  #3116), so live held-out gains 7 asks (73 → ~80 = ~26.4%, an estimate, not a full run): #993 the judge itself now asks;
+  #622, #625, #981, #2190, #2566, #2571 the judge approved but the code found no cited quote naming the data or the app
+  (e.g. #622 "can you see the bug?" about a Claude compression error; #2190 an approval question with a screenshot).
+  This is the price of "the quote names that data or the app"; the owner decides whether it is worth it.
 - Checks: `npm --prefix pi-runtime test` 289/289; replay fixture #79/#80 (assumed verdicts without consent) now
   expected to ask, totals `approve-once 94 / approve-remember 9 / ask 70 / allowed 1`.
