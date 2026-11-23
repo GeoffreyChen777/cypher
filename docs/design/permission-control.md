@@ -1888,7 +1888,8 @@ Commands:
 | `cypher-permissions/risk.ts`, `packs.ts` | The risk classifier: an action's tier, what each program does, and the findings the floor reads (`floor`) |
 | `cypher-permissions/created.ts` | What this task made, read from the commands it ran: the facts a danger over its own leavings rests on (§7.3.3) |
 | `cypher-permissions/catalogue.ts` | The creator/destroyer catalogue: per tool and subcommand, the entity it creates, destroys, stops, starts or merges and where its name comes from; plan before a run, settle after (§7.3.3) |
-| `cypher-permissions/ledger.ts` | The provenance ledger: per chat, on disk where the sandbox can't write (§7.3.3) |
+| `cypher-permissions/ledger.ts` | The provenance ledger: per chat, on disk where the sandbox can't write (§7.3.3); round 5 step 2: the taint ledger (`taintFile`) of files and repositories written from a secret |
+| `cypher-permissions/fold.ts` | Round 5 step 2: constant folding of pure transforms (`TRANSFORMS`: base64 -d, xxd -r, rev, tr, printf escapes) for computed names |
 | `cypher-permissions/lifecycle.ts` | Lifecycle closure: the follow-ups an action implies, as data (§7.3.6) |
 | `cypher-permissions/explicit.ts` | Explicit requests: the owner's words, what a dangerous line acts on, the quote, target and retraction checks (§7.3.2); `scanConsents`/`scanDataConsent`, the same checks on every owner word as evidence (§7.3.10) |
 | `cypher-permissions/entities.ts` | Target identity: typed entities and `relation`/`covers`/`identifies`/`namesOf` (§7.3.5) |
