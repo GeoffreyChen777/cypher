@@ -290,6 +290,7 @@ impl Transcript {
                 Rc::new(move |row: &str, code: &str| index.borrow().patch_outcome(row, code))
             }),
             images: Some(self.image_ui(cx)),
+            file_previews: Some(self.file_preview_ui(cx)),
             live,
             justify: false,
         };
@@ -302,6 +303,7 @@ impl Transcript {
         let diagram_row = row_id.clone();
         let streaming_tail = live && block_ix + 1 == tree.blocks.len();
         self.request_images(&top.block, row_id, streaming_tail, cx);
+        self.request_file_previews(&top.block, row_id, streaming_tail, cx);
         markdown::mermaid::request_block(
             &top.block,
             theme,

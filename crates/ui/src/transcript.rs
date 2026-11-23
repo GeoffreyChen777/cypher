@@ -60,6 +60,7 @@ pub use rows::*;
 mod chips;
 pub use chips::*;
 mod code_ref;
+mod file_previews;
 mod git_refs;
 mod highlight;
 mod images;

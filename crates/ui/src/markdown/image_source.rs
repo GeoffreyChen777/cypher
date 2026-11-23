@@ -85,6 +85,8 @@ impl Format {
             .then_some(Self::Svg)
     }
 
+    /// The vectors' name for the format.
+    #[cfg(test)]
     pub fn mime(self) -> &'static str {
         match self {
             Self::Png => "image/png",
@@ -106,6 +108,8 @@ pub enum Rejection {
 }
 
 impl Rejection {
+    /// The vectors' name for the reason.
+    #[cfg(test)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Insecure => "insecure",
@@ -292,6 +296,16 @@ fn remote_extension(url: &str) -> Option<&str> {
 }
 
 fn local(path: &str, format: Format, context: &Context) -> Source {
+    match local_candidates(path, context) {
+        Ok(candidates) => Source::Local { candidates, format },
+        Err(path) => Source::Outside { path },
+    }
+}
+
+/// Where a cleaned local path ([`local_path`]) may be read, in lookup order:
+/// as images resolve, for any kind of file. `Err` holds the absolute path
+/// when it is outside every root the chat may read.
+pub fn local_candidates(path: &str, context: &Context) -> Result<Vec<Candidate>, String> {
     let home = context.home.map(|home| home.trim_end_matches('/'));
     let absolute = |path: &str| -> Option<String> {
         if path == "~" || path.starts_with("~/") {
@@ -340,11 +354,9 @@ fn local(path: &str, format: Format, context: &Context) -> Source {
         }
     }
     if candidates.is_empty() {
-        return Source::Outside {
-            path: tries.into_iter().next().unwrap_or_else(|| path.to_owned()),
-        };
+        return Err(tries.into_iter().next().unwrap_or_else(|| path.to_owned()));
     }
-    Source::Local { candidates, format }
+    Ok(candidates)
 }
 
 /// `full` relative to `root` when inside it.

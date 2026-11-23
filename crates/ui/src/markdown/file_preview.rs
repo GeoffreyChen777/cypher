@@ -40,6 +40,8 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// The vectors' name for the kind.
+    #[cfg(test)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Csv => "csv",

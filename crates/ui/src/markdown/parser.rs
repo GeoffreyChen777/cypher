@@ -105,6 +105,13 @@ pub enum Block {
         src: String,
         alt: String,
     },
+    /// A paragraph that was only a path to a file with a preview
+    /// ([`super::file_preview::file_line`]): a table, PDF page, video frame
+    /// or page card ([`super::file_card`]).
+    FilePreview {
+        src: String,
+        kind: super::file_preview::Kind,
+    },
 }
 
 /// What an artifact renders as.
@@ -644,6 +651,11 @@ fn paragraph_blocks(
                 src,
             }];
         }
+        if let Some(src) = super::file_preview::file_line(source)
+            && let Some(kind) = super::file_preview::kind(&src)
+        {
+            return vec![Block::FilePreview { src, kind }];
+        }
         if runs.is_empty() {
             return Vec::new();
         }
@@ -1082,6 +1094,7 @@ impl IncrementalParser {
                 | Block::Rule
                 | Block::Table { .. }
                 | Block::Image { .. }
+                | Block::FilePreview { .. }
         ) {
             return;
         }

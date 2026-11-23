@@ -303,7 +303,7 @@ fn plain(blocks: &[Block]) -> String {
                     }
                 }
             }
-            Block::Rule | Block::Image { .. } => {}
+            Block::Rule | Block::Image { .. } | Block::FilePreview { .. } => {}
         }
     }
     out.join("\n")

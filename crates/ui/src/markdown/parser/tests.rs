@@ -851,7 +851,7 @@ fn a_paragraph_that_is_only_an_image_path_is_an_image() {
     );
     for prose in [
         "See `shots/a.png`\n",
-        "`notes.pdf`\n",
+        "`notes.txt`\n",
         "http://x.dev/a.png\n",
         "`a.png` `b.png`\n",
     ] {
@@ -870,6 +870,41 @@ fn streaming_a_paragraph_with_an_image_keeps_the_block_before_it() {
             stream(chunk, text).tree().blocks,
             parse_full(text).blocks,
             "{chunk}"
+        );
+    }
+}
+
+#[test]
+fn a_previewable_file_alone_is_a_preview_block() {
+    use super::super::file_preview::Kind;
+    let preview = |src: &str, kind| Block::FilePreview {
+        src: src.into(),
+        kind,
+    };
+    assert_eq!(
+        blocks("`out/results.csv`\n"),
+        vec![preview("out/results.csv", Kind::Csv)]
+    );
+    assert_eq!(
+        blocks("report.PDF\n\n<clips/demo.mov>\n\n`site/index.html`\n"),
+        vec![
+            preview("report.PDF", Kind::Pdf),
+            preview("clips/demo.mov", Kind::Video),
+            preview("site/index.html", Kind::Html),
+        ]
+    );
+    // An svg is a picture; a file in a sentence and a URL stay text.
+    assert_eq!(
+        blocks("`out/logo.svg`\n"),
+        vec![image("out/logo.svg", "out/logo.svg")]
+    );
+    for text in [
+        "See `out/results.csv` for the rows.\n",
+        "https://x.dev/a.pdf\n",
+    ] {
+        assert!(
+            matches!(blocks(text).as_slice(), [Block::Paragraph { .. }]),
+            "{text}"
         );
     }
 }

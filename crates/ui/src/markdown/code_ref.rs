@@ -147,7 +147,8 @@ pub fn refs_in(tree: &BlockTree) -> Vec<CodeRef> {
             Block::CodeBlock { .. }
             | Block::Artifact { .. }
             | Block::Rule
-            | Block::Image { .. } => {}
+            | Block::Image { .. }
+            | Block::FilePreview { .. } => {}
         }
     }
     let mut out = Vec::new();

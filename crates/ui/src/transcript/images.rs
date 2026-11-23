@@ -43,6 +43,16 @@ impl Transcript {
             scope,
             on_open: std::rc::Rc::new(
                 move |key: Key, alt: SharedString, window: &mut Window, cx: &mut gpui::App| {
+                    if let Some(page) = svg_page(&key, &alt) {
+                        let handler = entity
+                            .read_with(cx, |this, _| this.artifact_handler.clone())
+                            .ok()
+                            .flatten();
+                        if let Some(handler) = handler {
+                            handler(page, window, cx);
+                            return;
+                        }
+                    }
                     entity
                         .update(cx, |this, cx| {
                             this.image_viewer = Some(ImageViewer {
@@ -60,7 +70,7 @@ impl Transcript {
         }
     }
 
-    fn image_scope(&self, cx: &Context<Self>) -> SharedString {
+    pub(super) fn image_scope(&self, cx: &Context<Self>) -> SharedString {
         self.state
             .read(cx)
             .selected_chat_row()
@@ -355,9 +365,39 @@ impl Transcript {
     }
 }
 
+/// A local SVG file opens as a page in the artifact viewer, where it draws
+/// at any size; other images (and SVGs carried in the reply or fetched)
+/// open in the image viewer.
+fn svg_page(key: &Key, alt: &str) -> Option<crate::markdown::artifact::ArtifactOpen> {
+    let Shown::Ready(loaded) = image::lookup(key) else {
+        return None;
+    };
+    let Origin::File(path) = &loaded.origin else {
+        return None;
+    };
+    if loaded.image.format() != ImageFormat::Svg {
+        return None;
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let title = if alt.is_empty() || alt == key.src.as_ref() {
+        name
+    } else {
+        alt
+    };
+    Some(crate::markdown::artifact::ArtifactOpen {
+        key: format!("file:{path}").into(),
+        kind: crate::markdown::parser::ArtifactKind::Svg,
+        title: title.to_owned().into(),
+        named: false,
+        code: String::from_utf8_lossy(loaded.image.bytes())
+            .into_owned()
+            .into(),
+    })
+}
+
 /// The context of `root` among the chat's, the path in it, and the path its
 /// link handler opens (a workspace chat's are absolute).
-fn locate(
+pub(super) fn locate(
     contexts: &LinkContexts,
     root: &str,
     relative: String,
