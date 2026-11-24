@@ -493,7 +493,8 @@ export function systemLocation(value: string): boolean {
 
 let systemDirectory = (path: string): boolean => {
   try {
-    const real = realpathSync(value);
+    // (final pass: this read `value`, a name not in scope, so the check was always false outside the fake machines)
+    const real = realpathSync(path);
     const home = process.env.HOME ? realpathSync(process.env.HOME) : undefined;
     if (home && (real === home || real.startsWith(`${home}/`))) return false;
     if (!statSync(real).isDirectory()) return false;

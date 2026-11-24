@@ -60,7 +60,7 @@ import { decide, describe } from "./policy.ts";
 import type { Verdict } from "./policy.ts";
 import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs } from "./sandbox.ts";
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
-import { benignEnv, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
+import { benignEnv, systemLocation, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
 import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, lineFlow, listingSet, normalRefspec, redirectRisk, runtimeWriteSets, secretName, secretWrites, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
 import type { PatternFinding } from "./risk.ts";
@@ -2104,7 +2104,7 @@ export class Permissions {
    */
   private scriptFinding(item: LineCommand, written: ReadonlyMap<string, string | undefined>, depth: number): CodeFinding | undefined {
     if (depth > MAX_CODE_DEPTH) return undefined;
-    const scripts = projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd), this.scriptReader(written));
+    const scripts = projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd), this.scriptReader(written), (path) => systemLocation(dirname(path)));
     if (!scripts.length) return undefined;
     let finding: CodeFinding | undefined;
     for (const script of scripts) {
@@ -2754,7 +2754,7 @@ export class Permissions {
         }
       }
       // A script this line wrote before running it is read from what it wrote (final pass).
-      const scripts = projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd), this.scriptReader(written));
+      const scripts = projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd), this.scriptReader(written), (path) => systemLocation(dirname(path)));
       this.noteLineWrite(item, written);
       for (const script of [...spawned, ...scripts]) {
         this.scriptDepth++;
@@ -2780,7 +2780,7 @@ export class Permissions {
       const language = inline.interpreter.language as Parameters<typeof scanCode>[1];
       if (signaledPids(inline.source.text, language).length || scanCode(inline.source.text, language, secretName).commands.length) return true;
     }
-    return projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd)).length > 0;
+    return projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd), readText, (path) => systemLocation(dirname(path))).length > 0;
   }
 
   private lineClassOwn(line: LineAssessment, command: string, cwd: string, read: LineTargets | undefined): ActionClass {

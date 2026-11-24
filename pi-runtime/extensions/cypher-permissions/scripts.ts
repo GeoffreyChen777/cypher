@@ -191,11 +191,14 @@ export const SCRIPT_RUNNERS: readonly { programs: readonly string[]; read: Reade
 ];
 
 /** The project scripts a command (unwrapped words, its folder) runs, read from disk; empty when it runs none. */
-export function projectScripts(words: readonly string[], cwd: string | undefined, read: ReadFile = readText): ProjectScript[] {
+export function projectScripts(words: readonly string[], cwd: string | undefined, read: ReadFile = readText, system: (path: string) => boolean = () => false): ProjectScript[] {
   if (!words.length || cwd === undefined) return [];
   const program = basename(words[0]);
   const row = SCRIPT_RUNNERS.find((candidate) => candidate.programs.includes(program));
-  const found = row ? row.read(words, cwd, read) : pathScript(words, cwd, read);
+  // The system's own scripts (`/Applications/Xcode.app/…/simctl`, `/usr/bin/…`: a place the agent can't write) are
+  // programs like any other, not this project's code: not read (final pass).
+  const guarded: ReadFile = (path) => (system(isAbsolute(path) ? path : join(cwd, path)) ? undefined : read(path));
+  const found = row ? row.read(words, cwd, guarded) : pathScript(words, cwd, guarded);
   return (found ?? []).filter((script) => script.lines.length > 0).map((script) => ({ ...script, cwd: script.cwd || dirname(cwd) }));
 }
 

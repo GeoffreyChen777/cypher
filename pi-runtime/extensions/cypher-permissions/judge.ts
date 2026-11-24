@@ -281,7 +281,7 @@ function evidenceLines(request: JudgeRequest): string[] {
   for (const item of evidence.originUnknown ?? []) lines.push(`- who made ${item}: unknown. This chat's ledger doesn't hold it and no other chat's ledger names it, so Cypher can't tell whether it is this task's, another task's, or made by hand. It isn't shown to be this task's: approve only when the owner's words or the conversation account for this one (it is named, or it is plainly what they asked to remove); else ask ("other-task" or "destroys-data")`);
   for (const item of evidence.otherChats ?? []) lines.push(`- another chat's work in this chat's working tree: ${item}. Which task that chat belongs to is unknown: sessions of one plan share a worktree. Approve when the request and the conversation show it is this task's own cleanup (its plan, its scratch, what it was asked to do); ask ("other-task") when nothing here accounts for removing another chat's work`);
   for (const item of evidence.projectScripts ?? []) lines.push(`- project script: ${item}`);
-  for (const item of evidence.unread ?? []) lines.push(`- Cypher couldn't read: ${item}. Approve only when the owner's words account for what it could do; else ask ("opaque-code")`);
+  for (const item of evidence.unread ?? []) lines.push(`- Cypher couldn't read: ${item}`);
   for (const item of evidence.opaqueCode ?? []) lines.push(`- opaque code: ${item}. Cypher can't tell what it does: approve only when the owner's words account for running it; else ask ("opaque-code")`);
   for (const item of evidence.unresolved ?? []) lines.push(`- path known only when it runs: ${item}. Approve when the line or the conversation shows where it goes (a variable it sets, this task's own folders); else ask ("opaque-code")`);
   return lines;
