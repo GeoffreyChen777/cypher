@@ -110,6 +110,27 @@ send-in-flight map, so sidebar dots and chimes see sends from any tile.
   too narrow for both, the dock takes the tile over. At most 200 entries
   are kept (least recently changed go first); boot drops entries of deleted
   chats and layouts of deleted projects.
+- **Dock tabs.** The same entry remembers the right dock's Files and Git
+  tabs in their order (`surfaces`, at most 16), the one in front
+  (`activeSurface`) and a workspace chat's root pick (`rootPick`): a Files
+  tab's root, file and caret line; a Git tab's scope (and branch base), a
+  commit's or a round's pinned diff. Side chats and pages are not saved. The
+  entry is rewritten whenever a tab's view changes (unchanged snapshots are
+  skipped) and when its slot goes. Any new slot of the session (after a
+  restart, a closed tab reopened, a Workspaces conversation let go) brings
+  the tabs back; what no longer resolves drops quietly — an unknown kind
+  (a newer build's) on load, a Files tab's file when its root is no longer
+  the one shown or the file is gone, a branch base gone (the default base).
+  A terminal that was open comes back as a new shell.
+- **Workspaces view.** The Workspaces view shows one conversation at a time
+  (`BoardUi::slot`). Switching workspace keeps the outgoing slot alive but
+  hidden (`BoardUi::kept`, the 5 most recently shown beside the one on
+  screen) — chat, dock, terminal, scroll and draft as left — and switching
+  back reuses it. Hidden slots never render, take keys, follow or mark
+  seen; the oldest past the cap, and one whose workspace or chat is
+  deleted, is disposed. The detail panel and the dock still take turns: a
+  switch shuts the detail panel, and a conversation coming back with its
+  dock open keeps the panel shut.
 - **Short tiles.** Height priority, top down: tile header > composer stack
   (never clipped) > terminal > transcript (may shrink to 0). The terminal
   shrinks to the room under the composer, below its tab bar + 48px

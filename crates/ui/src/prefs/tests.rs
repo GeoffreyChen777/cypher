@@ -40,6 +40,11 @@ fn round_trip() {
                 terminal: None,
                 right_open: true,
                 terminal_open: false,
+                surfaces: sample_surfaces(),
+                active_surface: Some(1),
+                root_pick: Some(SavedRoot {
+                    space_id: Some("api".into()),
+                }),
                 used_at: 7,
             },
         )]),
@@ -54,11 +59,154 @@ fn round_trip() {
         "\"projectWorkspaces\"",
         "\"sessionDocks\"",
         "\"rightOpen\"",
+        "\"kind\": \"files\"",
+        "\"scope\": \"branch\"",
+        "\"baseRef\"",
+        "\"activeSurface\": 1",
+        "\"rootPick\"",
         "\"windowMode\": \"botboard\"",
         "\"botboardBot\"",
     ] {
         assert!(json.contains(key), "{key} missing: {json}");
     }
+}
+
+fn sample_surfaces() -> Vec<SavedSurface> {
+    vec![
+        SavedSurface::Files {
+            root: Some("api".into()),
+            file: Some("src/lib.rs".into()),
+            line: Some(42),
+        },
+        SavedSurface::Git {
+            scope: SavedGitScope::Branch,
+            base_ref: Some("main".into()),
+        },
+        SavedSurface::Git {
+            scope: SavedGitScope::History,
+            base_ref: None,
+        },
+        SavedSurface::Commit {
+            commit: cypher_proto::GitHistoryCommit {
+                sha: "abc1234".into(),
+                parent_shas: vec!["0123abc".into()],
+                subject: "Fix it".into(),
+                author_name: "A".into(),
+                author_email: "a@example.com".into(),
+                authored_at: "2026-11-24T00:00:00Z".into(),
+                refs: Vec::new(),
+            },
+            root: Some(SavedRoot { space_id: None }),
+        },
+        SavedSurface::Turn {
+            turn: cypher_proto::TurnChanges {
+                cwd: "/src/api".into(),
+                base: "t1".into(),
+                head: "t2".into(),
+                files: Vec::new(),
+                file_count: 3,
+                additions: 10,
+                deletions: 2,
+            },
+        },
+    ]
+}
+
+/// The dock's surface tabs: files written before them load with none;
+/// a kind this build doesn't know (a newer build's) drops on its own,
+/// leaving the entry's sizes and the other tabs; the list is bounded and
+/// its pick kept in range.
+#[test]
+fn saved_dock_surfaces_load_leniently_and_stay_bounded() {
+    let old: UiSettings = serde_json::from_str(
+        r#"{"sessionDocks": {"a": {"right": 0.4, "rightOpen": true, "usedAt": 3}}}"#,
+    )
+    .unwrap();
+    let a = &old.clamped().session_docks["a"];
+    assert_eq!(a.right, Some(0.4));
+    assert!(a.right_open);
+    assert!(a.surfaces.is_empty());
+    assert_eq!((a.active_surface, a.root_pick.clone()), (None, None));
+
+    let mixed: UiSettings = serde_json::from_str(
+        r#"{"sessionDocks": {"a": {
+            "right": 0.3,
+            "surfaces": [
+                {"kind": "hologram", "beam": 1},
+                {"kind": "files", "file": "README.md"},
+                {"kind": "git", "scope": "someFutureScope"},
+                {"kind": "git", "scope": "workingTree"},
+                "not a surface"
+            ],
+            "activeSurface": 9,
+            "rootPick": {}
+        }, "b": {"surfaces": {"kind": "files"}, "terminalOpen": true}}}"#,
+    )
+    .unwrap();
+    let settings = mixed.clamped();
+    let a = &settings.session_docks["a"];
+    assert_eq!(a.right, Some(0.3));
+    assert_eq!(
+        a.surfaces,
+        vec![
+            SavedSurface::Files {
+                root: None,
+                file: Some("README.md".into()),
+                line: None,
+            },
+            SavedSurface::Git {
+                scope: SavedGitScope::WorkingTree,
+                base_ref: None,
+            },
+        ]
+    );
+    assert_eq!(a.active_surface, None, "out of range: the first shows");
+    assert_eq!(a.root_pick, Some(SavedRoot { space_id: None }));
+    // A list of the wrong type drops alone; the entry stays.
+    assert!(settings.session_docks["b"].terminal_open);
+    assert!(settings.session_docks["b"].surfaces.is_empty());
+
+    // Remembering bounds the list too.
+    let mut settings = UiSettings::default();
+    let many = SessionDock {
+        surfaces: (0..SAVED_SURFACES_CAP + 4)
+            .map(|ix| SavedSurface::Files {
+                root: None,
+                file: Some(format!("f{ix}")),
+                line: None,
+            })
+            .collect(),
+        active_surface: Some(SAVED_SURFACES_CAP + 1),
+        ..SessionDock::default()
+    };
+    settings.remember_session_dock("a", many, 5);
+    let a = &settings.session_docks["a"];
+    assert_eq!(a.surfaces.len(), SAVED_SURFACES_CAP);
+    assert_eq!(a.active_surface, None);
+    assert_eq!(a.used_at, 5);
+    // A deleted chat's tabs go with its entry.
+    settings.prune_session_docks(|_| false);
+    assert!(settings.session_docks.is_empty());
+}
+
+#[test]
+fn an_unchanged_dock_is_the_same_whatever_its_stamp() {
+    let dock = SessionDock {
+        right: Some(0.4),
+        surfaces: sample_surfaces(),
+        used_at: 1,
+        ..SessionDock::default()
+    };
+    let later = SessionDock {
+        used_at: 99,
+        ..dock.clone()
+    };
+    assert!(dock.same_as(&later));
+    let moved = SessionDock {
+        active_surface: Some(2),
+        ..dock.clone()
+    };
+    assert!(!dock.same_as(&moved));
 }
 
 fn sample_workspace() -> crate::workspace::Workspace {
@@ -180,7 +328,7 @@ fn session_docks_heal_and_stay_bounded() {
         r#"{"sessionDocks": {"a": {"right": 3.0, "terminal": -1.0, "terminalOpen": true}}}"#,
     )
     .unwrap();
-    let a = healed.clamped().session_docks["a"];
+    let a = &healed.clamped().session_docks["a"];
     assert_eq!(a.right, Some(DOCK_FRACTION_MAX));
     assert_eq!(a.terminal, Some(DOCK_FRACTION_MIN));
     assert!(a.terminal_open && !a.right_open);
@@ -195,6 +343,7 @@ fn a_new_session_starts_from_the_latest_sizes_with_docks_closed() {
         right_open: true,
         terminal_open: true,
         used_at: 5,
+        ..SessionDock::default()
     };
     let seeded = SessionDock::seeded_from(Some(&latest));
     assert_eq!((seeded.right, seeded.terminal), (Some(0.3), Some(0.25)));

@@ -32,6 +32,7 @@ use gpui::{
     ListState, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
 };
 
+use crate::prefs::{SavedGitScope, SavedSurface};
 use cypher_proto::{CheckoutDiff, GitHistoryCommit, TurnChanges};
 use cypher_rpc::methods;
 
@@ -207,6 +208,11 @@ pub struct Changes {
     /// A commit pane in a workspace's own chat: the project it was opened in
     /// (see [`Self::chat_row`]).
     pinned_root: Option<cypher_proto::ChatFileRoot>,
+    /// A commit pane brought back from prefs in a workspace's own chat: the
+    /// root it was opened in, by id, looked up in the listed roots (until
+    /// they land, or once that root is no longer granted, the pane has no
+    /// checkout to show).
+    pinned_root_id: Option<crate::files::roots::RootId>,
     /// The workspace chat's project picker in the header.
     root_menu: Popup<()>,
     /// Pinned round for a [`DiffScope::Turn`] pane (its checkout and tree
@@ -576,6 +582,7 @@ impl Changes {
             history_events: None,
             commit: None,
             pinned_root: None,
+            pinned_root_id: None,
             root_menu: Popup::default(),
             turn: None,
             focus_path: None,
@@ -733,7 +740,78 @@ impl Changes {
             let chat = state.selected_chat_row()?;
             return Some(std::borrow::Cow::Owned(state.chat_at_root(chat, root)));
         }
+        if let Some(id) = &self.pinned_root_id {
+            let chat = state.selected_chat_row()?;
+            let root = state.listed_root(id)?;
+            return Some(std::borrow::Cow::Owned(state.chat_at_root(chat, root)));
+        }
         state.git_chat_row()
+    }
+
+    /// What identifies this pane's view, for the session's saved docks.
+    pub fn saved_view(&self) -> Option<SavedSurface> {
+        let git = |scope| SavedSurface::Git {
+            scope,
+            base_ref: None,
+        };
+        Some(match self.scope {
+            DiffScope::WorkingTree => git(SavedGitScope::WorkingTree),
+            DiffScope::Branch => SavedSurface::Git {
+                scope: SavedGitScope::Branch,
+                base_ref: self.base_ref.clone(),
+            },
+            DiffScope::LatestTurn => git(SavedGitScope::LatestTurn),
+            DiffScope::History => git(SavedGitScope::History),
+            DiffScope::Commit => SavedSurface::Commit {
+                commit: self.commit.clone()?,
+                root: self
+                    .pinned_root
+                    .as_ref()
+                    .map(|root| root.space_id.clone())
+                    .or_else(|| self.pinned_root_id.clone())
+                    .map(|space_id| crate::prefs::SavedRoot { space_id }),
+            },
+            DiffScope::Turn => SavedSurface::Turn {
+                turn: TurnChanges {
+                    files: Vec::new(),
+                    ..TurnChanges::clone(self.turn.as_deref()?)
+                },
+            },
+        })
+    }
+
+    /// A pane on a saved view; `None` for a surface that is not a diff.
+    pub fn from_saved(
+        state: Entity<AppState>,
+        comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
+        saved: &SavedSurface,
+        cx: &mut Context<Self>,
+    ) -> Option<Self> {
+        Some(match saved {
+            SavedSurface::Files { .. } => return None,
+            SavedSurface::Git { scope, base_ref } => {
+                let mut changes = Self::new(state, comment_popup, cx);
+                changes.scope = match scope {
+                    SavedGitScope::WorkingTree => DiffScope::WorkingTree,
+                    SavedGitScope::Branch => DiffScope::Branch,
+                    SavedGitScope::LatestTurn => DiffScope::LatestTurn,
+                    SavedGitScope::History => DiffScope::History,
+                };
+                // A branch gone since falls back to the default base once
+                // the branch list lands (`ensure_branches`).
+                changes.base_ref = base_ref.clone();
+                changes
+            }
+            SavedSurface::Commit { commit, root } => {
+                let mut changes = Self::for_commit(state, comment_popup, commit.clone(), cx);
+                changes.pinned_root = None;
+                changes.pinned_root_id = root.as_ref().map(|root| root.space_id.clone());
+                changes
+            }
+            SavedSurface::Turn { turn } => {
+                Self::for_turn(state, comment_popup, Arc::new(turn.clone()), None, cx)
+            }
+        })
     }
 
     /// Whether this pane is pinned to `turn`'s round.

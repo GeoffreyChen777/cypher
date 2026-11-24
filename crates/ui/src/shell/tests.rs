@@ -2579,6 +2579,44 @@ fn workspace_board(
     cx: &mut gpui::TestAppContext,
 ) -> (Entity<Shell>, &mut gpui::VisualTestContext, SlotId) {
     let ui = tempfile::tempdir().unwrap().keep();
+    workspace_board_in(ui, cx)
+}
+
+/// [`workspace_board`] over the UI data in `ui`.
+fn workspace_board_in(
+    ui: PathBuf,
+    cx: &mut gpui::TestAppContext,
+) -> (Entity<Shell>, &mut gpui::VisualTestContext, SlotId) {
+    let (shell, vcx) = windowed_board(ui, &["bob"], cx);
+    let sid = shell.read_with(vcx, |shell, _| shell.board.slot.unwrap());
+    let root = |space: Option<&str>, name: &str, path: &str| cypher_proto::ChatFileRoot {
+        space_id: space.map(str::to_owned),
+        name: name.into(),
+        path: path.into(),
+        checkout_id: space.map(|id| format!("co-{id}")),
+    };
+    let slot_state = shell.read_with(vcx, |shell, _| shell.tiles.slots[&sid].state.clone());
+    slot_state.update(vcx, |s, cx| {
+        assert_eq!(s.file_roots(), crate::state::FileRoots::Loading);
+        s.set_file_roots_for_test(vec![
+            root(None, "BOB", "/data/bots/bob"),
+            root(Some("api"), "api", "/src/api"),
+            root(Some("web"), "web", "/src/web"),
+        ]);
+        cx.notify();
+    });
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    (shell, vcx, sid)
+}
+
+/// A windowed shell on the Botboard with workspaces `bots` (each chat in
+/// its folder) and session "a", showing the first workspace.
+fn windowed_board<'a>(
+    ui: PathBuf,
+    bots: &[&str],
+    cx: &'a mut gpui::TestAppContext,
+) -> (Entity<Shell>, &'a mut gpui::VisualTestContext) {
     cx.update(|cx| {
         gpui_tokio::init(cx);
         cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
@@ -2604,42 +2642,25 @@ fn workspace_board(
         s.workspace_scope = Some(WorkspaceScope::Local);
         s.auth = Some(AuthState::SignedOut);
         s.local_device_id = Some("dev".into());
-        s.apply_bots(vec![test_bot("bob")]);
-        s.apply_chats(vec![
-            test_chat("a", false),
-            cypher_proto::Chat {
-                cwd: Some("/data/bots/bob".into()),
-                ..test_bot_chat("bob")
-            },
-        ]);
+        s.apply_bots(bots.iter().map(|id| test_bot(id)).collect());
+        s.apply_chats(
+            std::iter::once(test_chat("a", false))
+                .chain(bots.iter().map(|id| cypher_proto::Chat {
+                    cwd: Some(format!("/data/bots/{id}")),
+                    ..test_bot_chat(id)
+                }))
+                .collect(),
+        );
         cx.notify();
     });
     vcx.run_until_parked();
+    let first = format!("{}-chat", bots[0]);
     shell.update(vcx, |shell, cx| {
         shell.pages.setup_dismissed = true;
-        shell.open_chat("bob-chat".into(), cx);
+        shell.open_chat(first, cx);
     });
     vcx.run_until_parked();
-    let sid = shell.read_with(vcx, |shell, _| shell.board.slot.unwrap());
-    let root = |space: Option<&str>, name: &str, path: &str| cypher_proto::ChatFileRoot {
-        space_id: space.map(str::to_owned),
-        name: name.into(),
-        path: path.into(),
-        checkout_id: space.map(|id| format!("co-{id}")),
-    };
-    let slot_state = shell.read_with(vcx, |shell, _| shell.tiles.slots[&sid].state.clone());
-    slot_state.update(vcx, |s, cx| {
-        assert_eq!(s.file_roots(), crate::state::FileRoots::Loading);
-        s.set_file_roots_for_test(vec![
-            root(None, "BOB", "/data/bots/bob"),
-            root(Some("api"), "api", "/src/api"),
-            root(Some("web"), "web", "/src/web"),
-        ]);
-        cx.notify();
-    });
-    vcx.update(|window, _| window.refresh());
-    vcx.run_until_parked();
-    (shell, vcx, sid)
+    (shell, vcx)
 }
 
 fn board_side(
@@ -2813,4 +2834,260 @@ fn git_names_its_project_whenever_the_chat_has_several_roots(cx: &mut gpui::Test
         s.set_file_roots_for_test(vec![root(None, false)])
     });
     assert_eq!(slot_state.read_with(vcx, |s, _| s.git_root_choice()), None);
+}
+
+// ---- Workspace switches keep each one's dock ----
+
+fn a_turn(head: &str) -> std::sync::Arc<cypher_proto::TurnChanges> {
+    std::sync::Arc::new(cypher_proto::TurnChanges {
+        cwd: "/data/bots/x".into(),
+        base: "t0".into(),
+        head: head.into(),
+        files: Vec::new(),
+        file_count: 1,
+        additions: 1,
+        deletions: 0,
+    })
+}
+
+fn dock_of(
+    shell: &Entity<Shell>,
+    sid: SlotId,
+    cx: &mut gpui::VisualTestContext,
+) -> (bool, Vec<dock::DockSurface>, dock::DockSurface) {
+    shell.read_with(cx, |shell, _| {
+        let slot = &shell.tiles.slots[&sid];
+        (slot.dock.open, slot.dock.surfaces.clone(), slot.dock.active)
+    })
+}
+
+#[gpui::test]
+fn switching_workspaces_keeps_each_ones_dock(cx: &mut gpui::TestAppContext) {
+    use crate::prefs::WindowMode;
+    let ui = tempfile::tempdir().unwrap().keep();
+    let (shell, vcx) = windowed_board(ui, &["bob", "ann"], cx);
+    let bob = shell.read_with(vcx, |shell, _| shell.board.slot.unwrap());
+    shell.update(vcx, |shell, cx| {
+        shell.toggle_dock(bob, cx);
+        shell.open_turn_diff(bob, a_turn("t1"), None, cx);
+    });
+    let left = dock_of(&shell, bob, vcx);
+    assert!(left.0 && left.1.len() == 1);
+
+    // Shift+↓ to the next workspace: bob's slot stays, hidden.
+    shell.update(vcx, |shell, cx| shell.step_workspace(true, cx));
+    vcx.run_until_parked();
+    let ann = shell.read_with(vcx, |shell, _| shell.board.slot.unwrap());
+    assert_ne!(ann, bob);
+    assert_eq!(board_chat(&shell, vcx).as_deref(), Some("ann-chat"));
+    shell.read_with(vcx, |shell, _| {
+        assert!(shell.tiles.slots.contains_key(&bob));
+        assert!(shell.board.kept.holds(bob));
+        // Only the shown one takes keys, follow and seen-marking.
+        assert_eq!(shell.focused_slot(), Some(ann));
+        assert_eq!(shell.shown_chats(), vec!["ann-chat".to_string()]);
+        assert!(!shell.tiles.slots[&ann].dock.open);
+    });
+    assert_eq!(
+        shell
+            .read_with(vcx, |shell, cx| shell.state.read(cx).selected_chat.clone())
+            .as_deref(),
+        Some("ann-chat"),
+        "main follows the one in front"
+    );
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+
+    // Shift+↑ back: the same slot, its dock as left.
+    shell.update(vcx, |shell, cx| shell.step_workspace(false, cx));
+    vcx.run_until_parked();
+    assert_eq!(shell.read_with(vcx, |shell, _| shell.board.slot), Some(bob));
+    assert_eq!(dock_of(&shell, bob, vcx), left);
+    // The switcher (a picker row) does the same.
+    shell.update(vcx, |shell, cx| shell.open_bot("ann", cx));
+    shell.update(vcx, |shell, cx| shell.open_bot("bob", cx));
+    assert_eq!(shell.read_with(vcx, |shell, _| shell.board.slot), Some(bob));
+    assert_eq!(dock_of(&shell, bob, vcx), left);
+    // The Sessions view and back.
+    shell.update(vcx, |shell, cx| {
+        shell.set_window_mode(WindowMode::Projects, cx);
+        shell.set_window_mode(WindowMode::Botboard, cx);
+    });
+    assert_eq!(shell.read_with(vcx, |shell, _| shell.board.slot), Some(bob));
+    assert_eq!(dock_of(&shell, bob, vcx), left);
+    // Coming back with the dock open, the detail panel stays shut.
+    shell.update(vcx, |shell, cx| shell.open_bot("ann", cx));
+    shell.update(vcx, |shell, cx| shell.open_panel(PanelItem::Activity, cx));
+    shell.update(vcx, |shell, cx| shell.open_bot("bob", cx));
+    assert_eq!(board_side(&shell, bob, vcx), (true, false));
+    assert_eq!(
+        shell.read_with(vcx, |shell, _| shell.board.side),
+        bots::BoardSide::Dock
+    );
+
+    // A kept workspace deleted while hidden lets its slot go.
+    shell.read_with(vcx, |shell, _| assert!(shell.board.kept.holds(ann)));
+    shell.update(vcx, |shell, cx| {
+        shell.state.update(cx, |s, cx| {
+            s.apply_bots(vec![test_bot("bob")]);
+            s.apply_chats(vec![
+                test_chat("a", false),
+                cypher_proto::Chat {
+                    cwd: Some("/data/bots/bob".into()),
+                    ..test_bot_chat("bob")
+                },
+            ]);
+            cx.notify();
+        });
+    });
+    vcx.run_until_parked();
+    shell.read_with(vcx, |shell, _| {
+        assert!(!shell.tiles.slots.contains_key(&ann));
+        assert!(!shell.board.kept.holds(ann));
+        assert_eq!(shell.board.slot, Some(bob));
+    });
+}
+
+#[gpui::test]
+fn the_oldest_kept_workspace_goes_and_comes_back_from_prefs(cx: &mut gpui::TestAppContext) {
+    let names: Vec<String> = (0..=bots::KEPT_BOARD_SLOTS + 1)
+        .map(|ix| format!("w{ix}"))
+        .collect();
+    let ids: Vec<&str> = names.iter().map(String::as_str).collect();
+    let ui = tempfile::tempdir().unwrap().keep();
+    let (shell, vcx) = windowed_board(ui.clone(), &ids, cx);
+    let first = shell.read_with(vcx, |shell, _| shell.board.slot.unwrap());
+    shell.update(vcx, |shell, cx| {
+        shell.toggle_dock(first, cx);
+        shell.open_turn_diff(first, a_turn("t1"), None, cx);
+        shell.open_turn_diff(first, a_turn("t2"), None, cx);
+    });
+    // Visit every other workspace: one more than the kept ones fit.
+    for id in &ids[1..] {
+        shell.update(vcx, |shell, cx| shell.open_bot(id, cx));
+    }
+    shell.read_with(vcx, |shell, _| {
+        assert!(!shell.tiles.slots.contains_key(&first), "the oldest went");
+        let held = shell
+            .tiles
+            .slots
+            .keys()
+            .filter(|sid| shell.board.holds(**sid))
+            .count();
+        assert_eq!(held, bots::KEPT_BOARD_SLOTS + 1);
+    });
+    // Its docks were saved as it left; a new slot brings them back.
+    shell.update(vcx, |shell, cx| shell.open_bot(ids[0], cx));
+    let again = shell.read_with(vcx, |shell, _| shell.board.slot.unwrap());
+    assert_ne!(again, first);
+    let (open, surfaces, active) = dock_of(&shell, again, vcx);
+    assert!(open);
+    assert_eq!(surfaces.len(), 2);
+    assert_eq!(active, surfaces[1], "the tab in front stays in front");
+    shell.read_with(vcx, |shell, cx| {
+        let docks = shell.slot_docks(&shell.tiles.slots[&again], cx);
+        let heads: Vec<String> = docks
+            .surfaces
+            .iter()
+            .map(|saved| match saved {
+                crate::prefs::SavedSurface::Turn { turn } => turn.head.clone(),
+                other => panic!("not a turn: {other:?}"),
+            })
+            .collect();
+        assert_eq!(heads, vec!["t1".to_string(), "t2".into()]);
+    });
+    // …and it is written to disk.
+    vcx.executor()
+        .advance_clock(Duration::from_millis(SAVE_DEBOUNCE_MS + 50));
+    vcx.run_until_parked();
+    let written = UiSettings::load(&ui);
+    let saved = &written.session_docks["w0-chat"];
+    assert!(saved.right_open);
+    assert_eq!(saved.surfaces.len(), 2);
+    assert_eq!(saved.active_surface, Some(1));
+}
+
+/// A restart: a session's saved Files and Git tabs come back on their
+/// views; the workspace chat's root pick too, and a Files tab saved on a
+/// root no longer shown drops its file quietly.
+#[gpui::test]
+fn saved_dock_tabs_come_back_after_a_restart(cx: &mut gpui::TestAppContext) {
+    use crate::prefs::{SavedGitScope, SavedRoot, SavedSurface, SessionDock};
+    let ui = tempfile::tempdir().unwrap().keep();
+    let files = |root: Option<&str>, file: &str, line| SavedSurface::Files {
+        root: root.map(str::to_owned),
+        file: Some(file.into()),
+        line,
+    };
+    UiSettings {
+        session_docks: std::collections::HashMap::from([(
+            "bob-chat".to_string(),
+            SessionDock {
+                right_open: true,
+                surfaces: vec![
+                    SavedSurface::Git {
+                        scope: SavedGitScope::Branch,
+                        base_ref: Some("main".into()),
+                    },
+                    files(Some("web"), "app/page.tsx", Some(12)),
+                    files(Some("gone"), "x.rs", None),
+                    SavedSurface::Git {
+                        scope: SavedGitScope::History,
+                        base_ref: None,
+                    },
+                ],
+                active_surface: Some(1),
+                root_pick: Some(SavedRoot {
+                    space_id: Some("web".into()),
+                }),
+                used_at: 1,
+                ..Default::default()
+            },
+        )]),
+        ..Default::default()
+    }
+    .save(&ui)
+    .unwrap();
+    let (shell, vcx, sid) = workspace_board_in(ui, cx);
+    let (open, surfaces, active) = dock_of(&shell, sid, vcx);
+    assert!(open);
+    assert_eq!(surfaces.len(), 4);
+    assert_eq!(active, surfaces[1]);
+    assert_eq!(shown_root(&shell, sid, vcx).as_deref(), Some("web"));
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    shell.read_with(vcx, |shell, cx| {
+        let docks = shell.slot_docks(&shell.tiles.slots[&sid], cx);
+        assert_eq!(
+            docks.surfaces,
+            vec![
+                SavedSurface::Git {
+                    scope: SavedGitScope::Branch,
+                    base_ref: Some("main".into()),
+                },
+                // Back on its file (its line waits for the text).
+                files(Some("web"), "app/page.tsx", Some(12)),
+                // Saved on a root not shown now: the tree alone.
+                SavedSurface::Files {
+                    root: Some("web".into()),
+                    file: None,
+                    line: None,
+                },
+                SavedSurface::Git {
+                    scope: SavedGitScope::History,
+                    base_ref: None,
+                },
+            ]
+        );
+        assert_eq!(docks.active_surface, Some(1));
+        assert_eq!(
+            docks.root_pick,
+            Some(SavedRoot {
+                space_id: Some("web".into())
+            })
+        );
+        // Restored Files tabs got their composer hookup with the frame.
+        let slot = &shell.tiles.slots[&sid];
+        assert_eq!(slot.files_subs.len(), slot.files.len());
+    });
 }

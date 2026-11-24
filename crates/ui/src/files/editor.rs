@@ -328,6 +328,20 @@ impl CodeEditor {
         cx.notify();
     }
 
+    /// Put the caret at the start of 1-based `line` (clamped to the text),
+    /// nothing selected, scrolled like [`Self::go_to_lines`]: a restored
+    /// tab coming back where it was.
+    pub fn go_to_caret_line(&mut self, line: usize, cx: &mut Context<Self>) {
+        let ix = line.saturating_sub(1).min(self.line_count() - 1);
+        let start = self.line_starts[ix];
+        self.selected_range = start..start;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.follow_cursor = true;
+        self.center_caret = true;
+        cx.notify();
+    }
+
     /// `(line, column)` of the caret, 1-based, for a status readout.
     pub fn caret_position(&self) -> (usize, usize) {
         let offset = self.cursor_offset();

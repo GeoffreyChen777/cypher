@@ -63,6 +63,20 @@ impl AppState {
             .map(|(_, pick)| pick)
     }
 
+    /// The root the owner picked for the selected chat, if any (what a
+    /// session's docks remember; `Some(None)`: the workspace's own folder).
+    pub fn file_root_pick(&self) -> Option<&RootId> {
+        self.roots_pick()
+    }
+
+    /// The listed root `id` names, while the list is in.
+    pub fn listed_root(&self, id: &RootId) -> Option<&ChatFileRoot> {
+        match self.file_roots() {
+            FileRoots::Ready(list) => list.iter().find(|root| root.space_id == *id),
+            _ => None,
+        }
+    }
+
     /// The root the Files surface shows (see [`roots::pick`]).
     pub fn files_root(&self) -> Option<&ChatFileRoot> {
         match self.file_roots() {
