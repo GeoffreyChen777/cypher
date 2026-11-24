@@ -1735,6 +1735,41 @@ function consumerWrites(words: readonly string[]): boolean {
   return new RegExp(`(?:>>?|>\\|)\\s*['"]?${t}`).test(text) || ((OPERAND_WRITERS.has(program) || inPlace) && run.slice(1).some((word) => word.includes(token!))) || new RegExp(`\\b(?:tee|truncate|rm|cp|mv|dd|install)\\b[^|;&]*${t}`).test(text) || new RegExp(`\\bsed\\s+-[A-Za-z]*i[^|;&]*${t}`).test(text);
 }
 
+/**
+ * The write targets a feeder's command builds around its runtime operand (final pass): a path that holds the
+ * replace token (`xargs -I{} sh -c 'echo > ~/.cypher/x/{}'`, `parallel 'cp a {}.bak'`), inside an inline shell's
+ * script or among the command's own words, after a redirect or as a writer's operand, as a glob with the token as
+ * `*` (any name the pipe could hand). A target that is the token alone is the listing's own set (`listingSet`).
+ */
+export function feederWriteTemplates(words: readonly string[]): string[] {
+  let i = 1;
+  let token: string | undefined;
+  for (; i < words.length; i++) {
+    const word = words[i];
+    if (word === "-I" || word === "-i" || word === "--replace") token = words[++i] ?? "{}";
+    else if (/^-I./.test(word)) token = word.slice(2);
+    else if (/^--replace=/.test(word)) token = word.slice("--replace=".length);
+    else if (/^-(n|L|P|s|d|E|a|j)$/.test(word)) i++;
+    else if (!word.startsWith("-")) break;
+  }
+  if (basename(words[0] ?? "") === "parallel") token ??= "{}";
+  if (!token) return [];
+  const text = words.slice(i).filter((word) => word !== UNKNOWN).join(" ");
+  const t = escapeText(token);
+  const out = new Set<string>();
+  const path = `([^\\s'";|&<>()]*${t}[^\\s'";|&<>()]*)`;
+  const forms = [new RegExp(`(?:>>?|>\\|)\\s*['"]?${path}`, "g"), new RegExp(`\\b(?:tee(?:\\s+-a)?|truncate\\s+-s\\s*\\S+|cp\\s+\\S+|mv\\s+\\S+|install\\s+\\S+|ln\\s+-s?f?\\s*\\S+)\\s+['"]?${path}`, "g"), new RegExp(`\\bof=['"]?${path}`, "g")];
+  for (const form of forms) {
+    for (const match of text.matchAll(form)) {
+      const target = match[1];
+      if (target === token || target === `./${token}`) continue;
+      // `~/…` stays for the resolver (resolve.ts), as a word the reader didn't expand.
+      out.add(target.replaceAll(token, "*"));
+    }
+  }
+  return [...out];
+}
+
 /** What a listing pipe could print, as globs (`LISTERS`, `SUBSET_FILTERS`); undefined when that isn't known. */
 export function listingSet(pipe: readonly RiskCommand[]): { pattern: string; cwd: string | undefined; subtree: boolean }[] | undefined {
   const [first, ...rest] = pipe;
@@ -1795,6 +1830,11 @@ export function runtimeWriteSets(commands: readonly (RiskCommand & { joint?: str
     if (piped && FEEDERS.has(program)) {
       const words = program === "xargs" ? command.words : ["xargs", "-I", "{}", ...command.words.slice(1).filter((word) => !word.startsWith("-"))];
       if (consumerWrites(words)) check(listingSet(commands.slice(start, index)), program, basename(commands[start].words[0] ?? ""));
+      // A target built around the operand, in its own words or an inline shell's script (final pass): its glob.
+      for (const pattern of feederWriteTemplates(command.words)) {
+        const found = facts.couldBe(pattern, command.cwd, {});
+        if (found.permissionSystem) out.push(`\`${program}\` writes ${shownPattern(pattern)} for each name \`${basename(commands[start].words[0] ?? "")}\` hands it, which could be the permission system's own files (${found.permissionSystem})`);
+      }
     }
     // `find … -exec CMD {} +` is read as CMD on find's roots (core.ts `codeFindings`, effects.ts): not again here.
     // `… | while read NAME; do …; done`: the loop's commands that write a target known only when they run are handed the pipe's lines.
@@ -1883,7 +1923,7 @@ export function sinkOf(view: CommandView): string | undefined {
  * `~/.netrc`, `~/.config/gh/**`, …) and a credential's variable when its name says so (`secretName`).
  * Such a command is a source for the line's other commands: `aws configure get …` alone prints it here.
  */
-export const SECRET_SOURCES: readonly { id: string; program: string; verbs: readonly (string | RegExp)[]; bare?: boolean; options?: RegExp }[] = [
+export const SECRET_SOURCES: readonly { id: string; program: string; verbs: readonly (string | RegExp)[]; bare?: boolean; options?: RegExp; with?: RegExp }[] = [
   { id: "the keychain", program: "security", verbs: [/^(find-generic-password|find-internet-password|dump-keychain|export|find-key|find-certificate|unlock-keychain)$/] },
   { id: "the environment", program: "printenv", verbs: [] },
   { id: "the environment", program: "env", verbs: [] },
@@ -1911,6 +1951,30 @@ export const SECRET_SOURCES: readonly { id: string; program: string; verbs: read
   { id: "a stored secret", program: "secret-tool", verbs: ["lookup"] },
   { id: "a stored token", program: "npm", verbs: ["token"] },
   { id: "a stored token", program: "heroku", verbs: ["auth:token"] },
+  // Final pass: commands whose output is secret material, by what they print, not by program: a private key's
+  // export (any key tool), a stored secret's value or a token minted from stored credentials (cloud CLIs, password
+  // managers, a cluster's secrets and raw config). `with`: an option the verbs need (`kubectl config view --raw`).
+  { id: "a private key", program: "gpg", verbs: [], options: /^--export-secret-(sub)?keys(=|$)/ },
+  { id: "a private key", program: "gpg2", verbs: [], options: /^--export-secret-(sub)?keys(=|$)/ },
+  { id: "a private key", program: "gpgsm", verbs: [], options: /^--export-secret-key-(p12|p8|raw)(=|$)/ },
+  { id: "a stored token", program: "gh", verbs: ["auth", "status"], with: /^(-t|--show-token)$/ },
+  { id: "a stored credential", program: "kubectl", verbs: ["config", "view"], with: /^--raw$/ },
+  { id: "a stored secret", program: "kubectl", verbs: ["get", /^(secret|secrets)(\/.+)?$/] },
+  { id: "a stored secret", program: "oc", verbs: ["extract", /^(secret|secrets)\/.+$/] },
+  { id: "a stored token", program: "aws", verbs: ["ecr", /^get-login-password$/] },
+  { id: "a stored token", program: "aws", verbs: ["sts", /^(get-session-token|assume-role|get-federation-token)$/] },
+  { id: "a stored secret", program: "aws", verbs: ["secretsmanager", "get-secret-value"] },
+  { id: "a stored secret", program: "aws", verbs: ["ssm", /^get-parameters?$/], with: /^--with-decryption$/ },
+  { id: "a stored secret", program: "gcloud", verbs: ["secrets", "versions", "access"] },
+  { id: "a stored token", program: "gcloud", verbs: ["auth", "print-refresh-token"] },
+  { id: "a stored secret", program: "az", verbs: ["keyvault", "secret", /^(show|download)$/] },
+  { id: "a stored secret", program: "bw", verbs: ["get"] },
+  { id: "a stored secret", program: "lpass", verbs: ["show"] },
+  { id: "a stored secret", program: "gopass", verbs: [/^(show|cat)$/] },
+  { id: "a stored secret", program: "sops", verbs: [], options: /^(-d|--decrypt)$/ },
+  { id: "a stored secret", program: "ansible-vault", verbs: [/^(view|decrypt)$/] },
+  { id: "a stored credential", program: "docker-credential-osxkeychain", verbs: ["get"] },
+  { id: "a stored credential", program: "docker-credential-desktop", verbs: ["get"] },
 ];
 
 /** The source row a command is, by `SECRET_SOURCES` (its program and leading positionals). */
@@ -1929,6 +1993,7 @@ function credentialSource(view: CommandView): string | undefined {
       if (view.positionals.length === 0) return row.id;
       continue;
     }
+    if (row.with && !view.args.some((word) => word !== UNKNOWN && row.with!.test(word))) continue;
     if (row.verbs.every((verb, i) => {
       const word = view.positionals[i];
       return word !== undefined && (word === UNKNOWN || (typeof verb === "string" ? word === verb : verb.test(word)));
