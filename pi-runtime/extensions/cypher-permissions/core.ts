@@ -25,6 +25,8 @@ import { Denials, denialsFile, forRecord } from "./denials.ts";
 import type { ActionClass, DenialRecord, DenialScope } from "./denials.ts";
 import { commandEffects, unwrapped } from "./effects.ts";
 import { consumerWords, groupOperand, passes, RUNTIME, runtimeOperand } from "./flow.ts";
+import { runsElsewhere } from "./defaults.ts";
+import { COMMAND_STARTS, commandText, LOCAL_CONSUMERS, namedRemote, OUTPUT_OPTIONS, OWN_CREDENTIAL, PLAIN_PROGRAMS, REMOTE_RUNNERS, secretByContent, TEXT_OPTIONS } from "./defaults.ts";
 import { projectScripts, readText, scheduledLines, shellLines, triggeredHooks, unreadParts } from "./scripts.ts";
 import type { ProjectScript } from "./scripts.ts";
 import { apiDestroys, DELETING_SUBCOMMAND, folderPackage, typedTargets, withEnvOptions } from "./schema.ts";
@@ -62,14 +64,15 @@ import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs }
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
 import { benignEnv, systemLocation, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
-import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, lineFlow, listingSet, normalRefspec, redirectRisk, runtimeWriteSets, secretName, secretWrites, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
+import { usesKey } from "./risk.ts";
+import { assessCommand, assessOpaque, credentialSource, downloadsAndRuns, exfiltrates, SINK_PROGRAMS, installedProgram, lineFlow, listingSet, normalRefspec, redirectRisk, runtimeWriteSets, secretName, secretWrites, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
 import type { PatternFinding } from "./risk.ts";
 import { globsIntersect, resolvePattern, resolveText } from "./resolve.ts";
 import { codeOf, DELETE_NAMES, INTERPRETERS as INTERPRETER_TABLE, interpreterOf, optionCommands, scanCode, shebangInterpreter, signaledPids } from "./code.ts";
 import type { Interpreter } from "./code.ts";
 import type { Assessment, GitFacts, KillTarget, ProcessFacts, RiskFacts, Tier } from "./risk.ts";
 import { INSPECT, inspectMatches, viewOf } from "./packs.ts";
-import { literalOutput, parseShell, UNKNOWN } from "./shell.ts";
+import { literalOutput, parseShell, setGitTop, UNKNOWN } from "./shell.ts";
 import type { ParsedLine, SimpleCommand } from "./shell.ts";
 
 export const UNAVAILABLE_ENTRY = "cypher-permissions.unavailable";
@@ -642,6 +645,9 @@ export type EntryPoint = keyof typeof ENTRY_POINTS;
 /** The file tools (the extension's own, and apply_patch) and the access each asks for. */
 export const FILE_TOOL_ACCESS: Readonly<Record<string, Capability>> = { read: "read", ls: "read", grep: "read", find: "read", write: "write", edit: "write", apply_patch: "write" };
 
+// The shell reader's `git rev-parse --show-toplevel` (iteration 3).
+setGitTop((dir) => gitRoots(dir).top);
+
 function gitRoots(cwd: string): { top?: string; gitDirs: string[]; gitDir?: string; common?: string } {
   try {
     const out = execFileSync("git", ["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"], {
@@ -1030,8 +1036,9 @@ export class Permissions {
       return { ok: false, text: `Denied: ${denied.reason}.` };
     }
     const elevations = verdicts.filter((verdict): verdict is Extract<Verdict, { kind: "elevate" }> => verdict.kind === "elevate");
-    // Already allowed paths still consult the owner's denials and the floor (round 6, W1).
-    const held = elevations.length === 0 ? await this.gate("request_permission", this.fileClass("request_permission", input.capability, classifications.map((item) => item.path))) : undefined;
+    // Every request consults the owner's denials and the floor (round 6, W1), whether its paths need an elevation or not
+    // (iteration 3: one that elevated went straight to the judge, past another task's working tree).
+    const held = await this.gate("request_permission", this.fileClass("request_permission", input.capability, classifications.map((item) => item.path)));
     if (held) {
       const outcome = await this.serialized(() => this.elevate({ capability: input.capability, classifications, key: "held", mode: "ask", tool: "request_permission", justification: input.reason, held }, ctx));
       if (!outcome.allowed) return { ok: false, text: outcome.reason, abort: outcome.abort };
@@ -1976,7 +1983,7 @@ export class Permissions {
     // A secret leaving the machine: the always-ask floor, for the line as a whole — the code it runs included.
     const exfiltration = exfiltrates(commands, facts, parsed.expands, code);
     const nested = [...code.values()].find((found) => found.floor)?.floor;
-    const staged = exfiltration ? undefined : (this.movedIntoSystem(commands) ?? this.feederSends(commands) ?? this.globbedInputSent(commands) ?? this.bulkStagedSecret(commands) ?? this.publishedSecret(commands) ?? (depth < MAX_CODE_DEPTH ? this.urlCarriedSecret(command, cwd, depth) : undefined));
+    const staged = exfiltration ? undefined : (this.defaultSink(commands) ?? this.operandFloor(commands, depth) ?? this.movedIntoSystem(commands) ?? this.feederSends(commands) ?? this.globbedInputSent(commands) ?? this.bulkStagedSecret(commands) ?? this.publishedSecret(commands) ?? (depth < MAX_CODE_DEPTH ? this.urlCarriedSecret(command, cwd, depth) : undefined));
     if (exfiltration) worst = { tier: "danger", kind: exfiltration, key: "secret-off-machine", floor: true };
     else if (staged) worst = { tier: "danger", kind: staged, key: staged.startsWith("changes the permission system") ? "permission-system" : "secret-off-machine", floor: true };
     else if (nested) worst = { tier: "danger", kind: nested.kind, key: nested.key, floor: true };
@@ -2069,8 +2076,15 @@ export class Permissions {
     const links: { link: string; target: string }[] = [];
     let changed = false;
     const out = commands.map((item) => {
-      const rewrite = (word: string) => {
-        if (word === UNKNOWN || !links.length) return word;
+      const rewrite = (whole: string): string => {
+        if (whole === UNKNOWN || !links.length) return whole;
+        // A sender's `@file` and `key=@file` forms name the file after the `@`.
+        const at = /^([^=@]*=?@)(.+)$/.exec(whole);
+        if (at) {
+          const inner = rewrite(at[2]);
+          return inner === at[2] ? whole : `${at[1]}${inner}`;
+        }
+        const word = whole;
         const path = item.cwd === undefined && !isAbsolute(word) ? undefined : this.paths.canonical(word, item.cwd ?? this.cwd);
         for (const { link, target } of links) {
           if (path === link || (path && path.startsWith(`${link}/`))) {
@@ -2082,6 +2096,26 @@ export class Permissions {
       };
       const next = links.length ? { ...item, words: [item.words[0], ...item.words.slice(1).map(rewrite)], writes: item.writes.map(rewrite), reads: item.reads.map(rewrite) } : item;
       const words = unwrapped(item.words);
+      // Links made otherwise (iteration 3): a bind mount (`bindfs SRC DST`, `mount --bind SRC DST`), and inline code's
+      // symlink calls (`os.symlink`, `fs.symlinkSync`, `File.symlink`): the path its literals lead from home or `/`, to
+      // the link it names.
+      if (item.cwd !== undefined) {
+        const program = basename(words[0] ?? "");
+        const operands = words.slice(1).filter((word) => !word.startsWith("-"));
+        if ((program === "bindfs" || (program === "mount" && words.some((word) => word === "--bind" || word === "--rbind" || /bind/.test(word)))) && operands.length >= 2 && !operands.includes(UNKNOWN)) {
+          const [source, target] = operands.slice(-2);
+          links.push({ link: this.paths.canonical(target, item.cwd), target: this.paths.canonical(source, item.cwd) });
+        }
+        const inline = codeOf(runWords(item.words), UNKNOWN, undefined);
+        if (inline && inline.source.from === "inline" && /\b(?:symlink|symlinkSync|symlink_to|make_symlink|link)\s*\(/.test(inline.source.text)) {
+          const scan = scanCode(inline.source.text, inline.interpreter.language as Parameters<typeof scanCode>[1], secretName);
+          const literals = [...inline.source.text.matchAll(/['"]([^'"\s]+)['"]/g)].map((match) => match[1]);
+          // A home path the code builds (not the home-relative reading of a bare literal), else an absolute literal.
+          const target = scan.paths.find((path) => path.startsWith("~/") && !literals.includes(path.slice(2))) ?? scan.paths.find((path) => path.startsWith("/") && literals.includes(path) && path.split("/").length > 2);
+          const link = [...literals].reverse().find((text) => !text.startsWith("~") && !text.startsWith("/") && /^[\w.@+-][\w./@+-]*$/.test(text) && !/^(os|fs|path|shutil|pathlib)$/.test(text));
+          if (target && link) links.push({ link: this.paths.canonical(link, item.cwd), target: this.paths.canonical(resolveText(target, this.home), item.cwd) });
+        }
+      }
       if (basename(words[0] ?? "") === "ln" && words.some((word) => /^-[a-zA-Z]*s/.test(word) || word === "--symbolic") && item.cwd !== undefined) {
         const operands = words.slice(1).filter((word) => !word.startsWith("-"));
         if (operands.length === 2 && !operands.includes(UNKNOWN)) {
@@ -2096,6 +2130,197 @@ export class Permissions {
       return next;
     });
     return changed ? out : undefined;
+  }
+
+  /** A floor finding of a command line a command may run (`operandLines`), read as a line of its own. */
+  private operandFloor(commands: readonly LineCommand[], depth: number): string | undefined {
+    if (depth >= MAX_CODE_DEPTH) return undefined;
+    for (const { item, text } of this.operandLines(commands)) {
+      let inner: LineAssessment;
+      try {
+        inner = this.assess(text, item.cwd ?? this.cwd, depth + 1);
+      } catch {
+        continue;
+      }
+      const by = item.words[0] === UNKNOWN ? (item.hints?.[0] ?? "the line") : basename(unwrapped(item.words)[0] ?? "");
+      if (inner.floor && inner.kind) return `${inner.kind} (in a command line \`${by}\` is given to run)`;
+    }
+    return undefined;
+  }
+
+  /**
+   * The command lines a command may run that the shell reader didn't read as such (iteration 3, defaults.ts): any
+   * program not known not to run its operands (`PLAIN_PROGRAMS`, the remote runners, the local consumers) that is given
+   * words starting with a command (`stdbuf -oL curl …`, `flock L scp …`, `fd -x curl …`, `uv run python -c …`), or an
+   * operand whose text is one (`rg --pre 'curl …'`, `npx -c '…'`, `tmux new-session '…'`), a `trap`'s text, an
+   * assignment's value a program runs (`GIT_SSH_COMMAND`, `LESSOPEN`, `GIT_EDITOR`: any variable whose value is a
+   * command line), and a line read into a variable that the line then runs (`read c <<< '…'; $c`). Message and
+   * search options' values are text (`TEXT_OPTIONS`).
+   */
+  private operandLines(commands: readonly LineCommand[]): { item: LineCommand; text: string }[] {
+    const out: { item: LineCommand; text: string }[] = [];
+    const runsUnknown = commands.some((item) => item.words[0] === UNKNOWN && !item.env.length);
+    for (const item of commands) {
+      const words = unwrapped(item.words);
+      const program = basename(words[0] ?? "");
+      // An assignment's value that is a command line (in front of a command, or on its own; the program it hides too).
+      for (const value of item.envValues ?? []) {
+        const text = value === UNKNOWN ? undefined : commandText(value);
+        if (text) out.push({ item, text });
+      }
+      if (!program || words[0] === UNKNOWN) continue;
+      // Options that run their value, whatever the program (`rg --pre CMD`, `fd -x CMD`, `npx -c CMD`, `--exec`).
+      for (let at = 1; at < words.length - 1; at++) {
+        if (!RUN_OPTIONS.test(words[at]) || words[at + 1] === UNKNOWN) continue;
+        const text = commandText(words[at + 1]) ?? (COMMAND_STARTS.has(basename(words[at + 1])) ? words.slice(at + 1).join(" ") : undefined);
+        if (text) out.push({ item, text });
+      }
+      if (program === "trap") {
+        const text = words.slice(1).find((word) => !word.startsWith("-") && word !== UNKNOWN);
+        const line = text ? (commandText(text) ?? (/\s/.test(text) ? text : undefined)) : undefined;
+        if (line) out.push({ item, text: line });
+        continue;
+      }
+      if (program === "read" && typeof item.input === "string" && runsUnknown) {
+        const line = commandText(item.input);
+        if (line) out.push({ item, text: line });
+        continue;
+      }
+      if (item.inert || item.script === true || PLAIN_PROGRAMS.has(program) || REMOTE_RUNNERS.has(program) || LOCAL_CONSUMERS.has(program) || codeOf(words, UNKNOWN, undefined)) continue;
+      // A package runner runs the package it names with the words after it (`npx np`, `pnpm dlx X`, `bunx X`, `uvx X`,
+      // `pipx run X`, `uv run X`): that package is a program, whatever its name.
+      const runner = PACKAGE_RUNNERS.find((row) => row.program === program && row.sub.every((word, at) => words[at + 1] === word));
+      if (runner) {
+        const rest = words.slice(1 + runner.sub.length);
+        let at = 0;
+        while (at < rest.length && rest[at].startsWith("-")) at += /^(--with|-p|--package|--python|--from|--spec)$/.test(rest[at]) ? 2 : 1;
+        if (rest[at] !== undefined && rest[at] !== UNKNOWN && !rest.slice(at).includes(UNKNOWN)) out.push({ item, text: rest.slice(at).map((part) => (/^[\w@%+=:,./{}-]+$/.test(part) ? part : `'${part.replaceAll("'", `'\\''`)}'`)).join(" ") });
+      }
+      for (let at = 1; at < words.length; at++) {
+        const word = words[at];
+        if (word === UNKNOWN) continue;
+        if (TEXT_OPTIONS.test(words[at - 1] ?? "")) continue;
+        const name = basename(word);
+        if (COMMAND_STARTS.has(name) && !word.includes(" ")) {
+          out.push({ item, text: words.slice(at).map((part) => (/^[\w@%+=:,./{}-]+$/.test(part) ? part : `'${part.replaceAll("'", `'\\''`)}'`)).join(" ") });
+          break;
+        }
+        const text = /\s/.test(word) ? commandText(word) : undefined;
+        if (text) out.push({ item, text });
+      }
+    }
+    return out.slice(0, 8);
+  }
+
+  /**
+   * Row 1 by default (iteration 3, defaults.ts): a secret's contents handed to a program not known to keep them on this
+   * machine (`LOCAL_CONSUMERS`) — on its input (`< F`, a pipe from a command that read one) or in an argument a
+   * substitution built from one — may leave it; and a secret file given to a program that names another machine (a
+   * host option, a URL, `//host/`, `host:path`), or to a listed sink, is sent. A secret is one by name (the sensitive
+   * patterns) or by what the file holds (`secretByContent`). Not when it reaches the tool's own credential option
+   * (`OWN_CREDENTIAL`: `--password-stdin`, `-i KEY`, `--kubeconfig`): a tool using its credential is the judge's.
+   */
+  private defaultSink(commands: readonly LineCommand[]): string | undefined {
+    const facts = this.riskFacts();
+    const secretAt = (word: string, cwd: string | undefined): string | undefined => {
+      if (word === UNKNOWN || word.startsWith("-") || /^[a-z][\w+.-]*:\/\//i.test(word) || (cwd === undefined && !isAbsolute(word) && !word.startsWith("~"))) return undefined;
+      const name = word.replace(/^[^=@]*=?@/, "").replace(/^@/, "");
+      if (!name || name.length > 512) return undefined;
+      const classification = this.classify(name, cwd);
+      let file = false;
+      try {
+        file = statSync(classification.path).isFile();
+      } catch {}
+      // A secret by name counts where the line names it from home or by its absolute path, whether it is there now or not
+      // (as the data-flow floor reads them); by content, only a file that is there.
+      if (classification.zone === "sensitive" && (file || isAbsolute(name) || name.startsWith("~"))) return name;
+      if (!file) return undefined;
+      if (secretByContent(classification.path, secretName)) return name;
+      return undefined;
+    };
+    const contentSecret = (word: string, cwd: string | undefined): string | undefined => {
+      const found = secretAt(word, cwd);
+      if (!found) return undefined;
+      return this.classify(found, cwd).zone === "sensitive" ? undefined : found;
+    };
+    const readsSecret = (item: LineCommand): string | undefined => {
+      for (const path of item.reads) {
+        const found = secretAt(path, item.cwd);
+        if (found) return found;
+      }
+      const view = viewOf(unwrapped(item.words));
+      // A stored credential printed (`gh auth token`, a key export) is a secret proper; the environment printers
+      // (`ps eww`, `env`) are often an identity check on this machine: left to the data-flow floor's own reading.
+      const source = credentialSource(view);
+      if (source && source !== "the environment") return source;
+      if (!CONTENT_PRINTERS.has(view.program)) return undefined;
+      for (const word of view.args) {
+        const found = secretAt(word, item.cwd);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    const ownCredential = (words: readonly string[]) => words.some((word) => OWN_CREDENTIAL.test(word));
+    for (const [index, item] of commands.entries()) {
+      const words = unwrapped(item.words);
+      const program = basename(words[0] ?? "");
+      if (!program || words[0] === UNKNOWN || item.inert) continue;
+      const view = viewOf(words);
+      const interpreter = codeOf(words, UNKNOWN, undefined);
+      const local = LOCAL_CONSUMERS.has(program) || interpreter !== undefined || FEEDER_NAMES.has(program);
+      // A secret file named to a sink or to a program that talks to another machine.
+      const remote = namedRemote(words, UNKNOWN);
+      // A program that runs its words on another machine (ssh, docker exec, kubectl exec): its paths are that machine's.
+      if ((remote || sinkOf(view)) && !runsElsewhere(words)) {
+        // A word known only when it runs whose place the reader computed exactly (no glob: `@"$(git rev-parse
+        // --show-toplevel)/.env"`) is that path (iteration 3): the could-be is a is.
+        const offset = item.words.length - words.length;
+        const exact = (at: number): string | undefined => {
+          const pattern = item.patterns?.[at + offset];
+          return pattern !== undefined && !/[*?[\u0001]/.test(pattern.replace(/\\./g, "")) ? pattern.replace(/\\(.)/g, "$1") : undefined;
+        };
+        for (const [at, raw] of words.entries()) {
+          const word = raw === UNKNOWN ? (exact(at) ?? raw) : raw;
+          // A tool's own key or credential option (per program: risk.ts `KEY_OPTIONS`; by name: `OWN_CREDENTIAL`).
+          if (at === 0 || OWN_CREDENTIAL.test(words[at - 1] ?? "") || OWN_CREDENTIAL.test(word) || usesKey(program, words[at - 1] ?? "") || usesKey(program, word)) continue;
+          // What it writes is no part of what it sends (`curl URL -o ca.pem`).
+          if (OUTPUT_OPTIONS.test(words[at - 1] ?? "") || /^(-o|--output)=?/.test(word) && OUTPUT_OPTIONS.test(word)) continue;
+          // A listed sink's named secrets are the data-flow floor's (`exfiltrates`); here, what only the content tells.
+          const listedOnly = !remote || Boolean(sinkOf(view));
+          // A download's destination (the last operand after a remote one: `aws s3 cp s3://b/k.pem /tmp/k.pem`) is written.
+          const positionals = words.slice(1).filter((w) => !w.startsWith("-"));
+          if (raw === positionals.at(-1) && positionals.length >= 2 && positionals.slice(0, -1).some((w) => /^[a-z][\w+.-]*:\/\/|^[\w.-]+@?[\w.-]*:[^/]/i.test(w))) continue;
+          // An operand's text may name it too (`-c 'put .env env.txt'`, `-a 'src=.env dest=…'`).
+          const parts = word.split(/[\s,=]+/);
+          for (const [p, part] of [word, ...parts].entries()) {
+            // Inside an operand's text, a key option of any program before it (`core.sshCommand=ssh -i KEY`) keeps it the tool's.
+            const before = p > 0 ? (parts[p - 2] ?? "") : "";
+            if (p > 0 && (OWN_CREDENTIAL.test(before) || usesKey("ssh", before) || usesKey(program, before))) continue;
+            const found = listedOnly ? contentSecret(part, item.cwd) : secretAt(part, item.cwd);
+            if (found) return `sends a secret off this machine (${found}) through ${program}${remote ? `, which talks to ${remote}` : ""}`;
+          }
+        }
+      }
+      if (local || ownCredential(words)) continue;
+      // Contents on its input.
+      for (const path of item.reads) {
+        const found = secretAt(path, item.cwd);
+        if (found) return `sends a secret off this machine (${found}, on the input of ${program}, which isn't known to keep it here)`;
+      }
+      // What flows into it: the pipeline before it, and the substitutions that build its arguments (the commands right
+      // before it that no `&&`, `||`, `;` or `&` separates from it, their own pipes included).
+      const piped = index > 0 && commands[index - 1].joint === "|";
+      if (piped || words.includes(UNKNOWN)) {
+        for (let at = index - 1; at >= 0 && (commands[at].joint === undefined || commands[at].joint === "|"); at--) {
+          const found = readsSecret(commands[at]);
+          if (!found) continue;
+          const where = words.findIndex((word) => word === UNKNOWN);
+          if (!piped && where > 0 && OWN_CREDENTIAL.test(words[where - 1] ?? "")) break;
+          return `sends a secret off this machine (${found}, ${commands[at].joint === "|" && piped ? "piped into" : "in what it is given:"} ${program}, which isn't known to keep it here)`;
+        }
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -2488,7 +2713,9 @@ export class Permissions {
     if (scan.opaque.length) finding.opaque = scan.opaque.join("; ");
     if (scan.network.length) finding.sink = `${language} code (${scan.network.slice(0, 3).map((name) => name.replace(/\($/, "")).join(", ")})`;
     else if (scan.urls.length && scan.reads) finding.sink = `${language} code (it opens ${scan.urls[0].slice(0, 80)})`;
-    if (scan.reads || scan.spawn.length) {
+    // Code that reaches the network may send a file it names without a read call of its own (iteration 3: an upload
+    // API that takes a path, `sftp.put('.env', …)`, `upload_file('.env', …)`): a secret it names is a source then too.
+    if (scan.reads || scan.spawn.length || scan.network.length) {
       for (const path of scan.paths) {
         if (!/[/.~]/.test(path) || /^[a-z][\w+.-]*:\/\//i.test(path)) continue;
         const classification = this.classify(resolveText(path, this.home), at);
@@ -2820,7 +3047,10 @@ export class Permissions {
           // line that reads a secret (risk.ts `once`) or the installed app's data, or of an ask the owner's words answered.
           // A line that runs a project script (final pass): its approval was of the script's lines as they are now; a
           // remembered pattern would cover them after any edit. Once.
-          const kept = verdict.once || dangerous || installedRead || line.once === true || line.scripts?.length || line.unread?.length || line.assessments?.some((assessment) => assessment.once === true) ? [] : memo;
+          // Iteration 3: nor a line Cypher couldn't read in full (a word, a program or a redirection known only when it
+          // runs, opaque code, a path whose start is unknown): what was approved isn't what a pattern would match later.
+          const unreadable = Boolean(line.opaqueCode?.length || line.unresolved?.length || line.commands.some((item) => item.words.includes(UNKNOWN) || item.reads.includes(UNKNOWN) || item.writes.includes(UNKNOWN)));
+          const kept = verdict.once || dangerous || installedRead || unreadable || line.once === true || line.scripts?.length || line.unread?.length || line.assessments?.some((assessment) => assessment.once === true) ? [] : memo;
           for (const pattern of kept) this.addCommandGrant(pattern, "chat", "judge", label);
           const quoted = audit.explicit?.ok && audit.explicit.quote ? ` (your words: "${audit.explicit.quote}")` : "";
           finish({ decision: "allow", decidedBy: "judge", reason: `${verdict.reason}${quoted}`, scope: kept.length ? "chat" : "once", prompted: false });
@@ -3011,6 +3241,9 @@ export class Permissions {
       // it signals by pid (code.ts `SIGNAL_CALLS`).
       const inline = codeOf(runWords(item.words), UNKNOWN, undefined);
       const spawned: ProjectScript[] = [];
+      // Command lines it may run that the reader didn't read (iteration 3, `operandLines`): their units are its own.
+      const lines = this.operandLines([item]);
+      if (lines.length) spawned.push({ by: `${basename(unwrapped(item.words)[0] ?? "")} runs`, lines: lines.map((entry) => entry.text), cwd: here });
       if (inline && inline.source.from === "inline" && inline.interpreter.language !== "shell") {
         const language = inline.interpreter.language as Parameters<typeof scanCode>[1];
         const scan = scanCode(inline.source.text, language, secretName);
@@ -3161,7 +3394,9 @@ export class Permissions {
       if (inline && inline.source.from === "inline" && inline.interpreter.language !== "shell") {
         const scan = scanCode(inline.source.text, inline.interpreter.language as Parameters<typeof scanCode>[1], secretName);
         const deletes = CODE_DELETES.test(inline.source.text);
-        for (const path of scan.paths) {
+        // A delete call's literal argument is a path even when bare (`shutil.rmtree('data')`; iteration 3).
+        const bare = deletes ? [...inline.source.text.matchAll(/\b(?:rmtree|rmSync|rmdirSync|unlinkSync|unlink|rmdir|remove|removedirs|rm_rf|rm_r|rm|delete)\s*\(\s*['"]([\w.@+-]+)['"]/g)].map((match) => match[1]) : [];
+        for (const path of [...scan.paths, ...bare.map((name) => `./${name}`)]) {
           if (!/[/~.]/.test(path) || /^[a-z][\w+.-]*:\/\//i.test(path)) continue;
           const scope = pathScope(resolveText(path, this.home), item.cwd);
           if (!scope) continue;
@@ -3547,6 +3782,9 @@ export class Permissions {
       // Naming it where the words keep it (final pass): the clause that names it negates, defers or asks ("but don't
       // touch feat/x yet", "keep x?") names it to keep it, not to give it away. Clauses split at punctuation and "but".
       const clauses = text.split(/(?<=[?？!！。])\s*|(?<=\.)\s+|[,;，；、\n]|\s(?:but|except|however|aber|mais|pero)\s|但是?|不过|只是/iu).filter(Boolean);
+      // A name right after an exception word ("all … except X", "but X", "除了 X") is what is kept (iteration 3).
+      const excepted = names.some((name) => name.length >= 2 && new RegExp(`(?:\\bexcept(?: for)?|\\bbut(?: not)?|\\bother than|\\bapart from|\\bsave|\\bausser|\\bsauf|\\bexcepto|\\bmenos|除了|除外|以外)\\s*[:"'“”\`]?\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "iu").test(text));
+      if (excepted) continue;
       if (clauses.some((clause) => names.some((name) => name.length >= 2 && mentions(clause, name)) && !(QUESTION.test(clause) || NEGATION_WORDS.test(clause) || RETRACT_WORDS.test(clause)))) return word.text;
       if (names.some((name) => name.length >= 2 && mentions(text, name)) && !clauses.some((clause) => names.some((name) => name.length >= 2 && mentions(clause, name)))) {
         if (!(QUESTION.test(text) || NEGATION_WORDS.test(text) || RETRACT_WORDS.test(text))) return word.text;
@@ -4707,6 +4945,22 @@ function gitDiscards(words: readonly string[]): { dir?: string; sub: string } | 
 function shownGlob(pattern: string): string {
   return pattern.replaceAll("\u0001", "…");
 }
+
+/** Package runners and the words before the package they run (data). */
+const PACKAGE_RUNNERS: readonly { program: string; sub: readonly string[] }[] = [
+  { program: "npx", sub: [] }, { program: "bunx", sub: [] }, { program: "uvx", sub: [] }, { program: "pnpx", sub: [] },
+  { program: "pnpm", sub: ["dlx"] }, { program: "pnpm", sub: ["exec"] }, { program: "npm", sub: ["exec"] }, { program: "yarn", sub: ["dlx"] },
+  { program: "pipx", sub: ["run"] }, { program: "uv", sub: ["run"] }, { program: "uv", sub: ["tool", "run"] }, { program: "poetry", sub: ["run"] }, { program: "pdm", sub: ["run"] }, { program: "hatch", sub: ["run"] },
+];
+
+/** Options whose value is a command the program runs, whichever program it is (data). */
+const RUN_OPTIONS = /^(--pre|--exec|--exec-batch|-x|-X|--command|-c|--run|--shell-command|--on-change|--onchange)$/;
+
+/** Programs whose output is what they read (a file's content, or an encoding of it), not its name or size. */
+const CONTENT_PRINTERS: ReadonlySet<string> = new Set(["cat", "tac", "head", "tail", "base64", "base32", "xxd", "od", "hexdump", "gzip", "zcat", "bzip2", "xz", "zstd", "lz4", "tar", "zip", "openssl", "gpg", "age", "sed", "awk", "gawk", "grep", "egrep", "rg", "cut", "tr", "sort", "uniq", "strings", "jq", "yq", "dd", "iconv", "envsubst", "tee", "less", "more", "rev", "fold", "nl", "paste"]);
+
+/** Programs that hand their input to the program they run (flow.ts feeders): that program is the consumer. */
+const FEEDER_NAMES: ReadonlySet<string> = new Set(["xargs", "parallel"]);
 
 /** The files a feeder reads its names from (`xargs -a F`, `--arg-file=F`, `parallel -a F`, `:::: F`). */
 function feederArgFiles(words: readonly string[]): string[] {
