@@ -1663,6 +1663,52 @@ words (typed, plan, card or answer; not a reply) name it, and when they do the j
 with the line "- not this task's: … (the owner's words name it: …)" in its evidence (concern
 `other-task`).
 
+#### 7.3.12 Round 6: one pipeline, typed targets by declaration (2026-11-24)
+
+Five mechanisms (tests: `cypher-permissions-round6.test.mjs`), none fitted to the blind-5 lines:
+
+- **One decision pipeline (W1).** Every way a request can be allowed is listed in core.ts
+  `ENTRY_POINTS` (a file tool's default allow, a grant, a rule; `request_permission` for paths
+  already allowed; an MCP/extension tool allowed by its setting or an approval; a bash line a rule
+  or an inspection runs outside the sandbox; a sandboxed bash line; an escalation), and each calls
+  `Permissions.gate` before it allows: the owner's denials (denials.ts) and the floor's `before`
+  rows. Held, a file or tool request goes to `elevate` (the floor asks the owner, no judge), a
+  rule-allowed line to review, a sandboxed line is refused with "run it with `escalate`". Nothing
+  to match (no denial in the chat, nothing destroyed, no other chat's ledger) costs no prompt and
+  no judge call. The file tools and their access are `FILE_TOOL_ACCESS`; the test drives every
+  entry point from these lists.
+- **Typed targets by declaration (W2).** schema.ts `TARGET_SCHEMAS`: per tool (kubectl/oc, helm,
+  docker/podman, gh, glab, curl/http/xh, aws, gcloud/gsutil) which option or operand names which
+  entity kind, with a role — `target`, `within` (a namespace or repository: where named operands
+  are, and the target itself when none is named, `delete all --all -n X`), `env` (context,
+  cluster, profile: never a target). `API_ROUTES`: method × route (GitHub `repos/…`, GitLab
+  `projects/…`) → effect class and entities (`PUT …/pulls/N/merge` merges pr N, `DELETE
+  …/git/refs/heads/X` changes branch X). effects.ts `commandEffects` reads them, so denials and
+  the other-task floor match by typed target. New entity kinds: namespace, context, cluster,
+  bucket, project. Safety net, for denial matching only (`tokenMatch`): an argv word equal to a
+  denied target's name touches it when the effects meet (an unknown effect — a program no table
+  reads, an MCP tool — meets any).
+- **Provenance of every kind (W3).** Ledger kinds are read through `KIND_ALIASES` (dir, folder,
+  file → path; ns → namespace); entries carry the chat's task (`CYPHER_TASK_ID`: a workspace and
+  its threads, a plan and its sessions), and one task's chats are never each other's other task.
+  `otherTaskOf`: any destroying effect (delete, erase, stop, move away — by the program tables,
+  `DenialUnit.destroys`; a content write is none) on another chat's entity — the same, one inside
+  the target, or one the line's globs could match — is the `other-task` floor, for every line, not
+  only dangers, unless the owner's words name it.
+- **Code as categories (W4).** A secret given to any command is read by it whatever the flag
+  (`-i`, `--input=`, `-in`, positional, `@`, `<`), except a program's own key options (risk.ts
+  `KEY_OPTIONS`: `ssh -i`, `curl --cert`, …) and stat-only programs. code.ts `HOME_FORMS`: the home
+  folder in any syntax (`$HOME`, `${HOME}`, `$ENV{HOME}`, `%USERPROFILE%`, `ENV['HOME']`,
+  `os.environ['HOME']`, `process.env.HOME`, `os.homedir()`, `Path.home()`, `Dir.home`, …), at a
+  literal's start or joined to one. `NETWORK_CATEGORIES`: raw sockets, socket devices, HTTP
+  clients, DNS lookups, host:port literals of another machine, beside the library names.
+- **Runtime write targets by their possible set (W5).** risk.ts `runtimeWriteSets`: a consumer
+  that writes what a pipe hands it (`xargs -I{} sh -c '… >> {}'`, `xargs tee -a`, `xargs sed -i`)
+  writes only what the producer could print; when that is a listing (`LISTERS`: ls, echo, find
+  with its `-name`/`-path` tests, …) seen through `SUBSET_FILTERS` (head, sort, grep, …), the
+  floor's `permission-system` row applies if the set could hold the permission system. Any other
+  producer leaves the set unknown and nothing asks more than before.
+
 ### 7.4 Human approval
 
 `ctx.ui.select`, which Cypher bridges to a question in the desktop and iOS apps
