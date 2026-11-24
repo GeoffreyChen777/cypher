@@ -52,10 +52,26 @@ export const TRANSFORMS: readonly { program: string; when: (args: readonly strin
   { program: "cut", when: () => false, apply: () => undefined },
 ];
 
-/** The literal text a command prints of its own (`echo`, `printf` with `\x`/octal escapes, `echo -e`), or undefined. */
-export function printed(words: readonly string[], unknown: string): string | undefined {
+/** What the folding knows of the machine (final pass): the user the line runs as, whose name `whoami` prints. */
+export interface FoldContext {
+  user?: string;
+}
+
+/**
+ * Commands that print the name of the user the line runs as (final pass, data): `whoami`, `logname`, `id -un`.
+ * `~$(whoami)` after an `eval` is the home folder; the name is no secret, but what it builds is a place.
+ */
+const USER_PRINTERS: readonly { program: string; when: (args: readonly string[]) => boolean }[] = [
+  { program: "whoami", when: (args) => args.length === 0 },
+  { program: "logname", when: (args) => args.length === 0 },
+  { program: "id", when: (args) => args.length > 0 && args.every((arg) => /^-(un|nu|u|n)$/.test(arg)) && args.join("").includes("u") && args.join("").includes("n") },
+];
+
+/** The literal text a command prints of its own (`echo`, `printf` with `\x`/octal escapes, `echo -e`, a user-name printer), or undefined. */
+export function printed(words: readonly string[], unknown: string, context: FoldContext = {}): string | undefined {
   const [program, ...args] = words;
   if (program === undefined || words.includes(unknown)) return undefined;
+  if (context.user && USER_PRINTERS.some((row) => row.program === program && row.when(args))) return `${context.user}\n`;
   const unescape = (text: string) =>
     text
       .replace(/\\x([0-9a-fA-F]{1,2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
@@ -81,10 +97,10 @@ export function printed(words: readonly string[], unknown: string): string | und
  * What a pipe prints, folded: a literal printer (or literal input) through transforms of `TRANSFORMS`.
  * `chain`: the pipe's commands in order, each with its words and its literal input (a here-string).
  */
-export function foldPipe(chain: readonly { words: readonly string[]; input?: string }[], unknown: string): string | undefined {
+export function foldPipe(chain: readonly { words: readonly string[]; input?: string }[], unknown: string, context: FoldContext = {}): string | undefined {
   if (!chain.length) return undefined;
   const [first, ...rest] = chain;
-  let text = first.input !== undefined && first.words.length && TRANSFORMS.some((row) => row.program === first.words[0]) ? applyOne(first.words, first.input, unknown) : printed(first.words, unknown);
+  let text = first.input !== undefined && first.words.length && TRANSFORMS.some((row) => row.program === first.words[0]) ? applyOne(first.words, first.input, unknown) : printed(first.words, unknown, context);
   for (const command of rest) {
     if (text === undefined || text.length > MAX_FOLD) return undefined;
     text = applyOne(command.words, text, unknown);

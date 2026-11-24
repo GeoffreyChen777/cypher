@@ -72,6 +72,8 @@
  * sandbox unless it is approved as written.
  */
 
+import { basename } from "node:path";
+
 import { foldPipe } from "./fold.ts";
 import { ANY, ENV_CLOSE, ENV_OPEN, escapeGlob, userHome } from "./resolve.ts";
 
@@ -974,11 +976,23 @@ function read(
         return inner + 1;
       }
       const close = closingParen(source, i + 2);
-      const before = out.length;
-      const text = source.slice(i + 2, close);
+      let before = out.length;
+      let text = source.slice(i + 2, close);
+      const poisonedBefore = vars.poisoned;
       read(text, home, options, out, true, vars, subshells, subshell);
+      // `$(eval WORDS)` (final pass): the shell reads the words once more, and what that reads is what runs and
+      // prints (`$(eval echo ~$(whoami))` is the home folder). Only a lone `eval` of words known now.
+      const top = out.at(-1);
+      if (out.length > before && /^\s*eval\s/.test(text) && top?.words[0] === "eval" && top.words.length > 1 && !top.words.includes(UNKNOWN) && !top.writes.length && !top.reads.length) {
+        text = top.words.slice(1).join(" ");
+        out.pop();
+        before = out.length;
+        // `eval` poisons what the reader knows because it doesn't read its words; here it does.
+        vars.poisoned = poisonedBefore;
+        read(text, home, options, out, true, vars, subshells, subshell);
+      }
       // A pipe of literal text through pure transforms (fold.ts): the text it prints is known now (round 5 step 2).
-      const folded = !/[;&\n`]|\|\||\$\(/.test(text) ? foldPipe(out.slice(before), UNKNOWN) : undefined;
+      const folded = !/[;&\n`]|\|\||\$\(/.test(text) ? foldPipe(out.slice(before), UNKNOWN, { user: basename(home) }) : undefined;
       if (folded !== undefined && !vars.poisoned && /^[\x20-\x7e]*\n*$/.test(folded)) {
         expand(folded.replace(/\n+$/, ""));
         inWord = true;
@@ -992,6 +1006,18 @@ function read(
       return close;
     }
     if (next === "{") {
+      // `${NAME/pat/rep}`, `${NAME#pre}`, `${NAME%suf}`, `${NAME^^}` … of a value known now (final pass): its result.
+      const transformed = parameterTransform(source, i, (name) => knownValue(name, true), home);
+      if (transformed) {
+        vars.expanded.add(transformed.name);
+        if (transformed.value !== undefined && (inQuotes || !/[\s*?[\]]/.test(transformed.value))) expand(transformed.value);
+        else {
+          becomesUnknown();
+          pat += ANY;
+        }
+        inWord = true;
+        return transformed.close;
+      }
       const close = source.indexOf("}", i + 2);
       if (close < 0) throw new Opaque("an unterminated `${`");
       if (/[$`(]/.test(source.slice(i + 2, close))) throw new Opaque("a substitution inside `${…}`");
@@ -1314,9 +1340,22 @@ function read(
       case "~":
         if (!inWord) {
           inWord = true;
+          const user = /^[A-Za-z_][\w.-]*/.exec(source.slice(i + 1))?.[0];
+          const afterUser = user === undefined ? undefined : source[i + 1 + user.length];
           if (next === undefined || " \t\n;|&/<>)".includes(next)) {
             word += home;
             pat += escapeGlob(home);
+          } else if (user !== undefined && userHome(user, home) === home && (afterUser === undefined || " \t\n;|&/<>)".includes(afterUser))) {
+            // `~NAME` of the user the line runs as (final pass): the home folder itself.
+            word += home;
+            pat += escapeGlob(home);
+            i += user.length;
+          } else if (next === "$" || next === "`" || next === "'" || next === '"') {
+            // `~$(whoami)`, `~"$USER"`: no tilde prefix bash expands (its name isn't a plain word); a literal `~`
+            // before what follows (an `eval` of it reads it again: `$(eval echo ~$(whoami))`).
+            word += char;
+            pat += char;
+            raw += char;
           } else {
             // `~user`, `~+`: known only when it runs; its place, as a glob (resolve.ts `userHome`).
             becomesUnknown();
@@ -1426,6 +1465,97 @@ function globbed(raw: string): boolean {
 }
 
 /** The index of the `)` closing a `$(` whose contents start at `start`. */
+/** A shell glob (a parameter expansion's pattern) as a regex source; `\\c` is the character itself. */
+function patternSource(pattern: string, greedy: boolean): string {
+  let out = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === "\\" && i + 1 < pattern.length) out += pattern[++i].replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+    else if (c === "*") out += greedy ? ".*" : ".*?";
+    else if (c === "?") out += ".";
+    else out += c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+  }
+  return out;
+}
+
+/**
+ * The parameter expansions that transform a value (final pass, data: `PARAMETER_TRANSFORMS`), read at `$` (`i`):
+ * `${NAME/pat/rep}` (`//`, `/#`, `/%`), `${NAME#pat}` (`##`), `${NAME%pat}` (`%%`), `${NAME^^}`, `${NAME,,}`,
+ * `${NAME:off[:len]}`. Their operands may hold `$NAME` / `${NAME}` and `~`. `value` undefined: something in it is
+ * known only when it runs (the variable, an operand). Undefined: no transform (read as before).
+ */
+const PARAMETER_TRANSFORMS = /^([A-Za-z_][A-Za-z0-9_]*)(\/\/|\/#|\/%|\/|##|#|%%|%|\^\^|,,|\^|,|:(?=[\s\d-]))([\s\S]*)$/;
+
+function parameterTransform(source: string, i: number, known: (name: string) => string | undefined, home: string): { name: string; value: string | undefined; close: number } | undefined {
+  // The closing brace, past `${…}` inside it.
+  let close = -1;
+  for (let j = i + 2, depth = 1; j < source.length; j++) {
+    if (source[j] === "\\") j++;
+    else if (source[j] === "{" && source[j - 1] === "$") depth++;
+    else if (source[j] === "}" && --depth === 0) {
+      close = j;
+      break;
+    }
+  }
+  if (close < 0) return undefined;
+  const body = source.slice(i + 2, close);
+  const match = PARAMETER_TRANSFORMS.exec(body);
+  if (!match || /[`(]/.test(body)) return undefined;
+  const [, name, op, rest] = match;
+  // Operands: `$NAME`, `${NAME}` known now, a leading `~` the home folder; quotes dropped.
+  let unknown = false;
+  const operand = (text: string): string =>
+    text
+      .replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_, a, b) => {
+        const value = known(a ?? b);
+        if (value === undefined) unknown = true;
+        return value ?? "";
+      })
+      .replace(/^~(?=\/|$)/, home)
+      .replace(/^(['"])(.*)\1$/, "$2");
+  const value = known(name);
+  let out: string | undefined;
+  if (op.startsWith("/")) {
+    // The pattern ends at the first `/` no backslash escapes.
+    const slash = /(?<!\\)\//.exec(rest);
+    const pattern = operand(slash ? rest.slice(0, slash.index) : rest);
+    const replacement = operand(slash ? rest.slice(slash.index + 1) : "");
+    if (value !== undefined && !unknown) {
+      const source = patternSource(pattern, true);
+      const regex = new RegExp(op === "/#" ? `^${source}` : op === "/%" ? `${source}$` : source, op === "//" ? "g" : "");
+      out = pattern === "" ? value : value.replace(regex, () => replacement);
+    }
+  } else if (op === "#" || op === "##" || op === "%" || op === "%%") {
+    const pattern = operand(rest);
+    if (value !== undefined && !unknown) {
+      const source = patternSource(pattern, op.length === 2);
+      out = value.replace(new RegExp(op.startsWith("#") ? `^${source}` : `${op === "%" ? "(?<=^[\\s\\S]*?)" : ""}${source}$`), "");
+      if (op === "%") {
+        // Shortest suffix: the last match from the right.
+        for (let at = value.length; at >= 0; at--) {
+          if (new RegExp(`^${patternSource(pattern, true)}$`).test(value.slice(at))) {
+            out = value.slice(0, at);
+            break;
+          }
+        }
+      }
+    }
+  } else if (op === "^^" || op === "^" || op === ",," || op === ",") {
+    if (rest !== "") return undefined;
+    if (value !== undefined) out = op === "^^" ? value.toUpperCase() : op === ",," ? value.toLowerCase() : op === "^" ? value.charAt(0).toUpperCase() + value.slice(1) : value.charAt(0).toLowerCase() + value.slice(1);
+  } else if (op === ":") {
+    const parts = /^\s*(-?\d+)\s*(?::\s*(-?\d+)\s*)?$/.exec(rest);
+    if (!parts) return undefined;
+    if (value !== undefined) {
+      const offset = Number(parts[1]);
+      const start = offset < 0 ? Math.max(0, value.length + offset) : offset;
+      const length = parts[2] === undefined ? undefined : Number(parts[2]);
+      out = length === undefined ? value.slice(start) : length < 0 ? value.slice(start, value.length + length) : value.slice(start, start + length);
+    }
+  }
+  return { name, value: out, close };
+}
+
 function closingParen(source: string, start: number): number {
   let depth = 1;
   let wordStart = true;
