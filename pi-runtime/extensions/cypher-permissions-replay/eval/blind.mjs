@@ -15,6 +15,7 @@
 // - `createdBranches` / `createdTags` / `createdDirs` / `createdWorktrees` → earlier commands this chat ran
 //   (`git branch`, `git tag -a … <default>`, `mkdir -p`, `git worktree add --detach`), run for real on the
 //   case's own fake machine between plan and settle (`ranRun`), so the ledger observes what they made.
+//   A created branch that is the chat's own branch is `git switch -c` instead of the checkout above.
 // - `openedPRs` → for each, `git push -u origin <head>` and `gh pr create --base --head` (`glab mr create` when the case
 //   is a GitLab one: its line or the agent's text uses glab or `!N`) with its URL as output:
 //   both in the conversation (the explicit check's PR facts) and settled like a real run (the ledger).
@@ -131,7 +132,15 @@ export function convert(blind) {
     tagBase[m[1]] = m[2];
     fake.refs.push({ kind: "branch", name: m[2], ahead: true });
   }
-  for (const name of setup.createdBranches ?? []) ran.push([`git branch ${name}`, "", true]);
+  // The chat's own branch, when the chat made it: the chat switched to it as it made it (`git switch -c`), so its
+  // folder is on it and its ledger holds it (a `git branch X` after the fake machine's checkout of X failed, and
+  // read as a second, foreign branch of that name).
+  for (const name of setup.createdBranches ?? []) {
+    if (name === checkout) {
+      checkout = undefined;
+      ran.push([`git switch -c ${name}`, `Switched to a new branch '${name}'\n`, true]);
+    } else ran.push([`git branch ${name}`, "", true]);
+  }
   for (const name of setup.createdTags ?? []) ran.push([`git tag -a ${name} -m ${name} ${tagBase[name] ?? defaultBranch}`, "", true]);
   for (const dir of setup.createdDirs ?? []) ran.push([`mkdir -p ${dir}`, "", true]);
   for (const path of setup.createdWorktrees ?? []) ran.push([`git worktree add --detach ${path}`, `Preparing worktree (detached HEAD)\n`, true]);
