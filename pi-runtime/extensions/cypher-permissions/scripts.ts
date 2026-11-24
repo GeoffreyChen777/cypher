@@ -21,6 +21,8 @@ export interface ProjectScript {
   lines: string[];
   /** The folder its lines run in. */
   cwd: string;
+  /** The file its lines are in (a script, a makefile, `package.json`), when it is one. */
+  file?: string;
 }
 
 /** Reads a file's text (from disk; a line's own earlier writes first: `projectScripts`'s `read`). */
@@ -64,7 +66,7 @@ const shellFile: Reader = (words, cwd, read) => {
   if (!file) return undefined;
   const path = isAbsolute(file) ? file : join(cwd, file);
   const text = read(path);
-  return text === undefined ? undefined : [{ by: words.slice(0, 2).join(" "), lines: shellLines(text), cwd }];
+  return text === undefined ? undefined : [{ by: words.slice(0, 2).join(" "), lines: shellLines(text), cwd, file: path }];
 };
 
 /** A makefile's recipe for each target (prerequisites' recipes first, one level), or the first target's. */
@@ -80,7 +82,8 @@ const makeRecipe: Reader = (words, cwd, read) => {
     else if (word.startsWith("-") || word.includes("=")) continue;
     else targets.push(word);
   }
-  const path = file ? (isAbsolute(file) ? file : join(dir, file)) : ["GNUmakefile", "makefile", "Makefile"].map((name) => join(dir, name)).find((candidate) => read(candidate) !== undefined);
+  // `-f -` / `-f /dev/stdin`: the makefile is the command's input (iteration 2), which the caller's reader gives.
+  const path = file === "-" || file === "/dev/stdin" ? "/dev/stdin" : file ? (isAbsolute(file) ? file : join(dir, file)) : ["GNUmakefile", "makefile", "Makefile"].map((name) => join(dir, name)).find((candidate) => read(candidate) !== undefined);
   const text = path ? read(path) : undefined;
   if (text === undefined) return undefined;
   const rules = new Map<string, { prerequisites: string[]; recipe: string[] }>();
@@ -113,7 +116,7 @@ const makeRecipe: Reader = (words, cwd, read) => {
     const rule = rules.get(target);
     if (!rule) continue;
     const lines = [...rule.prerequisites.flatMap((name) => rules.get(name)?.recipe ?? []), ...rule.recipe].slice(0, MAX_LINES);
-    out.push({ by: `make ${target}`, lines, cwd: dir });
+    out.push({ by: `make ${target}`, lines, cwd: dir, ...(path !== "/dev/stdin" ? { file: path } : {}) });
   }
   return out;
 };
@@ -145,7 +148,7 @@ const packageScript: Reader = (words, cwd, read) => {
     return undefined;
   }
   const lines = [`pre${name}`, name, `post${name}`].map((key) => scripts[key]).filter((value): value is string => typeof value === "string");
-  return lines.length ? [{ by: `${program} run ${name}`, lines, cwd: dir }] : undefined;
+  return lines.length ? [{ by: `${program} run ${name}`, lines, cwd: dir, file: join(dir, "package.json") }] : undefined;
 };
 
 /** A justfile recipe (`just X`; the first recipe without one): its indented lines. */
@@ -179,7 +182,7 @@ const pathScript: Reader = (words, cwd, read) => {
   const path = isAbsolute(program) ? program : join(cwd, program);
   const text = read(path);
   if (text === undefined || !/^#!\s*(?:\/usr\/bin\/env\s+(?:-S\s+)?)?(?:\/[\w/]*\/)?(sh|bash|zsh|dash|ksh)\b/.test(text)) return undefined;
-  return [{ by: program, lines: shellLines(text), cwd }];
+  return [{ by: program, lines: shellLines(text), cwd, file: path }];
 };
 
 /** How each runner finds the script it runs (data). */
@@ -197,7 +200,7 @@ export function projectScripts(words: readonly string[], cwd: string | undefined
   const row = SCRIPT_RUNNERS.find((candidate) => candidate.programs.includes(program));
   // The system's own scripts (`/Applications/Xcode.app/…/simctl`, `/usr/bin/…`: a place the agent can't write) are
   // programs like any other, not this project's code: not read (final pass).
-  const guarded: ReadFile = (path) => (system(isAbsolute(path) ? path : join(cwd, path)) ? undefined : read(path));
+  const guarded: ReadFile = (path) => (path !== "/dev/stdin" && system(isAbsolute(path) ? path : join(cwd, path)) ? undefined : read(path));
   const found = row ? row.read(words, cwd, guarded) : pathScript(words, cwd, guarded);
   return (found ?? []).filter((script) => script.lines.length > 0).map((script) => ({ ...script, cwd: script.cwd || dirname(cwd) }));
 }

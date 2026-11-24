@@ -282,7 +282,9 @@ export const TEST_SOURCES: readonly { programs: readonly string[]; read: (words:
       } else if (sub === "for-each-ref") {
         for (const ref of operands) {
           const name = /^refs\/(?:heads|tags|remotes\/[^/]+)\/(.*)$/.exec(ref)?.[1];
-          if (name !== undefined) out.push({ glob: `${name}${name.endsWith("/") || !name ? "*" : ""}` });
+          // git matches a literal pattern completely or up to a slash (`refs/heads/feat` is feat and feat/…; iteration 2).
+          if (name !== undefined && /[*?[]/.test(name)) out.push({ glob: name });
+          else if (name !== undefined) out.push(name === "" || name.endsWith("/") ? { glob: `${name}*` } : { regex: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(/.*)?$`) });
         }
       }
       return out;

@@ -133,7 +133,8 @@ export function unitsOf(record: Pick<DenialRecord, "units" | "actions" | "scopes
 /** The denied unit and the scope of `asked` a denial covers: the same effect class on the same thing, or one holding the other. */
 /**
  * Effects that are part of another (final pass, data): removing what runs stops it first (`docker rm -f`, `kill` then
- * delete), so a denied destroy covers stopping the same entity. Only for a denied unit that destroys.
+ * delete), so a denied destroy covers stopping the same entity (and scaling it to nothing, a stop: iteration 2). Only for
+ * a denied unit that destroys.
  */
 export const EFFECT_PARTS: Readonly<Partial<Record<EffectClass, readonly EffectClass[]>>> = { change: ["stop"] };
 
@@ -141,14 +142,14 @@ function covers(unit: DenialUnit, asked: DenialUnit): boolean {
   return unit.effects.some((effect) => asked.effects.includes(effect) || (unit.destroys === true && (EFFECT_PARTS[effect] ?? []).some((part) => asked.effects.includes(part))));
 }
 
-export function classMatch(denied: Pick<DenialRecord, "units" | "actions" | "scopes" | "tool">, asked: ActionClass): { unit: DenialUnit; scope: DenialScope } | undefined {
+export function classMatch(denied: Pick<DenialRecord, "units" | "actions" | "scopes" | "tool">, asked: ActionClass, formsOf?: (kind: string, name: string) => readonly string[]): { unit: DenialUnit; scope: DenialScope } | undefined {
   for (const unit of unitsOf(denied)) {
     for (const other of asked.units) {
       if (!covers(unit, other)) continue;
       const scope = other.scopes.find((candidate) => unit.scopes.some((scope) => scopeMatches(scope, candidate)));
       if (scope) return { unit, scope };
       // Round 6 step 2: what it acts on known only when it runs, by its possible set — a producer's (flow.ts) or a glob's.
-      const reached = unit.scopes.find((scope) => scope.kind !== "line" && (other.runtime ?? []).some((operand) => (operand.kinds as readonly string[]).includes(scope.kind) && operand.tests.every((test) => passes(test, scope.kind, scope.name))));
+      const reached = unit.scopes.find((scope) => scope.kind !== "line" && (other.runtime ?? []).some((operand) => (operand.kinds as readonly string[]).includes(scope.kind) && operand.tests.every((test) => passes(test, scope.kind, scope.name, formsOf?.(scope.kind, scope.name) ?? []))));
       if (reached) return { unit, scope: reached };
       const globbed = unit.scopes.find((scope) => PATH_KINDS.has(scope.kind) && !scope.glob && (other.globs ?? []).some((glob) => globsIntersect(glob, scope.name) || globsIntersect(`${glob.replace(/\/+$/, "")}/**`, scope.name)));
       if (globbed) return { unit, scope: globbed };
@@ -388,12 +389,12 @@ export class Denials {
    * words since haven't lifted, with the scope it covers; and the denials of the same effect on other
    * targets (evidence for the judge).
    */
-  check(asked: ActionClass, owner: OwnerWords | undefined): { active?: { denial: DenialRecord; scope: DenialScope }; review?: { denial: DenialRecord; scope: DenialScope; word: string }; similar: DenialRecord[] } {
+  check(asked: ActionClass, owner: OwnerWords | undefined, formsOf?: (kind: string, name: string) => readonly string[]): { active?: { denial: DenialRecord; scope: DenialScope }; review?: { denial: DenialRecord; scope: DenialScope; word: string }; similar: DenialRecord[] } {
     this.load();
     const similar: DenialRecord[] = [];
     let review: { denial: DenialRecord; scope: DenialScope; word: string } | undefined;
     for (const denial of [...this.records].reverse()) {
-      const match = classMatch(denial, asked) ?? tokenMatch(denial, asked);
+      const match = classMatch(denial, asked, formsOf) ?? tokenMatch(denial, asked);
       if (match) {
         if (liftedBy(denial, match.scope, owner, match.unit) === undefined) {
           // Asked for since, with a deferral word in the same words: the judge's, with the denial as evidence.

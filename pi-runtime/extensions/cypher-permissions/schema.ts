@@ -135,8 +135,33 @@ export const TARGET_SCHEMAS: readonly TargetSchema[] = [
     api: { sub: ["api"], method: ["-X", "--method"], body: ["-f", "-F", "--field", "--raw-field", "--input"] },
   },
   {
+    // Iteration 2: terminal multiplexer sessions, by their name (`-t` / `-s`; zellij's operand).
+    programs: ["tmux"],
+    options: { "-t": { kind: "resource", role: "target" } },
+    values: ["-s", "-n", "-c", "-x", "-y", "-F", "-f", "-L", "-S"],
+    subs: [
+      { sub: ["kill-session"], effect: "change", operands: [] },
+      { sub: ["kill-window"], effect: "change", operands: [] },
+      { sub: ["kill-pane"], effect: "change", operands: [] },
+      { sub: ["kill-server"], effect: "change", operands: [] },
+    ],
+  },
+  {
+    programs: ["screen"],
+    options: { "-S": { kind: "resource", role: "target" } },
+    values: ["-X", "-c"],
+  },
+  {
+    programs: ["zellij"],
+    subs: [
+      { sub: ["kill-session"], effect: "change", operands: ["resource"] },
+      { sub: ["delete-session"], effect: "change", operands: ["resource"] },
+      { sub: ["k"], effect: "change", operands: ["resource"] },
+    ],
+  },
+  {
     programs: ["curl", "http", "https", "xh"],
-    values: ["-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "-F", "--form", "-H", "--header", "-o", "--output", "-u", "--user", "-A", "--user-agent", "-e", "--referer", "-T", "--upload-file", "-w", "--write-out", "-m", "--max-time", "--json", "-b", "--cookie", "-c", "--cookie-jar"],
+    values: ["-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "-F", "--form", "-H", "--header", "-o", "--output", "-u", "--user", "-A", "--user-agent", "-e", "--referer", "-T", "--upload-file", "-w", "--write-out", "-m", "--max-time", "--json", "-b", "--cookie", "-c", "--cookie-jar", "--unix-socket"],
     api: { sub: [], method: ["-X", "--request"], body: ["-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "-F", "--form", "--json"], put: ["-T", "--upload-file"] },
   },
   {
@@ -205,6 +230,12 @@ export const API_ROUTES: readonly ApiRoute[] = [
   { methods: ["DELETE"], route: "projects/:project/repository/branches/:branch*", effect: "change", entities: { branch: "branch" } },
   { methods: ["DELETE"], route: "projects/:project/repository/tags/:tag*", effect: "change", entities: { tag: "tag" } },
   // A release addressed by its tag (final pass): the same release as by its id (`gh release delete TAG`).
+  // Iteration 2: the Docker (and Podman) Engine API over its socket.
+  { methods: ["DELETE"], route: "containers/:container", effect: "change", entities: { container: "container" } },
+  { methods: ["POST"], route: "containers/:container/stop", effect: "stop", entities: { container: "container" } },
+  { methods: ["POST"], route: "containers/:container/kill", effect: "stop", entities: { container: "container" } },
+  { methods: ["DELETE"], route: "images/:image", effect: "change", entities: { image: "image" } },
+  { methods: ["DELETE"], route: "volumes/:volume", effect: "change", entities: { volume: "resource" } },
   { methods: ["DELETE", "PATCH"], route: "repos/:owner/:repo/releases/tags/:release", effect: "change", entities: { release: "release" } },
   { methods: ["DELETE", "PATCH"], route: "repos/:owner/:repo/releases/:release", effect: "change", entities: { release: "release" } },
   { methods: ["POST"], route: "repos/:owner/:repo/releases", effect: "publish" },
@@ -318,7 +349,7 @@ export function apiDestroys(words: readonly string[]): boolean {
 }
 
 /** A subcommand word that deletes (data, round 6 step 2). */
-export const DELETING_SUBCOMMAND = /^(delete|remove|rm|rb|terminate|destroy|purge|deregister|drop)(-[a-z-]+)?$/;
+export const DELETING_SUBCOMMAND = /^(delete|remove|rm|rb|terminate|destroy|purge|deregister|drop|kill)(-[a-z-]+)?$/;
 
 /** One command's words (unwrapped), read by its schema: undefined when the table has none for it. */
 /**
@@ -364,7 +395,8 @@ export const FOLDER_PUBLISHERS: readonly { programs: readonly string[]; sub: rea
 /** The package a folder publisher publishes (`FOLDER_PUBLISHERS`): its manifest's name, else `folder:<dir>`; undefined when it names one itself. */
 export function folderPackage(words: readonly string[], cwd: string | undefined, read: (path: string) => string | undefined): string | undefined {
   const program = basename(words[0] ?? "");
-  const positionals = words.slice(1).filter((word) => !word.startsWith("-"));
+  // Options that take a value (`--access public`, `--tag next`, `--registry URL`, `--token T`): their value is no operand.
+  const positionals = words.slice(1).filter((word, at, all) => !word.startsWith("-") && !/^(--access|--tag|--otp|--registry|--token|--index|--index-token|-r|--repository|--username|--password|--features|-p|--package|--manifest-path|--target|-w|--workspace|--filter)$/.test(all[at - 1] ?? ""));
   const row = FOLDER_PUBLISHERS.find((candidate) => candidate.programs.includes(program) && candidate.sub.every((word, at) => positionals[at] === word));
   if (!row || cwd === undefined) return undefined;
   // An operand after the subcommand names what it publishes (a folder or a tarball): read by the tables, not here.
@@ -429,7 +461,12 @@ export function typedTargets(words: readonly string[]): Typed | undefined {
   }
   // A REST call: its method and route.
   if (schema.api && schema.api.sub.every((word, index) => positionals[index] === word)) {
-    const endpoint = positionals.slice(schema.api.sub.length).map(apiPath).find((path) => path !== undefined);
+    // A local engine's API over its socket (iteration 2: `curl --unix-socket /var/run/docker.sock -X DELETE
+    // http://localhost/containers/X`): the route is the URL's path, its version prefix off.
+    const socket = options.find(([option]) => option === "--unix-socket")?.[1];
+    const engine = socket !== undefined && /(docker|podman)[^/]*\.sock$/.test(socket);
+    const local = (word: string) => /^https?:\/\/[^/]+(\/[^?#]*)?/i.exec(word)?.[1]?.replace(/^\/v\d+(\.\d+)?\//, "/").replace(/^\/+/, "");
+    const endpoint = positionals.slice(schema.api.sub.length).map((word) => (engine ? local(word) : apiPath(word))).find((path) => path !== undefined);
     if (endpoint !== undefined) {
       const given = options.find(([option]) => schema.api!.method.includes(option))?.[1]?.toUpperCase();
       const method = given ?? (options.some(([option]) => schema.api!.put?.includes(option)) ? "PUT" : options.some(([option]) => schema.api!.body.includes(option)) ? "POST" : "GET");
