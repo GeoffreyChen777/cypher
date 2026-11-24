@@ -13,6 +13,7 @@ mod history;
 mod kit;
 mod markdown;
 mod pickers;
+mod plan_level;
 mod prefs;
 mod quote_origin;
 mod settings;

@@ -765,6 +765,51 @@ impl Shell {
                     }))
                     .child(SharedString::from(short(minutes)))
             }));
+        // The level new plans run at, as `/permissions` names it; amber
+        // only for Full access.
+        let level = plans.level();
+        let level_pick = div()
+            .flex_none()
+            .p(px(2.0))
+            .rounded(px(8.0))
+            .bg(crate::kit::theme::ink(0.05))
+            .flex()
+            .flex_row()
+            .gap(px(2.0))
+            .children(crate::pickers::PERMISSION_LEVELS.iter().map(|entry| {
+                let on = entry.level == level;
+                let pick = entry.level;
+                let badge = crate::plan_level::badge(pick);
+                let color = match badge.tone {
+                    crate::composer::slash_menu::Tone::Warning => theme.warning,
+                    _ if on => theme.text,
+                    _ => theme.text_muted,
+                };
+                div()
+                    .id(SharedString::from(format!(
+                        "bot-plan-level-{}",
+                        entry.value
+                    )))
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(6.0))
+                    .text_size(px(12.0))
+                    .cursor_pointer()
+                    .text_color(color)
+                    .when(on, |el| {
+                        el.bg(crate::kit::theme::card_selected_bg())
+                            .shadow(crate::kit::theme::card_selected_shadows())
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                    })
+                    .when(!on, |el| el.hover(|s| s.text_color(theme.text)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(d) = this.dialogs.bot.as_mut() {
+                            d.plans.level = crate::plan_level::default_setting(pick);
+                        }
+                        cx.notify();
+                    }))
+                    .child(SharedString::from(badge.label))
+            }));
         let stepper =
             |id: &str, value: usize, max: u32, set: fn(&mut cypher_proto::PlanSettings, u32)| {
                 let button = |suffix: &str, glyph: &'static str, enabled: bool, next: u32| {
@@ -842,6 +887,12 @@ impl Shell {
                 "How long a plan may run before it stops. A plan can ask for its own, and you \
                  can add time while it runs.",
                 limit_pick.into_any_element(),
+            ))
+            .child(plan_row(
+                false,
+                "Permissions",
+                "What a new plan's sessions may do. You can change a plan's own on its card.",
+                level_pick.into_any_element(),
             ))
             .child(plan_row(
                 false,

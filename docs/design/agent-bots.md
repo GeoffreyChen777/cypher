@@ -352,6 +352,10 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
   it starts next start at it, the coordinating session reads it from the row
   (`run_sandbox`, when it works directly in local checkouts; read-only otherwise). Live
   runs take it at once on whichever device hosts them (permission-control.md §5.3).
+  On the desktop the card and the plan's page carry one picker, named as `/permissions`
+  names levels (`crates/ui/src/plan_level.rs`): before approval a pick is held until
+  Approve sends it, from approval until the plan ends a pick is sent at once; the
+  workspace's settings pick the default under Plans.
 - Orchestration threads survive engine restarts like any chat: their transcript and the
   durable command queue carry the state.
 

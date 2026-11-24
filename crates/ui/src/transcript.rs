@@ -207,6 +207,8 @@ pub struct Transcript {
     /// group fold. Render-local like `folds` — never part of the row
     /// fingerprint.
     tool_details: HashMap<SharedString, FoldState>,
+    /// The plan card whose permission level menu is open (its row id).
+    level_menu: crate::kit::popover::Popup<SharedString>,
     /// Tool groups whose capped-away chips the user revealed, by row id. The
     /// cap itself is a setting (`chat_style::tool_call_limit`); this is the
     /// per-row override, render-local like `folds`.
@@ -558,6 +560,7 @@ impl Transcript {
             tree_cache: HashMap::new(),
             folds: HashMap::new(),
             tool_details: HashMap::new(),
+            level_menu: Default::default(),
             tool_overflow: std::collections::HashSet::new(),
             toggle_pins: HashMap::new(),
             show_original: std::collections::HashSet::new(),
