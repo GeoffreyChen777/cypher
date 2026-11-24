@@ -12,7 +12,7 @@ import { DELETE_NAMES, SIGNAL_CALLS, scanCode, signaledPids } from "./cypher-per
 import { EFFECT_PARTS } from "./cypher-permissions/denials.ts";
 import { printed } from "./cypher-permissions/fold.ts";
 import { FOLDER_PUBLISHERS, folderPackage } from "./cypher-permissions/schema.ts";
-import { HOOK_TRIGGERS, scheduledLines, triggeredHooks, unreadParts } from "./cypher-permissions/scripts.ts";
+import { HOOK_TRIGGERS, projectScripts, scheduledLines, triggeredHooks, unreadParts } from "./cypher-permissions/scripts.ts";
 import { parseShell } from "./cypher-permissions/shell.ts";
 
 delete process.env.CYPHER_TASK_ID;
@@ -196,6 +196,13 @@ test("R5/R6: a project script's lines are the line's own — floor findings, evi
     for (const line of [`printf 'rm -rf build/cache\\n' > ${tmp} && sh ${tmp}`, `echo 'rm -rf build/cache' > ${tmp}; bash ${tmp}`]) assert.equal((await escalate(denied, line, project)).how, "floor", `${seed}: ${line}`);
     assert.notEqual((await escalate(denied, `echo 'ls build' > ${tmp} && sh ${tmp}`, project)).how, "floor", `${seed}: a harmless written script`);
   }
+});
+
+test("R5: the system's own scripts are programs, not project scripts", () => {
+  const read = () => "#!/bin/sh\nrm -rf /x\n";
+  assert.equal(projectScripts(["/opt/tools/bin/sim", "list"], "/w", read, (path) => path.startsWith("/opt/tools/")).length, 0);
+  assert.equal(projectScripts(["./tools/sim", "list"], "/w", read, (path) => path.startsWith("/opt/tools/")).length, 1);
+  assert.equal(projectScripts(["bash", "/opt/tools/x.sh"], "/w", read, (path) => path.startsWith("/opt/tools/")).length, 0);
 });
 
 test("R7: code set up to run later is read when the line gives it (a hook it writes and triggers, crontab entries), else marked for the judge", async () => {
