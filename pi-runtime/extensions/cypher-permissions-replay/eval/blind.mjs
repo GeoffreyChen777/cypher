@@ -47,6 +47,8 @@
 // - `files` (round 6) → paths that exist on the fake machine before the chat's commands (`fake.files`, a small file
 //   each; a folder when the path ends in `/`); only paths inside the fake machine's home or /tmp (others are no fact the
 //   fake machine can make, noted).
+// - `wroteFiles` (final pass, iteration 4) → paths of `files` this chat wrote with the write tool earlier (a write call
+//   and its result in the transcript, before the commands), so a script the chat wrote reads as its own.
 // - `otherChats` kinds `file` (a path), `namespace`, and `container` named `image:X` / `volume:X` (the mutation sets' form
 //   for a docker image / volume: the ledger's `image` / `resource`).
 // - Final pass: an `otherChats` name that starts with a kind word (`container X`) is of that kind; a process note's
@@ -62,7 +64,7 @@ import { parseArgs } from "node:util";
 
 const { values: args } = parseArgs({ options: { cases: { type: "string" }, out: { type: "string" }, score: { type: "string" }, corpus: { type: "string" }, "merged-by-chat": { type: "boolean", default: false } } });
 
-const KNOWN_SETUP = new Set(["repo", "defaultBranch", "chatBranch", "planBranch", "createdBranches", "createdTags", "createdDirs", "createdWorktrees", "openedPRs", "mergedBranches", "startedProcesses", "foreign", "spoof", "otherChats", "deniedEarlier", "files"]);
+const KNOWN_SETUP = new Set(["repo", "defaultBranch", "chatBranch", "planBranch", "createdBranches", "createdTags", "createdDirs", "createdWorktrees", "openedPRs", "mergedBranches", "startedProcesses", "foreign", "spoof", "otherChats", "deniedEarlier", "files", "wroteFiles"]);
 
 const user = (content) => ({ type: "message", message: { role: "user", content } });
 const assistant = (text) => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
@@ -72,6 +74,15 @@ function toolCall(command, output, isError = false) {
   return [
     { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id, name: "bash", arguments: { command } }] } },
     { type: "message", message: { role: "toolResult", toolCallId: id, toolName: "bash", content: [{ type: "text", text: output }], isError } },
+  ];
+}
+
+/** A write tool call this chat made earlier (final pass, iteration 4: a script it wrote, then ran). */
+function writeCall(path, content) {
+  const id = `blind_call_${++callNumber}`;
+  return [
+    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id, name: "write", arguments: { path, content } }] } },
+    { type: "message", message: { role: "toolResult", toolCallId: id, toolName: "write", content: [{ type: "text", text: `Successfully wrote ${content.length} bytes to ${path}` }], isError: false } },
   ];
 }
 
@@ -338,7 +349,9 @@ export function convert(blind) {
     agentText.splice(-1, 1);
     notes.push("reply: the agent's last text is its proposal");
   }
-  const work = [...ran.flatMap(([command, output]) => toolCall(command, output)), ...agentText.map(assistant)];
+  // Files this chat wrote with the write tool (`wroteFiles`, paths as in `files`), before its commands.
+  const wrote = (setup.wroteFiles ?? []).flatMap((path) => writeCall(absolute(path, cwd), typeof setup.files?.[path] === "string" ? setup.files[path] : ""));
+  const work = [...wrote, ...ran.flatMap(([command, output]) => toolCall(command, output)), ...agentText.map(assistant)];
   const entryOf = (word) => {
     switch (word.source) {
       case "reply":

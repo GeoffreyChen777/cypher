@@ -208,6 +208,9 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
     const base = conversation ? JSON.parse(expand(JSON.stringify(conversation))) : user;
     const extra = conversation ? [] : (item.branch ?? []);
     const branch = [...base, ...JSON.parse(expand(JSON.stringify(extra)))];
+    // The chat's transcript, as production gives it (cypher-permissions.ts: `sessionManager.getBranch()`; final pass,
+    // iteration 4): what its tools wrote before this process.
+    permissions.transcript = () => branch;
     // `deniedEarlier` (round 4): earlier prompts of this chat the owner answered Deny or closed (`dismissed`),
     // replayed through the same permission object before the case's request, as production records them: the
     // request is asked (a stub verdict ask-user on a standing concern), the dialog answers "Deny" or nothing, and the owner's words
