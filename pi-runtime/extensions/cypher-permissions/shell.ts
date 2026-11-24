@@ -72,8 +72,81 @@
  * sandbox unless it is approved as written.
  */
 
+import { foldPipe } from "./fold.ts";
+import { ANY, ENV_CLOSE, ENV_OPEN, escapeGlob, userHome } from "./resolve.ts";
+
 /** A word known only when the line runs. */
 export const UNKNOWN = "\0";
+
+/**
+ * Commands whose output is a path in a known place (round 5, data): `t=$(mktemp -d)` is in the temp
+ * directory (or under its template), `$(pwd)` is where the line is. What a variable set from one stands for
+ * is that place (`variablePattern`); every other substitution stands for anything.
+ */
+const PRODUCERS: readonly { program: string; place(args: readonly string[], pwd: string | undefined): string | undefined }[] = [
+  {
+    program: "mktemp",
+    place: (args) => {
+      const temp = `{${ENV_OPEN}TMPDIR:-/tmp${ENV_CLOSE},/tmp}`;
+      let dir: string | undefined;
+      let inTemp = false;
+      const positionals: string[] = [];
+      for (let i = 0; i < args.length; i++) {
+        const word = args[i];
+        if (word === UNKNOWN) return undefined;
+        if (word === "-p" || word === "--tmpdir") dir = args[++i];
+        else if (word.startsWith("--tmpdir=")) dir = word.slice("--tmpdir=".length);
+        else if (word === "-t") inTemp = true;
+        else if (/^-[dqu]+$/.test(word) || word === "--directory" || word === "--quiet" || word === "--dry-run") continue;
+        else if (word.startsWith("-")) return undefined;
+        else positionals.push(word);
+      }
+      if (dir === UNKNOWN) return undefined;
+      const template = positionals.at(-1);
+      // Without a template, mktemp names it `tmp.XXXXXXXX` (GNU and BSD).
+      const name = template === undefined ? "tmp.*" : `${escapeGlob(template.replace(/X+$/, ""))}*`;
+      if (template !== undefined && template.startsWith("/")) return name;
+      if (dir !== undefined) return `${escapeGlob(dir)}/${name}`;
+      // A template without `-t` or `-p` is made where the line is (GNU and BSD alike): relative, for the resolver.
+      if (template !== undefined && !inTemp) return name;
+      return `${temp}/${name}`;
+    },
+  },
+  { program: "pwd", place: (_args, pwd) => (pwd === undefined ? undefined : escapeGlob(pwd)) },
+  // What it prints is its own words (`D=$(echo ~/x)`, `$(realpath ../y)`, `$(dirname /a/b)`).
+  { program: "echo", place: (args) => (args.length && !args.includes(UNKNOWN) && !args[0].startsWith("-") ? escapeGlob(args.join(" ")) : undefined) },
+  { program: "realpath", place: (args) => (args.length === 1 && args[0] !== UNKNOWN && !args[0].startsWith("-") ? escapeGlob(args[0]) : undefined) },
+  { program: "dirname", place: (args) => (args.length === 1 && args[0] !== UNKNOWN && args[0].includes("/") ? escapeGlob(args[0].replace(/\/+[^/]*\/*$/, "") || "/") : undefined) },
+];
+
+/**
+ * What `echo` or `printf` of literal words prints (round 5): a shell or interpreter it pipes into reads it
+ * as code. Undefined for anything else, or a word known only when it runs.
+ */
+export function literalOutput(words: readonly string[]): string | undefined {
+  const [program, ...args] = words;
+  if (program === undefined || words.includes(UNKNOWN)) return undefined;
+  const unescape = (text: string) => text.replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\\\/g, "\\");
+  if (program === "echo") {
+    const flags = args.length && /^-[neE]+$/.test(args[0]) ? args[0] : "";
+    const rest = flags ? args.slice(1) : args;
+    const text = rest.join(" ");
+    return `${flags.includes("e") ? unescape(text) : text}${flags.includes("n") ? "" : "\n"}`;
+  }
+  if (program === "printf" && args.length && !args[0].startsWith("-")) {
+    let used = 1;
+    const text = unescape(args[0]).replace(/%[sbd]/g, () => args[used++] ?? "");
+    return `${text}${args.slice(used).join(" ")}`;
+  }
+  return undefined;
+}
+
+/** The place a producer's output is in (`PRODUCERS`), as a glob; undefined when it is no producer. */
+function producedPlace(words: readonly string[], pwd: string | undefined): string | undefined {
+  if (!words.length || words[0] === UNKNOWN) return undefined;
+  const row = PRODUCERS.find((candidate) => candidate.program === words[0]);
+  return row?.place(words.slice(1), pwd);
+}
 
 export interface SimpleCommand {
   /** Its words; a word known only when it runs is [`UNKNOWN`]. Empty for a bare redirection. */
@@ -101,6 +174,16 @@ export interface SimpleCommand {
    * where an unknown word points, never what a rule may match.
    */
   hints?: (string | undefined)[];
+  /**
+   * For each word known only when it runs, the glob it stands for (round 5, resolve.ts
+   * `resolvePattern`): its literal text escaped, its unquoted globs and braces kept, a variable the line
+   * doesn't set as `ENV_OPEN NAME ENV_CLOSE`, text known only when it runs as `ANY`; undefined for a known
+   * word. One per word; absent when every word is known.
+   */
+  patterns?: (string | undefined)[];
+  /** The same for its redirections' files known only when they run (one per `reads`/`writes` entry). */
+  readPatterns?: (string | undefined)[];
+  writePatterns?: (string | undefined)[];
   /** In a subshell `( … )`: which one, numbered from 1 in the line. */
   subshell?: number;
   /** `evaluate`: the operator after it (`&&`, `||`, `;`, `|`, `&`); absent at the end of the line or its group. */
@@ -184,11 +267,13 @@ interface Variables {
   depth: number;
   /** `evaluate`: aliases the line defined, by name (shared like functions). */
   aliases?: Map<string, string>;
+  /** Variables set to a value known only when it runs whose place is known (`t=$(mktemp -d)`): their glob (round 5). */
+  patterns: Map<string, string>;
 }
 
 /** A copy of the variables for a shell, loop iteration or call of its own; functions and the budget are shared. */
 function forkVariables(vars: Variables, values = new Map(vars.values)): Variables {
-  return { values, poisoned: vars.poisoned, expanded: vars.expanded, functions: vars.functions, calling: vars.calling, budget: vars.budget, depth: vars.depth, aliases: vars.aliases };
+  return { values, poisoned: vars.poisoned, expanded: vars.expanded, functions: vars.functions, calling: vars.calling, budget: vars.budget, depth: vars.depth, aliases: vars.aliases, patterns: new Map(vars.patterns) };
 }
 
 /**
@@ -230,7 +315,7 @@ function readLine(line: string, home: string, options: ParseOptions, cwd: string
     // `$HOME` is the home folder `~` stands for, until the line changes it.
     const values = new Map<string, string | undefined>([["HOME", home]]);
     if (cwd !== undefined) values.set("PWD", cwd);
-    const vars: Variables = { values, poisoned: false, expanded: new Set(), functions: new Map(), calling: [], budget: { used: 0 }, depth: 0 };
+    const vars: Variables = { values, poisoned: false, expanded: new Set(), functions: new Map(), calling: [], budget: { used: 0 }, depth: 0, patterns: new Map() };
     read(line, home, options, commands, false, vars, { next: 1 });
     return { kind: "simple", commands, expands: [...vars.expanded] };
   } catch (error) {
@@ -264,6 +349,8 @@ function read(
   let quoted = false;
   /** Some of it is known only when it runs. */
   let unknown = false;
+  /** The word as a glob (round 5): what it stands for when some of it is known only when it runs. */
+  let pat = "";
   /** How much of it was read when it first became unknown. */
   let knownUpTo = 0;
   /** A part of the word is known only when it runs, from here on. */
@@ -275,9 +362,14 @@ function read(
   // The command being read.
   let words: string[] = [];
   let hints: (string | undefined)[] = [];
+  let patterns: (string | undefined)[] = [];
   let reads: string[] = [];
   let writes: string[] = [];
+  let readPatterns: (string | undefined)[] = [];
+  let writePatterns: (string | undefined)[] = [];
   let assigns: string[] = [];
+  /** Each assignment's glob, when its value is known only when it runs (`t=$(mktemp -d)`). */
+  let assignPatterns: (string | undefined)[] = [];
   /** Each assignment's value, when it is a literal. */
   let assignValues: (string | undefined)[] = [];
   /** Assignments in front of the command's program. */
@@ -288,6 +380,8 @@ function read(
   let chained = false;
   /** The command after `|`: it runs in a pipeline's own shell. */
   let piped = false;
+  /** The command pushed last (`evaluate`: what a pipe feeds the next one). */
+  let previous: SimpleCommand | undefined;
   /** A subshell just closed: only operators and redirections may follow it. */
   let afterSubshell = false;
   /** `evaluate`: an assignment in front of the command changes how its program is found or runs. */
@@ -422,7 +516,7 @@ function read(
     // What the shell inherits: the exported `HOME` and `PWD`, as this line knows them.
     const values = new Map<string, string | undefined>([["HOME", vars.poisoned ? undefined : vars.values.get("HOME")]]);
     if (!vars.poisoned && vars.values.has("PWD")) values.set("PWD", vars.values.get("PWD"));
-    const inner: Variables = { values, poisoned: false, expanded: vars.expanded, functions: new Map(), calling: [], budget: vars.budget, depth: vars.depth + 1 };
+    const inner: Variables = { values, poisoned: false, expanded: vars.expanded, functions: new Map(), calling: [], budget: vars.budget, depth: vars.depth + 1, patterns: new Map() };
     const commands: SimpleCommand[] = [];
     try {
       read(text, home, options, commands, false, inner, subshells, subshell ?? subshells.next++);
@@ -440,6 +534,7 @@ function read(
 
   const resetWord = () => {
     word = "";
+    pat = "";
     raw = "";
     inWord = false;
     quoted = false;
@@ -456,6 +551,8 @@ function read(
     // What an unknown word surely starts with: up to its first substitution, or its first glob character.
     const glob = text.search(/[*?[{]/);
     const hint = known ? undefined : text.slice(0, Math.min(unknown ? knownUpTo : text.length, glob < 0 ? text.length : glob));
+    // What a word known only when it runs stands for, as a glob (resolve.ts).
+    const pattern = known ? undefined : pat;
     resetWord();
     if (redirect) {
       const kind = redirect;
@@ -476,8 +573,14 @@ function read(
       // A path known only when it runs is still a file the command opens: which one, nobody can say yet.
       const path = known ? text : UNKNOWN;
       if (known && NO_FILE.has(text)) return;
-      if (kind !== "write") reads.push(path);
-      if (kind !== "read") writes.push(path);
+      if (kind !== "write") {
+        reads.push(path);
+        readPatterns.push(pattern);
+      }
+      if (kind !== "read") {
+        writes.push(path);
+        writePatterns.push(pattern);
+      }
       return;
     }
     if (afterSubshell) throw new Opaque("a subshell");
@@ -612,6 +715,8 @@ function read(
       if (assignment && text.startsWith(assignment[0])) {
         assigns.push(assignment[1]);
         assignValues.push(known && !assignment[0].endsWith("+=") ? assignedValue(text.slice(assignment[0].length), unquoted.slice(assignment[0].length), home) : undefined);
+        // A value known only when it runs may still have a known place (`t=$(mktemp -d)`): its glob.
+        assignPatterns.push(pattern !== undefined && !assignment[0].endsWith("+=") && pattern.startsWith(assignment[0]) ? pattern.slice(assignment[0].length) : undefined);
         return;
       }
     }
@@ -622,6 +727,7 @@ function read(
       envValues = assignValues.map((value) => value ?? UNKNOWN);
       assigns = [];
       assignValues = [];
+      assignPatterns = [];
       hiddenProgram = !allowed;
     }
     if (hiddenProgram) {
@@ -630,10 +736,12 @@ function read(
       const resolved = known ? options.resolveProgram?.(text, env.map((name, index) => ({ name, value: envValues[index] === UNKNOWN ? undefined : envValues[index] }))) : undefined;
       words.push(resolved ?? UNKNOWN);
       hints.push(resolved === undefined ? (known ? text : hint) : undefined);
+      patterns.push(undefined);
       return;
     }
     words.push(known ? text : UNKNOWN);
     hints.push(hint);
+    patterns.push(pattern);
   };
 
   const endCommand = (next: "and-or" | "pipe" | "background" | "end", joint?: Joint) => {
@@ -648,7 +756,17 @@ function read(
     }
     const scoped = nested || chained || next === "pipe" || next === "background" || blocks.length > 0;
     // A value is known after an assignment that surely ran in the line's shell.
-    if (words.length === 0) assigns.forEach((name, index) => vars.values.set(name, scoped ? undefined : assignValues[index]));
+    if (words.length === 0) {
+      assigns.forEach((name, index) => {
+        // One that may not have run (`cd x && I=a; …$I`): its value, or what the variable was before.
+        const before = vars.poisoned ? ANY : vars.values.get(name) !== undefined ? escapeGlob(vars.values.get(name)!) : (vars.patterns.get(name) ?? (vars.values.has(name) ? ANY : `${ENV_OPEN}${name}${ENV_CLOSE}`));
+        const value = assignValues[index];
+        const pattern = scoped ? (value !== undefined ? `{${escapeGlob(value)},${before}}` : assignPatterns[index] !== undefined ? `{${assignPatterns[index]},${before}}` : undefined) : value === undefined ? assignPatterns[index] : undefined;
+        vars.values.set(name, scoped ? undefined : value);
+        if (pattern !== undefined) vars.patterns.set(name, pattern);
+        else vars.patterns.delete(name);
+      });
+    }
     // A program hidden by an assignment in front of it is still the program its name says, or a builtin of that name.
     const program = words[0] === UNKNOWN && evaluate && env.length && hints[0] !== undefined && /^[\w.+-]+$/.test(hints[0]) && !SETS_VARIABLES.has(hints[0]) ? hints[0] : words[0];
     if (program === "export" && exported(words, options)) {
@@ -698,6 +816,9 @@ function read(
         scoped: fn ? true : scoped,
         ...(envValues.length ? { envValues } : {}),
         ...(programRuns && hints.some((hint) => hint !== undefined) ? { hints } : {}),
+        ...(programRuns && patterns.some((item) => item !== undefined) ? { patterns } : {}),
+        ...(readPatterns.some((item) => item !== undefined) ? { readPatterns } : {}),
+        ...(writePatterns.some((item) => item !== undefined) ? { writePatterns } : {}),
         ...(subshell !== undefined ? { subshell } : {}),
         ...(evaluate
           ? {
@@ -707,11 +828,17 @@ function read(
           : {}),
       };
       out.push(pushed);
+      previous = pushed;
     }
     if (evaluate) {
       // The heredocs this command opened are its input; those of a command that isn't one are nobody's.
       for (const heredoc of heredocs) if (heredoc.owner === undefined) heredoc.owner = pushed ?? null;
       if (hereString !== undefined && pushed) feed(pushed, hereString ?? undefined);
+      // `echo '…' | sh`, `printf '…' | bash`: literal words piped into a shell are its script, as a heredoc is.
+      else if (pushed && programRuns && piped && previous?.joint === "|" && pushed.input === undefined && scriptShell(pushed.words)) {
+        const text = literalOutput(previous.words);
+        if (text !== undefined) runScript(pushed, text);
+      }
       // `bash -c '…'` (through wrappers that only run it): a literal script is read as the shell's commands.
       const script = pushed && programRuns ? dashC(pushed.words, options) : undefined;
       if (script !== undefined && pushed) runScript(pushed, script);
@@ -722,10 +849,14 @@ function read(
     afterSubshell = false;
     words = [];
     hints = [];
+    patterns = [];
     reads = [];
     writes = [];
+    readPatterns = [];
+    writePatterns = [];
     assigns = [];
     assignValues = [];
+    assignPatterns = [];
     env = [];
     envValues = [];
     chained = next === "and-or" || next === "pipe";
@@ -745,9 +876,29 @@ function read(
     return value;
   };
 
+  /**
+   * What a variable stands for as a glob, when its value isn't a word here (round 5): a literal value with
+   * globs or spaces (unquoted: its globs and words count), the place a command put it in (`t=$(mktemp -d)`),
+   * an environment variable the line doesn't set (resolve.ts substitutes it), or anything.
+   */
+  const variablePattern = (name: string, inQuotes: boolean, fallback?: string): string => {
+    if (vars.poisoned || redirect === "heredoc" || redirect === "heredoc-tabs") return ANY;
+    const value = vars.values.get(name);
+    if (value !== undefined) {
+      if (inQuotes) return escapeGlob(value);
+      const parts = value.split(/\s+/).filter(Boolean);
+      return parts.length > 1 ? `{${parts.map((part) => part.replace(/,/g, "\\,")).join(",")}}` : value;
+    }
+    const place = vars.patterns.get(name);
+    if (place !== undefined) return place;
+    if (vars.values.has(name)) return ANY;
+    return `${ENV_OPEN}${name}${fallback !== undefined ? `:-${fallback}` : ""}${ENV_CLOSE}`;
+  };
+
   /** A known variable's value joins the word; it is not a keyword, an assignment or a glob there. */
   const expand = (value: string) => {
     word += value;
+    pat += escapeGlob(value);
     quoted = true;
     inWord = true;
   };
@@ -768,12 +919,25 @@ function read(
         if (/[`'"\\]|\$\(/.test(expression)) throw new Opaque("arithmetic");
         if (/(^|[^=!<>])=(?!=)|\+\+|--/.test(expression)) vars.poisoned = true;
         becomesUnknown();
+        pat += ANY;
         inWord = true;
         return inner + 1;
       }
       const close = closingParen(source, i + 2);
-      read(source.slice(i + 2, close), home, options, out, true, vars, subshells, subshell);
+      const before = out.length;
+      const text = source.slice(i + 2, close);
+      read(text, home, options, out, true, vars, subshells, subshell);
+      // A pipe of literal text through pure transforms (fold.ts): the text it prints is known now (round 5 step 2).
+      const folded = !/[;&\n`]|\|\||\$\(/.test(text) ? foldPipe(out.slice(before), UNKNOWN) : undefined;
+      if (folded !== undefined && !vars.poisoned && /^[\x20-\x7e]*\n*$/.test(folded)) {
+        expand(folded.replace(/\n+$/, ""));
+        inWord = true;
+        return close;
+      }
       becomesUnknown();
+      // A command whose output is a path in a known place (`$(mktemp -d)`, `$(pwd)`): that place.
+      const inner = out.slice(before);
+      pat += (inner.length === 1 ? producedPlace(inner[0].words, vars.poisoned ? undefined : vars.values.get("PWD")) : undefined) ?? ANY;
       inWord = true;
       return close;
     }
@@ -784,9 +948,20 @@ function read(
       const name = source.slice(i + 2, close);
       const expanded = /^[#!]?([A-Za-z_][A-Za-z0-9_]*)/.exec(name)?.[1];
       if (expanded !== undefined) vars.expanded.add(expanded);
+      // `${!NAME}`: the variable NAME's value names (round 5 step 2). Known, that variable is expanded too;
+      // known only when it runs, it could be any of them: `!NAME` says so (risk.ts `lineFlow`).
+      if (expanded !== undefined && name.startsWith("!") && /^![A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        const target = knownValue(expanded, true);
+        vars.expanded.add(target !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(target) ? target : `!${expanded}`);
+      }
       const value = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? knownValue(name, inQuotes) : undefined;
       if (value !== undefined) expand(value);
-      else becomesUnknown();
+      else {
+        becomesUnknown();
+        // `${NAME}`, `${NAME:-default}` with a literal default: the variable's place; anything else, anything.
+        const plain = /^([A-Za-z_][A-Za-z0-9_]*)(?::?-([^$`'"\\]*))?$/.exec(name);
+        pat += plain ? variablePattern(plain[1], inQuotes, plain[2]) : ANY;
+      }
       inWord = true;
       return close;
     }
@@ -796,18 +971,23 @@ function read(
       vars.expanded.add(source.slice(i + 1, j + 1));
       const value = knownValue(source.slice(i + 1, j + 1), inQuotes);
       if (value !== undefined) expand(value);
-      else becomesUnknown();
+      else {
+        becomesUnknown();
+        pat += variablePattern(source.slice(i + 1, j + 1), inQuotes);
+      }
       inWord = true;
       return j;
     }
     if (next !== undefined && /[0-9@*#?$!-]/.test(next)) {
       becomesUnknown();
+      pat += ANY;
       inWord = true;
       return i + 1;
     }
     if (!inQuotes && (next === "'" || next === '"')) throw new Opaque("`$'…'` quoting");
     // A lone `$` is itself.
     word += "$";
+    pat += "$";
     if (!inQuotes) raw += "$";
     inWord = true;
     return i;
@@ -822,8 +1002,11 @@ function read(
       inner += source[j];
     }
     if (j >= source.length) throw new Opaque("an unterminated backtick");
+    const before = out.length;
     read(inner, home, options, out, true, vars, subshells, subshell);
     becomesUnknown();
+    const produced = out.slice(before);
+    pat += (produced.length === 1 ? producedPlace(produced[0].words, vars.poisoned ? undefined : vars.values.get("PWD")) : undefined) ?? ANY;
     inWord = true;
     return j;
   };
@@ -869,6 +1052,7 @@ function read(
     if (test && "&|()<>".includes(char)) {
       // Operators inside `[[ … ]]` compare; nothing runs.
       word += char;
+      pat += char;
       raw += char;
       inWord = true;
       continue;
@@ -1021,6 +1205,7 @@ function read(
           break;
         }
         word += char;
+        pat += char;
         raw += char;
         break;
       case "\\":
@@ -1030,6 +1215,7 @@ function read(
           break;
         }
         word += next;
+        pat += escapeGlob(next);
         inWord = true;
         quoted = true;
         i++;
@@ -1038,6 +1224,7 @@ function read(
         const end = source.indexOf("'", i + 1);
         if (end < 0) throw new Opaque("an unterminated quote");
         word += source.slice(i + 1, end);
+        pat += escapeGlob(source.slice(i + 1, end));
         inWord = true;
         quoted = true;
         i = end;
@@ -1055,9 +1242,11 @@ function read(
               j++;
             } else if (escaped !== undefined && '$`"\\'.includes(escaped)) {
               word += escaped;
+              pat += escapeGlob(escaped);
               j++;
             } else {
               word += inner;
+              pat += escapeGlob(inner);
             }
           } else if (inner === "$") {
             j = dollar(j, true);
@@ -1065,6 +1254,7 @@ function read(
             j = backtick(j);
           } else {
             word += inner;
+            pat += escapeGlob(inner);
           }
         }
         if (j >= source.length) throw new Opaque("an unterminated quote");
@@ -1076,18 +1266,25 @@ function read(
           inWord = true;
           if (next === undefined || " \t\n;|&/<>)".includes(next)) {
             word += home;
+            pat += escapeGlob(home);
           } else {
-            // `~user`, `~+`: known only when it runs.
+            // `~user`, `~+`: known only when it runs; its place, as a glob (resolve.ts `userHome`).
             becomesUnknown();
+            const from = i + 1;
             while (i + 1 < source.length && !" \t\n;|&/<>()".includes(source[i + 1])) i++;
+            const name = source.slice(from, i + 1);
+            const pwd = vars.poisoned ? undefined : vars.values.get("PWD");
+            pat += /^[A-Za-z_][\w.-]*$/.test(name) ? escapeGlob(userHome(name, home)) : name === "+" && pwd !== undefined ? escapeGlob(pwd) : ANY;
           }
           break;
         }
         word += char;
+        pat += char;
         raw += char;
         break;
       default:
         word += char;
+        pat += char;
         raw += char;
         inWord = true;
     }

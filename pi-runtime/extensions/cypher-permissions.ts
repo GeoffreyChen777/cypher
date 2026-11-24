@@ -76,6 +76,8 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
         ownerWords: parseOwnerWords(process.env[OWNER_WORDS_ENV]),
       });
       permissions.appendEntry = (type, data) => pi.appendEntry(type, data);
+      // The chat's own transcript: what its tools wrote is this task's (code it runs is read, core.ts `taskWrote`).
+      permissions.transcript = () => ctx.sessionManager?.getBranch() ?? [];
       permissions.ownerWordsNow = ownerWordsNow;
       permissions.reload(ctx.cwd, ctx.sessionManager?.getBranch() ?? []);
     }

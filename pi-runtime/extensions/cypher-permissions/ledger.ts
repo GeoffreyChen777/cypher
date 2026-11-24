@@ -43,6 +43,8 @@ export interface LedgerEntity {
   head?: string;
   /** A package's version. */
   version?: string;
+  /** The taint ledger's: the secret the file or repository holds. */
+  from?: string;
 }
 
 /** What a command did to the entity: made it (the default), started it, merged it. */
@@ -85,6 +87,16 @@ export const MATCHING: Readonly<Record<LedgerKind, Match>> = {
 /** Bounds on one chat's ledger (the file and the memory). */
 const MAX_ENTRIES = 2000;
 const MAX_LINE = 4000;
+
+/**
+ * Where a chat's taint ledger is kept (round 5 step 2): the files and repositories its commands wrote from
+ * a secret (risk.ts `secretWrites`), one `path`/`repo` entry each with the secret in `from`. Its own
+ * directory, so no other chat's reading of ledgers (core.ts `othersMade`) ever counts them as made.
+ */
+export function taintFile(agentDir: string, chatId: string | undefined): string | undefined {
+  if (!chatId) return undefined;
+  return join(agentDir, "cypher-permissions", "taint", `${chatId.replace(/[^A-Za-z0-9._-]/g, "_")}.jsonl`);
+}
 
 /** Where a chat's ledger is kept. */
 export function ledgerFile(agentDir: string, chatId: string | undefined): string | undefined {
@@ -129,7 +141,7 @@ function validEntry(value: unknown): value is LedgerEntry {
   if (typeof entry.kind !== "string" || !LEDGER_KINDS.includes(entry.kind as LedgerKind)) return false;
   if (typeof entry.name !== "string" || entry.name === "") return false;
   if (entry.action !== undefined && !["create", "start", "merge"].includes(entry.action)) return false;
-  for (const field of ["repo", "remote", "head", "version", "by", "at", "chatId"] as const) {
+  for (const field of ["repo", "remote", "head", "version", "by", "at", "chatId", "from"] as const) {
     if (entry[field] !== undefined && typeof entry[field] !== "string") return false;
   }
   return true;

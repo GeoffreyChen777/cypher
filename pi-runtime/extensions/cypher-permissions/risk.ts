@@ -34,6 +34,10 @@ import { isUnder } from "./paths.ts";
 import type { CommandView, PackFacts } from "./packs.ts";
 import type { Classification } from "./paths.ts";
 import { UNKNOWN } from "./shell.ts";
+import { ANY, ENV_CLOSE, ENV_OPEN, escapeGlob, resolveText } from "./resolve.ts";
+import { interpreterOf } from "./code.ts";
+import { refsWritten, unwrapped } from "./effects.ts";
+import { foldPipe } from "./fold.ts";
 import { genericDestroyer, TOLD_BY_PLACE } from "./catalogue.ts";
 import { gradeOf, judgeDecides } from "./grades.ts";
 
@@ -86,8 +90,9 @@ const READERS: ReadonlySet<string> = new Set([
   "awk", "gawk", "json_pp", "xmllint", "iconv", "base64", "gunzip", "zcat", "bzcat", "xzcat", "open", "qlmanage", "wc",
 ]);
 
-/** Interpreters and tools whose operands may be read or written: their text says which. */
-const EITHER = /^(python\d*(\.\d+)?|node|deno|bun|ruby|perl|php|lua|osascript|sqlite3|sed|tee|tar|unzip|zip|ditto|plutil|defaults|jq|java)$/;
+/** Tools whose operands may be read or written: their text says which (the interpreters of code.ts `INTERPRETERS` too). */
+const EITHER_TOOLS = /^(sqlite3|sed|tee|tar|unzip|zip|ditto|plutil|defaults|jq|java)$/;
+const EITHER = { test: (program: string) => EITHER_TOOLS.test(program) || (interpreterOf(program) !== undefined && interpreterOf(program)!.language !== "shell") };
 
 /**
  * Whether a command changes a path it names, or only reads it: a copy reads
@@ -95,7 +100,9 @@ const EITHER = /^(python\d*(\.\d+)?|node|deno|bun|ruby|perl|php|lua|osascript|sq
  * program (`fileEffect`).
  */
 function pathEffect(command: RiskCommand, view: CommandView, path: string): "read" | "write" {
-  if (/^(cp|mv|rsync|scp|ditto|install|ln)$/.test(view.program)) {
+  // A move takes its sources away: it changes them as it does its destination.
+  if (view.program === "mv") return "write";
+  if (/^(cp|rsync|scp|ditto|install|ln)$/.test(view.program)) {
     const copy = copyOperands(view.words);
     if (copy) return path === copy.dest ? "write" : "read";
   }
@@ -211,6 +218,11 @@ export interface RiskCommand {
   carried?: readonly string[];
   /** What each word known only when it runs surely starts with (shell.ts `hints`), one per word. */
   hints?: readonly (string | undefined)[];
+  /** The glob each word known only when it runs stands for (shell.ts `patterns`, resolve.ts), one per word. */
+  patterns?: readonly (string | undefined)[];
+  /** The same for its redirections' files known only when they run, one per `reads`/`writes` entry. */
+  readPatterns?: readonly (string | undefined)[];
+  writePatterns?: readonly (string | undefined)[];
   /** It is a shell or interpreter that runs code from its input, which is known only when it runs (`… | sh`, `sh < file`). */
   stdinCode?: boolean;
 }
@@ -278,6 +290,160 @@ export interface RiskFacts extends PackFacts {
   };
   /** A canonical path of the permission system itself (config.ts): a change there always asks. */
   permissionSystem?(path: string): boolean;
+  /**
+   * What a word known only when it runs could be (round 5: resolve.ts `resolvePattern`, paths.ts
+   * `classifyPattern`), relative to `cwd`; `subtree` when the command acts on what lies below it too.
+   */
+  couldBe?(pattern: string, cwd: string | undefined, options?: { subtree?: boolean }): PatternFinding;
+  /**
+   * Round 5 step 2, the provenance ledger's taint: a canonical path this chat's earlier command wrote
+   * from a secret (`cp .env /tmp/x`, `cat .env >> log`, `tar czf b.tgz .env`): the secret it holds, else undefined.
+   */
+  tainted?(path: string): string | undefined;
+  /** A repository (its top folder, canonical) where this chat staged or committed a secret: the secret, else undefined. */
+  taintedRepo?(dir: string): string | undefined;
+  /** The permission system's folders the table names literally (the agent folder, a project's `.pi`): a write into a folder holding one could make its files. */
+  permissionPlaces?(): readonly string[];
+  /** The first sensitive file inside an existing directory (bounded), for an archiver or sender of the whole of it. */
+  secretInside?(dir: string): string | undefined;
+}
+
+/** What every path a glob may stand for could be (`RiskFacts.couldBe`). */
+export interface PatternFinding {
+  /** Its start is known only when it runs: it could be any path. */
+  anywhere: boolean;
+  /** The literal directories its globs start with (canonical). */
+  fixed: readonly string[];
+  /** The existing paths it matches now, classified. */
+  matches: readonly Classification[];
+  sensitive?: string;
+  permissionSystem?: string;
+  guard?: Classification["guard"];
+  /** One of its paths (or its fixed directory) is the installed app or its data. */
+  installed?: string;
+}
+
+/**
+ * Programs whose effect reaches below the paths they name (round 5, data): deleting or moving a
+ * folder deletes what is in it, a recursive change changes it all, extracting writes a tree. A path such a
+ * command names counts for every protected place inside it (paths.ts `classifyPattern`, `subtree`).
+ */
+export const SUBTREE_EFFECTS: readonly { programs: readonly string[]; flags?: RegExp; dest?: true }[] = [
+  { programs: ["rm", "rmdir", "shred", "srm", "trash"] },
+  // A move takes its sources whole; its destination only gains a name.
+  { programs: ["mv"], dest: true },
+  { programs: ["chmod", "chown", "chgrp", "chflags", "xattr", "setfacl"], flags: /^(-[A-Za-z]*R[A-Za-z]*|--recursive)$/ },
+  { programs: ["find", "fd"], flags: /^-(delete|exec|execdir|ok|okdir|x|X)$|^--exec/ },
+  { programs: ["rsync"], flags: /^--(delete|remove-source-files)/ },
+];
+
+/** Programs that only make what isn't there (an empty directory): a path of theirs known only when it runs changes nothing that is. */
+const CREATES_ONLY: ReadonlySet<string> = new Set(["mkdir"]);
+
+/** Whether a command acts on what lies below the paths it names (`SUBTREE_EFFECTS`). */
+export function subtreeEffect(view: CommandView): boolean {
+  return SUBTREE_EFFECTS.some((row) => row.programs.includes(view.program) && (!row.flags || view.args.some((word) => word !== UNKNOWN && row.flags!.test(word))));
+}
+
+/** Whether `word` is the destination of a command whose destination only gains a name (`SUBTREE_EFFECTS` `dest`). */
+function destinationOnly(view: CommandView, word: string): boolean {
+  return SUBTREE_EFFECTS.some((row) => row.dest && row.programs.includes(view.program)) && view.positionals.at(-1) === word && view.positionals.length > 1;
+}
+
+/**
+ * Options that move where a command's relative paths are (round 5, data): `git -C dir rm x` removes
+ * `dir/x`. Read before every path check of the command (`operandDir`).
+ */
+export const DIRECTORY_OPTIONS: readonly { programs: readonly string[]; options: readonly string[]; beforeSubcommand?: true }[] = [
+  { programs: ["git"], options: ["-C"], beforeSubcommand: true },
+  { programs: ["make", "gmake"], options: ["-C", "--directory"] },
+  { programs: ["tar", "bsdtar", "gtar"], options: ["-C", "--directory", "--cd"] },
+  { programs: ["npm"], options: ["--prefix", "-C"] },
+  { programs: ["pnpm"], options: ["-C", "--dir"] },
+  { programs: ["yarn", "bun"], options: ["--cwd"] },
+  { programs: ["go", "cargo"], options: ["-C"], beforeSubcommand: true },
+  { programs: ["uv"], options: ["--directory"] },
+  { programs: ["poetry"], options: ["-C", "--directory"] },
+  { programs: ["just"], options: ["-d", "--working-directory"] },
+  { programs: ["env"], options: ["-C", "--chdir"] },
+];
+
+/** The directory a command's relative paths are in: its cwd, moved by its `DIRECTORY_OPTIONS` (undefined: known only when it runs). */
+export function operandDir(command: Pick<RiskCommand, "cwd">, view: CommandView): string | undefined {
+  const row = DIRECTORY_OPTIONS.find((candidate) => candidate.programs.includes(view.program));
+  let dir = command.cwd;
+  if (!row) return dir;
+  for (let i = 0; i < view.args.length; i++) {
+    const word = view.args[i];
+    const eq = word.indexOf("=");
+    const name = word.startsWith("--") && eq > 0 ? word.slice(0, eq) : word;
+    if (row.options.includes(name)) {
+      const value = name === word ? view.args[++i] : word.slice(eq + 1);
+      if (value === undefined || value === UNKNOWN) return undefined;
+      if (dir === undefined && !isAbsolute(value) && !value.startsWith("~")) return undefined;
+      dir = isAbsolute(value) || value.startsWith("~") ? value : `${dir}/${value}`;
+      continue;
+    }
+    if (row.beforeSubcommand && word !== UNKNOWN && !word.startsWith("-")) break;
+  }
+  return dir;
+}
+
+/**
+ * Programs whose operands are the files they change or read (round 5, data): a word of theirs known only
+ * when it runs is a path, read by the resolver. `skip`: leading operands that aren't (chmod's mode);
+ * `values`: options whose value is no operand (`truncate -s "$SIZE" f`). Other programs' words known only
+ * when they run are paths only when what they surely start with says so (`"$D/out"`, `~/x$Y`).
+ */
+export const FILE_OPERANDS: readonly { programs: readonly string[]; skip?: number; values?: readonly string[] }[] = [
+  { programs: ["rm", "rmdir", "unlink", "shred", "srm", "trash", "touch", "tee", "ditto"] },
+  { programs: ["cp", "mv", "ln"], values: ["-S", "--suffix"] },
+  { programs: ["install"], values: ["-m", "--mode", "-o", "--owner", "-g", "--group", "-S", "--suffix"] },
+  { programs: ["mkdir"], values: ["-m", "--mode"] },
+  { programs: ["truncate"], values: ["-s", "--size", "-r", "--reference"] },
+  { programs: ["chmod", "chown", "chgrp", "chflags"], skip: 1, values: ["--reference"] },
+  { programs: ["setfacl"], skip: 1, values: ["-m", "-x", "-M", "-X", "--modify", "--remove"] },
+  { programs: ["rsync", "scp"], values: ["-e", "--rsh", "--exclude", "--include", "--filter", "-f", "--exclude-from", "--include-from", "--files-from", "--rsync-path", "--chmod", "--chown", "--log-file", "--password-file", "--port", "--bwlimit", "--timeout", "-T", "--temp-dir", "--partial-dir", "--backup-dir", "--suffix", "--compare-dest", "--copy-dest", "--link-dest", "--info", "--debug", "-P", "-i", "-F", "-o", "-c", "-l", "-S", "-J"] },
+  { programs: ["cat", "head", "tail", "less", "more", "bat", "base64", "xxd", "od", "hexdump", "strings", "wc", "nl", "tac", "md5", "md5sum", "shasum", "sha1sum", "sha256sum", "cksum", "file", "stat", "ls", "du", "source", "."], values: ["-n", "-c", "-b", "-t", "-w", "-a", "-A", "-I", "-l", "--lines", "--bytes"] },
+];
+
+/** Whether a command's word at arg index `at`, known only when it runs, is one of its file operands. */
+function fileOperand(command: RiskCommand, view: CommandView, at: number): boolean {
+  const hint = command.hints?.[at + 1 + (command.words.length - (command.hints?.length ?? command.words.length))] ?? "";
+  if (hint.startsWith("-")) return false;
+  // What it surely starts with says it is a path: wherever it is, whatever the program.
+  if (hint.startsWith("/") || hint.startsWith("~") || hint.startsWith("./") || hint.startsWith("../") || hint.includes("/")) return true;
+  if (/[=:@]/.test(hint)) return false;
+  const row = FILE_OPERANDS.find((candidate) => candidate.programs.includes(view.program));
+  if (!row) return false;
+  if (row.values?.includes(view.args[at - 1] ?? "")) return false;
+  // Its place among the operands: past what isn't a file (chmod's mode).
+  let operand = 0;
+  for (let i = 0; i < at; i++) {
+    const word = view.args[i];
+    if (word !== UNKNOWN && word.startsWith("-") && word !== "-") {
+      if (row.values?.includes(word)) i++;
+      continue;
+    }
+    operand++;
+  }
+  return operand >= (row.skip ?? 0);
+}
+
+/** The glob of the command's word at `index` (shell.ts `patterns`, aligned with its words' end), if any. */
+function patternOf(command: RiskCommand, index: number): string | undefined {
+  if (!command.patterns || command.words[index] !== UNKNOWN) return undefined;
+  return command.patterns[index - (command.words.length - command.patterns.length)];
+}
+
+/** Each word of a command known only when it runs that has a glob (shell.ts `patterns`): where it is, and the glob. */
+function patternWords(command: RiskCommand): { at: number; word: number; pattern: string }[] {
+  const out: { at: number; word: number; pattern: string }[] = [];
+  const offset = command.words.length - (command.patterns?.length ?? command.words.length);
+  for (const [index, pattern] of (command.patterns ?? []).entries()) {
+    if (pattern !== undefined && command.words[index + offset] === UNKNOWN) out.push({ at: index + offset - 1, word: index + offset, pattern });
+  }
+  return out;
 }
 
 /** A path the task may delete, move or discard: the workspace, scratch, caches, or what it made itself. */
@@ -306,7 +472,8 @@ const REMOTE: ReadonlySet<string> = new Set([
 ]);
 
 const DOWNLOADERS: ReadonlySet<string> = new Set(["curl", "wget", "fetch", "aria2c", "http", "https"]);
-const INTERPRETERS = /^(sh|bash|zsh|dash|ksh|fish|python\d*(\.\d+)?|node|deno|bun|ruby|perl|php|lua|osascript)$/;
+/** Shells and interpreters (code.ts `INTERPRETERS`, and fish): what runs code it is given. */
+const INTERPRETERS = { test: (program: string) => program === "fish" || interpreterOf(program) !== undefined };
 
 function globMatches(glob: string, word: string): boolean {
   const source = glob.toLowerCase().replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
@@ -356,11 +523,15 @@ function pathWords(words: readonly string[]): string[] {
  * x >> ~/.zshrc` changes a file that runs code later, `cat < key` reads a
  * secret. Every command is checked, inert builtins and filters too.
  */
-export function redirectRisk(command: Pick<RiskCommand, "reads" | "writes" | "cwd">, facts: RiskFacts): Assessment | undefined {
+export function redirectRisk(command: Pick<RiskCommand, "reads" | "writes" | "cwd" | "readPatterns" | "writePatterns">, facts: RiskFacts): Assessment | undefined {
   let soft: Assessment | undefined;
-  for (const path of command.reads) {
+  for (const [index, path] of command.reads.entries()) {
     // `< "$file"`: which file, nobody can say before it runs. No inspection, and no rule's to vouch for (core.ts).
     if (path === UNKNOWN) {
+      // What it may be (resolve.ts): a glob with a known start that could be a secret reads one.
+      const pattern = command.readPatterns?.[index];
+      const found = pattern === undefined ? undefined : facts.couldBe?.(pattern, command.cwd);
+      if (found && !found.anywhere && found.sensitive) soft ??= { tier: "local", kind: `reads a secret (${shownPattern(pattern!)})`, once: true, concern: "secret" };
       soft ??= { tier: "local", kind: "reads a file known only when it runs" };
       continue;
     }
@@ -370,8 +541,15 @@ export function redirectRisk(command: Pick<RiskCommand, "reads" | "writes" | "cw
     // it for the request at hand, once, and nothing is remembered.
     if (classification.zone === "sensitive") soft ??= { tier: "local", kind: `reads a secret (${path})`, once: true, concern: "secret" };
   }
-  for (const path of command.writes) {
+  for (const [index, path] of command.writes.entries()) {
     if (path === UNKNOWN) {
+      const pattern = command.writePatterns?.[index];
+      const found = pattern === undefined ? undefined : facts.couldBe?.(pattern, command.cwd);
+      if (found?.permissionSystem && !found.anywhere) return { tier: "danger", kind: `changes the permission system itself (${shownPattern(pattern!)}, which could be ${found.permissionSystem})`, key: "permission-system", floor: true };
+      if (found && !found.anywhere) {
+        const why = found.sensitive ? "writes a secret" : found.guard === "self" ? "changes Cypher's own data" : found.guard === "protected" ? "changes a file that runs code later" : undefined;
+        if (why) return { tier: "danger", kind: `${why} (${shownPattern(pattern!)})`, key: dangerKey(why) };
+      }
       soft ??= { tier: "local", kind: "writes a file known only when it runs" };
       continue;
     }
@@ -400,13 +578,115 @@ function named(path: string, facts: RiskFacts): Classification | undefined {
   return classification.zone === "sensitive" || classification.guard !== undefined ? classification : undefined;
 }
 
+/**
+ * Options whose value is a folder a command writes files into that its words don't name (data, round 5
+ * step 2): an extraction's `-C`, a copy's `-t`, git's `--work-tree`. With `find ROOT … -exec WRITER` and
+ * `-delete`, ROOT (narrowed by `-name`): what it writes there is known only when it runs.
+ */
+export const DESTINATION_OPTIONS: readonly { programs: RegExp; options: readonly string[]; when?: RegExp }[] = [
+  { programs: /^(tar|gtar|bsdtar)$/, options: ["-C", "--directory"], when: /^(-?[A-Za-z]*x[A-Za-z]*|--extract|--get)$/ },
+  { programs: /^(unzip|ditto|7z|7za)$/, options: ["-d", "-o"] },
+  { programs: /^(cp|mv|install|ln|gcp)$/, options: ["-t", "--target-directory"] },
+  { programs: /^git$/, options: ["--work-tree"] },
+  { programs: /^(cpio|pax)$/, options: ["-D", "--directory"] },
+];
+
+/** Writes of files a command doesn't name, into a folder it does (`tar x -C D`, `git --work-tree=D checkout`, `find D -exec …`): the floor where that folder holds the permission system. */
+function destinationRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): Assessment | undefined {
+  for (const { glob, dir, creates } of destinationGlobs(command, view, facts)) {
+    const found = facts.couldBe?.(glob, undefined, { subtree: true });
+    // A permission-system file there now (what `find` acts on, what an extraction overwrites), or a folder inside one
+    // of its places (`-C <agent>/extensions`): not a folder that a pattern's wildcard could make one of (an
+    // extraction into `~/.cypher-dev/pi-runtime-x/` makes a Runtime, not another instance's agent folder).
+    const there =
+      found?.matches.some((item) => facts.permissionSystem?.(item.path)) ||
+      facts.permissionSystem?.(`${dir}/${INSIDE_PROBE}`) ||
+      (creates && (facts.permissionPlaces?.() ?? []).some((place) => isUnder(place, dir)));
+    if (!there) continue;
+    if (found?.permissionSystem) return { tier: "danger", kind: `changes the permission system itself (it writes inside ${shownPattern(glob)}, which holds ${found.permissionSystem})`, key: "permission-system", floor: true };
+  }
+  return undefined;
+}
+
+/** The folders (as globs) a command writes inside without naming the files (`DESTINATION_OPTIONS`, `find -exec`). */
+/** A name no file has: `dir/<it>` is inside a permission-system place only when every path in `dir` is. */
+const INSIDE_PROBE = "\u0000cypher-inside";
+
+function destinationGlobs(command: RiskCommand, view: CommandView, facts: RiskFacts): { glob: string; dir: string; creates?: boolean }[] {
+  const out: { glob: string; dir: string; creates?: boolean }[] = [];
+  const dir = operandDir(command, view);
+  const place = (word: string) => {
+    if (word === UNKNOWN) return undefined;
+    const at = facts.classify(word, dir)?.path;
+    return at === undefined ? undefined : escapeGlob(at);
+  };
+  const row = DESTINATION_OPTIONS.find((candidate) => candidate.programs.test(view.program));
+  if (row && (!row.when || view.args.some((word) => row.when!.test(word)))) {
+    for (const [i, word] of view.args.entries()) {
+      for (const option of row.options) {
+        const value = word === option ? view.args[i + 1] : word.startsWith(`${option}=`) ? word.slice(option.length + 1) : /^-[A-Za-z]$/.test(option) && word.startsWith(option) && word.length > 2 && !word.startsWith("--") ? word.slice(2) : undefined;
+        const at = value === undefined ? undefined : place(value);
+        // An extraction or checkout creates files: a folder holding a permission-system place could get one.
+        if (at !== undefined) out.push({ glob: `${at}/**`, dir: facts.classify(value!, dir)!.path, creates: true });
+      }
+    }
+  }
+  if (view.program === "find" && fileEffect(command, view, view.args.find((word) => !word.startsWith("-")) ?? ".") === "write") {
+    const roots = view.args.slice(0, Math.max(0, view.args.findIndex((word) => word.startsWith("-") || word === "!" || word === "("))).filter((word) => word !== UNKNOWN);
+    const names = view.args.flatMap((word, i) => (/^-(name|iname)$/.test(word) && view.args[i + 1] !== undefined && view.args[i + 1] !== UNKNOWN ? [view.args[i + 1]] : []));
+    for (const root of roots.length ? roots : ["."]) {
+      const at = place(root);
+      if (at === undefined) continue;
+      const path = facts.classify(root, dir)!.path;
+      if (names.length) for (const name of names) out.push({ glob: `${at}/**/${name}`, dir: path });
+      else out.push({ glob: `${at}/**`, dir: path });
+    }
+  }
+  return out;
+}
+
+/**
+ * Commands that make a link (data, round 5 step 2): another name for their sources, through which a later
+ * write changes them. `options`: what makes the program one (`cp -l`); none, any use.
+ */
+export const LINK_MAKERS: readonly { program: string; options?: RegExp }[] = [
+  { program: "ln" },
+  { program: "link" },
+  { program: "cp", options: /^(-[A-Za-z]*[ls][A-Za-z]*|--link|--symbolic-link)$/ },
+  { program: "gcp", options: /^(-[A-Za-z]*[ls][A-Za-z]*|--link|--symbolic-link)$/ },
+];
+
+function makesLink(view: CommandView): boolean {
+  return LINK_MAKERS.some((row) => row.program === view.program && (!row.options || view.args.some((word) => row.options!.test(word))));
+}
+
 /** Programs that send a file named `@file` (`curl -d @f`, `-F x=@f`, `http x=@f`). */
 const SENDS_AT_FILES = /^(curl|http|https|xh)$/;
 
 function pathRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): Assessment | undefined {
   const redirected = redirectRisk(command, facts);
   if (redirected?.tier === "danger") return redirected;
+  const inside = destinationRisk(command, view, facts);
+  if (inside) return inside;
   let soft: Assessment | undefined = redirected;
+  const dir = operandDir(command, view);
+  // Words known only when they run, by every path they may stand for (resolve.ts); a start known only when it runs says nothing of secrets.
+  for (const item of patternWords(command)) {
+    if (!fileOperand(command, view, item.at) || !localOperand(view, command.hints?.[item.word] ?? "", view.args[item.at - 1])) continue;
+    if (/^(ssh|scp|sftp|rsync|git|mosh)$/.test(view.program) && (view.args[item.at - 1] === "-i" || /IdentityFile/i.test(view.args[item.at - 1] ?? ""))) continue;
+    const found = facts.couldBe?.(item.pattern, dir, { subtree: subtreeEffect(view) });
+    if (!found || found.anywhere) continue;
+    const effect = pathEffect(command, view, UNKNOWN);
+    if (found.sensitive && !NAME_ONLY.has(view.program)) {
+      if (effect === "write") return { tier: "danger", kind: `writes a secret (${shownPattern(item.pattern)})`, key: "writes a secret" };
+      soft ??= { tier: "local", kind: `reads a secret (${shownPattern(item.pattern)})`, once: true, concern: "secret" };
+      continue;
+    }
+    if (WRITERS.has(view.program) && view.program !== "git" && effect === "write") {
+      const why = found.guard === "self" ? "changes Cypher's own data" : found.guard === "protected" ? "changes a file that runs code later" : undefined;
+      if (why) return { tier: "danger", kind: `${why} (${shownPattern(item.pattern)})`, key: dangerKey(why) };
+    }
+  }
   if (SENDS_AT_FILES.test(view.program)) {
     for (const word of view.args) {
       const file = /^(?:[^=@\s]*=)?@([^;]+)/.exec(word)?.[1];
@@ -424,10 +704,11 @@ function pathRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): As
     if (/^(ssh|scp|sftp|rsync|git|mosh)$/.test(view.program) && (words[i - 1] === "-i" || /IdentityFile/i.test(words[i - 1] ?? ""))) continue;
     // `host:path` and a URL are the other machine's files, whatever their names.
     if (!localOperand(view, word, words[i - 1])) continue;
-    const classification = facts.classify(word, command.cwd);
+    const classification = facts.classify(word, dir);
     if (!classification) continue;
     const effect = pathEffect(command, view, word);
-    if (facts.permissionSystem?.(classification.path) && effect === "write") {
+    // A link to a file is a way to write it later (`ln -s <permissions.json> x`, then a write through x).
+    if (facts.permissionSystem?.(classification.path) && (effect === "write" || makesLink(view))) {
       return { tier: "danger", kind: `changes the permission system itself (${word})`, key: "permission-system", floor: true };
     }
     if (classification.zone === "sensitive" && !NAME_ONLY.has(view.program)) {
@@ -537,7 +818,8 @@ export function uploadDanger(view: CommandView): string | undefined {
         const value = inline ?? args[i + 1];
         if (value === undefined) continue;
         const sendsFile = row.at?.test(name) ? value.startsWith("@") || value === UNKNOWN : name.startsWith("-F") || name.startsWith("--form") ? /=[<@]/.test(value) || value === UNKNOWN : true;
-        if (sendsFile) return `sends files off this machine (${view.program} ${name} ${value})`;
+        // A value known only when it runs is said so (round 5 step 2: the judge's evidence names what can't be read).
+        if (sendsFile) return value === UNKNOWN ? `sends a file known only when it runs off this machine (${view.program} ${name} …), which could be a secret` : `sends files off this machine (${view.program} ${name} ${value})`;
       }
     }
     if (row.dest) {
@@ -587,10 +869,19 @@ function destroyDanger(command: RiskCommand, view: CommandView, facts: RiskFacts
     // "$E" && chmod 700 "$E"`).
     operands = view.positionals.slice(1).filter((word) => word !== UNKNOWN);
   } else return undefined;
+  // Operands known only when it runs, in order, with the globs they stand for (resolve.ts).
+  const globs = view.args.flatMap((word, at) => (word === UNKNOWN ? [patternOf(command, at + 1)] : []));
+  const dir = operandDir(command, view);
   for (const operand of operands) {
-    if (operand === UNKNOWN) return `${verb(view.program)} files named only when it runs`;
-    if (command.cwd === undefined && !isAbsolute(operand) && !operand.startsWith("~")) return `${verb(view.program)} files in a directory known only when it runs`;
-    const classification = facts.classify(operand, command.cwd);
+    if (operand === UNKNOWN) {
+      // A glob whose every start is the chat's own (its workspace, scratch: `rm -rf "$(mktemp -d)"`, `rm build/*`) deletes only there.
+      const pattern = globs.shift();
+      const found = pattern === undefined ? undefined : facts.couldBe?.(pattern, dir, { subtree: true });
+      if (found && !found.anywhere && found.fixed.length && found.fixed.every((path) => disposable(path, facts)) && !found.permissionSystem && !found.guard && !found.installed) continue;
+      return `${verb(view.program)} files named only when it runs`;
+    }
+    if (dir === undefined && !isAbsolute(operand) && !operand.startsWith("~")) return `${verb(view.program)} files in a directory known only when it runs`;
+    const classification = facts.classify(operand, dir);
     if (!classification || !disposable(classification.path, facts)) return `${verb(view.program)} files outside the project folders (${operand})`;
   }
   return undefined;
@@ -678,7 +969,7 @@ function installedMention(text: string, facts: RiskFacts, home: string | undefin
   for (const match of text.split(home).join("~").matchAll(INSTALLED_MENTION)) {
     const mention = match[0];
     if (mention.startsWith("/Applications/")) return mention;
-    const classification = facts.classify(`${home}${mention.replace(/^(~|\$HOME|\$\{HOME\})/, "")}`, undefined);
+    const classification = facts.classify(resolveText(mention, home), undefined);
     if (classification && facts.installedApp(classification.path)) return mention;
   }
   return undefined;
@@ -733,6 +1024,14 @@ function installedAppRisk(command: RiskCommand, view: CommandView, facts: RiskFa
       if (WRITE_HINT.test(word) || (!(index === 0 && asking) && pathEffect(command, view, inside) === "write")) return changes(inside);
       soft ??= reads(inside);
     }
+  }
+  // Words known only when it runs (resolve.ts): a glob into the installed app (`rm -rf ~/.cypher/logs/*`).
+  for (const item of patternWords(command)) {
+    if (!fileOperand(command, view, item.at)) continue;
+    const found = facts.couldBe?.(item.pattern, operandDir(command, view), { subtree: subtreeEffect(view) });
+    if (!found?.installed || found.anywhere) continue;
+    if (pathEffect(command, view, UNKNOWN) === "write") return changes(shownPattern(item.pattern));
+    soft ??= reads(found.installed);
   }
   return soft;
 }
@@ -1041,14 +1340,13 @@ function gitDiscardDanger(command: RiskCommand, view: CommandView, facts: RiskFa
     if (facts.inWorkspace(classification.path) || facts.created?.worktree(classification.path) || facts.created?.has(classification.path)) return undefined;
     return `removes a worktree outside this chat's workspace (${target})`;
   }
-  if (sub === "branch" && view.args.some((word) => /^-[A-Za-z]*D$/.test(word) || word === "--delete" || word === "-d")) {
-    // Deleting branches this task created undoes its own work.
-    const names = view.positionals.slice(1).filter((word) => word !== UNKNOWN);
+  const written = refsWritten(view);
+  if (written) {
+    // Deleting, moving or resetting branches this task created undoes or redoes its own work.
     const own = (name: string) => facts.created?.branch(name) === true || facts.workspaceBranches?.().includes(name) === true;
-    if (names.length && names.length === view.positionals.length - 1 && names.every(own)) return undefined;
-    // Anyone else's branch, in any checkout: its owner decides.
-    const others = view.positionals.slice(1).filter((name) => name === UNKNOWN || !own(name));
-    return others.includes(UNKNOWN) ? "deletes a branch known only when it runs" : `deletes ${others.join(", ")}, a branch this chat didn't create`;
+    const others = written.refs.filter((name) => name === UNKNOWN || !own(name));
+    if (!others.length) return undefined;
+    return others.includes(UNKNOWN) ? `${written.verb} a branch known only when it runs` : `${written.verb} ${others.join(", ")}, a branch this chat didn't create`;
   }
   const discards =
     (sub === "reset" && view.args.some((word) => word === "--hard" || word === "--merge" || word === "--keep")) ||
@@ -1233,19 +1531,23 @@ function assessWords(command: RiskCommand, facts: RiskFacts): Assessment {
   if (vouch) return { tier: "danger", kind: `gives ${view.program} an option that can run a program or write a file on this computer`, key: "ssh-options" };
   const next = runsNext(view);
   if (next) {
-    const assessment = assessCommand({ ...command, words: next, reads: [], writes: [], hints: undefined }, facts);
+    // The words it runs are its own last words (`exec`, `env`, `nohup`): their globs come along; `xargs` adds its input's.
+    const suffix = next.every((word, i) => word === command.words[command.words.length - next.length + i]);
+    const assessment = assessCommand({ ...command, words: next, reads: [], writes: [], hints: undefined, patterns: suffix ? command.patterns : undefined, readPatterns: undefined, writePatterns: undefined }, facts);
     if (assessment.tier === "danger") return assessment;
     const redirected = redirectRisk(command, facts);
     if (redirected?.tier === "danger") return redirected;
     return { tier: "local", kind: assessment.kind ?? redirected?.kind ?? `runs ${basename(next[0] ?? "a program")} through ${view.program}`, ...(assessment.once || redirected?.once ? { once: true as const } : {}), ...(assessment.concern || redirected?.concern ? { concern: assessment.concern ?? redirected?.concern } : {}), ...(assessment.data ? { data: assessment.data } : {}) };
   }
   // What `find -exec` runs is a command of its own, on the files `find`
-  // starts from (`find build -exec rm {} +` deletes in `build`).
+  // starts from (`find build -exec rm {} +` deletes in `build`). What it writes among them first: the permission system's floor.
+  const inside = destinationRisk(command, view, facts);
+  if (inside) return inside;
   let ran: Assessment | undefined;
   for (const run of findRuns(view) ?? []) {
     const starts = run.some((word) => word.includes("{}")) ? findStarts(view) : [""];
     for (const start of starts) {
-      const assessment = assessCommand({ ...command, words: run.map((word) => word.split("{}").join(start)), reads: [], writes: [], hints: undefined }, facts);
+      const assessment = assessCommand({ ...command, words: run.map((word) => word.split("{}").join(start)), reads: [], writes: [], hints: undefined, patterns: undefined, readPatterns: undefined, writePatterns: undefined }, facts);
       if (assessment.tier === "danger") return assessment;
       if (assessment.once) ran ??= assessment;
     }
@@ -1255,7 +1557,9 @@ function assessWords(command: RiskCommand, facts: RiskFacts): Assessment {
   // The checks that may also come out local (reading a secret, reading the
   // installed app's data): a danger wins, a local one stands when nothing
   // else is dangerous.
-  const system = permissionSystemRisk(command, view, facts);
+  // The permission system through a wrapper that runs a command as another user or with other settings (`sudo rm …`): the floor first.
+  const wrapped = unwrapped(words);
+  const system = permissionSystemRisk(command, view, facts) ?? (wrapped.length && wrapped.length < words.length ? permissionSystemRisk({ ...command, words: wrapped, patterns: command.patterns?.slice(command.patterns.length - wrapped.length), hints: command.hints?.slice((command.hints?.length ?? 0) - wrapped.length) }, viewOf(wrapped), facts) : undefined);
   if (system) return system;
   let soft: Assessment | undefined = ran;
   const installed = installedAppRisk(command, view, facts);
@@ -1313,23 +1617,78 @@ function permissionSystemRisk(command: RiskCommand, view: CommandView, facts: Ri
   const system = facts.permissionSystem;
   if (!system) return undefined;
   const home = facts.classify("~", undefined)?.path;
+  const dir = operandDir(command, view);
+  const subtree = subtreeEffect(view);
+  const floor = (what: string): Assessment => ({ tier: "danger", kind: `changes the permission system itself (${what})`, key: "permission-system", floor: true });
   const candidates = new Set<string>();
+  /** Whole words that are operands: what lies below them counts for a deletion or a move. */
+  const operands = new Set<string>();
+  const row = FILE_OPERANDS.find((candidate) => candidate.programs.includes(view.program));
   for (const word of [...command.words, ...command.reads, ...command.writes, ...(command.carried ?? [])]) {
     if (word === UNKNOWN) continue;
-    if (pathWords([word]).length || command.reads.includes(word) || command.writes.includes(word)) candidates.add(word);
-    for (const match of word.matchAll(SYSTEM_FILE)) {
-      const path = match[0];
-      candidates.add(home === undefined ? path : path.replace(/^(\$HOME|\$\{HOME\})/, home));
+    if (pathWords([word]).length || command.reads.includes(word) || command.writes.includes(word)) {
+      candidates.add(word);
+      operands.add(word);
     }
+    // Inside a script or an option's value: `~`, `$HOME` and `${HOME}` as the resolver reads them.
+    for (const match of word.matchAll(SYSTEM_FILE)) candidates.add(home === undefined ? match[0] : resolveText(match[0], home));
+  }
+  // A file-operand program's bare names are paths where it runs (`cd …/cypher-permissions && rm -rf ledger`).
+  if (row) for (const word of view.positionals.slice(row.skip ?? 0)) if (word !== UNKNOWN && !/^[a-z][\w+.-]*:\/\//i.test(word)) {
+    candidates.add(word);
+    operands.add(word);
   }
   for (const candidate of candidates) {
-    const classification = facts.classify(candidate, command.cwd);
-    if (!classification || !system(classification.path)) continue;
-    if (pathEffect(command, view, candidate) === "write" || command.words.some((word) => word !== UNKNOWN && word.includes(candidate) && WRITE_HINT.test(word))) {
-      return { tier: "danger", kind: `changes the permission system itself (${candidate})`, key: "permission-system", floor: true };
-    }
+    const at = command.writes.includes(candidate) || command.reads.includes(candidate) ? command.cwd : dir;
+    const classification = facts.classify(candidate, at);
+    if (!classification) continue;
+    const writes = pathEffect(command, view, candidate) === "write" || command.words.some((word) => word !== UNKNOWN && word.includes(candidate) && WRITE_HINT.test(word));
+    if (!writes) continue;
+    if (system(classification.path)) return floor(candidate);
+    // A folder that holds the permission system, deleted or moved whole (`rm -rf ~/.cypher/pi-runtime/agent`).
+    if (subtree && operands.has(candidate) && !command.writes.includes(candidate) && !destinationOnly(view, candidate) && facts.couldBe?.(escapeGlob(classification.path), undefined, { subtree: true }).permissionSystem) return floor(`${candidate}, which holds it`);
+  }
+  // Words known only when it runs: every path they may stand for (resolve.ts). A glob under the
+  // permission system, or one whose start is known only when it runs, could be it.
+  const unknown = [
+    ...patternWords(command)
+      .filter((item) => fileOperand(command, view, item.at))
+      .map((item) => ({ pattern: item.pattern, cwd: dir, write: pathEffect(command, view, UNKNOWN) === "write" && !CREATES_ONLY.has(view.program) })),
+    ...(command.writePatterns ?? []).flatMap((pattern) => (pattern === undefined ? [] : [{ pattern, cwd: command.cwd, write: true }])),
+  ];
+  for (const item of unknown) {
+    if (!item.write) continue;
+    const found = facts.couldBe?.(item.pattern, item.cwd, { subtree });
+    // A start known only when it runs could be anywhere: no floor (it would be every such write), but the judge is told.
+    if (found?.permissionSystem && !found.anywhere) return floor(`${shownPattern(item.pattern)}, which could be ${found.permissionSystem}`);
   }
   return undefined;
+}
+
+/**
+ * Writes whose path starts with text known only when it runs and could be the permission system (round 5):
+ * no floor (it would be every such write), but evidence for the judge, in words.
+ */
+export function unresolvedWrites(command: RiskCommand, facts: RiskFacts): string[] {
+  if (!facts.permissionSystem || !facts.couldBe || command.words[0] === UNKNOWN) return [];
+  const view = viewOf(command.words);
+  const dir = operandDir(command, view);
+  const subtree = subtreeEffect(view);
+  const out: string[] = [];
+  const items = [
+    ...(command.words.length && pathEffect(command, view, UNKNOWN) === "write" && !CREATES_ONLY.has(view.program) ? patternWords(command).filter((item) => fileOperand(command, view, item.at)).map((item) => ({ pattern: item.pattern, cwd: dir })) : []),
+    ...(command.writePatterns ?? []).flatMap((pattern) => (pattern === undefined ? [] : [{ pattern, cwd: command.cwd }])),
+  ];
+  for (const item of items) {
+    const found = facts.couldBe(item.pattern, item.cwd, { subtree });
+    if (found.anywhere && found.permissionSystem) out.push(`\`${view.program || ">"}\` writes ${shownPattern(item.pattern)}, a path whose start is known only when it runs: it could be the permission system's own files (${found.permissionSystem})`);
+  }
+  return out;
+}
+
+/** A glob from the shell reader in words, for the dialog (markers spelled out). */
+export function shownPattern(pattern: string): string {
+  return pattern.replaceAll(ANY, "…").replace(new RegExp(`${ENV_OPEN}([^${ENV_CLOSE}]*)${ENV_CLOSE}`, "g"), "$$$1").replace(/\\(.)/g, "$1");
 }
 
 /** Pack kinds (packs.ts) that only read a secret here: the model may approve one, once. */
@@ -1347,7 +1706,7 @@ const SECRET_WRITE_VERB =
  * `SECRET_SOURCES` with the sensitive file patterns (config.ts `DEFAULT_SENSITIVE`); the floor is
  * their data flow (`exfiltrates`).
  */
-export const NETWORK_SINKS: readonly { id: string; programs: readonly string[]; verbs?: RegExp }[] = [
+export const NETWORK_SINKS: readonly { id: string; programs: readonly string[]; verbs?: RegExp; urls?: boolean; module?: RegExp }[] = [
   { id: "http", programs: ["curl", "wget", "http", "https", "xh", "aria2c"] },
   { id: "socket", programs: ["nc", "ncat", "netcat", "socat", "telnet", "ftp", "lftp", "openssl-s_client"] },
   { id: "remote-shell", programs: ["ssh", "mosh", "scp", "sftp", "rsync"] },
@@ -1355,8 +1714,18 @@ export const NETWORK_SINKS: readonly { id: string; programs: readonly string[]; 
   { id: "paste", programs: ["pastebinit", "wgetpaste", "termbin", "ix", "sprunge", "0x0", "pbin", "haste", "gist"] },
   { id: "hosting-cli", programs: ["gh", "glab", "tea", "hub"], verbs: /^(api|gist|secret|variable|release|pr|mr|issue|repo|snippet|create|upload)$/ },
   { id: "git-push", programs: ["git"], verbs: /^(push|send-email|request-pull)$/ },
+  // Round 5 step 2: what a lookup or a probe carries in its name or payload (`dig $(… .env).evil.dev`, `ping -p HEX`).
+  { id: "dns", programs: ["dig", "nslookup", "host", "drill", "kdig", "delv", "dnsget", "resolvectl", "dscacheutil", "getent"] },
+  { id: "icmp", programs: ["ping", "ping6", "traceroute", "traceroute6", "tracepath", "mtr", "hping3", "nping", "arping"] },
+  // A launcher hands a URL to a browser, which fetches it: a sink only with a URL (`open .env` opens it here). `urls`.
+  { id: "url-launcher", programs: ["open", "xdg-open", "gio", "sensible-browser", "x-www-browser", "firefox", "google-chrome", "chromium", "chromium-browser", "lynx", "w3m", "links", "elinks"], urls: true },
+  // An interpreter's standard module run as a program (`python3 -m webbrowser URL`, `-m smtplib`).
+  { id: "module", programs: ["python", "python3", "pypy3"], module: /^(webbrowser|smtplib|ftplib|telnetlib|http\.client|urllib\.request)$/ },
   { id: "cloud-cli", programs: ["aws", "gcloud", "az", "op", "vault", "doppler", "heroku", "fly", "flyctl", "vercel", "netlify", "wrangler", "railway", "firebase", "supabase"] },
 ];
+
+/** bash's (and zsh's, ksh's) network redirections: a write or read of one is a connection (round 5 step 2). */
+export const NETWORK_FILES = /^\/dev\/(tcp|udp|sctp)\//;
 
 /** Every program some sink row names, the transfer tools' too: what a line the reader can't follow is checked for. */
 const SINK_PROGRAMS: ReadonlySet<string> = new Set([...NETWORK_SINKS.flatMap((row) => row.programs), ...TRANSFER_PROGRAMS()]);
@@ -1365,6 +1734,15 @@ const SINK_PROGRAMS: ReadonlySet<string> = new Set([...NETWORK_SINKS.flatMap((ro
 export function sinkOf(view: CommandView): string | undefined {
   for (const row of NETWORK_SINKS) {
     if (!row.programs.includes(view.program)) continue;
+    if (row.module) {
+      const at = view.args.indexOf("-m");
+      if (at >= 0 && (view.args[at + 1] === UNKNOWN || row.module.test(view.args[at + 1] ?? ""))) return row.id;
+      continue;
+    }
+    if (row.urls) {
+      if (view.positionals.some((word) => word === UNKNOWN || /^[a-z][\w+.-]*:/i.test(word))) return row.id;
+      continue;
+    }
     if (!row.verbs || view.positionals.some((word) => word === UNKNOWN || row.verbs!.test(word))) return row.id;
   }
   return TRANSFER_PROGRAMS().includes(view.program) ? "transfer" : undefined;
@@ -1377,10 +1755,19 @@ export function sinkOf(view: CommandView): string | undefined {
  * `~/.netrc`, `~/.config/gh/**`, …) and a credential's variable when its name says so (`secretName`).
  * Such a command is a source for the line's other commands: `aws configure get …` alone prints it here.
  */
-export const SECRET_SOURCES: readonly { id: string; program: string; verbs: readonly (string | RegExp)[] }[] = [
+export const SECRET_SOURCES: readonly { id: string; program: string; verbs: readonly (string | RegExp)[]; bare?: boolean; options?: RegExp }[] = [
   { id: "the keychain", program: "security", verbs: [/^(find-generic-password|find-internet-password|dump-keychain|export|find-key|find-certificate|unlock-keychain)$/] },
   { id: "the environment", program: "printenv", verbs: [] },
   { id: "the environment", program: "env", verbs: [] },
+  // Round 5 step 2: the shell's own printers of its exported variables, and a process's environment.
+  // `bare`: a source with no words after it; `options`: with one of these.
+  { id: "the environment", program: "export", verbs: [], bare: true, options: /^-[A-Za-z]*p$/ },
+  { id: "the environment", program: "declare", verbs: [], bare: true, options: /^-[A-Za-z]*[xp]/ },
+  { id: "the environment", program: "typeset", verbs: [], bare: true, options: /^-[A-Za-z]*[xp]/ },
+  { id: "the environment", program: "set", verbs: [], bare: true },
+  { id: "the environment", program: "compgen", verbs: [], options: /^-[A-Za-z]*[ev]/ },
+  { id: "the environment", program: "ps", verbs: [], options: /^-?[A-Za-z]*[eE][A-Za-z]*$/ },
+  { id: "the environment", program: "launchctl", verbs: [/^(getenv|print|export)$/] },
   { id: "a stored token", program: "gh", verbs: ["auth", "token"] },
   { id: "a stored token", program: "glab", verbs: ["auth", "status"] },
   { id: "a stored credential", program: "git", verbs: ["credential", /^(fill|get)$/] },
@@ -1402,6 +1789,10 @@ export const SECRET_SOURCES: readonly { id: string; program: string; verbs: read
 function credentialSource(view: CommandView): string | undefined {
   for (const row of SECRET_SOURCES) {
     if (row.program !== view.program) continue;
+    if (row.bare || row.options) {
+      if ((row.bare && view.args.length === 0) || (row.options && view.args.some((word) => word !== UNKNOWN && row.options!.test(word)))) return row.id;
+      continue;
+    }
     if (row.program === "printenv") {
       if (view.positionals.length === 0 || view.positionals.some((word) => word === UNKNOWN || secretName(word))) return row.id;
       continue;
@@ -1463,6 +1854,9 @@ function namesSecret(word: string): boolean {
  */
 const TOUCHES_ONLY: ReadonlySet<string> = new Set([...NAME_ONLY, "chmod", "chown", "chgrp", "chflags", "xattr", "touch", "rm", "rmdir", "unlink", "ssh-add", "ssh-keygen"]);
 
+/** A socat address that is a file it reads (round 5 step 2). */
+const SOCAT_FILE = /^(?:FILE|OPEN|GOPEN|READ):([^,]+)/i;
+
 /** Options whose value is a key or certificate a connection is made with: used, not read out. */
 const USES_KEY = /^(-i|-E|--identity|--key|--cert|--cacert|--capath|--client-cert|--pubkey|--proxy-cert|--proxy-key|--proxy-cacert)$/;
 
@@ -1504,11 +1898,18 @@ function localOperand(view: CommandView, word: string, before = ""): boolean {
  * machine's); a copy names its local sources when it uploads; a download's
  * output file is written, not read.
  */
-function fileWords(command: RiskCommand, view: CommandView): string[] {
+function fileWords(command: RiskCommand, view: CommandView, patterns: string[] = []): string[] {
   if (TOUCHES_ONLY.has(view.program) || /^(ssh|mosh)$/.test(view.program)) return [];
+  // socat's address words: a file it opens (`FILE:.env`, `OPEN:…`, `GOPEN:…`), the rest are sockets.
+  if (view.program === "socat") return view.positionals.flatMap((word) => SOCAT_FILE.exec(word)?.[1] ?? []);
   if (view.program === "scp" || view.program === "rsync") {
     const copy = copyOperands(view.words);
-    if (copy) return remoteOperand(copy.dest) ? copy.sources.filter((word) => !remoteOperand(word)) : [];
+    if (copy) {
+      if (!remoteOperand(copy.dest)) return [];
+      // Sources known only when it runs (`scp ~/.ssh/id_* host:`): their globs.
+      for (const item of patternWords(command)) if (view.args[item.at] === UNKNOWN && item.word < command.words.length - 1) patterns.push(item.pattern);
+      return copy.sources.filter((word) => !remoteOperand(word));
+    }
   }
   const out: string[] = [];
   // `aws s3 cp s3://bucket/key file`: copied from a URL, the last word is a file it writes.
@@ -1521,11 +1922,17 @@ function fileWords(command: RiskCommand, view: CommandView): string[] {
     if (DOWNLOADERS.has(view.program) && WRITES_OUTPUT.test(before)) continue;
     if (at === written && !before.startsWith("-")) continue;
     if (word === UNKNOWN) {
-      // `~/.ssh/id_*`: the directory it surely points into, and the name it starts.
+      // `~/.ssh/id_*`: every path it may stand for (resolve.ts), when where it starts is known and local.
       const hint = command.hints?.[at + 1];
       if (!hint || hint.startsWith("-") || !localOperand(view, hint, before)) continue;
-      out.push(hint.includes("/") ? hint.slice(0, hint.lastIndexOf("/") + 1) : "./");
-      if (!hint.endsWith("/")) out.push(hint);
+      const pattern = command.patterns?.[at + 1 + (command.words.length - (command.patterns?.length ?? command.words.length))];
+      if (pattern !== undefined) patterns.push(pattern);
+      continue;
+    }
+    // `--post-file=f`, `--upload-file=f`: an option's attached file (round 5 step 2).
+    const attached = /^(--[\w-]+)=(.+)$/.exec(word);
+    if (attached && DOWNLOADERS.has(view.program) && TAKES_FILE.test(attached[1]) && !WRITES_OUTPUT.test(attached[1])) {
+      out.push(attached[2]);
       continue;
     }
     if (word.startsWith("-") || !localOperand(view, word, before)) continue;
@@ -1549,7 +1956,195 @@ function fileWords(command: RiskCommand, view: CommandView): string[] {
  * reads; a bare name that is not there (and that no other command of the
  * line makes) holds nothing to send.
  */
-export function exfiltrates(commands: readonly RiskCommand[], facts: RiskFacts, expands: readonly string[] = []): string | undefined {
+export function exfiltrates(commands: readonly RiskCommand[], facts: RiskFacts, expands: readonly string[] = [], code?: ReadonlyMap<RiskCommand, CodeFlow>): string | undefined {
+  const { sink, secret } = lineFlow(commands, facts, expands, code);
+  if (sink === undefined || secret === undefined) return undefined;
+  return `sends a secret off this machine (${secret}) through ${sink}`;
+}
+
+/** Programs that read a whole folder they are given (round 5 step 2): an archiver's or copier's directory operand holds what is inside it. */
+const WHOLE_FOLDER: ReadonlySet<string> = new Set(["tar", "gtar", "bsdtar", "zip", "7z", "7za", "rar", "ditto", "rsync", "scp", "cpio", "pax", "xar", "hdiutil", "mksquashfs"]);
+
+/**
+ * The secret a word names, for a command of a line (`lineFlow`): a sensitive file (named in full, there,
+ * made elsewhere in the line, or read by the command for the line: `direct`), or a file this chat wrote
+ * from a secret before (`RiskFacts.tainted`, the ledger's taint).
+ */
+function heldSecret(word: string, command: RiskCommand, direct: boolean, facts: RiskFacts, elsewhere: (word: string, self: RiskCommand) => boolean): string | undefined {
+  const classification = facts.classify(word, operandDir(command, viewOf(command.words)));
+  if (classification === undefined) return undefined;
+  if (classification.zone === "sensitive") return direct || isAbsolute(word) || word.startsWith("~") || present(classification.path) || elsewhere(word, command) ? word : undefined;
+  const from = facts.tainted?.(classification.path);
+  return from === undefined ? undefined : `${word}, which this chat wrote from ${from}`;
+}
+
+/**
+ * What a line writes from a secret (round 5 step 2, the ledger's taint): each file a command of it writes
+ * while it reads a secret, or after one in its pipe (`cp .env /tmp/x`, `cat .env >> log`, `tar czf b.tgz
+ * .env`, `zip -r k.zip ~/.ssh`, `cat .env | gzip > x.gz`), and the repositories where it stages one
+ * (`git add -f .env`). Canonical paths; the secret each holds.
+ */
+export function secretWrites(commands: readonly (RiskCommand & { joint?: string })[], facts: RiskFacts): { paths: { path: string; from: string }[]; repos: { dir: string; from: string }[] } {
+  const paths: { path: string; from: string }[] = [];
+  const repos: { dir: string; from: string }[] = [];
+  const elsewhere = (word: string, self: RiskCommand) => commands.some((other) => other !== self && (other.words.includes(word) || other.writes.includes(word)));
+  let flowing: string | undefined;
+  for (const [index, command] of commands.entries()) {
+    const view = viewOf(command.words);
+    const dir = operandDir(command, view);
+    let from = flowing;
+    for (const path of command.reads) if (path !== UNKNOWN) from ??= heldSecret(path, command, true, facts, elsewhere);
+    const words = command.words.length ? fileWords(command, view) : [];
+    for (const word of words) {
+      from ??= heldSecret(word, command, true, facts, elsewhere);
+      if (from === undefined && WHOLE_FOLDER.has(view.program) && facts.secretInside) {
+        const at = facts.classify(word, dir)?.path;
+        const inside = at === undefined ? undefined : facts.secretInside(at);
+        if (inside !== undefined) from = inside;
+      }
+    }
+    if (from === undefined) from = credentialSource(view) === "the environment" ? "the environment" : undefined;
+    // `git add .env`: the repository holds it once committed.
+    if (view.program === "git" && GIT_STAGES.test(view.positionals[0] ?? "") && from !== undefined) {
+      const repo = gitDirectory(command, view);
+      if (repo !== undefined) repos.push({ dir: repo, from });
+    }
+    if (from !== undefined) {
+      const written: string[] = command.writes.filter((path) => path !== UNKNOWN && !NETWORK_FILES.test(path) && !path.startsWith("/dev/"));
+      const copy = /^(cp|mv|install|ditto|rsync|ln|gcp)$/.test(view.program) ? copyOperands(view.words) : undefined;
+      if (copy && !remoteOperand(copy.dest)) written.push(copy.dest);
+      const archive = archiveOutput(view);
+      if (archive !== undefined && archive !== "-") written.push(archive);
+      if (view.program === "tee") written.push(...view.positionals);
+      for (const word of written) {
+        const at = facts.classify(word, dir);
+        if (!at || at.zone === "sensitive") continue;
+        const target = copy && word === copy.dest && isDirectory(at.path) && copy.sources.length === 1 ? `${at.path}/${basename(copy.sources[0])}` : at.path;
+        paths.push({ path: target, from: from.replace(/, which this chat wrote from .*$/, "") });
+      }
+    }
+    // What a command prints flows on through its pipe.
+    const next = commands[index + 1];
+    flowing = from !== undefined && command.joint === "|" && next !== undefined ? from : undefined;
+  }
+  return { paths, repos };
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** The archive an archiver writes (`tar czf X`, `tar -cf X`, `--file=X`, `zip X …`, `7z a X …`), or undefined. */
+function archiveOutput(view: CommandView): string | undefined {
+  const args = view.args;
+  if (/^(tar|gtar|bsdtar)$/.test(view.program)) {
+    const creates = args.some((word) => /^-?[A-Za-z]*[cru][A-Za-z]*$/.test(word) && !word.startsWith("--")) || args.includes("--create");
+    if (!creates) return undefined;
+    for (let i = 0; i < args.length; i++) {
+      const word = args[i];
+      if (word.startsWith("--file=")) return word.slice("--file=".length);
+      if (word === "--file") return args[i + 1];
+      if (/^-?[A-Za-z]*f[A-Za-z]*$/.test(word) && !word.startsWith("--") && (i === 0 || word.startsWith("-"))) return args[i + 1];
+    }
+    return undefined;
+  }
+  if (view.program === "zip") return view.positionals[0];
+  if (/^7za?$/.test(view.program) && view.positionals[0] === "a") return view.positionals[1];
+  return undefined;
+}
+
+/**
+ * The commands wrappers run with the operands they substitute (round 5 step 2, data in `WRAPPED`): each
+ * is read like a command of the line (same directory), so its sink and the file it is handed meet.
+ * - `find ROOT -name P … -exec CMD {} ;`: CMD with `{}` as ROOT/P (each `-name`, `-iname`, `-path` value);
+ * - `… | xargs [-I T] CMD`: CMD with what the pipe prints when it folds (fold.ts), else nothing;
+ * - `parallel CMD ::: A B`: CMD with `{}` as each A, else A appended;
+ * - `env -S 'CMD'`, `env --split-string=CMD`, `eval 'CMD'`: CMD split into words.
+ */
+export function wrappedRuns(commands: readonly (RiskCommand & { joint?: string; input?: string })[]): RiskCommand[] {
+  const out: RiskCommand[] = [];
+  const push = (from: RiskCommand, words: string[]) => {
+    if (words.length && words[0] !== UNKNOWN) out.push({ ...from, words, reads: [], writes: [], hints: undefined, patterns: undefined });
+  };
+  for (const [index, command] of commands.entries()) {
+    const words = command.words;
+    const program = basename(words[0] ?? "");
+    if (program === "find" || program === "fd") {
+      const at = words.findIndex((word) => /^-(exec|execdir|ok|okdir)$/.test(word));
+      if (at < 0) continue;
+      const end = words.findIndex((word, i) => i > at && (word === ";" || word === "+" || word === "\\;"));
+      const run = words.slice(at + 1, end < 0 ? undefined : end);
+      const roots = words.slice(1).filter((word, i) => i < at - 1 && !word.startsWith("-") && word !== UNKNOWN);
+      const root = roots[0] ?? ".";
+      const names: string[] = [];
+      for (let i = 1; i < at; i++) if (/^-(name|iname|path|ipath|wholename)$/.test(words[i]) && words[i + 1] !== undefined && words[i + 1] !== UNKNOWN) names.push(/^-(i?path|wholename)$/.test(words[i]) ? words[i + 1] : `${root.replace(/\/$/, "")}/${words[i + 1]}`);
+      for (const name of names.length ? names : [root]) push(command, run.map((word) => word.split("{}").join(name)));
+      continue;
+    }
+    if (program === "xargs") {
+      const previous = commands[index - 1];
+      const fed = previous?.joint === "|" ? foldPipe(pipeBefore(commands, index), UNKNOWN) : command.input;
+      if (fed === undefined) continue;
+      const items = fed.split(/\s+/).filter(Boolean);
+      let i = 1;
+      let token: string | undefined;
+      for (; i < words.length; i++) {
+        const word = words[i];
+        if (word === "-I" || word === "-i" || word === "--replace") token = words[++i] ?? "{}";
+        else if (/^-I./.test(word)) token = word.slice(2);
+        else if (/^-(n|L|P|s|d|E|a)$/.test(word)) i++;
+        else if (!word.startsWith("-")) break;
+      }
+      const run = words.slice(i);
+      if (!run.length) continue;
+      if (token !== undefined) for (const item of items) push(command, run.map((word) => word.split(token!).join(item)));
+      else push(command, [...run, ...items]);
+      continue;
+    }
+    if (program === "parallel") {
+      const sep = words.indexOf(":::");
+      if (sep < 0) continue;
+      const run = words.slice(1, sep).filter((word, i, all) => !(i === 0 && word.startsWith("-")));
+      const items = words.slice(sep + 1).filter((word) => word !== UNKNOWN && word !== ":::");
+      for (const item of items) push(command, run.some((word) => word.includes("{}")) ? run.map((word) => word.split("{}").join(item)) : [...run, item]);
+      continue;
+    }
+    // `eval WORDS`: the line its words make (known when they fold, fold.ts).
+    if (program === "eval") {
+      if (words.length > 1 && !words.includes(UNKNOWN)) push(command, splitWords(words.slice(1).join(" ")));
+      continue;
+    }
+    if (program === "env") {
+      const at = words.findIndex((word) => word === "-S" || word.startsWith("--split-string"));
+      if (at < 0) continue;
+      const text = words[at].includes("=") ? words[at].split("=").slice(1).join("=") : words[at + 1];
+      if (text === undefined || text === UNKNOWN) continue;
+      push(command, [...splitWords(text), ...words.slice(at + 2)]);
+    }
+  }
+  return out;
+}
+
+/** The commands piped into the one at `index`, in order (the pipe it ends). */
+function pipeBefore(commands: readonly (RiskCommand & { joint?: string; input?: string })[], index: number): { words: readonly string[]; input?: string }[] {
+  let start = index - 1;
+  while (start > 0 && commands[start - 1]?.joint === "|") start--;
+  return commands.slice(start, index);
+}
+
+/** A command line's words, by quotes and spaces only (what `env -S` splits). */
+function splitWords(text: string): string[] {
+  return [...text.matchAll(/'([^']*)'|"([^"]*)"|(\S+)/g)].map((match) => match[1] ?? match[2] ?? match[3]);
+}
+
+/** A line's data flow (`exfiltrates`): the first network sink it has and the first secret it reads, each when there is one. */
+export function lineFlow(given: readonly RiskCommand[], facts: RiskFacts, expands: readonly string[] = [], code?: ReadonlyMap<RiskCommand, CodeFlow>): CodeFlow {
+  // What wrappers run, with the operands they hand it (`find -name P -exec … {}`, `xargs` of a literal, `parallel … ::: x`, `env -S '…'`).
+  const commands = [...given, ...wrappedRuns(given)];
   let sink: string | undefined;
   let secret: string | undefined;
   /** A name some other command of the line also uses: it may make the file this one sends. */
@@ -1560,17 +2155,28 @@ export function exfiltrates(commands: readonly RiskCommand[], facts: RiskFacts, 
    * contents for the line (`direct`: a sink's own file, a redirection's input, a content reader such as
    * `cat`): then the name alone says it (`gh gist create .env.production`, `cat .env | nc …`).
    */
-  const holdsSecret = (word: string, command: RiskCommand, direct: boolean): boolean => {
-    const classification = facts.classify(word, command.cwd);
-    if (classification?.zone !== "sensitive") return false;
-    return direct || isAbsolute(word) || word.startsWith("~") || present(classification.path) || elsewhere(word, command);
-  };
+  const holdsSecret = (word: string, command: RiskCommand, direct: boolean): boolean => secretOf(word, command, direct) !== undefined;
+  const secretOf = (word: string, command: RiskCommand, direct: boolean): string | undefined => heldSecret(word, command, direct, facts, elsewhere);
   /** Credential commands (`SECRET_SOURCES`): a source for the line's other commands. */
   const printers = new Set<RiskCommand>();
   const sinks = new Set<RiskCommand>();
   for (const command of commands) {
     // What a redirection feeds a command is a file it reads, whatever the command.
     for (const path of command.reads) if (path !== UNKNOWN && holdsSecret(path, command, true)) secret ??= path;
+    // bash's network files (`> /dev/tcp/host/port`, `exec 3<>/dev/udp/…`): a redirection to one is a sink.
+    for (const path of [...command.writes, ...command.reads]) {
+      if (path !== UNKNOWN && NETWORK_FILES.test(path)) {
+        sinks.add(command);
+        sink ??= `a network socket (${path.split("/").slice(0, 4).join("/")})`;
+      }
+    }
+    // Code an interpreter runs (code.ts): its network capability is a sink, the secrets it reads are sources.
+    const flow = code?.get(command);
+    if (flow?.sink) {
+      sinks.add(command);
+      sink ??= flow.sink;
+    }
+    if (flow?.secret) secret ??= flow.secret;
     const words = command.words;
     if (words.length === 0) continue;
     const view = viewOf(words);
@@ -1581,11 +2187,33 @@ export function exfiltrates(commands: readonly RiskCommand[], facts: RiskFacts, 
     }
     // Staging a file into a commit (`git add .env`) reads it for the line's push.
     const direct = row !== undefined || CONTENT_READERS.has(view.program) || (view.program === "git" && GIT_STAGES.test(view.positionals[0] ?? ""));
-    for (const word of fileWords(command, view)) if (holdsSecret(word, command, direct)) secret ??= word;
+    const globs: string[] = [];
+    for (const word of fileWords(command, view, globs)) {
+      const held = secretOf(word, command, direct);
+      if (held !== undefined) secret ??= held;
+      // An archiver or sender of a whole folder (`tar czf - .`, `rsync -a ./ host:`): the secrets inside it.
+      else if ((row !== undefined || WHOLE_FOLDER.has(view.program)) && facts.secretInside) {
+        const dir = facts.classify(word, operandDir(command, view))?.path;
+        const inside = dir === undefined ? undefined : facts.secretInside(dir);
+        if (inside !== undefined) secret ??= `${word}, which holds ${inside}`;
+      }
+    }
+    // A glob with a known start that could be a secret (`cat ~/.ssh/id_* | nc …`): the resolver's reading.
+    for (const pattern of globs) {
+      const found = facts.couldBe?.(pattern, operandDir(command, view));
+      if (found && !found.anywhere && found.sensitive) secret ??= shownPattern(pattern);
+    }
     // A sink's `@file` and `name=@file` values (`gh api -f body=@.env`, `http x=@f`): files it sends.
     if (row) for (const word of view.args) {
       const file = /^(?:[^=@\s]*=)?@([^;@]+)$/.exec(word)?.[1];
-      if (file && file !== "-" && holdsSecret(file, command, true)) secret ??= file;
+      const held = file && file !== "-" ? secretOf(file, command, true) : undefined;
+      if (held !== undefined) secret ??= held;
+    }
+    // A push from a repository where this chat staged a secret (`git add -f .env && git commit`, earlier).
+    if (row === "git-push" && facts.taintedRepo) {
+      const dir = gitDirectory(command, view);
+      const held = dir === undefined ? undefined : facts.taintedRepo(dir);
+      if (held !== undefined) secret ??= `a commit this chat made, holding ${held}`;
     }
     const printed = credentialSource(view);
     if (printed) {
@@ -1609,8 +2237,15 @@ export function exfiltrates(commands: readonly RiskCommand[], facts: RiskFacts, 
   }
   // A variable named like a credential that the line's own shell expands for its commands.
   if (expands.some(secretName)) secret ??= "a value in this line";
-  if (sink === undefined || secret === undefined) return undefined;
-  return `sends a secret off this machine (${secret}) through ${sink}`;
+  // An indirect expansion whose name is known only when it runs (`${!v}`, shell.ts): it could be any variable, a credential's too.
+  if (sink !== undefined && expands.some((name) => name.startsWith("!"))) secret ??= "a variable whose name is known only when it runs";
+  return { ...(sink !== undefined ? { sink } : {}), ...(secret !== undefined ? { secret } : {}) };
+}
+
+/** What the code a command runs does with data (core.ts reads it, code.ts): a network capability it has, a secret it reads. */
+export interface CodeFlow {
+  sink?: string;
+  secret?: string;
 }
 
 /** The files a download writes: `-o`/`-O` values, a redirection, or the URL's file name (`curl -O`, `wget`). */
@@ -1683,6 +2318,17 @@ export function assessOpaque(line: string, facts: RiskFacts, remote = false, cwd
   if (installed && mentionWrites(home === undefined ? line : line.split(home).join("~"), installed)) {
     const kind = `changes the installed Cypher app or its data (${installed})`;
     return { tier: "danger", kind, key: "installed Cypher app" };
+  }
+  // The permission system named anywhere in it (`~`, `$HOME`, a glob under it), where the line writes: the floor.
+  const self = facts.classify("~", undefined)?.path;
+  if (!remote && facts.permissionSystem && self !== undefined) {
+    for (const match of line.matchAll(SYSTEM_FILE)) {
+      const glob = /[*?[{]/.test(match[0]);
+      const path = resolveText(match[0].replace(/[*?[{].*$/, ""), self);
+      const classification = facts.classify(path, cwd);
+      const could = classification && (facts.permissionSystem(classification.path) || (glob && facts.couldBe?.(escapeGlob(classification.path), undefined, { subtree: true }).permissionSystem));
+      if (could && mentionWrites(line, match[0])) return { tier: "danger", kind: `changes the permission system itself (${match[0]})`, key: "permission-system", floor: true };
+    }
   }
   const segments: string[][] = [];
   const pieces = line.split(/;|&&|\|\||\||&|\(|\)|`|\$\(|\n|<|>/);
