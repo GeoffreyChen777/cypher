@@ -311,11 +311,13 @@ interface Variables {
   aliases?: Map<string, string>;
   /** Variables set to a value known only when it runs whose place is known (`t=$(mktemp -d)`): their glob (round 5). */
   patterns: Map<string, string>;
+  /** Inside a function's body: the call's words as `$1`…, undefined for one known only when it runs (final pass). */
+  positional?: (string | undefined)[];
 }
 
 /** A copy of the variables for a shell, loop iteration or call of its own; functions and the budget are shared. */
 function forkVariables(vars: Variables, values = new Map(vars.values)): Variables {
-  return { values, poisoned: vars.poisoned, expanded: vars.expanded, functions: vars.functions, calling: vars.calling, budget: vars.budget, depth: vars.depth, aliases: vars.aliases, patterns: new Map(vars.patterns) };
+  return { values, poisoned: vars.poisoned, expanded: vars.expanded, functions: vars.functions, calling: vars.calling, budget: vars.budget, depth: vars.depth, aliases: vars.aliases, patterns: new Map(vars.patterns), ...(vars.positional ? { positional: vars.positional } : {}) };
 }
 
 /**
@@ -516,12 +518,15 @@ function read(
    * whether the call is surely the function (else the program of that name
    * may run instead).
    */
-  const call = (name: string, loop: boolean): boolean => {
+  const call = (name: string, loop: boolean, args: readonly string[] = []): boolean => {
     const fn = vars.functions.get(name)!;
     // The same body again (not the same name: a body may redefine its own function) is recursion.
     if (vars.calling.includes(fn.body) || vars.calling.length >= 8) throw new Opaque("a recursive function");
     const inner = forkVariables(vars);
     inner.calling = [...vars.calling, fn.body];
+    // The call's words are the body's positional parameters (final pass): `$1`…`$9`, `$@`/`$*` joined; one known only
+    // when it runs stays unknown, and so do the ones past what the call gave.
+    inner.positional = args.map((arg) => (arg === UNKNOWN ? undefined : arg));
     const commands: SimpleCommand[] = [];
     read(fn.body, home, options, commands, nested, inner, subshells, subshell);
     if (!spend(commands.length)) throw new Opaque("a function too long to follow");
@@ -856,7 +861,7 @@ function read(
     }
     // A call of a function the line defined runs its body; the call's redirections stay its own.
     const fn = evaluate && words.length > 0 && words[0] !== UNKNOWN && vars.functions.has(words[0]);
-    const programRuns = !fn || !call(words[0], loop);
+    const programRuns = !fn || !call(words[0], loop, words.slice(1));
     let pushed: SimpleCommand | undefined;
     if ((programRuns && words.length) || reads.length || writes.length) {
       pushed = {
@@ -891,8 +896,9 @@ function read(
         const text = literalOutput(previous.words);
         if (text !== undefined) runScript(pushed, text);
       }
-      // `bash -c '…'` (through wrappers that only run it): a literal script is read as the shell's commands.
-      const script = pushed && programRuns ? dashC(pushed.words, options) : undefined;
+      // `bash -c '…'` (through wrappers that only run it): a literal script is read as the shell's commands; so is the
+      // text another program hands a shell (`INLINE_SCRIPTS`: `eval WORDS`, `watch CMD`, `env -S 'CMD'`; final pass).
+      const script = pushed && programRuns ? (dashC(pushed.words, options) ?? (nested && pushed.words[0] === "eval" ? undefined : inlineScript(pushed.words))) : undefined;
       if (script !== undefined && pushed) runScript(pushed, script);
     }
     hereString = undefined;
@@ -1053,6 +1059,17 @@ function read(
       }
       inWord = true;
       return j;
+    }
+    // A function's positional parameter, bound by its call (`call`): its word, when known.
+    if (next !== undefined && /[1-9@*]/.test(next) && vars.positional && !vars.poisoned) {
+      const values = vars.positional;
+      // `$@`/`$*` are one word only when the call gave one (several would be several words: left unknown, as before).
+      const value = /[1-9]/.test(next) ? values[Number(next) - 1] : values.length === 1 ? values[0] : undefined;
+      if (value !== undefined && (inQuotes || (value !== "" && !/[\s*?[\]]/.test(value)))) {
+        expand(value);
+        inWord = true;
+        return i + 1;
+      }
     }
     if (next !== undefined && /[0-9@*#?$!-]/.test(next)) {
       becomesUnknown();
@@ -1396,6 +1413,47 @@ const RUNS_NEXT: Readonly<Record<string, { duration?: boolean }>> = { env: {}, n
  * the shell, and the assignments in front of it change nothing about how
  * programs run (`prefixAllowed`). Undefined otherwise.
  */
+/**
+ * Programs that hand their words to a shell as one script (final pass, data): `eval WORDS` (the shell itself),
+ * `watch [options] CMD…` (runs `sh -c` with the words joined; not `-x`, which execs them), `env -S 'CMD'` /
+ * `--split-string` (splits the string into the command). Each reads the words after its options; known words only.
+ */
+const INLINE_SCRIPTS: Readonly<Record<string, { values: ReadonlySet<string>; flags: RegExp; refuses?: RegExp; split?: RegExp }>> = {
+  eval: { values: new Set(), flags: /^$/ },
+  watch: { values: new Set(["-n", "--interval", "-d", "--differences", "-q", "--equexit", "--color", "-c"]), flags: /^-[a-zA-Z]+\d*$|^--[a-z-]+(=.*)?$/, refuses: /^(-x|--exec)$/ },
+  env: { values: new Set(["-u", "--unset", "-C", "--chdir"]), flags: /^-[a-zA-Z]+$|^--[a-z-]+(=.*)?$/, split: /^(-S|--split-string)(=?)(.*)$/ },
+};
+
+function inlineScript(words: readonly string[]): string | undefined {
+  const name = (words[0] ?? "").replace(/^.*\//, "");
+  const row = INLINE_SCRIPTS[name];
+  if (!row || words.length < 2 || words.includes(UNKNOWN)) return undefined;
+  let i = 1;
+  if (row.split) {
+    // `env -S 'CMD ARGS'` (or `-SCMD`, `--split-string=CMD`): the string is the command line.
+    for (; i < words.length; i++) {
+      const split = row.split.exec(words[i]);
+      if (split) return [split[3] || words[i + 1] || "", ...words.slice(split[3] ? i + 1 : i + 2)].join(" ").trim() || undefined;
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) continue;
+      if (!words[i].startsWith("-")) return undefined;
+      if (row.values.has(words[i])) i++;
+    }
+    return undefined;
+  }
+  for (; i < words.length; i++) {
+    const word = words[i];
+    if (row.refuses?.test(word)) return undefined;
+    if (word === "--") {
+      i++;
+      break;
+    }
+    if (!row.flags.test(word) || word === "") break;
+    if (row.values.has(word)) i++;
+  }
+  const text = words.slice(i).join(" ").trim();
+  return text || undefined;
+}
+
 function dashC(words: readonly string[], options: ParseOptions): string | undefined {
   let i = 0;
   for (let guard = 0; guard < 8; guard++) {

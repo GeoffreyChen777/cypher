@@ -2548,13 +2548,8 @@ export function assessOpaque(line: string, facts: RiskFacts, remote = false, cwd
   // Its words with `$` are unknown: look for the installed app in its text
   // instead. Only a line that writes where it names it is dangerous; one
   // that reads it is local work like any other read.
-  const home = facts.installedApp ? facts.classify("~", undefined)?.path : undefined;
-  const installed = installedMention(line, facts, home);
-  if (installed && mentionWrites(home === undefined ? line : line.split(home).join("~"), installed)) {
-    const kind = `changes the installed Cypher app or its data (${installed})`;
-    return { tier: "danger", kind, key: "installed Cypher app" };
-  }
-  // The permission system named anywhere in it (`~`, `$HOME`, a glob under it), where the line writes: the floor.
+  // The permission system named anywhere in it (`~`, `$HOME`, a glob under it), where the line writes: the floor. Checked
+  // before the installed app (final pass): the permission system lives inside `~/.cypher`, and a floor finding comes first.
   const self = facts.classify("~", undefined)?.path;
   if (!remote && facts.permissionSystem && self !== undefined) {
     for (const match of line.matchAll(SYSTEM_FILE)) {
@@ -2564,6 +2559,12 @@ export function assessOpaque(line: string, facts: RiskFacts, remote = false, cwd
       const could = classification && (facts.permissionSystem(classification.path) || (glob && facts.couldBe?.(escapeGlob(classification.path), undefined, { subtree: true }).permissionSystem));
       if (could && mentionWrites(line, match[0])) return { tier: "danger", kind: `changes the permission system itself (${match[0]})`, key: "permission-system", floor: true };
     }
+  }
+  const home = facts.installedApp ? facts.classify("~", undefined)?.path : undefined;
+  const installed = installedMention(line, facts, home);
+  if (installed && mentionWrites(home === undefined ? line : line.split(home).join("~"), installed)) {
+    const kind = `changes the installed Cypher app or its data (${installed})`;
+    return { tier: "danger", kind, key: "installed Cypher app" };
   }
   const segments: string[][] = [];
   const pieces = line.split(/;|&&|\|\||\||&|\(|\)|`|\$\(|\n|<|>/);
