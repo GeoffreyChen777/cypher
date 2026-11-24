@@ -58,6 +58,8 @@ write(join(workspace, "config", ".env.local"), "SECRET=2");
 write(join(workspace, ".git", "config"), "[core]");
 // A real repository: git commands outside the sandbox trust only the chat's own (or one the sandbox can't write).
 spawnSync("git", ["init", "-q", workspace]);
+// The project ignores its secrets, as projects do (a publish then sends none: iteration 2's publish check).
+write(join(workspace, ".gitignore"), ".env\n.env.*\n!.env.example\n");
 write(join(other, "notes.md"), "notes");
 const agentDir = join(home, ".cypher", "pi-runtime", "agent");
 
@@ -1203,6 +1205,8 @@ test("escalation: the model decides a danger (once, never remembered), with the 
     assert.deepEqual(declined.asked[0].options, ["Allow for this task", "Deny", "Deny and stop"]);
 
     // Publishing, sending, installing, deploying, other processes: the model's.
+    // The repository ignores its .env (a publish of a folder whose secret no ignore rule excludes is row 1: iteration 2).
+    writeFileSync(join(repo, ".gitignore"), ".env\n");
     const review = (command) => permissions.assess(command, repo).assessments.every((assessment) => assessment.floor !== true) && permissions.assess(command, repo).floor !== true;
     for (const command of [
       "git push origin main",
