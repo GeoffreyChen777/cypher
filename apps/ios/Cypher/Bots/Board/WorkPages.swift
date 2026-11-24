@@ -3,6 +3,9 @@
 // once: how it stands (its times on a tap) and its title; the result once
 // it ended; then the steps on one rail (each step's state, duration and
 // what it reported). A plan still to approve also quotes what was asked.
+// A long plan's row holds previews; the page reads the full text from the
+// workspace chat doc (PlanText.swift) and, until it is here, shows the
+// preview with a quiet "Loading the full plan…" under the cut text.
 // Approve / Edit / Reject while it waits and Stop while it runs sit at the
 // foot, in reach; Delete and its coordinator (read-only) in the bar.
 
@@ -69,10 +72,13 @@ struct WorkItemPage: View {
     @State private var confirmStop = false
     @State private var confirmDelete = false
     @State private var copied = false
+    /// The workspace chat's store, while the page reads its plan bodies.
+    @State private var bodyStore: SessionStore?
 
     var body: some View {
         if let work = model.data?.work(id: workId) {
             page(work)
+                .task(id: BodyWatch(work)) { await watchBodies(BodyWatch(work)) }
         } else {
             BotEmptyState(
                 symbol: "list.bullet.indent", title: "Work gone", hint: "It was deleted on another device.")
@@ -90,12 +96,51 @@ struct WorkItemPage: View {
         }
     }
 
+    /// What the page needs of the workspace chat: its plan bodies, while it
+    /// shows a text the row had to cut.
+    private struct BodyWatch: Hashable {
+        var chatId: String
+        var wanted: Bool
+
+        init(_ work: BotWork) {
+            chatId = work.chatId
+            wanted =
+                (work.bodyRev != nil && WorkFlow.showsPlan(work.phase))
+                || (work.resultRev != nil && work.phase.ended)
+        }
+    }
+
+    /// Keep the workspace chat's store warm and its entry for this work read
+    /// while the page shows (until the task is cancelled).
+    private func watchBodies(_ watch: BodyWatch) async {
+        guard watch.wanted, let chat = model.chat(id: watch.chatId),
+            let store = model.planBodyStore(for: chat)
+        else { return }
+        model.sessionOnScreen(chat.id)
+        store.watchPlanBody(workId)
+        bodyStore = store
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(3_600))
+        }
+        store.unwatchPlanBody(workId)
+        model.sessionOffScreen(chat.id)
+        model.releaseSessionStore(chatId: chat.id)
+    }
+
     private func page(_ work: BotWork) -> some View {
         let phase = work.phase
         let bot = model.bot(id: work.botId)
         let threadListed = work.threadChatId.flatMap { model.chat(id: $0) } != nil
         let shared = work.commonProject.flatMap(spaceRow)
-        let result = phase.ended ? nonEmpty(work.result) : nil
+        let text = PlanText.of(work, bodyStore?.planBodies[work.id])
+        let result = phase.ended ? nonEmpty(text.result) : nil
+        let showsRequest = phase.awaiting && work.showsRequest
+        // "Loading the full plan…" goes under each text shown cut: they can
+        // be screens apart.
+        let requestCut = showsRequest && text.plan.isPreview && Self.isCut(text.instruction)
+        let stepsCut =
+            text.plan.isPreview && WorkFlow.showsPlan(phase)
+            ? Set(text.details.indices.filter { Self.isCut(text.details[$0]) }) : []
         return BotPageList(title: "Work") {
             // How it stands (its times on a tap), its title, and the one
             // project every step works in. Counts and times are not
@@ -118,17 +163,23 @@ struct WorkItemPage: View {
             .groupedRowStyle()
             // What was asked, while the plan is still to judge against it;
             // after that the title stands for it.
-            if phase.awaiting, work.showsRequest {
+            if showsRequest {
                 Section {
-                    BotQuote(text: work.instruction, cacheKey: "work-request-\(work.id)")
+                    VStack(alignment: .leading, spacing: 2) {
+                        BotQuote(text: text.instruction, cacheKey: "work-request-\(work.id)")
+                        if requestCut { PlanLoadingLine(part: .plan) }
+                    }
                 }
                 .groupedRowStyle()
             }
             // What it produced comes before how it got there.
             if let result {
                 Section {
-                    BotMarkdown(text: result, cacheKey: "work-result-\(work.id)")
-                        .padding(.vertical, 4)
+                    VStack(alignment: .leading, spacing: 2) {
+                        BotMarkdown(text: result, cacheKey: "work-result-\(work.id)")
+                            .padding(.vertical, 4)
+                        if text.resultSource.isPreview { PlanLoadingLine(part: .result) }
+                    }
                 } header: {
                     ListSectionHeader(title: "Result") {
                         Button {
@@ -158,7 +209,7 @@ struct WorkItemPage: View {
                             .foregroundStyle(Theme.textMuted)
                             .padding(.vertical, 4)
                     }
-                    WorkFlow(work: work, shared: shared != nil)
+                    WorkFlow(work: work, shared: shared != nil, details: text.details, loadingSteps: stepsCut)
                         .padding(.vertical, 6)
                 } header: {
                     // A heading only where a result stands above the steps.
@@ -239,6 +290,11 @@ struct WorkItemPage: View {
         .botActionAlert(actions)
     }
 
+    /// A preview the host cut ends in an ellipsis (bot_records.rs `clip`).
+    private static func isCut(_ text: String?) -> Bool {
+        text?.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("…") ?? false
+    }
+
     private func nonEmpty(_ text: String?) -> String? {
         text.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
     }
@@ -262,6 +318,11 @@ struct WorkFlow: View {
     let work: BotWork
     /// The page's head already names the one project.
     var shared = false
+    /// Each step's planned detail as the page shows it (`PlanText`: the full
+    /// text once its body is here); nil reads the row's.
+    var details: [String?]?
+    /// Steps whose cut detail says the full plan is still loading.
+    var loadingSteps: Set<Int> = []
     /// Steps the owner opened or closed; the rest follow their state.
     @State private var opened: [Int: Bool] = [:]
 
@@ -272,8 +333,14 @@ struct WorkFlow: View {
         numbered || [.running, .asking, .failed].contains(state)
     }
 
+    /// Whether the steps show their planned details (numbered) rather than
+    /// what they reported.
+    static func showsPlan(_ phase: PlanPhase) -> Bool {
+        [PlanPhase.awaiting, .starting, .cancelling, .cancelled].contains(phase)
+    }
+
     var body: some View {
-        let numbered = [PlanPhase.awaiting, .starting, .cancelling, .cancelled].contains(work.phase)
+        let numbered = Self.showsPlan(work.phase)
         let last = work.steps.count - 1
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(work.steps.enumerated()), id: \.offset) { ix, step in
@@ -323,7 +390,8 @@ struct WorkFlow: View {
     @ViewBuilder
     private func stepContent(_ ix: Int, _ step: WorkStep, numbered: Bool) -> some View {
         let space = shared ? nil : step.project.flatMap { id in model.spaces.first { $0.id == id } }
-        let said = (numbered ? step.detail : step.note).flatMap {
+        let planned = details.map { $0.indices.contains(ix) ? $0[ix] : nil } ?? step.detail
+        let said = (numbered ? planned : step.note).flatMap {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
         }
         // While it waits, what its sessions run on, when the plan chose it.
@@ -383,7 +451,17 @@ struct WorkFlow: View {
             )
             .accessibilityIdentifier("work-step-\(ix)")
             if isOpen {
-                if let detail {
+                if numbered, loadingSteps.contains(ix), let said {
+                    // The loading line right under the cut text, before
+                    // what its sessions run on.
+                    BotMarkdown(text: said, cacheKey: "work-step-\(work.id)-\(ix)")
+                        .foregroundStyle(Theme.textMuted)
+                    PlanLoadingLine(part: .plan)
+                    if let runs {
+                        BotMarkdown(text: runs, cacheKey: "work-step-\(work.id)-\(ix)-runs")
+                            .foregroundStyle(Theme.textMuted)
+                    }
+                } else if let detail {
                     BotMarkdown(text: detail, cacheKey: "work-step-\(work.id)-\(ix)")
                         .foregroundStyle(step.state == .asking ? Theme.warning : Theme.textMuted)
                 }
@@ -433,5 +511,19 @@ struct WorkFlow: View {
                 .font(Theme.sans(13, relativeTo: .subheadline))
                 .foregroundStyle(Theme.textFaint)
         }
+    }
+}
+
+/// The quiet line under a preview whose full text is still on its way
+/// (plan-body.md §5): the owner may still decide on the preview (D5).
+struct PlanLoadingLine: View {
+    enum Part { case plan, result }
+    let part: Part
+
+    var body: some View {
+        Text(part == .plan ? "Loading the full plan…" : "Loading the full result…")
+            .font(Theme.sans(13, relativeTo: .subheadline))
+            .foregroundStyle(Theme.textFaint)
+            .accessibilityIdentifier(part == .plan ? "work-plan-loading" : "work-result-loading")
     }
 }

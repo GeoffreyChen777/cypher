@@ -122,8 +122,9 @@ impl Bots {
                     created_at: existing.as_ref().map_or(now, |s| s.created_at),
                     updated_at: now,
                 };
-                shortcut.clamp();
+                // Before the clamp: a request over its cap is refused, not cut.
                 shortcut.validate().map_err(EngineError::Other)?;
+                shortcut.clamp();
                 workspace.put_record(
                     p::KIND_BOT_SHORTCUTS,
                     &shortcut.id,

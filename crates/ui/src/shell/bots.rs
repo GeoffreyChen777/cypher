@@ -134,6 +134,11 @@ pub(super) struct BoardUi {
     /// id, step index); the rest follow their state. Local to this window
     /// like the cards' folds.
     work_open: std::collections::HashMap<(String, usize), bool>,
+    /// The full text of the plan the work page shows, when its row was cut
+    /// to previews (docs/design/plan-body.md §5): the watch on its
+    /// workspace chat's `planBodies` entry. Dropped when the panel shows
+    /// another item.
+    plan_body: Option<work::PlanBodyWatch>,
     /// The Copy button just pressed (its key), and the task that turns its
     /// check back into Copy.
     copied: Option<String>,

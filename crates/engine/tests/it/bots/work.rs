@@ -834,10 +834,13 @@ async fn however_a_plan_ends_its_open_steps_end_with_it() {
         .tool(
             &thread,
             "finish_work",
-            serde_json::json!({ "outcome": "failed", "result": "r".repeat(2_001) }),
+            serde_json::json!({ "outcome": "failed", "result": "r".repeat(30_001) }),
         )
         .await;
-    assert!(long.contains("has 2001 characters"), "{long}");
+    assert!(
+        long.contains("has 30001 characters, 1 over the 30000 it holds"),
+        "{long}"
+    );
     assert!(long.contains("Nothing is cut"), "{long}");
     assert_eq!(rig.work(&failed).state, WorkState::Running, "refused");
     let finished = rig
@@ -937,25 +940,27 @@ async fn a_plan_is_refused_rather_than_cut() {
             serde_json::json!({ "title": "Long plan", "steps": steps }),
         )
     };
-    // The details share one budget, whether one step uses it or several.
+    // The details share one budget, whether one step uses it or several,
+    // and the refusal says by how much it is over.
     let long_step = propose(serde_json::json!([
-        { "title": "a", "project": "sp-billing", "detail": "d".repeat(4_001) },
+        { "title": "a", "project": "sp-billing", "detail": "d".repeat(30_001) },
     ]))
     .await;
     assert!(
-        long_step.contains("add up to 4001 characters; a plan holds at most 4000"),
+        long_step.contains("add up to 30001 characters, 1 over the 30000 a plan holds in all"),
         "{long_step}"
     );
     let long_plan = propose(serde_json::json!([
-        { "title": "a", "detail": "d".repeat(1_500) },
-        { "title": "b", "detail": "d".repeat(1_500) },
-        { "title": "c", "detail": "d".repeat(1_001) },
+        { "title": "a", "detail": "d".repeat(10_000) },
+        { "title": "b", "detail": "d".repeat(10_000) },
+        { "title": "c", "detail": "d".repeat(10_250) },
     ]))
     .await;
     assert!(
-        long_plan.contains("add up to 4001 characters; a plan holds at most 4000"),
+        long_plan.contains("add up to 30250 characters, 250 over the 30000"),
         "{long_plan}"
     );
+    assert!(long_plan.contains("Nothing is cut for you"), "{long_plan}");
     let long_title = propose(serde_json::json!([{ "title": "t".repeat(161) }])).await;
     assert!(
         long_title.contains("Step 1's title has 161"),
@@ -964,6 +969,10 @@ async fn a_plan_is_refused_rather_than_cut() {
     assert!(
         rig.core.workspace.read_bot_records().work.is_empty(),
         "a refused plan writes nothing"
+    );
+    assert!(
+        plan_bodies(&rig, &bot.chat_id).is_empty(),
+        "nor any full text"
     );
     // A refusal is flagged, so the extension answers it as an error result
     // (and the chat draws no plan card for it); an answer is not.
@@ -997,9 +1006,9 @@ async fn a_plan_is_refused_rather_than_cut() {
         .doc_host
         .open(&bot.chat_id)
         .unwrap()
-        .write_user_message("m-long", &"词".repeat(1_600), 1_000)
+        .write_user_message("m-long", &"词".repeat(30_050), 1_000)
         .unwrap();
-    let detail = format!("{}END", "设".repeat(3_997));
+    let detail = format!("{}END", "设".repeat(29_997));
     let kept = raw(serde_json::json!([
         { "title": "a", "project": "sp-billing", "detail": detail },
     ]))
@@ -1013,7 +1022,7 @@ async fn a_plan_is_refused_rather_than_cut() {
     // The owner's own message can't be refused; the model is told it was cut.
     assert!(
         kept.contains(
-            "has 1600 characters and the background session is given only its first 1500"
+            "has 30050 characters and the background session is given only its first 30000"
         ),
         "{kept}"
     );
@@ -1025,7 +1034,15 @@ async fn a_plan_is_refused_rather_than_cut() {
         .into_iter()
         .next()
         .expect("the plan");
-    assert_eq!(work.steps[0].detail.as_deref(), Some(detail.as_str()));
+    // The row holds a preview; the chat doc the whole detail.
+    assert!(work.body_rev.is_some());
+    assert_ne!(work.steps[0].detail.as_deref(), Some(detail.as_str()));
+    let body = plan_bodies(&rig, &bot.chat_id)
+        .remove(&work.id)
+        .and_then(|body| body.plan)
+        .expect("the plan's body");
+    assert_eq!(body.details["1"], detail);
+    assert_eq!(body.instruction.chars().count(), p::INSTRUCTION_BODY_MAX);
     let thread = rig.approve(&work.id).await;
     let (request, _) = wait_for_some("the brief run", || {
         rig.run_of("Carry out this approved plan")
@@ -1035,7 +1052,7 @@ async fn a_plan_is_refused_rather_than_cut() {
     assert!(
         request
             .prompt
-            .contains("only its first 1500 characters, the rest was cut"),
+            .contains("only its first 30000 characters, the rest was cut"),
         "{}",
         request.prompt
     );
@@ -2046,4 +2063,380 @@ fn words_of_opt(rig: &Rig, chat: &str, prompt: &str) -> Option<serde_json::Value
         .iter()
         .any(|(c, p, _)| c == chat && p == prompt);
     found.then(|| words_of(rig, chat, prompt)).flatten()
+}
+
+// ── plan bodies (docs/design/plan-body.md) ─────────────────────────────────
+
+/// Every `planBodies` entry in `chat`'s doc, by work id.
+fn plan_bodies(rig: &Rig, chat: &str) -> std::collections::BTreeMap<String, p::WorkBodies> {
+    rig.core.doc_host.open(chat).unwrap().doc().plan_bodies()
+}
+
+/// The two details of [`propose_long`]: about 20,000 characters, far over
+/// what a row holds.
+fn long_details() -> [String; 2] {
+    [
+        format!("{}END-1", "设".repeat(12_000)),
+        format!("{}END-2", "detail ".repeat(1_150)),
+    ]
+}
+
+/// The owner's message, then a plan with [`long_details`]; its work id.
+async fn propose_long(rig: &Rig, bot: &Bot, title: &str) -> String {
+    rig.core
+        .doc_host
+        .open(&bot.chat_id)
+        .unwrap()
+        .write_user_message(&format!("m-{title}"), "Rewrite the billing exports", 1_000)
+        .unwrap();
+    let [one, two] = long_details();
+    let text = rig
+        .tool(
+            &bot.chat_id,
+            "propose_plan",
+            serde_json::json!({
+                "title": title,
+                "steps": [
+                    { "title": "Rewrite", "project": "sp-billing", "detail": one },
+                    { "title": "Check", "project": "sp-billing", "detail": two },
+                ],
+            }),
+        )
+        .await;
+    assert!(text.contains("waiting for your owner's approval"), "{text}");
+    rig.core
+        .workspace
+        .read_bot_records()
+        .work
+        .into_iter()
+        .find(|w| w.title == title)
+        .expect("a work row")
+        .id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_plan_keeps_its_full_text_in_the_workspace_chat() {
+    let rig = rig(false);
+    let bot = rig.bot(coordinate()).await;
+    let work_id = propose_long(&rig, &bot, "Long").await;
+    let [one, two] = long_details();
+
+    // The row is the index: previews within today's caps, and the rev of
+    // the full text, which is in the workspace chat's doc.
+    let work = rig.work(&work_id);
+    let rev = work.body_rev.clone().expect("a bodyRev");
+    assert!(work.details_len() <= p::PLAN_DETAILS_MAX);
+    assert!(work.steps[0].detail.as_deref().unwrap().ends_with('…'));
+    assert_eq!(work.instruction, "Rewrite the billing exports");
+    let bodies = plan_bodies(&rig, &bot.chat_id);
+    let body = bodies[&work_id].plan.clone().expect("the plan's body");
+    assert_eq!(body.rev, rev);
+    assert!(body.is_intact());
+    assert_eq!(body.details["1"], one);
+    assert_eq!(body.details["2"], two);
+    assert_eq!(body.instruction, "Rewrite the billing exports");
+    assert_eq!(bodies[&work_id].result, None);
+    let read = p::PlanText::of(&work, bodies.get(&work_id));
+    assert_eq!(read.plan, p::TextSource::Body);
+
+    // get_work and the brief read the body; list_work the row.
+    let got = rig
+        .tool(
+            &bot.chat_id,
+            "get_work",
+            serde_json::json!({ "work_id": work_id }),
+        )
+        .await;
+    assert!(
+        got.contains(&format!("   detail: {one}")),
+        "the whole detail"
+    );
+    assert!(got.contains(&format!("   detail: {two}")));
+    assert!(!got.contains("missing on this device"), "{got}");
+    let listed = rig
+        .tool(&bot.chat_id, "list_work", serde_json::json!({}))
+        .await;
+    assert!(
+        listed.contains(&work_id) && listed.len() < 1_000,
+        "{listed}"
+    );
+
+    let thread = rig.approve(&work_id).await;
+    let (request, _) = wait_for_some("the brief run", || {
+        rig.run_of("Carry out this approved plan")
+    })
+    .await;
+    assert!(request.prompt.contains("1. Rewrite — in sp-billing"));
+    assert!(
+        request.prompt.contains(&format!("   {one}\n")),
+        "detail 1 whole"
+    );
+    assert!(
+        request.prompt.contains(&format!("   {two}\n")),
+        "detail 2 whole"
+    );
+    assert!(
+        request
+            .prompt
+            .contains("\"\"\"\nRewrite the billing exports\n\"\"\"")
+    );
+    assert!(!request.prompt.contains('…'), "no preview in the brief");
+
+    // A long result: refused over its cap, kept whole under it.
+    let result = format!("Rewrote the exports. {}END", "结".repeat(8_000));
+    let finished = rig
+        .tool(
+            &thread,
+            "finish_work",
+            serde_json::json!({ "outcome": "done", "result": result }),
+        )
+        .await;
+    assert!(finished.starts_with("Recorded."), "{finished}");
+    let work = rig.work(&work_id);
+    assert_eq!(work.state, WorkState::Done);
+    let result_rev = work.result_rev.clone().expect("a resultRev");
+    let preview = work.result.clone().expect("a preview");
+    assert!(preview.chars().count() <= p::RESULT_MAX && preview.ends_with('…'));
+    let stored = plan_bodies(&rig, &bot.chat_id)[&work_id].clone();
+    let stored_result = stored.result.expect("the result's body");
+    assert_eq!(stored_result.rev, result_rev);
+    assert_eq!(stored_result.text, result);
+    assert_eq!(stored.plan, Some(body), "the plan's body is untouched");
+    let got = rig
+        .tool(
+            &bot.chat_id,
+            "get_work",
+            serde_json::json!({ "work_id": work_id }),
+        )
+        .await;
+    assert!(
+        got.contains(&format!("Result:\n{result}")),
+        "the whole result"
+    );
+
+    // The notice's post holds the whole result; the agent's turn a clip that
+    // says where the rest is.
+    let post_id = p::work_post_id(&work_id);
+    let event_id = format!("{}{post_id}", p::BOT_EVENT_PREFIX);
+    wait_for(
+        || {
+            support::entries(&rig.core, &bot.chat_id)
+                .iter()
+                .any(|e| e.id == event_id)
+        },
+        "the plan's notice",
+    )
+    .await;
+    let entries = support::entries(&rig.core, &bot.chat_id);
+    let post = entries.iter().find(|e| e.id == post_id).expect("the post");
+    assert!(
+        matches!(&post.parts[..], [MessagePart::Post { text, .. }] if *text == result),
+        "the post is the whole result"
+    );
+    let told = || {
+        rig.runs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(r, _)| r.prompt.clone())
+            .find(|prompt| prompt.contains("[Plan \"Long\" finished]"))
+    };
+    let told = wait_for_some("the agent's turn", told).await;
+    assert!(
+        told.contains(&format!(
+            "characters are shown here; get_work with work_id {work_id} shows all of it."
+        )),
+        "{told}"
+    );
+    assert!(!told.contains("结END"), "the turn's copy is cut");
+    rig.core.sessions.interrupt(&thread).await.unwrap();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plan_that_fits_its_row_writes_no_body() {
+    let rig = rig(false);
+    let bot = rig.bot(coordinate()).await;
+    let work_id = rig.propose(&bot, "Short").await;
+    let work = rig.work(&work_id);
+    assert_eq!(work.body_rev, None);
+    assert_eq!(work.steps[0].detail.as_deref(), Some("in a worktree"));
+    let thread = rig.approve(&work_id).await;
+    let finished = rig
+        .tool(
+            &thread,
+            "finish_work",
+            serde_json::json!({ "outcome": "done", "result": "r".repeat(p::RESULT_MAX) }),
+        )
+        .await;
+    assert!(finished.starts_with("Recorded."), "{finished}");
+    let work = rig.work(&work_id);
+    assert_eq!(work.result_rev, None, "a result that fits is the row's");
+    assert_eq!(
+        work.result.as_deref(),
+        Some("r".repeat(p::RESULT_MAX).as_str())
+    );
+    assert!(
+        plan_bodies(&rig, &bot.chat_id).is_empty(),
+        "nothing in the chat doc"
+    );
+    rig.core.sessions.interrupt(&thread).await.unwrap();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plan_without_its_full_text_never_runs() {
+    let rig = rig(false);
+    let bot = rig
+        .bot(serde_json::json!({
+            "workDirectly": false, "coordinate": true,
+        }))
+        .await;
+    // Three ways a body can fail the host's check: gone, another plan's
+    // (another rev) and edited under its rev.
+    let missing = propose_long(&rig, &bot, "Missing").await;
+    let other = propose_long(&rig, &bot, "Other").await;
+    let edited = propose_long(&rig, &bot, "Edited").await;
+    let handle = rig.core.doc_host.open(&bot.chat_id).unwrap();
+    assert!(handle.doc().delete_plan_body(&missing).unwrap());
+    let replaced = p::PlanBody::new("Something else".into(), Default::default(), 1);
+    handle.doc().put_plan_body(&other, &replaced).unwrap();
+    let mut forged = plan_bodies(&rig, &bot.chat_id)[&edited]
+        .plan
+        .clone()
+        .unwrap();
+    forged.instruction = "Delete the billing exports".into();
+    assert_eq!(Some(&forged.rev), rig.work(&edited).body_rev.as_ref());
+    handle.doc().put_plan_body(&edited, &forged).unwrap();
+
+    for id in [&missing, &other, &edited] {
+        rig.mutate(serde_json::json!({ "op": "resolveBotPlan", "workId": id, "approve": true }))
+            .await;
+    }
+    for id in [&missing, &other, &edited] {
+        wait_for(
+            || rig.work(id).state == WorkState::Failed,
+            "the plan to fail",
+        )
+        .await;
+        let work = rig.work(id);
+        assert!(
+            work.result
+                .as_deref()
+                .is_some_and(|r| r.starts_with("Its full text is missing on its host")),
+            "{:?}",
+            work.result
+        );
+        assert_eq!(work.thread_chat_id, None, "no thread was made");
+        assert!(work.ended_at.is_some());
+    }
+    assert!(
+        rig.run_of("Carry out this approved plan").is_none(),
+        "nothing ran on the previews"
+    );
+    assert!(rig.activity(&bot).contains(&ActivityKind::WorkFailed));
+    // The workspace's chat hears that it failed.
+    let post_id = p::work_post_id(&missing);
+    wait_for(
+        || {
+            support::entries(&rig.core, &bot.chat_id)
+                .iter()
+                .any(|e| e.id == post_id)
+        },
+        "the failure's notice",
+    )
+    .await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bodies_without_rows_are_cleaned_after_the_hour() {
+    let rig = rig(false);
+    let bot = rig.bot(coordinate()).await;
+    let hour = 3_600_000;
+    let now = p::now_ms();
+
+    // A crash between the two writes: the body landed, its row never did.
+    let orphan = p::PlanBody::new("Never proposed".into(), Default::default(), now);
+    rig.core
+        .doc_host
+        .open(&bot.chat_id)
+        .unwrap()
+        .doc()
+        .put_plan_body("crashed", &orphan)
+        .unwrap();
+    // A plan with its row, and one deleted elsewhere (any owner device may
+    // delete a row; only the host cleans its body).
+    let kept = propose_long(&rig, &bot, "Kept").await;
+    let deleted = propose_long(&rig, &bot, "Deleted").await;
+    rig.mutate(serde_json::json!({ "op": "resolveBotPlan", "workId": deleted, "approve": false }))
+        .await;
+    wait_for(
+        || rig.work(&deleted).state == WorkState::Cancelled,
+        "the plan cancelled",
+    )
+    .await;
+    rig.mutate(serde_json::json!({ "op": "deleteBotWork", "workId": deleted }))
+        .await;
+    assert!(
+        rig.core
+            .workspace
+            .record::<BotWork>(p::KIND_BOT_WORK, &deleted)
+            .is_none()
+    );
+    let keys = |rig: &Rig| {
+        plan_bodies(rig, &bot.chat_id)
+            .into_keys()
+            .collect::<Vec<_>>()
+    };
+    let mut all = vec!["crashed".to_string(), kept.clone(), deleted.clone()];
+    all.sort();
+    assert_eq!(keys(&rig), all);
+
+    // Within the hour the window between the writes is respected.
+    assert_eq!(rig.core.bots.clean_plan_bodies(now + hour / 2), 0);
+    assert_eq!(keys(&rig), all);
+    // Past it, both orphans go; the body with a row stays, however old.
+    assert_eq!(rig.core.bots.clean_plan_bodies(now + 2 * hour), 2);
+    assert_eq!(keys(&rig), std::slice::from_ref(&kept));
+    assert_eq!(rig.core.bots.clean_plan_bodies(now + 100 * hour), 0);
+    assert!(rig.work(&kept).body_rev.is_some());
+
+    // Pruning takes a body with its row: one finished plan more than the
+    // host keeps, the oldest going first.
+    let handle = rig.core.doc_host.open(&bot.chat_id).unwrap();
+    let mut row = rig.work(&kept);
+    row.state = WorkState::Done;
+    row.thread_chat_id = None;
+    for i in 0..=p::KEEP_FINISHED_WORK {
+        let id = format!("old-{i}");
+        row.id = id.clone();
+        row.ended_at = Some(1_000 + i as i64);
+        let body = p::PlanBody::new(id.clone(), Default::default(), now);
+        row.body_rev = Some(body.rev.clone());
+        handle.doc().put_plan_body(&id, &body).unwrap();
+        rig.core
+            .workspace
+            .put_record(
+                p::KIND_BOT_WORK,
+                &id,
+                &row,
+                cypher_engine::RecordFields::All,
+            )
+            .unwrap();
+    }
+    wait_for(
+        || {
+            rig.core
+                .workspace
+                .record::<BotWork>(p::KIND_BOT_WORK, "old-0")
+                .is_none()
+        },
+        "the oldest plan pruned",
+    )
+    .await;
+    let left = plan_bodies(&rig, &bot.chat_id);
+    assert!(!left.contains_key("old-0"), "its body went with it");
+    assert!(left.contains_key("old-1") && left.contains_key(&kept));
+    rig.core.shutdown().await;
 }

@@ -34,6 +34,13 @@ extension AppModel {
         return store
     }
 
+    /// The workspace chat's store a work page reads plan bodies from
+    /// (docs/design/plan-body.md §5): warmed, without touching recency.
+    func planBodyStore(for chat: Chat) -> SessionStore? {
+        if let demo { return demo.sessionStore(for: chat.id) }
+        return warmSessionStore(for: chat)
+    }
+
     func releaseSessionStore(chatId: String) {
         trimSessionStores()
     }

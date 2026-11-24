@@ -14,6 +14,14 @@ pub(super) struct ChatParams {
     pub(super) chat_id: String,
 }
 
+/// `WatchPlanBody`: a work item's entry in its workspace chat's doc.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PlanBodyParams {
+    pub(super) chat_id: String,
+    pub(super) work_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ListModelsParams {

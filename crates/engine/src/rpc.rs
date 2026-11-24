@@ -790,6 +790,7 @@ impl RpcService for EngineRpc {
             methods::FAIL_UPLOADS => docs::fail_uploads(self, params),
             methods::WATCH_DOC_MESSAGES => docs::watch_doc_messages(self, params),
             methods::WATCH_DOC_COMMANDS => docs::watch_doc_commands(self, params),
+            methods::WATCH_PLAN_BODY => docs::watch_plan_body(self, params),
             methods::PROBE_SYNC => {
                 self.workspace.probe();
                 self.doc_host.probe_open_chats();

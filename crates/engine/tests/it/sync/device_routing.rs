@@ -217,6 +217,82 @@ async fn target_device_id_routes_over_the_relay() {
     core_b.shutdown().await;
 }
 
+/// `WatchPlanBody` forwards like `WatchDocMessages`: with `targetDeviceId`
+/// the work page reads the plan's body from that device's copy of the
+/// workspace chat, through the relay, and hears when its result lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plan_body_watch_forwards_over_the_relay() {
+    let (relay_url, _relay) = support::relay::fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let core_b = support::assemble_device(&dirs.path().join("b"), "device-b", registry());
+    let _host = core_b.start_host_relay(&relay_url);
+    let core_a = support::assemble_device(&dirs.path().join("a"), "device-a", registry());
+    let mut link_config =
+        LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
+    link_config.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(link_config));
+
+    // The body is on B only.
+    let handle_b = core_b.doc_host.open("ws-chat").expect("open chat on B");
+    let plan = cypher_proto::PlanBody::new(
+        "Rewrite the billing exports".into(),
+        [("1".to_string(), "设".repeat(9_000))].into(),
+        1_000,
+    );
+    handle_b.doc().put_plan_body("w1", &plan).unwrap();
+
+    let client = cypher_rpc::memory_client(core_a.rpc_service());
+    let params = serde_json::json!({
+        "chatId": "ws-chat", "workId": "w1", "targetDeviceId": "device-b",
+    });
+    // The host relay dials with backoff; retry until its session is up.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut stream = loop {
+        match client
+            .subscribe(methods::WATCH_PLAN_BODY, params.clone())
+            .await
+        {
+            Ok(stream) => break stream,
+            Err(err) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "relay never came up: {err}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    };
+    let frame = |item: Option<serde_json::Value>| -> cypher_proto::WorkBodies {
+        serde_json::from_value(item.expect("stream alive")).expect("a body frame")
+    };
+    let first = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+        .await
+        .expect("the body before timeout");
+    assert_eq!(frame(first).plan, Some(plan.clone()), "read from B's doc");
+
+    let result = cypher_proto::PlanResult::new("Done.".into(), 2_000);
+    handle_b.doc().put_plan_result("w1", &result).unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+        .await
+        .expect("the result before timeout");
+    let second = frame(second);
+    assert_eq!(second.plan, Some(plan));
+    assert_eq!(second.result, Some(result));
+    assert!(
+        core_a
+            .doc_host
+            .open("ws-chat")
+            .unwrap()
+            .doc()
+            .plan_bodies()
+            .is_empty(),
+        "A's own copy was never written"
+    );
+
+    core_a.shutdown().await;
+    core_b.shutdown().await;
+}
+
 /// Terminals are device-addressable — OpenTerminal/WriteTerminal forward as
 /// unary calls and SubscribeTerminal proxies its stream through the relay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

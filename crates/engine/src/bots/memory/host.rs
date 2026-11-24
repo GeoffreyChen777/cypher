@@ -783,6 +783,7 @@ impl Bots {
                 ),
                 what: "this routine just ran",
                 author: cypher_doc::command_author::ROUTINE,
+                whole: None,
             }),
             entry_id,
         };

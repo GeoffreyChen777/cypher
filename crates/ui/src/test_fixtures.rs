@@ -138,6 +138,8 @@ pub fn bot_work(id: &str, bot_id: &str) -> BotWork {
         time_added_minutes: None,
         warned_at: None,
         coordinator_choice: Default::default(),
+        body_rev: None,
+        result_rev: None,
     }
 }
 

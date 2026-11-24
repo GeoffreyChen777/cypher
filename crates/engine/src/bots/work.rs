@@ -10,8 +10,9 @@
 //! taint rule apply to them.
 //!
 //! The coordination tools are in [`coordinate`], the host loop that acts on
-//! plan decisions and Stop in [`host`], and the prompt sections and the
-//! orchestration brief in [`text`].
+//! plan decisions and Stop in [`host`], the prompt sections and the
+//! orchestration brief in [`text`], and a long plan's full text in the
+//! workspace chat doc in [`bodies`].
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -28,6 +29,7 @@ use crate::host::workspace_host::{Fields, WorkspaceHost};
 use crate::pi::runtime::PiRuntimePaths;
 use crate::util::{lock, new_id, off_runtime};
 
+mod bodies;
 mod coordinate;
 mod host;
 mod text;
@@ -519,7 +521,8 @@ impl Bots {
 
     /// Change one work row under the row lock and write the host's fields
     /// back; `None` when the row is gone. The owner's fields are never
-    /// written here.
+    /// written here. No doc I/O happens under the lock: a body is written
+    /// before, and its rev handed to `edit`.
     pub(super) fn edit_work<T>(
         &self,
         work_id: &str,
