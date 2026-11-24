@@ -18,8 +18,8 @@ import { CREATED_ENTRY, CreatedStore, creationsOf } from "./created.ts";
 import type { CreationFacts, CreationPlan } from "./created.ts";
 import type { CatalogueFacts } from "./catalogue.ts";
 import { genericDestroyer, targetsOf } from "./catalogue.ts";
-import { readTool } from "./tools.ts";
-import { entryCovers, Ledger, ledgerFile, taintFile } from "./ledger.ts";
+import { readTool, remoteEffect } from "./tools.ts";
+import { entryCovers, Ledger, ledgerFile, ledgerKind, taintFile } from "./ledger.ts";
 import type { LedgerEntity, LedgerEntry } from "./ledger.ts";
 import { Denials, denialsFile, forRecord } from "./denials.ts";
 import type { ActionClass, DenialRecord, DenialScope } from "./denials.ts";
@@ -46,7 +46,7 @@ import type { ExplicitClaim, ExplicitFacts, ExplicitResult, LineTargets, OwnerWo
 import { answeredByConsent, conversationContext, judgePrompt, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
 import type { Concern, JudgeEvidence, JudgeRequest } from "./judge.ts";
 import { floorOf } from "./floor.ts";
-import type { FloorHit } from "./floor.ts";
+import type { FloorHit, FloorSubject } from "./floor.ts";
 import { describeGrade, gradesOf, kindGrades } from "./grades.ts";
 import { isUnder, PathContext } from "./paths.ts";
 import type { Classification } from "./paths.ts";
@@ -56,9 +56,9 @@ import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs }
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
 import { benignEnv, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
-import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, lineFlow, normalRefspec, redirectRisk, secretName, secretWrites, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
+import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, lineFlow, normalRefspec, redirectRisk, runtimeWriteSets, secretName, secretWrites, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
 import type { PatternFinding } from "./risk.ts";
-import { resolvePattern, resolveText } from "./resolve.ts";
+import { globsIntersect, resolvePattern, resolveText } from "./resolve.ts";
 import { codeOf, INTERPRETERS as INTERPRETER_TABLE, interpreterOf, optionCommands, scanCode, shebangInterpreter } from "./code.ts";
 import type { Interpreter } from "./code.ts";
 import type { Assessment, GitFacts, KillTarget, ProcessFacts, RiskFacts, Tier } from "./risk.ts";
@@ -555,7 +555,33 @@ export interface PermissionsInit {
   scratch?: readonly string[];
   /** The owner's own words, as the engine passed them (`CYPHER_OWNER_WORDS`); undefined when it passed none. */
   ownerWords?: OwnerWords;
+  /**
+   * The task this chat belongs to (round 6, W3): a workspace's id for it and its threads, a plan's for its
+   * sessions (`CYPHER_TASK_ID`). Chats of one task are never each other's "other task".
+   */
+  taskId?: string;
 }
+
+/**
+ * Every way a request can be allowed (round 6, W1). Each goes through `Permissions.gate` before it allows:
+ * the owner's denials (denials.ts) and the floor's `before` rows (floor.ts) are consulted on all of them.
+ * A request with no matching denial and no floor row passes as before: no prompt, no judge call.
+ */
+export const ENTRY_POINTS = {
+  "file:policy": "a file tool's access the policy allows by default (a read in the project, a write in the workspace)",
+  "file:grant": "a file tool's access an earlier approval covers",
+  "file:rule": "a file tool's access a saved rule covers",
+  "request_permission": "paths asked for ahead that are already allowed",
+  "tool:setting": "an MCP or extension tool whose setting is allow",
+  "tool:approval": "an MCP or extension tool an earlier approval or rule covers",
+  "bash:outside": "a command a saved rule allows outside the sandbox, or one that only inspects",
+  "bash:sandbox": "a command that runs in the sandbox",
+  "bash:escalate": "a command run outside the sandbox on review",
+} as const;
+export type EntryPoint = keyof typeof ENTRY_POINTS;
+
+/** The file tools (the extension's own, and apply_patch) and the access each asks for. */
+export const FILE_TOOL_ACCESS: Readonly<Record<string, Capability>> = { read: "read", ls: "read", grep: "read", find: "read", write: "write", edit: "write", apply_patch: "write" };
 
 function gitRoots(cwd: string): { top?: string; gitDirs: string[]; gitDir?: string; common?: string } {
   try {
@@ -628,6 +654,10 @@ export class Permissions {
   readonly created: CreatedStore;
   /** The owner's Deny clicks in this chat, by action class (denials.ts). */
   readonly denials: Denials;
+  /** The task this chat belongs to (`PermissionsInit.taskId`). */
+  readonly taskId: string | undefined;
+  /** Each `gate` call's entry point, for tests (round 6, W1): undefined unless a test sets it to a list. */
+  gated: { entry: EntryPoint; held?: string }[] | undefined;
   readonly status: LandstripStatus;
   config!: PermissionsConfig;
   level!: LevelName;
@@ -685,6 +715,8 @@ export class Permissions {
     this.audit = new AuditLog(init.agentDir, init.chatId);
     this.grants = new GrantStore(init.chatId);
     this.created = new CreatedStore(init.chatId, ledgerFile(init.agentDir, init.chatId));
+    this.taskId = init.taskId ?? (process.env.CYPHER_TASK_ID || undefined);
+    this.created.ledger.task = this.taskId;
     this.taint = new Ledger(init.agentDir ? taintFile(init.agentDir, init.chatId) : undefined, init.chatId);
     this.denials = new Denials(denialsFile(init.agentDir, init.chatId), init.chatId);
     this.status = init.landstrip ?? landstripStatus();
@@ -868,12 +900,14 @@ export class Permissions {
       const classification = this.classify(request.path, ctx.cwd);
       const canonical = classification.path;
       const verdict = this.verdict(request.capability, classification);
-      if (verdict.kind === "allow") continue;
+      // Every allow below consults the owner's denials and the floor first (round 6, W1, `gate`): held, it is reviewed.
+      const held = verdict.kind === "deny" ? undefined : await this.gate(verdict.kind === "allow" ? "file:policy" : this.fileGrant(request.capability, canonical) ? "file:grant" : "file:rule", this.fileClass(call.tool, request.capability, [canonical]), { permissionSystemPath: request.capability === "write" && this.paths.isPermissionSystem(canonical) !== undefined ? canonical : undefined });
+      if (verdict.kind === "allow" && !held) continue;
       if (verdict.kind === "deny") {
         this.audit.write({ tool: call.tool, capability: request.capability, zone: classification.zone, guard: classification.guard, paths: [canonical], decision: "deny", decidedBy: "policy", reason: verdict.reason });
         return { ok: false, reason: `Permission denied: ${verdict.reason}.` };
       }
-      const grant = this.fileGrant(request.capability, canonical);
+      const grant = held ? undefined : this.fileGrant(request.capability, canonical);
       if (grant) {
         this.audit.write({ tool: call.tool, capability: request.capability, zone: classification.zone, guard: classification.guard, paths: [canonical], decision: "allow", decidedBy: "grant", grantId: grant.id, scope: grant.scope });
         this.grants.used(grant);
@@ -881,7 +915,7 @@ export class Permissions {
         used("rule");
         continue;
       }
-      if (classification.zone !== "sensitive" && this.ruleCovers(request.capability, canonical)) {
+      if (!held && classification.zone !== "sensitive" && this.ruleCovers(request.capability, canonical)) {
         this.audit.write({ tool: call.tool, capability: request.capability, zone: classification.zone, guard: classification.guard, paths: [canonical], decision: "allow", decidedBy: "rule" });
         approved.add(request.capability, canonical);
         used("rule");
@@ -889,15 +923,16 @@ export class Permissions {
       }
       const outcome = await this.serialized(async () => {
         // An earlier dialog in the queue may have allowed it meanwhile.
-        if (this.fileGrant(request.capability, canonical) || (classification.zone !== "sensitive" && this.ruleCovers(request.capability, canonical))) {
+        if (!held && (this.fileGrant(request.capability, canonical) || (classification.zone !== "sensitive" && this.ruleCovers(request.capability, canonical)))) {
           return { allowed: true as const, scope: "rule" as const, by: "rule" as const };
         }
         return this.elevate(
           {
             capability: request.capability,
             classifications: [classification],
-            key: verdict.key,
-            mode: verdict.mode === "assisted" ? "assisted" : "ask",
+            key: verdict.kind === "elevate" ? verdict.key : "held",
+            mode: verdict.kind === "elevate" && verdict.mode === "assisted" ? "assisted" : "ask",
+            held,
             tool: call.tool,
             justification: call.justification,
             diff: request.diff,
@@ -936,6 +971,13 @@ export class Permissions {
       return { ok: false, text: `Denied: ${denied.reason}.` };
     }
     const elevations = verdicts.filter((verdict): verdict is Extract<Verdict, { kind: "elevate" }> => verdict.kind === "elevate");
+    // Already allowed paths still consult the owner's denials and the floor (round 6, W1).
+    const held = elevations.length === 0 ? await this.gate("request_permission", this.fileClass("request_permission", input.capability, classifications.map((item) => item.path))) : undefined;
+    if (held) {
+      const outcome = await this.serialized(() => this.elevate({ capability: input.capability, classifications, key: "held", mode: "ask", tool: "request_permission", justification: input.reason, held }, ctx));
+      if (!outcome.allowed) return { ok: false, text: outcome.reason, abort: outcome.abort };
+      return { ok: true, text: `Allowed once: ${classifications.map((item) => item.path).join(", ")}.` };
+    }
     if (elevations.length === 0) {
       return { ok: true, text: `Already allowed: ${classifications.map((item) => item.path).join(", ")}. Run the tool again; if it still fails, the cause is not a permission.` };
     }
@@ -1158,6 +1200,8 @@ export class Permissions {
       toolInput?: string;
       /** A domain a filtered command wants to reach. */
       domain?: string;
+      /** The floor row `gate` found for a request the policy, a grant or a rule would have allowed (round 6, W1). */
+      held?: FloorHit;
     },
     ctx: RequestContext,
   ): Promise<ElevateOutcome> {
@@ -1190,11 +1234,12 @@ export class Permissions {
     const floor = floorOf(
       {
         permissionSystemPath: file && request.capability === "write" ? request.classifications.map((item) => this.paths.isPermissionSystem(item.path) && item.path).find((path): path is string => typeof path === "string") : undefined,
-        ownerRule: request.mode === "ask" ? "this kind of request is set to Ask me" : undefined,
+        ownerRule: request.mode === "ask" && !request.held ? "this kind of request is set to Ask me" : undefined,
         ...(denied.active ? { ownerDenied: `you denied ${denied.active.denial.what} and haven't asked for it since` } : {}),
+        ...(request.held?.id === "other-task" ? { otherTask: request.held.detail } : {}),
       },
       "before",
-    );
+    ) ?? request.held;
     const base: AuditRecord = {
       decision: "deny",
       decidedBy: "user",
@@ -1310,7 +1355,7 @@ export class Permissions {
   }
 
   /** A tool-level approval for an MCP or extension tool whose setting is `elevate`. */
-  async requestToolUse(name: string, input: unknown, ctx: RequestContext): Promise<{ ok: true } | { ok: false; reason: string; abort?: boolean }> {
+  async requestToolUse(name: string, input: unknown, ctx: RequestContext, options: { held?: FloorHit } = {}): Promise<{ ok: true } | { ok: false; reason: string; abort?: boolean }> {
     this.refresh();
     const key = `tool:${name}`;
     const covered = () => {
@@ -1318,7 +1363,9 @@ export class Permissions {
       if (grant) this.grants.used(grant);
       return grant !== undefined || this.config.rules.some((rule) => rule.path === key && this.ruleApplies(rule));
     };
-    if (covered()) return { ok: true };
+    // Covered by an approval, or allowed by its setting (`options.held` from the caller's `gateTool`): denials and the floor first (round 6, W1).
+    const held = options.held ?? (covered() ? await this.gateTool("tool:approval", name, input) : undefined);
+    if (!held && covered()) return { ok: true };
     const mode = approvalModeFor(this.config, "tools");
     if (mode === "deny") return { ok: false, reason: `Permission denied: the ${name} tool needs approval, which is set to always deny.` };
     let rendered = "";
@@ -1329,9 +1376,9 @@ export class Permissions {
     }
     const classification: Classification = { path: key, zone: "external", match: "tool" };
     const outcome = await this.serialized(async () =>
-      covered()
+      !held && covered()
         ? ({ allowed: true, scope: "rule", by: "rule" } as const)
-        : this.elevate({ capability: "read", classifications: [classification], key: "tools", mode, tool: name, toolInput: rendered.slice(0, 2000) }, ctx),
+        : this.elevate({ capability: "read", classifications: [classification], key: "tools", mode: held ? "ask" : mode, tool: name, toolInput: rendered.slice(0, 2000), ...(held ? { held } : {}) }, ctx),
     );
     if (!outcome.allowed) return { ok: false, reason: outcome.reason, abort: outcome.abort };
     this.rememberPseudoPath(key, outcome.scope, outcome.by);
@@ -1848,6 +1895,11 @@ export class Permissions {
     const nested = [...code.values()].find((found) => found.floor)?.floor;
     if (exfiltration) worst = { tier: "danger", kind: exfiltration, key: "secret-off-machine", floor: true };
     else if (nested) worst = { tier: "danger", kind: nested.kind, key: nested.key, floor: true };
+    else {
+      // A write whose target is known only by what a listing could print (round 6, W5, risk.ts `runtimeWriteSets`).
+      const listed = runtimeWriteSets(commands, facts);
+      if (listed.length) worst = { tier: "danger", kind: listed[0], key: "permission-system", floor: true };
+    }
     const opaqueCode = [...code.values()].flatMap((found) => (found.opaque ? [`${found.origin} (${found.language}): ${found.opaque}`] : []));
     const unresolved = commands.flatMap((item) => unresolvedWrites(item, facts));
     return { ...worst, commands, assessments, parsed, ...(opaqueCode.length ? { opaqueCode } : {}), ...(unresolved.length ? { unresolved } : {}) };
@@ -2152,7 +2204,9 @@ export class Permissions {
       finish({ decidedBy: "rule", reason: check.reason, prompted: false });
       return { ok: false, reason: check.reason };
     }
-    if (check.kind === "outside") {
+    // A rule or an inspection allows it without review, unless a denial or the floor holds it (round 6, W1).
+    const heldOutside = check.kind === "outside" ? await this.gateLine("bash:outside", command, ctx.cwd) : undefined;
+    if (check.kind === "outside" && !heldOutside) {
       finish({ decision: "allow", decidedBy: check.rules.length ? "rule" : "inspect", prompted: false });
       return { ok: true, scope: "rule", by: "rule" };
     }
@@ -2233,7 +2287,7 @@ export class Permissions {
     return this.serialized(async () => {
       // An earlier dialog in the queue may have allowed it meanwhile.
       this.refresh();
-      if (this.checkCommand(command, ctx.cwd, { escalated: true }).kind === "outside") {
+      if (!heldOutside && this.checkCommand(command, ctx.cwd, { escalated: true }).kind === "outside" && !(await this.gateLine("bash:outside", command, ctx.cwd))) {
         finish({ decision: "allow", decidedBy: "rule", prompted: false });
         return { ok: true, scope: "rule", by: "rule" } as const;
       }
@@ -2251,7 +2305,9 @@ export class Permissions {
       let classOfLine: ActionClass | undefined;
       const actionClass = () => (classOfLine ??= this.lineClass(line, command, ctx.cwd, read));
       const denied = this.denials.any() ? await this.deniedLike(actionClass()) : { similar: [] };
-      const foreign = read ? await this.foreignTargets("targets" in read ? read.targets : (read.known ?? [])) : undefined;
+      // Another task's work: a danger's read targets, and what any line destroys of another chat's, globs too (round 6, W3).
+      const foreign = (read ? await this.foreignTargets("targets" in read ? read.targets : (read.known ?? [])) : undefined) ?? (this.othersMade().length ? await this.otherTaskOf(actionClass()) : undefined);
+      this.gated?.push({ entry: "bash:escalate", ...(denied.active ? { held: "owner-denied" } : foreign ? { held: "other-task" } : {}) });
       const floor = this.alwaysAsk(line, {
         ...(denied.active ? { ownerDenied: `you denied \`${denied.active.denial.what}\` (${denied.active.denial.at.slice(0, 16).replace("T", " ")} UTC) and haven't asked for it since` } : {}),
         ...(foreign ? { otherTask: foreign } : {}),
@@ -2475,10 +2531,10 @@ export class Permissions {
   private lineClass(line: LineAssessment, command: string, cwd: string, read: LineTargets | undefined): ActionClass {
     const actions = new Set<string>();
     const all: DenialScope[] = [];
-    const units: { effects: EffectClass[]; scopes: DenialScope[] }[] = [];
+    const units: { effects: EffectClass[]; scopes: DenialScope[]; destroys?: boolean; globs?: string[] }[] = [];
     const seen = new Set<string>();
     const scopeOf = (scope: DenialScope): DenialScope => {
-      const key = `${scope.kind}\u0000${scope.name}\u0000${scope.remote ?? ""}`;
+      const key = `${scope.kind}\u0000${scope.name}\u0000${scope.remote ?? ""}\u0000${scope.scope ?? ""}\u0000${scope.type ?? ""}`;
       if (!seen.has(key)) {
         seen.add(key);
         all.push(scope);
@@ -2492,14 +2548,14 @@ export class Permissions {
         const found = this.couldBe(pattern, at);
         if (found.anywhere || !found.fixed.length) return undefined;
         const path = found.fixed[0];
-        return scopeOf({ kind: "path", name: path, says: [displayPath(path, this.home)] });
+        return scopeOf({ kind: "path", name: path, says: [displayPath(path, this.home)], glob: true });
       }
       if (/^[a-z][\w+.-]*:\/\//i.test(word) || word.startsWith("-")) return undefined;
       if (at === undefined && !isAbsolute(word) && !word.startsWith("~")) return undefined;
       const path = this.classify(word, at ?? cwd).path;
       return scopeOf({ kind: "path", name: path, says: [displayPath(path, this.home), word] });
     };
-    let unit: { effects: EffectClass[]; scopes: DenialScope[] } | undefined;
+    let unit: { effects: EffectClass[]; scopes: DenialScope[]; destroys?: boolean; globs?: string[] } | undefined;
     const effect = (value: EffectClass) => {
       if (unit && !unit.effects.includes(value)) unit.effects.push(value);
     };
@@ -2513,6 +2569,18 @@ export class Permissions {
       const add = (scope: DenialScope | undefined) => {
         if (scope && unit && !unit.scopes.includes(scope)) unit.scopes.push(scope);
       };
+      // What destroys (round 6, W3: the other-task floor): a delete, erase or stop by the program tables, a move away.
+      const inner = unwrapped(item.words);
+      const removal = remoteEffect(inner);
+      const row = readTool(inner);
+      const operation = targetsOf(item, this.catalogueFacts())?.op;
+      if ((removal && /^(delete|erase|destroy|stop)$/.test(removal.action)) || (row && "row" in row && /^(delete|erase|destroy|stop)$/.test(row.row.action)) || basename(inner[0] ?? "") === "mv" || inner.includes("-delete") || operation === "destroy" || operation === "stop") unit.destroys = true;
+      // The globs it is given, canonical (resolve.ts): what they could match is what it acts on.
+      for (const pattern of item.patterns ?? []) {
+        if (pattern === undefined || !/[*?[]/.test(pattern)) continue;
+        const resolved = resolvePattern(pattern, { home: this.home, cwd: this.paths.canonical(item.cwd ?? cwd, this.cwd) });
+        if (!resolved.anywhere) (unit.globs ??= []).push(...resolved.globs);
+      }
       for (const [at, path] of item.writes.entries()) {
         effect("change");
         add(pathScope(path, item.cwd, item.writePatterns?.[at]));
@@ -2534,7 +2602,7 @@ export class Permissions {
       for (const value of found.effects) effect(value);
       for (const target of found.targets) {
         if (target.kind === "path" || target.kind === "worktree") add(pathScope(target.name, item.cwd));
-        else add(scopeOf({ kind: target.kind, name: target.name, ...(target.remote ? { remote: target.remote } : {}), ...(target.repo ? { repo: target.repo } : {}), says: [target.name] }));
+        else add(scopeOf({ kind: target.kind, name: target.name, ...(target.remote ? { remote: target.remote } : {}), ...(target.repo ? { repo: target.repo } : {}), ...(target.scope ? { scope: target.scope } : {}), ...(target.type ? { type: target.type } : {}), says: [target.name] }));
       }
       const offset = item.words.length - (item.patterns?.length ?? item.words.length);
       for (const word of found.paths) {
@@ -2561,16 +2629,150 @@ export class Permissions {
       if (scope && units.length && !units.some((item) => item.scopes.includes(scope))) units.at(-1)!.scopes.push(scope);
     }
     const concern = assessments.find((assessment) => assessment.concern)?.concern ?? (line.tier === "danger" ? line.key : undefined);
-    const named = units.filter((item) => item.scopes.length);
+    const named = units.filter((item) => item.scopes.length || item.globs?.length);
     const effects = [...new Set(units.flatMap((item) => item.effects))];
     const lineScope = (): DenialScope => scopeOf({ kind: "line", name: command });
     return {
       tool: "bash",
       actions: [...actions],
       ...(concern ? { concern } : {}),
+      tokens: line.commands.flatMap((item) => item.words.slice(1).filter((word) => word !== UNKNOWN && !word.startsWith("-"))),
       scopes: all.length ? all : [lineScope()],
-      units: named.length ? named.map((item) => ({ effects: item.effects.length ? item.effects : ["run"], scopes: item.scopes })) : [{ effects: effects.length ? effects : ["run"], scopes: [lineScope()] }],
+      units: named.length
+        ? named.map((item) => ({ effects: item.effects.length ? item.effects : ["run"], scopes: item.scopes, ...(item.destroys ? { destroys: true } : {}), ...(item.globs?.length ? { globs: item.globs } : {}) }))
+        : [{ effects: effects.length ? effects : ["run"], scopes: [lineScope()], ...(units.some((item) => item.destroys) ? { destroys: true } : {}), ...(units.some((item) => item.globs?.length) ? { globs: units.flatMap((item) => item.globs ?? []) } : {}) }],
     };
+  }
+
+  /**
+   * The one check every entry point makes before it allows (round 6, W1; `ENTRY_POINTS`): the owner's denials
+   * (denials.ts) and the floor's `before` rows (floor.ts) — the permission system, another task's work this
+   * destroys (`otherTaskOf`), and whatever the caller adds (`subject`). Undefined: nothing holds it, and it
+   * passes as before. Cheap when nothing can match: no denial in this chat, nothing destroyed, no other chat.
+   */
+  async gate(entry: EntryPoint, cls: ActionClass, subject: FloorSubject = {}): Promise<FloorHit | undefined> {
+    const denied = this.denials.any() ? await this.deniedLike(cls) : undefined;
+    const other = subject.otherTask ?? (await this.otherTaskOf(cls));
+    const hit = floorOf(
+      {
+        ...subject,
+        ...(denied?.active ? { ownerDenied: `you denied \`${denied.active.denial.what}\` (${denied.active.denial.at.slice(0, 16).replace("T", " ")} UTC) and haven't asked for it since` } : {}),
+        ...(other ? { otherTask: other } : {}),
+      },
+      "before",
+    );
+    this.gated?.push({ entry, ...(hit ? { held: hit.id } : {}) });
+    return hit;
+  }
+
+  /** A file tool's (or a tool's) request as an action class: its effect and its paths (denials.ts), as `elevate` reads one. */
+  fileClass(tool: string, capability: Capability, paths: readonly string[]): ActionClass {
+    const scopes: DenialScope[] = paths.map((path) => ({ kind: "path" as const, name: path, says: [displayPath(path, this.home)] }));
+    return { tool, actions: [capability], scopes, units: [{ effects: [capability === "write" ? "change" : "read"], scopes }], tokens: paths };
+  }
+
+  /** A tool's (MCP, extension) request as an action class: its own effect, its input as the line, and the input's words for the safety net. */
+  private toolClass(name: string, input: unknown): ActionClass {
+    let rendered = "";
+    try {
+      rendered = JSON.stringify(input) ?? "";
+    } catch {
+      rendered = String(input);
+    }
+    const scopes: DenialScope[] = [{ kind: "line", name: `${name} ${rendered.slice(0, 2000)}` }];
+    const words = [...rendered.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => match[1]).filter((word) => word.length >= 2 && word.length <= 400);
+    return { tool: name, actions: [`tool:${name}`], scopes, units: [{ effects: [`tool:${name}` as EffectClass], scopes }], tokens: words };
+  }
+
+  /** A bash line as an action class (`lineClass`), for `gate`. */
+  lineClassOf(command: string, cwd: string): ActionClass {
+    const line = this.assess(command, cwd);
+    return this.lineClass(line, command, cwd, undefined);
+  }
+
+  /**
+   * `gate` for a bash line that would run without review (round 6, W1): one a saved rule allows outside the
+   * sandbox or that only inspects (`bash:outside`: the whole floor, the line's own findings too), or one that
+   * runs in the sandbox (`bash:sandbox`: denials and other tasks' work; the sandbox itself keeps secrets and
+   * the permission system out of its reach). Reads the line only when a denial or another chat's ledger exists.
+   */
+  async gateLine(entry: "bash:outside" | "bash:sandbox" | "bash:escalate", command: string, cwd: string): Promise<FloorHit | undefined> {
+    const line = entry === "bash:outside" ? this.assess(command, cwd) : undefined;
+    const own = line ? this.alwaysAsk(line) : undefined;
+    if (!own && !this.denials.any() && !this.othersMade().length) {
+      this.gated?.push({ entry });
+      return undefined;
+    }
+    const cls = this.lineClass(line ?? this.assess(command, cwd), command, cwd, undefined);
+    const hit = await this.gate(entry, cls);
+    return own ?? hit;
+  }
+
+  /** `gate` for a tool call (MCP, extension) its setting or an earlier approval allows. */
+  async gateTool(entry: "tool:setting" | "tool:approval", name: string, input: unknown): Promise<FloorHit | undefined> {
+    if (!this.denials.any()) {
+      this.gated?.push({ entry });
+      return undefined;
+    }
+    return this.gate(entry, this.toolClass(name, input));
+  }
+
+  /**
+   * The floor's `other-task` detail for what a request destroys (round 6, W3): an entity of any kind that
+   * another chat's ledger says it made or started — the same entity, one inside it, or one a glob of the
+   * request could match — and that this chat's own ledger doesn't hold, its task (`taskId`) isn't the other
+   * chat's, and the owner's words don't name. Only destroying effects (`DenialUnit.destroys`: delete, erase,
+   * move away, stop); a change of a file's contents is no destruction.
+   */
+  private async otherTaskOf(cls: ActionClass): Promise<string | undefined> {
+    const units = cls.units.filter((unit) => unit.destroys);
+    if (!units.length) return undefined;
+    const others = this.othersMade()
+      .map((entry) => {
+        const kind = ledgerKind(entry.kind) ?? entry.kind;
+        return { ...entry, kind, name: kind === "path" || kind === "worktree" ? this.paths.canonical(entry.name, this.cwd) : entry.name };
+      })
+      .filter((entry) => !(this.taskId && entry.task === this.taskId));
+    if (!others.length) return undefined;
+    const found = (): { what: string; why: string }[] => {
+      const out: { what: string; why: string }[] = [];
+      const seen = new Set<string>();
+      const note = (entry: LedgerEntry, how: string) => {
+        const what = `${entry.kind} ${entry.name}`;
+        if (seen.has(what) || this.ownerNames([entry.name, basename(entry.name)]) !== undefined) return;
+        seen.add(what);
+        out.push({ what, why: `another chat (${entry.chatId ?? "unknown"}) ${entry.action === "start" ? "started" : "made"} it${how}` });
+      };
+      for (const unit of units) {
+        for (const scope of unit.scopes) {
+          // A glob's fixed folder is where it looks, not what it destroys: its globs say that (below).
+          if (scope.kind === "line" || scope.glob) continue;
+          const kind = ledgerKind(scope.kind);
+          if (!kind) continue;
+          const target: LedgerEntity = { kind, name: scope.name };
+          if (this.created.ledger.covers(target)) continue;
+          for (const entry of others) {
+            const made = { ...entry, repo: undefined, remote: undefined };
+            if (entryCovers(made, target)) note(entry, "");
+            else if ((kind === "path" || kind === "worktree") && (made.kind === "path" || made.kind === "worktree") && isUnder(made.name, target.name)) note(entry, `, inside ${scope.name}`);
+          }
+        }
+        for (const glob of unit.globs ?? []) {
+          for (const entry of others) {
+            if (entry.kind !== "path" && entry.kind !== "worktree") continue;
+            if (this.created.ledger.covers({ kind: entry.kind, name: entry.name })) continue;
+            if (globsIntersect(glob, entry.name) || globsIntersect(`${glob.replace(/\/+$/, "")}/**`, entry.name)) note(entry, `, which ${glob} matches`);
+          }
+        }
+      }
+      return out;
+    };
+    let hits = found();
+    if (hits.length && this.ownerWordsNow) {
+      await this.refreshOwnerWords();
+      hits = found();
+    }
+    return hits.length ? hits.map((item) => `${item.what} (${item.why})`).join("; ") : undefined;
   }
 
   /** The owner's denials of `cls` (denials.ts), checked against their words as of now. */
@@ -2605,7 +2807,9 @@ export class Permissions {
           if (!line.trim()) continue;
           try {
             const entry = JSON.parse(line) as LedgerEntry;
-            if (entry && typeof entry.kind === "string" && typeof entry.name === "string" && (entry.action ?? "create") !== "merge") entries.push({ ...entry, chatId: entry.chatId ?? name.replace(/\.jsonl$/, "") });
+            const kind = entry && typeof entry.kind === "string" ? ledgerKind(entry.kind) : undefined;
+            // One task's chats (a workspace and its threads, a plan's sessions) are no other task (round 6, W3).
+            if (kind && typeof entry.name === "string" && (entry.action ?? "create") !== "merge" && !(this.taskId && entry.task === this.taskId)) entries.push({ ...entry, kind, chatId: entry.chatId ?? name.replace(/\.jsonl$/, "") });
           } catch {
             // A torn line: skipped.
           }
