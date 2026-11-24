@@ -1812,13 +1812,15 @@ Tests: `cypher-permissions-final-it1.test.mjs` (10, three seeds). Each class as 
 - *Project scripts are the line's own* (core.ts `scriptFinding`): the lines of a script, make recipe, package script
   or justfile recipe the line runs are read as shell lines for the floor too (a secret sent by `make deploy` is row 1),
   the judge sees them ("project script: `make deploy` runs: …"), and an approval of such a line is never remembered
-  (the script may change). A script the same line writes first is read from what it wrote.
+  (the script may change). A script the same line writes first is read from what it wrote. The system's own scripts
+  (a file in a system location, `commands.ts` `systemLocation`: outside home, not writable) are programs, not read.
 - *Code set up to run later* (scripts.ts `HOOK_TRIGGERS`, `scheduledLines`, `UNREAD_FORMS`): a git hook the line (or
   this task) wrote is read as what the git command that triggers it runs; crontab entries the line gives are read as
   their commands. What can't be read — a crontab file, a launch agent, a systemd user unit, a hook written elsewhere,
   a sourced file's variables where the line uses a word known only when it runs — reaches the judge marked "Cypher
-  couldn't read: …", and its approval runs once.
-- *A function's arguments* (shell.ts `call`): a call's words are its body's `$1`…`$9`, `$@`, `$*`.
+  couldn't read: …" (a fact, with no instruction to ask), and its approval runs once.
+- *A function's arguments* (shell.ts `call`): a call's words are its body's `$1`…`$9`, and `$@`/`$*` when the call
+  gave one word (several would be several words; they stay unknown).
 - *Path printers* (fold.ts `PATH_PRINTERS`): `realpath X`, `readlink -f X`, `basename`, `dirname` fold to the path, so
   `$(realpath ~/.ssh/id)` is that file for row 1. *Directory moves* (core.ts `directoryMove`): `pushd DIR` (onto a
   stack), `popd`, `cd -P/-L DIR` move the shell like `cd`.
