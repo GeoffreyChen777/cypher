@@ -40,6 +40,8 @@ export interface TargetSchema {
   subs?: readonly SubSchema[];
   /** Resource-type words that name an entity kind of their own (`kubectl delete ns X`: a namespace). */
   types?: Readonly<Record<string, EntityKind>>;
+  /** Other names of resource types, by their canonical name (`deploy` → `deployment`). */
+  typeNames?: Readonly<Record<string, string>>;
   /** Operand URL schemes that name an entity (`s3://bucket/key`: the bucket's object). */
   schemes?: Readonly<Record<string, EntityKind>>;
   /** A REST call: the subcommand, the options that set the method, the options that make it a POST. */
@@ -47,6 +49,13 @@ export interface TargetSchema {
 }
 
 const KUBE_TYPES: Readonly<Record<string, EntityKind>> = { ns: "namespace", namespace: "namespace", namespaces: "namespace" };
+/** Resource types by their short and plural names (round 6 step 2, data): `deploy/api` and `deployment api` are one target. */
+const KUBE_TYPE_NAMES: Readonly<Record<string, string>> = {
+  deploy: "deployment", deployments: "deployment", po: "pod", pods: "pod", svc: "service", services: "service", sts: "statefulset", statefulsets: "statefulset",
+  ds: "daemonset", daemonsets: "daemonset", cm: "configmap", configmaps: "configmap", secrets: "secret", ing: "ingress", ingresses: "ingress", jobs: "job",
+  cj: "cronjob", cronjobs: "cronjob", pvc: "persistentvolumeclaim", persistentvolumeclaims: "persistentvolumeclaim", rs: "replicaset", replicasets: "replicaset",
+  sa: "serviceaccount", serviceaccounts: "serviceaccount", hpa: "horizontalpodautoscaler", no: "node", nodes: "node", pv: "persistentvolume", crd: "customresourcedefinition",
+};
 const KUBE_OPTIONS = {
   "-n": { kind: "namespace", role: "within" },
   "--namespace": { kind: "namespace", role: "within" },
@@ -62,6 +71,7 @@ export const TARGET_SCHEMAS: readonly TargetSchema[] = [
     options: KUBE_OPTIONS,
     values: ["-f", "--filename", "-l", "--selector", "-o", "--output", "--replicas", "--grace-period", "--timeout", "-c", "--container", "--kubeconfig", "--field-selector"],
     types: KUBE_TYPES,
+    typeNames: KUBE_TYPE_NAMES,
     subs: [
       { sub: ["delete"], effect: "change", operands: ["type", "resource"], rest: true },
       { sub: ["drain"], effect: "stop", operands: ["resource"] },
@@ -93,7 +103,8 @@ export const TARGET_SCHEMAS: readonly TargetSchema[] = [
   {
     programs: ["docker", "podman"],
     options: { "--context": { kind: "context", role: "env" }, "-H": { kind: "host", role: "env" }, "--host": { kind: "host", role: "env" }, "--connection": { kind: "host", role: "env" } },
-    values: ["-f", "--filter", "--format", "-t", "--time", "-s", "--signal", "--platform"],
+    // `-f` is no value option here: `docker rm -f`, `rmi -f` force (`ps -f` filters, but a read names nothing).
+    values: ["--filter", "--format", "-t", "--time", "-s", "--signal", "--platform"],
     subs: [
       { sub: ["rm"], effect: "change", operands: ["container"], rest: true },
       { sub: ["container", "rm"], effect: "change", operands: ["container"], rest: true },
@@ -284,6 +295,29 @@ export function routeOf(method: string, path: string): { effect: EffectClass; ta
   return undefined;
 }
 
+/**
+ * REST calls that destroy what their route names (round 6 step 2, data): a DELETE, or a write whose body sets one of
+ * `DESTROYING_FIELDS` (`state=closed` closes a pull request or issue).
+ */
+export const DESTROYING_METHODS: ReadonlySet<string> = new Set(["DELETE"]);
+export const DESTROYING_FIELDS = /^(state=closed|state_event=close|archived=true)$/i;
+
+/** Whether a command is a REST call (`TargetSchema.api`) that destroys (`DESTROYING_METHODS`, `DESTROYING_FIELDS`). */
+export function apiDestroys(words: readonly string[]): boolean {
+  const schema = SCHEMA_BY_PROGRAM.get(basename(words[0] ?? ""));
+  if (!schema?.api) return false;
+  for (const [index, word] of words.entries()) {
+    const glued = schema.api.method.map((option) => (word.startsWith(`${option}=`) ? word.slice(option.length + 1) : option.length === 2 && word.startsWith(option) && word.length > 2 ? word.slice(2) : undefined)).find((value) => value !== undefined);
+    const method = schema.api.method.includes(word) ? words[index + 1] : glued;
+    if (method && DESTROYING_METHODS.has(method.toUpperCase())) return true;
+    if (schema.api.body.includes(word) && DESTROYING_FIELDS.test(words[index + 1] ?? "")) return true;
+  }
+  return false;
+}
+
+/** A subcommand word that deletes (data, round 6 step 2). */
+export const DELETING_SUBCOMMAND = /^(delete|remove|rm|rb|terminate|destroy|purge|deregister|drop)(-[a-z-]+)?$/;
+
 /** One command's words (unwrapped), read by its schema: undefined when the table has none for it. */
 export function typedTargets(words: readonly string[]): Typed | undefined {
   const program = basename(words[0] ?? "");
@@ -340,6 +374,8 @@ export function typedTargets(words: readonly string[]): Typed | undefined {
   // Subcommands: the longest that matches.
   const sub = [...(schema.subs ?? [])].sort((a, b) => b.sub.length - a.sub.length).find((row) => row.sub.every((word, index) => positionals[index] === word));
   const operands = sub ? positionals.slice(sub.sub.length) : [];
+  // A subcommand the table has no row for whose verb deletes (`aws s3api delete-objects`, `ec2 terminate-instances`): a change (round 6 step 2).
+  if (!sub && schema.subs && positionals.slice(0, 3).some((word) => DELETING_SUBCOMMAND.test(word))) out.effects.push("change");
   if (sub) {
     out.effects.push(sub.effect);
     const kinds = sub.operands ?? [];
@@ -350,12 +386,13 @@ export function typedTargets(words: readonly string[]): Typed | undefined {
       if (kind === "type") {
         // `deployment/web`: a type and a name in one word.
         if (word.includes("/")) {
-          const [t, name] = [word.slice(0, word.indexOf("/")), word.slice(word.indexOf("/") + 1)];
+          const [given, name] = [word.slice(0, word.indexOf("/")), word.slice(word.indexOf("/") + 1)];
+          const t = schema.typeNames?.[given.toLowerCase()] ?? given;
           const own = schema.types?.[t];
           out.targets.push(own ? { kind: own, name } : { kind: "resource", name, type: t });
           continue;
         }
-        type = word;
+        type = schema.typeNames?.[word.toLowerCase()] ?? word;
         continue;
       }
       const own = kind === "resource" && type ? schema.types?.[type] : undefined;

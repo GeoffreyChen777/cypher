@@ -24,6 +24,9 @@ import type { LedgerEntity, LedgerEntry } from "./ledger.ts";
 import { Denials, denialsFile, forRecord } from "./denials.ts";
 import type { ActionClass, DenialRecord, DenialScope } from "./denials.ts";
 import { commandEffects, unwrapped } from "./effects.ts";
+import { passes, runtimeOperand } from "./flow.ts";
+import { apiDestroys } from "./schema.ts";
+import type { RuntimeOperand } from "./flow.ts";
 import type { EffectClass } from "./effects.ts";
 import type { LifecycleFacts } from "./lifecycle.ts";
 import type { PullRequestFact } from "./entities.ts";
@@ -56,7 +59,7 @@ import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs }
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
 import { benignEnv, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
-import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, lineFlow, normalRefspec, redirectRisk, runtimeWriteSets, secretName, secretWrites, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
+import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, lineFlow, listingSet, normalRefspec, redirectRisk, runtimeWriteSets, secretName, secretWrites, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
 import type { PatternFinding } from "./risk.ts";
 import { globsIntersect, resolvePattern, resolveText } from "./resolve.ts";
 import { codeOf, INTERPRETERS as INTERPRETER_TABLE, interpreterOf, optionCommands, scanCode, shebangInterpreter } from "./code.ts";
@@ -449,6 +452,16 @@ interface LineCommand extends SimpleCommand {
 }
 
 const DIRECTORY_BUILTINS: ReadonlySet<string> = new Set(["cd", "pushd", "popd"]);
+/** Calls that delete files, in any language scanCode reads (round 6 step 2). */
+const CODE_DELETES = /\b(rmtree|rmSync|rmdirSync|unlinkSync|unlink|rmdir|removedirs|rm_rf|rm_r|rm_f|delete_file|deleteSync|FileUtils\.rm\w*|Files\.delete\w*|os\.remove|fs\.rm|fs\.promises\.rm|shutil\.move|os\.rename|File\.delete)\s*\(/;
+/** Input keys of an MCP or extension tool that name a file (round 6 step 2). */
+const TOOL_PATH_KEYS = /^(path|paths|file|files|filename|filepath|file_path|dir|directory|folder|target|destination|dest|source|src|from|to|uri|location|root)$/i;
+/** Words of a tool's name by what it does to the files it names (round 6 step 2). */
+const TOOL_VERBS = { change: ["write", "create", "edit", "update", "put", "save", "append", "patch", "replace", "set", "mkdir", "copy", "upload", "insert", "modify"], destroy: ["delete", "remove", "rm", "unlink", "trash", "move", "rename", "mv", "drop", "destroy", "purge", "erase", "rmdir"] };
+/** `find`'s tests that pick some of what is under its roots (round 6 step 2). */
+const FIND_TESTS = /^-(i?name|i?path|i?wholename|i?regex|newer\w*|[acm]time|[acm]min|size|empty|user|group|perm|links)$/;
+/** Commands that destroy what they find under a root, the folder they run in (round 6 step 2): its whole subtree is their possible set. */
+const ROOT_CLEANERS: readonly { program: string; sub: readonly string[] }[] = [{ program: "git", sub: ["clean"] }];
 
 /** A danger's kind or key, by the action class a consent must ask for (lexicon.ts words). */
 const UNREAD_ACTIONS: readonly [string, RegExp][] = [
@@ -2531,7 +2544,7 @@ export class Permissions {
   private lineClass(line: LineAssessment, command: string, cwd: string, read: LineTargets | undefined): ActionClass {
     const actions = new Set<string>();
     const all: DenialScope[] = [];
-    const units: { effects: EffectClass[]; scopes: DenialScope[]; destroys?: boolean; globs?: string[] }[] = [];
+    const units: { effects: EffectClass[]; scopes: DenialScope[]; destroys?: boolean; globs?: string[]; runtime?: RuntimeOperand[] }[] = [];
     const seen = new Set<string>();
     const scopeOf = (scope: DenialScope): DenialScope => {
       const key = `${scope.kind}\u0000${scope.name}\u0000${scope.remote ?? ""}\u0000${scope.scope ?? ""}\u0000${scope.type ?? ""}`;
@@ -2555,7 +2568,7 @@ export class Permissions {
       const path = this.classify(word, at ?? cwd).path;
       return scopeOf({ kind: "path", name: path, says: [displayPath(path, this.home), word] });
     };
-    let unit: { effects: EffectClass[]; scopes: DenialScope[]; destroys?: boolean; globs?: string[] } | undefined;
+    let unit: { effects: EffectClass[]; scopes: DenialScope[]; destroys?: boolean; globs?: string[]; runtime?: RuntimeOperand[] } | undefined;
     const effect = (value: EffectClass) => {
       if (unit && !unit.effects.includes(value)) unit.effects.push(value);
     };
@@ -2571,6 +2584,13 @@ export class Permissions {
       };
       // What destroys (round 6, W3: the other-task floor): a delete, erase or stop by the program tables, a move away.
       if (this.destroys(item)) unit.destroys = true;
+      // Operands known only when it runs (round 6 step 2, flow.ts): the possible set its producers could hand it.
+      const runtime = this.runtimeOf(line.commands, index, cwd);
+      if (runtime) {
+        unit.destroys = true;
+        if (runtime.operand.kinds.some((kind) => kind !== "path")) (unit.runtime ??= []).push(runtime.operand);
+        if (runtime.globs.length) (unit.globs ??= []).push(...runtime.globs);
+      }
       // The globs it is given, canonical (resolve.ts): what they could match is what it acts on.
       for (const pattern of item.patterns ?? []) {
         if (pattern === undefined || !/[*?[]/.test(pattern)) continue;
@@ -2601,12 +2621,37 @@ export class Permissions {
         else add(scopeOf({ kind: target.kind, name: target.name, ...(target.remote ? { remote: target.remote } : {}), ...(target.repo ? { repo: target.repo } : {}), ...(target.scope ? { scope: target.scope } : {}), ...(target.type ? { type: target.type } : {}), says: [target.name] }));
       }
       const offset = item.words.length - (item.patterns?.length ?? item.words.length);
+      // A search that picks what it acts on (`find . -name '*.pyc' -delete`): its roots are where it looks, not what it
+      // destroys (round 6 step 2); what its tests pick is its possible set (`runtimeOf`).
+      const picks = /^(find|gfind|fd)$/.test(program) && item.words.some((word) => FIND_TESTS.test(word));
       for (const word of found.paths) {
         const at = item.words.indexOf(word);
-        add(pathScope(word, item.cwd, word === UNKNOWN ? undefined : item.patterns?.[at - offset]));
+        const scope = pathScope(word, item.cwd, word === UNKNOWN ? undefined : item.patterns?.[at - offset]);
+        add(scope && picks ? { ...scope, glob: true } : scope);
       }
       // Globs and words known only when it runs, by their fixed directory.
       for (const [at, pattern] of (item.patterns ?? []).entries()) if (pattern !== undefined && item.words[at + offset] === UNKNOWN && at + offset > 0) add(pathScope(UNKNOWN, item.cwd, pattern));
+      // Inline code (round 6 step 2, code.ts `scanCode`): the files its literals name and the hosts its URLs reach are
+      // what it acts on, with what the code does to them (`CODE_DELETES`: a delete destroys), for denials and the floor.
+      const inline = codeOf(runWords(item.words), UNKNOWN, undefined);
+      if (inline && inline.source.from === "inline" && inline.interpreter.language !== "shell") {
+        const scan = scanCode(inline.source.text, inline.interpreter.language as Parameters<typeof scanCode>[1], secretName);
+        const deletes = CODE_DELETES.test(inline.source.text);
+        for (const path of scan.paths) {
+          if (!/[/~.]/.test(path) || /^[a-z][\w+.-]*:\/\//i.test(path)) continue;
+          const scope = pathScope(resolveText(path, this.home), item.cwd);
+          if (!scope) continue;
+          add(scope);
+          effect(scan.writes || deletes ? "change" : "read");
+          if (deletes) unit.destroys = true;
+        }
+        for (const url of scan.urls) {
+          const host = /^[a-z][\w+.-]*:\/\/(?:[^@/]*@)?([^/:?#]+)/i.exec(url)?.[1];
+          if (!host) continue;
+          add(scopeOf({ kind: "host", name: host, says: [host] }));
+          effect("send");
+        }
+      }
       // What the catalogue says it destroys or stops (a simulator, a container, a worktree).
       const destroyed = targetsOf(item, this.catalogueFacts());
       for (const group of destroyed?.targets ?? []) {
@@ -2625,7 +2670,7 @@ export class Permissions {
       if (scope && units.length && !units.some((item) => item.scopes.includes(scope))) units.at(-1)!.scopes.push(scope);
     }
     const concern = assessments.find((assessment) => assessment.concern)?.concern ?? (line.tier === "danger" ? line.key : undefined);
-    const named = units.filter((item) => item.scopes.length || item.globs?.length);
+    const named = units.filter((item) => item.scopes.length || item.globs?.length || item.runtime?.length);
     const effects = [...new Set(units.flatMap((item) => item.effects))];
     const lineScope = (): DenialScope => scopeOf({ kind: "line", name: command });
     return {
@@ -2635,8 +2680,8 @@ export class Permissions {
       tokens: line.commands.flatMap((item) => item.words.slice(1).filter((word) => word !== UNKNOWN && !word.startsWith("-"))),
       scopes: all.length ? all : [lineScope()],
       units: named.length
-        ? named.map((item) => ({ effects: item.effects.length ? item.effects : ["run"], scopes: item.scopes, ...(item.destroys ? { destroys: true } : {}), ...(item.globs?.length ? { globs: item.globs } : {}) }))
-        : [{ effects: effects.length ? effects : ["run"], scopes: [lineScope()], ...(units.some((item) => item.destroys) ? { destroys: true } : {}), ...(units.some((item) => item.globs?.length) ? { globs: units.flatMap((item) => item.globs ?? []) } : {}) }],
+        ? named.map((item) => ({ effects: item.effects.length ? item.effects : ["run"], scopes: item.scopes, ...(item.destroys ? { destroys: true } : {}), ...(item.globs?.length ? { globs: item.globs } : {}), ...(item.runtime?.length ? { runtime: item.runtime } : {}) }))
+        : [{ effects: effects.length ? effects : ["run"], scopes: [lineScope()], ...(units.some((item) => item.destroys) ? { destroys: true } : {}), ...(units.some((item) => item.globs?.length) ? { globs: units.flatMap((item) => item.globs ?? []) } : {}), ...(units.some((item) => item.runtime?.length) ? { runtime: units.flatMap((item) => item.runtime ?? []) } : {}) }],
     };
   }
 
@@ -2677,7 +2722,48 @@ export class Permissions {
     }
     const scopes: DenialScope[] = [{ kind: "line", name: `${name} ${rendered.slice(0, 2000)}` }];
     const words = [...rendered.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => match[1]).filter((word) => word.length >= 2 && word.length <= 400);
-    return { tool: name, actions: [`tool:${name}`], scopes, units: [{ effects: [`tool:${name}` as EffectClass], scopes }], tokens: words };
+    // The files it names, as a unit of their own (round 6 step 2): denials, the permission system and other tasks' work meet them.
+    const files = this.toolPaths(name, input);
+    const fileScopes: DenialScope[] = files.paths.map((path) => ({ kind: "path" as const, name: path, says: [displayPath(path, this.home)] }));
+    const fileUnit = fileScopes.length ? [{ effects: files.effects, scopes: fileScopes, ...(files.destroys ? { destroys: true } : {}) }] : [];
+    return { tool: name, actions: [`tool:${name}`], scopes: [...scopes, ...fileScopes], units: [{ effects: [`tool:${name}` as EffectClass], scopes }, ...fileUnit], tokens: [...words, ...files.paths] };
+  }
+
+  /**
+   * A command's operands known only when it runs (round 6 step 2, flow.ts `runtimeOperand`): the kinds and
+   * name tests of what its producers could hand it, and for files, the globs a listing producer could print
+   * (risk.ts `listingSet`: `find ROOT -name P -exec rm {} +`, `ls GLOB | xargs rm`) or the root a cleaner
+   * empties (`ROOT_CLEANERS`). A file set no listing states stays unknown: it meets no other chat's files.
+   */
+  private runtimeOf(commands: readonly LineCommand[], index: number, cwd: string): { operand: RuntimeOperand; globs: string[] } | undefined {
+    const item = commands[index];
+    const raw = item.words;
+    const first = basename(raw[0] ?? "");
+    const inner = /^(xargs|parallel|find|gfind)$/.test(first) ? raw : unwrapped(raw);
+    const at = this.paths.canonical(item.cwd ?? cwd, this.cwd);
+    const cleaner = ROOT_CLEANERS.find((row) => row.program === basename(inner[0] ?? "") && row.sub.every((word, i) => inner[i + 1] === word));
+    if (cleaner && !inner.some((word) => /^(-[a-zA-Z]*n[a-zA-Z]*|--dry-run)$/.test(word))) {
+      // Its pathspecs, when it names any (`git clean -fdx src/`); else the folder it runs in.
+      const operands = inner.slice(1 + cleaner.sub.length).filter((word, i, all) => word !== UNKNOWN && word !== "--" && !word.startsWith("-") && !/^(-e|--exclude)$/.test(all[i - 1] ?? ""));
+      const roots = operands.length ? operands.map((word) => this.classify(word, at).path ?? word) : [at];
+      return { operand: { kinds: ["path"], tests: [], by: inner.slice(0, 2).join(" ") }, globs: roots.map((root) => `${root.replace(/\/+$/, "")}/**`) };
+    }
+    const operand = runtimeOperand(commands, index, inner);
+    if (!operand) return undefined;
+    const globs: string[] = [];
+    if (operand.kinds.includes("path") || operand.kinds.includes("worktree")) {
+      // The producer: `find` itself for `-exec`, else the pipeline or substitution right before it.
+      let start = index;
+      while (start > 0 && (commands[start - 1].joint === "|" || commands[start - 1].joint === undefined)) start--;
+      const pipe = /^(find|gfind)$/.test(first) ? [item] : commands.slice(start, index);
+      const set = pipe.length ? listingSet(pipe) : undefined;
+      for (const entry of set ?? []) {
+        const pattern = entry.subtree && !/[*?[]/.test(entry.pattern) ? `${entry.pattern.replace(/\/+$/, "")}/**` : entry.pattern;
+        const resolved = resolvePattern(pattern, { home: this.home, cwd: this.paths.canonical(entry.cwd ?? at, this.cwd) });
+        if (!resolved.anywhere) globs.push(...resolved.globs);
+      }
+    }
+    return { operand, globs };
   }
 
   /** Whether a command destroys what it names (round 6, W3): a delete, erase or stop by the program tables or the catalogue, a move away. */
@@ -2688,6 +2774,8 @@ export class Permissions {
     const row = readTool(inner);
     if (row && "row" in row && /^(delete|erase|destroy|stop)$/.test(row.row.action)) return true;
     if (basename(inner[0] ?? "") === "mv" || inner.includes("-delete")) return true;
+    // A REST call that deletes or closes what its route names (schema.ts `apiDestroys`, round 6 step 2).
+    if (apiDestroys(inner)) return true;
     const operation = targetsOf(item, this.catalogueFacts())?.op;
     return operation === "destroy" || operation === "stop";
   }
@@ -2709,7 +2797,7 @@ export class Permissions {
     const own = line ? this.alwaysAsk(line) : undefined;
     // Cheap first: with no denial, only a line that destroys something can meet another chat's work.
     const read = line ?? (this.denials.any() || this.othersMade().length ? this.assess(command, cwd) : undefined);
-    if (!own && !this.denials.any() && (!read || !this.othersMade().length || !read.commands.some((item) => this.destroys(item)))) {
+    if (!own && !this.denials.any() && (!read || !this.othersMade().length || !read.commands.some((item, index) => this.destroys(item) || this.runtimeOf(read.commands, index, cwd) !== undefined))) {
       this.gated?.push({ entry });
       return undefined;
     }
@@ -2720,11 +2808,39 @@ export class Permissions {
 
   /** `gate` for a tool call (MCP, extension) its setting or an earlier approval allows. */
   async gateTool(entry: "tool:setting" | "tool:approval", name: string, input: unknown): Promise<FloorHit | undefined> {
-    if (!this.denials.any()) {
+    // Round 6 step 2: the floor too, not only denials — the files its input names (`toolPaths`), by what its name says it does.
+    const cls = this.toolClass(name, input);
+    const typed = cls.units.slice(1);
+    const changes = typed.filter((unit) => unit.effects.includes("change"));
+    const system = changes.flatMap((unit) => unit.scopes).find((scope) => this.riskFacts().permissionSystem?.(scope.name));
+    if (!this.denials.any() && !system && !(typed.some((unit) => unit.destroys) && this.othersMade().length)) {
       this.gated?.push({ entry });
       return undefined;
     }
-    return this.gate(entry, this.toolClass(name, input));
+    return this.gate(entry, cls, system ? { permissionSystemPath: displayPath(system.name, this.home) } : {});
+  }
+
+  /**
+   * The files a tool's input names (round 6 step 2, data): string values under keys that name a file (`TOOL_PATH_KEYS`)
+   * or shaped like one (absolute, `~/`, `file://`), canonical; and what the tool's name says it does to them
+   * (`TOOL_VERBS`): a write changes, a delete or move destroys, anything else reads. Undefined effect words: read.
+   */
+  private toolPaths(name: string, input: unknown): { effects: EffectClass[]; destroys: boolean; paths: string[] } {
+    const paths: string[] = [];
+    const visit = (value: unknown, key: string, depth: number) => {
+      if (depth > 4 || paths.length >= 32) return;
+      if (typeof value === "string") {
+        const uri = /^file:\/\//i.test(value) ? decodeURIComponent(value.replace(/^file:\/\/(localhost)?/i, "")) : undefined;
+        const shaped = uri ?? (value.startsWith("/") || value.startsWith("~/") ? value : TOOL_PATH_KEYS.test(key) && value.length < 1024 && !/\s{2}|\n/.test(value) && !/^[a-z][\w+.-]*:\/\//i.test(value) ? value : undefined);
+        if (shaped) paths.push(this.classify(shaped, this.cwd).path);
+      } else if (Array.isArray(value)) for (const item of value) visit(item, key, depth + 1);
+      else if (value && typeof value === "object") for (const [k, v] of Object.entries(value)) visit(v, k, depth + 1);
+    };
+    visit(input, "", 0);
+    const words = name.toLowerCase().split(/[^a-z]+|(?<=[a-z])(?=[A-Z])/);
+    const destroys = words.some((word) => TOOL_VERBS.destroy.includes(word));
+    const changes = destroys || words.some((word) => TOOL_VERBS.change.includes(word));
+    return { effects: [changes ? "change" : "read"], destroys, paths: [...new Set(paths)] };
   }
 
   /**
@@ -2765,6 +2881,15 @@ export class Permissions {
             const made = { ...entry, repo: undefined, remote: undefined };
             if (entryCovers(made, target)) note(entry, "");
             else if ((kind === "path" || kind === "worktree") && (made.kind === "path" || made.kind === "worktree") && isUnder(made.name, target.name)) note(entry, `, inside ${scope.name}`);
+          }
+        }
+        // Operands known only when it runs (flow.ts): another chat's entity of a kind they take, passing every producer test.
+        for (const operand of unit.runtime ?? []) {
+          for (const entry of others) {
+            // Files by their globs (above); a worktree by what lists it (`git worktree list | awk …`), as a named entity.
+            if (entry.kind === "path" || !operand.kinds.includes(entry.kind)) continue;
+            if (this.created.ledger.covers({ kind: entry.kind, name: entry.name })) continue;
+            if (operand.tests.every((test) => passes(test, entry.kind, entry.name))) note(entry, `, which \`${operand.by}\` could be handed`);
           }
         }
         for (const glob of unit.globs ?? []) {

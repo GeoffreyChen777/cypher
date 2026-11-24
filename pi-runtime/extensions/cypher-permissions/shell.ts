@@ -83,7 +83,7 @@ export const UNKNOWN = "\0";
  * directory (or under its template), `$(pwd)` is where the line is. What a variable set from one stands for
  * is that place (`variablePattern`); every other substitution stands for anything.
  */
-const PRODUCERS: readonly { program: string; place(args: readonly string[], pwd: string | undefined): string | undefined }[] = [
+const PRODUCERS: readonly { program: string; place(args: readonly string[], pwd: string | undefined, globs: readonly string[]): string | undefined }[] = [
   {
     program: "mktemp",
     place: (args) => {
@@ -113,11 +113,49 @@ const PRODUCERS: readonly { program: string; place(args: readonly string[], pwd:
     },
   },
   { program: "pwd", place: (_args, pwd) => (pwd === undefined ? undefined : escapeGlob(pwd)) },
+  // Round 6 step 2: a listing prints what its operands match (`$(ls -d ~/.cypher*/x)`), `find ROOT -name N` what is
+  // under ROOT and named N; the glob a substitution or a loop over one stands for. One operand, or one root.
+  { program: "ls", place: (_args, _pwd, globs) => listedPlace(globs) },
+  { program: "find", place: (_args, _pwd, globs) => foundPlace(globs) },
   // What it prints is its own words (`D=$(echo ~/x)`, `$(realpath ../y)`, `$(dirname /a/b)`).
   { program: "echo", place: (args) => (args.length && !args.includes(UNKNOWN) && !args[0].startsWith("-") ? escapeGlob(args.join(" ")) : undefined) },
   { program: "realpath", place: (args) => (args.length === 1 && args[0] !== UNKNOWN && !args[0].startsWith("-") ? escapeGlob(args[0]) : undefined) },
   { program: "dirname", place: (args) => (args.length === 1 && args[0] !== UNKNOWN && args[0].includes("/") ? escapeGlob(args[0].replace(/\/+[^/]*\/*$/, "") || "/") : undefined) },
 ];
+
+/** `ls`'s one operand, as written (its globs kept). */
+function listedPlace(args: readonly string[]): string | undefined {
+  const operands = args.filter((word) => !word.startsWith("-"));
+  return operands.length === 1 && operands[0] !== UNKNOWN ? operands[0] : undefined;
+}
+
+/** `find ROOT [-name N | -path P]`: what it could print, as a glob (`-path` is a whole path, its `*` crossing folders). */
+function foundPlace(args: readonly string[]): string | undefined {
+  const root = args[0];
+  if (root === undefined || root === UNKNOWN || root.startsWith("-") || args.slice(1).some((word) => word === UNKNOWN)) return undefined;
+  const base = root.replace(/\/+$/, "") || "/";
+  const name = args.findIndex((word) => /^-i?name$/.test(word));
+  const path = args.findIndex((word) => /^-i?(path|wholename)$/.test(word));
+  if (path > 0 && args[path + 1] !== undefined) return wholePathGlob(args[path + 1], base);
+  if (name > 0 && args[name + 1] !== undefined) return `${base}/**/${args[name + 1]}`;
+  return `${base}/**`;
+}
+
+/** A `find -path` pattern as a glob under its root: its `*` may cross folders. */
+export function wholePathGlob(pattern: string, root: string): string {
+  const crossing = pattern.replace(/\*+/g, "**");
+  return crossing.startsWith("/") ? crossing : `${root}/${crossing.replace(/^(\*\*\/?)+/, "**/")}`;
+}
+
+/** Filters that pass on only lines of what they are given (a producer's place stays its place through them). */
+const SUBSET_PIPES: ReadonlySet<string> = new Set(["head", "tail", "sort", "uniq", "grep", "egrep", "fgrep", "shuf", "tac"]);
+
+/** A substitution's commands: one producer, or one producer piped through subset filters (`$(ls -t X | head -1)`). */
+function substitutionPlace(inner: readonly SimpleCommand[], pwd: string | undefined): string | undefined {
+  if (!inner.length || !inner.slice(1).every((command) => SUBSET_PIPES.has(command.words[0] ?? "") && !command.words.includes(UNKNOWN))) return undefined;
+  if (inner.length > 1 && !inner.slice(0, -1).every((command) => command.joint === "|")) return undefined;
+  return producedPlace(inner[0].words, pwd, inner[0].patterns);
+}
 
 /**
  * What `echo` or `printf` of literal words prints (round 5): a shell or interpreter it pipes into reads it
@@ -142,10 +180,12 @@ export function literalOutput(words: readonly string[]): string | undefined {
 }
 
 /** The place a producer's output is in (`PRODUCERS`), as a glob; undefined when it is no producer. */
-function producedPlace(words: readonly string[], pwd: string | undefined): string | undefined {
+function producedPlace(words: readonly string[], pwd: string | undefined, patterns?: readonly (string | undefined)[]): string | undefined {
   if (!words.length || words[0] === UNKNOWN) return undefined;
   const row = PRODUCERS.find((candidate) => candidate.program === words[0]);
-  return row?.place(words.slice(1), pwd);
+  // Each argument as a glob: a known word escaped, one known only when it runs by its pattern (else unknown).
+  const globs = words.slice(1).map((word, index) => (word === UNKNOWN ? (patterns?.[index + 1] ?? UNKNOWN) : escapeGlob(word)));
+  return row?.place(words.slice(1), pwd, globs);
 }
 
 export interface SimpleCommand {
@@ -393,7 +433,7 @@ function read(
   /** Where the reader is in `source`: when a word ends, the character that ends it. */
   let pos = 0;
   /** Per open loop, innermost last: a for-loop's name and literal words, and where its body starts. */
-  const loops: ({ name?: string; values?: string[]; bodyStart?: number; outStart?: number } | undefined)[] = [];
+  const loops: ({ name?: string; values?: string[]; places?: string[]; bodyStart?: number; outStart?: number } | undefined)[] = [];
   /** Per open `{ … }` group: the function it defines. */
   const groups: ({ name: string; bodyStart: number; outStart: number; sure: boolean } | undefined)[] = [];
   /** A function definition whose `{` comes next, with its name (none yet: the word after `function`). */
@@ -605,6 +645,8 @@ function read(
         if (known) loop.values.push(text);
         else loop.values = undefined;
       }
+      // What each word stands for (round 6 step 2): a loop over globs or substitutions binds its name to their glob.
+      if (loop?.places) loop.places.push(known ? escapeGlob(text) : (pattern ?? ANY));
       return;
     }
     if (test) {
@@ -634,7 +676,10 @@ function read(
         if (text === "in") {
           forHeader = 3;
           const loop = loops.at(-1);
-          if (loop) loop.values = [];
+          if (loop) {
+            loop.values = [];
+            loop.places = [];
+          }
         } else if (text === "do") forHeader = 0;
         else throw new Opaque("`for`");
         return;
@@ -668,6 +713,11 @@ function read(
             if (loop && loop.bodyStart === undefined) {
               loop.bodyStart = pos;
               loop.outStart = out.length;
+              // A loop whose words aren't all literal (it isn't expanded): its name is one of their globs.
+              if (!loop.values && loop.name !== undefined && loop.places?.length) {
+                const places = loop.places.map((place) => place.replace(/,/g, "\\,"));
+                vars.patterns.set(loop.name, places.length === 1 ? loop.places[0] : `{${places.join(",")}}`);
+              }
             }
             return;
           }
@@ -937,7 +987,7 @@ function read(
       becomesUnknown();
       // A command whose output is a path in a known place (`$(mktemp -d)`, `$(pwd)`): that place.
       const inner = out.slice(before);
-      pat += (inner.length === 1 ? producedPlace(inner[0].words, vars.poisoned ? undefined : vars.values.get("PWD")) : undefined) ?? ANY;
+      pat += substitutionPlace(inner, vars.poisoned ? undefined : vars.values.get("PWD")) ?? ANY;
       inWord = true;
       return close;
     }
@@ -1006,7 +1056,7 @@ function read(
     read(inner, home, options, out, true, vars, subshells, subshell);
     becomesUnknown();
     const produced = out.slice(before);
-    pat += (produced.length === 1 ? producedPlace(produced[0].words, vars.poisoned ? undefined : vars.values.get("PWD")) : undefined) ?? ANY;
+    pat += substitutionPlace(produced, vars.poisoned ? undefined : vars.values.get("PWD")) ?? ANY;
     inWord = true;
     return j;
   };

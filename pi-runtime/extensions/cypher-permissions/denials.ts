@@ -27,6 +27,9 @@
  * file and no command in the sandbox can write it.
  */
 
+import type { RuntimeOperand } from "./flow.ts";
+import { passes } from "./flow.ts";
+import { globsIntersect } from "./resolve.ts";
 import { createHash } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -65,6 +68,8 @@ export interface DenialUnit {
   destroys?: boolean;
   /** The canonical globs it is given (what they could match it acts on); not recorded. */
   globs?: readonly string[];
+  /** Operands known only when it runs, by their producers' possible set (round 6 step 2, flow.ts); not recorded. */
+  runtime?: readonly RuntimeOperand[];
 }
 
 export interface ActionClass {
@@ -129,6 +134,11 @@ export function classMatch(denied: Pick<DenialRecord, "units" | "actions" | "sco
       if (!unit.effects.some((effect) => other.effects.includes(effect))) continue;
       const scope = other.scopes.find((candidate) => unit.scopes.some((scope) => scopeMatches(scope, candidate)));
       if (scope) return { unit, scope };
+      // Round 6 step 2: what it acts on known only when it runs, by its possible set — a producer's (flow.ts) or a glob's.
+      const reached = unit.scopes.find((scope) => scope.kind !== "line" && (other.runtime ?? []).some((operand) => (operand.kinds as readonly string[]).includes(scope.kind) && operand.tests.every((test) => passes(test, scope.kind, scope.name))));
+      if (reached) return { unit, scope: reached };
+      const globbed = unit.scopes.find((scope) => PATH_KINDS.has(scope.kind) && !scope.glob && (other.globs ?? []).some((glob) => globsIntersect(glob, scope.name) || globsIntersect(`${glob.replace(/\/+$/, "")}/**`, scope.name)));
+      if (globbed) return { unit, scope: globbed };
     }
   }
   return undefined;

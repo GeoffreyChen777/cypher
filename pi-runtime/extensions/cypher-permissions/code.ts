@@ -376,7 +376,12 @@ export const HOME_FORMS: readonly RegExp[] = [
   /\[Environment\]::GetFolderPath\(\s*['"]?UserProfile['"]?\s*\)/i,
   /\bSystem\.getProperty\s*\(\s*['"]user\.home['"]\s*\)/,
   /\bstd::env::home_dir\s*\(\s*\)|\bdirs::home_dir\s*\(\s*\)|\bos\.UserHomeDir\s*\(\s*\)/,
+  // Round 6 step 2: Tcl's `$env(HOME)`, `$::env(HOME)`.
+  /\$(?:::)?env\(HOME\)/,
 ];
+
+/** `NAME = <home form>` (`h, _ := os.UserHomeDir()`, `home = Path.home()`, `set h $env(HOME)`): a name the code keeps the home folder in. */
+const HOME_HELD = new RegExp(`(?:^|[\\s;({])(?:set\\s+|(?:my|local|let|const|var)\\s+)?\\$?([A-Za-z_]\\w*)(?:\\s*,\\s*[A-Za-z_]\\w*)*\\s*(?::=|=|\\s)\\s*(?:${HOME_FORMS.map((form) => form.source).join("|")})`, "g");
 
 /** An interpolation around a home form inside a literal: `#{…}`, `${…}`, `{…}` (f-strings), `$(…)`. */
 const HOME_AT_START = new RegExp(`^(?:#\\{|\\$\\{|\\{|\\$\\()?\\s*(?:${HOME_FORMS.map((form) => form.source).join("|")})\\s*[})]?`);
@@ -395,12 +400,27 @@ const HOME_JOINED = new RegExp(`(?:${HOME_FORMS.map((form) => form.source).join(
 /** The literals of code that follow a home form they are joined to, as `~/…`. */
 export function homeJoined(code: string, literals: readonly Literal[]): string[] {
   const out: string[] = [];
-  for (const literal of literals) {
+  // Round 6 step 2: a variable the home folder is kept in is a home form too, and the literals a join gives after it
+  // are one path (`filepath.Join(h, ".ssh", "id_ed25519")`), as is a literal right after it (awk's `ENVIRON["HOME"] "/x"`).
+  const held = [...code.matchAll(HOME_HELD)].map((match) => match[1]).filter((name) => name.length >= 1);
+  const joined = held.length ? new RegExp(`(?:${[...HOME_FORMS.map((form) => form.source), ...held.map((name) => `(?<![\\w.])\\$?${name}(?![\\w(])`)].join("|")})\\s*(?:\\+|\\.\\.|\\.|,|/|&)?\\s*$`) : HOME_JOINED_LOOSE;
+  for (const [index, literal] of literals.entries()) {
     const before = code.slice(Math.max(0, literal.at - 120), literal.at);
-    if (HOME_JOINED.test(before) && literal.text && !/^[a-z][\w+.-]*:\/\//i.test(literal.text)) out.push(`~/${literal.text.replace(/^[/\\]+/, "")}`);
+    if (!joined.test(before) || !literal.text || /^[a-z][\w+.-]*:\/\//i.test(literal.text)) continue;
+    let path = literal.text.replace(/^[/\\]+/, "");
+    // The literals after it in the same join, separated by a comma (or a separator literal).
+    for (let next = index + 1; next < literals.length; next++) {
+      const between = code.slice(literals[next - 1].end, literals[next].at);
+      if (!/^\s*,\s*$/.test(between) || !literals[next].text) break;
+      path += `/${literals[next].text.replace(/^[/\\]+/, "")}`;
+    }
+    out.push(`~/${path}`);
   }
   return out;
 }
+
+/** `HOME_JOINED` with the separator optional: juxtaposition joins too (awk, Tcl). */
+const HOME_JOINED_LOOSE = new RegExp(`(?:${HOME_FORMS.map((form) => form.source).join("|")})\\s*(?:\\+|\\.\\.|\\.|,|/|&)?\\s*$`);
 
 /** Whether code finds the home folder by any form (`HOME_FORMS`). */
 export function usesHome(code: string): boolean {

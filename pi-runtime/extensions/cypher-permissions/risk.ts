@@ -33,9 +33,9 @@ import { asksOnly, DANGER, dangerMatches, INSPECT, inspectMatches, viewOf } from
 import { isUnder } from "./paths.ts";
 import type { CommandView, PackFacts } from "./packs.ts";
 import type { Classification } from "./paths.ts";
-import { UNKNOWN } from "./shell.ts";
+import { UNKNOWN, wholePathGlob } from "./shell.ts";
 import { ANY, ENV_CLOSE, ENV_OPEN, escapeGlob, resolveText } from "./resolve.ts";
-import { interpreterOf } from "./code.ts";
+import { interpreterOf, optionCommands } from "./code.ts";
 import { refsWritten, unwrapped } from "./effects.ts";
 import { foldPipe } from "./fold.ts";
 import { genericDestroyer, TOLD_BY_PLACE } from "./catalogue.ts";
@@ -225,6 +225,8 @@ export interface RiskCommand {
   writePatterns?: readonly (string | undefined)[];
   /** It is a shell or interpreter that runs code from its input, which is known only when it runs (`… | sh`, `sh < file`). */
   stdinCode?: boolean;
+  /** Inside a loop (shell.ts `loop`). */
+  loop?: boolean;
 }
 
 /** What `kill`, `pkill` and `killall` would stop. */
@@ -697,9 +699,12 @@ function pathRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): As
     }
   }
   const words = view.args;
+  const runLines = optionCommands(view.words, UNKNOWN);
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
     if (!pathWords([word]).length) continue;
+    // A command line an option runs is read as its own line (round 6 step 2), not as a file of this program.
+    if (runLines.some((line) => word === line || word.endsWith(`=${line}`))) continue;
     // ssh's identity file: the key is used, not read out.
     if (/^(ssh|scp|sftp|rsync|git|mosh)$/.test(view.program) && (words[i - 1] === "-i" || /IdentityFile/i.test(words[i - 1] ?? ""))) continue;
     // `host:path` and a URL are the other machine's files, whatever their names.
@@ -1681,7 +1686,8 @@ export function unresolvedWrites(command: RiskCommand, facts: RiskFacts): string
   ];
   for (const item of items) {
     const found = facts.couldBe(item.pattern, item.cwd, { subtree });
-    if (found.anywhere && found.permissionSystem) out.push(`\`${view.program || ">"}\` writes ${shownPattern(item.pattern)}, a path whose start is known only when it runs: it could be the permission system's own files (${found.permissionSystem})`);
+    // Round 6 step 2: any possible set (a loop's glob, a listing's place), not only one whose start is unknown.
+    if (found.permissionSystem) out.push(`\`${view.program || ">"}\` writes ${shownPattern(item.pattern)}, a path whose start is known only when it runs: it could be the permission system's own files (${found.permissionSystem})`);
   }
   return out;
 }
@@ -1698,6 +1704,8 @@ export function unresolvedWrites(command: RiskCommand, facts: RiskFacts): string
 export const LISTERS: Readonly<Record<string, "operands" | "subtree">> = { ls: "operands", echo: "operands", printf: "operands", realpath: "operands", readlink: "operands", find: "subtree", fd: "subtree", du: "subtree", tree: "subtree" };
 export const SUBSET_FILTERS: ReadonlySet<string> = new Set(["head", "tail", "sort", "uniq", "grep", "egrep", "fgrep", "rg", "shuf", "tac", "cat", "tr"]);
 /** Programs that write the operands xargs appends (or the token it substitutes) when they run. */
+/** Programs that hand the lines they read to a command as its operands (round 6 step 2). */
+export const FEEDERS: ReadonlySet<string> = new Set(["xargs", "parallel"]);
 export const OPERAND_WRITERS: ReadonlySet<string> = new Set(["tee", "truncate", "rm", "shred", "unlink", "cp", "mv", "ln", "install", "chmod", "chown", "touch", "dd", "rsync"]);
 
 function escapeText(text: string): string {
@@ -1761,26 +1769,46 @@ export function listingSet(pipe: readonly RiskCommand[]): { pattern: string; cwd
       if (/^-i?name$/.test(first.words[i])) names.push(value);
       if (/^-i?(path|wholename)$/.test(first.words[i])) paths.push(value);
     }
-    if (paths.length) return paths.map((pattern) => ({ pattern, cwd: operandDir(first, view), subtree: false }));
+    // `-path P` matches the whole path, its `*` crossing folders (round 6 step 2): under each root.
+    if (paths.length) return out.flatMap((root) => paths.map((pattern) => ({ pattern: wholePathGlob(pattern, root.pattern.replace(/\/+$/, "")), cwd: root.cwd, subtree: false })));
     if (names.length) return out.flatMap((root) => names.map((name) => ({ pattern: `${root.pattern.replace(/\/+$/, "")}/**/${name}`, cwd: root.cwd, subtree: false })));
   }
   return out;
 }
 
 /** The floor's findings for writes known only by their possible set (`listingSet`): each that could be the permission system. */
-export function runtimeWriteSets(commands: readonly (RiskCommand & { joint?: string })[], facts: RiskFacts): string[] {
+export function runtimeWriteSets(commands: readonly (RiskCommand & { joint?: string; loop?: boolean })[], facts: RiskFacts): string[] {
   if (!facts.couldBe) return [];
   const out: string[] = [];
+  const check = (set: ReturnType<typeof listingSet>, consumer: string, producer: string) => {
+    for (const item of set ?? []) {
+      const found = facts.couldBe!(item.pattern, item.cwd, { subtree: item.subtree });
+      if (found.permissionSystem) out.push(`\`${consumer}\` writes what \`${producer}\` lists, which could be the permission system's own files (${found.permissionSystem})`);
+    }
+  };
   for (const [index, command] of commands.entries()) {
-    if (basename(command.words[0] ?? "") !== "xargs" || commands[index - 1]?.joint !== "|") continue;
-    if (!consumerWrites(command.words)) continue;
+    const program = basename(command.words[0] ?? "");
     let start = index - 1;
     while (start > 0 && commands[start - 1]?.joint === "|") start--;
-    const set = listingSet(commands.slice(start, index));
-    if (!set) continue;
-    for (const item of set) {
-      const found = facts.couldBe(item.pattern, item.cwd, { subtree: item.subtree });
-      if (found.permissionSystem) out.push(`\`xargs\` writes what \`${basename(commands[start].words[0] ?? "")}\` lists, which could be the permission system's own files (${found.permissionSystem})`);
+    const piped = commands[index - 1]?.joint === "|";
+    // A feeder (`FEEDERS`: xargs, parallel) hands the pipe's lines to the command it runs.
+    if (piped && FEEDERS.has(program)) {
+      const words = program === "xargs" ? command.words : ["xargs", "-I", "{}", ...command.words.slice(1).filter((word) => !word.startsWith("-"))];
+      if (consumerWrites(words)) check(listingSet(commands.slice(start, index)), program, basename(commands[start].words[0] ?? ""));
+    }
+    // `find … -exec CMD {} +` is read as CMD on find's roots (core.ts `codeFindings`, effects.ts): not again here.
+    // `… | while read NAME; do …; done`: the loop's commands that write a target known only when they run are handed the pipe's lines.
+    if (piped && program === "read") {
+      const set = listingSet(commands.slice(start, index));
+      for (const later of commands.slice(index + 1)) {
+        if (!later.loop) break;
+        const view = viewOf(later.words);
+        const writesUnknown = later.writes.includes(UNKNOWN) || (later.words.length > 1 && pathEffect(later, view, UNKNOWN) === "write" && later.words.slice(1).includes(UNKNOWN));
+        if (writesUnknown) {
+          check(set, `while read`, basename(commands[start].words[0] ?? ""));
+          break;
+        }
+      }
     }
   }
   return out;
@@ -2049,9 +2077,13 @@ function fileWords(command: RiskCommand, view: CommandView, patterns: string[] =
   const url = (word: string) => /^[a-z][\w+.-]*:\/\//i.test(word);
   const last = view.positionals.at(-1);
   const written = last !== undefined && last !== UNKNOWN && !url(last) && view.positionals.slice(0, -1).some((word) => word !== UNKNOWN && url(word)) ? view.args.lastIndexOf(last) : -1;
+  // A command line an option runs (`git -c core.sshCommand="ssh -i KEY"`, code.ts `optionCommands`) is read as a line
+  // of its own (core.ts `codeFindings`, where `ssh -i` uses a key); it names no file this program reads (round 6 step 2).
+  const runLines = optionCommands(view.words, UNKNOWN);
   for (const [at, word] of view.args.entries()) {
     const before = view.args[at - 1] ?? "";
     if (usesKey(view.program, before)) continue;
+    if (runLines.some((line) => word === line || word.endsWith(`=${line}`))) continue;
     if (DOWNLOADERS.has(view.program) && WRITES_OUTPUT.test(before)) continue;
     if (at === written && !before.startsWith("-")) continue;
     if (word === UNKNOWN) {
