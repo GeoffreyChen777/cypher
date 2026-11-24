@@ -70,6 +70,15 @@ pub struct RunHostContext {
     /// a running Pi's environment. `None` (discovery, a chat without a
     /// ledger) unsets it, so no danger runs on an explicit request there.
     pub owner_words: Option<String>,
+    /// The task this run belongs to (`CYPHER_TASK_ID`; docs/design/
+    /// permission-control.md §7.3.13): `workspace:<bot>` for a workspace's
+    /// chat and threads, `workspace:<bot>/plan:<work>` for a plan's sessions
+    /// and thread, `chat:<id>` for an owner's plain chat; a subagent's child
+    /// chat takes its root's. The permission extension's other-task floor
+    /// never holds what a chat of the same task made. `None` (discovery, a
+    /// memory pass, a child whose parent row is gone) unsets it: lineage
+    /// unknown.
+    pub task_id: Option<String>,
 }
 
 impl RunHostContext {

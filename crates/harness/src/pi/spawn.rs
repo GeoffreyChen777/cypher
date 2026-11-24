@@ -16,6 +16,11 @@ const ENV_CHILD_INDEX: &str = "PI_SUBAGENT_CHILD_INDEX";
 /// harness as `CYPHER_CHAT_ID`, consumed by the subagents extension for the
 /// Cypher bridge.
 const ENV_CYPHER_CHAT_ID: &str = "CYPHER_CHAT_ID";
+/// The task the run belongs to ([`RunHostContext::task_id`]), read by the
+/// permission extension's ledger (`extensions/cypher-permissions/ledger.ts`):
+/// chats of one task are never each other's "other task". Set or cleared on
+/// every spawn, like the chat id.
+const ENV_CYPHER_TASK_ID: &str = "CYPHER_TASK_ID";
 /// Local engine IPC socket path the extension's Cypher bridge helper dials
 /// (`StartSubagent` / `WatchAgentEvents`).
 const ENV_CYPHER_ENGINE_SOCKET: &str = "CYPHER_ENGINE_SOCKET";
@@ -451,11 +456,15 @@ impl PiHarness {
         // WatchAgentEvents). Discovery processes pass an empty host context
         // and therefore never receive a parent chat id.
         cmd.env_remove(ENV_CYPHER_CHAT_ID);
+        cmd.env_remove(ENV_CYPHER_TASK_ID);
         cmd.env_remove(ENV_CYPHER_ENGINE_SOCKET);
         cmd.env_remove(ENV_CYPHER_SUBAGENT_BRIDGE);
         cmd.env_remove("CYPHER_ENGINE_WS_URL");
         if let Some(chat_id) = host.chat_id.as_deref().filter(|s| !s.is_empty()) {
             cmd.env(ENV_CYPHER_CHAT_ID, chat_id);
+        }
+        if let Some(task_id) = host.task_id.as_deref().filter(|s| !s.is_empty()) {
+            cmd.env(ENV_CYPHER_TASK_ID, task_id);
         }
         if let Some(url) = self.engine_socket.as_deref().filter(|s| !s.is_empty()) {
             cmd.env(ENV_CYPHER_ENGINE_SOCKET, url);
