@@ -25,8 +25,9 @@ import { Denials, denialsFile, forRecord } from "./denials.ts";
 import type { ActionClass, DenialRecord, DenialScope } from "./denials.ts";
 import { commandEffects, unwrapped } from "./effects.ts";
 import { groupOperand, passes, runtimeOperand } from "./flow.ts";
-import { projectScripts } from "./scripts.ts";
-import { apiDestroys, typedTargets, withEnvOptions } from "./schema.ts";
+import { projectScripts, readText, scheduledLines, shellLines, triggeredHooks, unreadParts } from "./scripts.ts";
+import type { ProjectScript } from "./scripts.ts";
+import { apiDestroys, folderPackage, typedTargets, withEnvOptions } from "./schema.ts";
 import type { RuntimeOperand } from "./flow.ts";
 import type { EffectClass } from "./effects.ts";
 import type { LifecycleFacts } from "./lifecycle.ts";
@@ -45,7 +46,8 @@ import {
 import { globBase, hasGlob } from "./glob.ts";
 import { GRANT_ENTRY, GrantStore, newGrant, REVOKE_ENTRY, ROOT_ENTRY } from "./grants.ts";
 import type { Grant, GrantScope } from "./grants.ts";
-import { checkDataConsent, checkExplicit, consentText, describeAttribute, describeTarget, lineTargets, mentions, repoName, scanConsents, scanDataConsent } from "./explicit.ts";
+import { listWords } from "./lexicon.ts";
+import { checkDataConsent, checkExplicit, consentText, describeAttribute, describeTarget, lineTargets, mentions, QUESTION, repoName, scanConsents, scanDataConsent } from "./explicit.ts";
 import type { ExplicitClaim, ExplicitFacts, ExplicitResult, LineTargets, OwnerWords, Target, TargetFacts } from "./explicit.ts";
 import { answeredByConsent, conversationContext, judgePrompt, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
 import type { Concern, JudgeEvidence, JudgeRequest } from "./judge.ts";
@@ -63,7 +65,7 @@ import type { CommandRule } from "./commands.ts";
 import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, lineFlow, listingSet, normalRefspec, redirectRisk, runtimeWriteSets, secretName, secretWrites, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
 import type { PatternFinding } from "./risk.ts";
 import { globsIntersect, resolvePattern, resolveText } from "./resolve.ts";
-import { codeOf, INTERPRETERS as INTERPRETER_TABLE, interpreterOf, optionCommands, scanCode, shebangInterpreter } from "./code.ts";
+import { codeOf, DELETE_NAMES, INTERPRETERS as INTERPRETER_TABLE, interpreterOf, optionCommands, scanCode, shebangInterpreter, signaledPids } from "./code.ts";
 import type { Interpreter } from "./code.ts";
 import type { Assessment, GitFacts, KillTarget, ProcessFacts, RiskFacts, Tier } from "./risk.ts";
 import { INSPECT, inspectMatches, viewOf } from "./packs.ts";
@@ -294,6 +296,10 @@ export interface LineAssessment extends Assessment {
   opaqueCode?: string[];
   /** Paths it writes whose start is known only when it runs and that could be the permission system (risk.ts `unresolvedWrites`). */
   unresolved?: string[];
+  /** Project scripts it runs (scripts.ts), read as its lines (final pass): evidence for the judge, and no remembered grant. */
+  scripts?: ProjectScript[];
+  /** What Cypher couldn't read of it (final pass): code set up to run later, a function's arguments, a sourced file's variables. */
+  unread?: string[];
 }
 
 /** What the code a command runs does (code.ts, `Permissions.codeFindings`). */
@@ -309,6 +315,8 @@ interface CodeFinding {
   floor?: Assessment;
   /** The most dangerous line it runs (`subprocess.run(["git", "push", "--force"])`), when one is. */
   worst?: Assessment;
+  /** The project scripts it is (`scriptFinding`). */
+  scripts?: ProjectScript[];
 }
 
 /** How deep code inside code is read (a script that runs a shell line that runs python …). */
@@ -483,7 +491,13 @@ interface LineCommand extends SimpleCommand {
 
 const DIRECTORY_BUILTINS: ReadonlySet<string> = new Set(["cd", "pushd", "popd"]);
 /** Calls that delete files, in any language scanCode reads (round 6 step 2). */
-const CODE_DELETES = /\b(rmtree|rmSync|rmdirSync|unlinkSync|unlink|rmdir|removedirs|rm_rf|rm_r|rm_f|delete_file|deleteSync|FileUtils\.rm\w*|Files\.delete\w*|os\.remove|fs\.rm|fs\.promises\.rm|shutil\.move|os\.rename|File\.delete)\s*\(/;
+const CODE_DELETES = new RegExp(
+  `\\b(rmtree|rmSync|rmdirSync|unlinkSync|unlink|rmdir|removedirs|rm_rf|rm_r|rm_f|delete_file|deleteSync|FileUtils\\.rm\\w*|Files\\.delete\\w*|os\\.remove|fs\\.rm|fs\\.promises\\.rm|shutil\\.move|os\\.rename|File\\.delete|${Object.values(DELETE_NAMES)
+    .flat()
+    .filter((name) => /^[\w.:$]+\(?$/.test(name))
+    .map((name) => name.replace(/\($/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|")})\\s*\\(`,
+);
 /** Input keys of an MCP or extension tool that name a file (round 6 step 2). */
 const TOOL_PATH_KEYS = /^(path|paths|file|files|filename|filepath|file_path|dir|directory|folder|target|destination|dest|source|src|from|to|uri|location|root)$/i;
 /** Words of a tool's name by what it does to the files it names (round 6 step 2). */
@@ -1589,6 +1603,7 @@ export class Permissions {
     // A subshell starts where the line's shell is, and its `cd` stays in it.
     let outside: string | undefined = cwd;
     let group: number | undefined;
+    const stack: string[] = [];
     for (const [index, command] of commands.entries()) {
       if (command.subshell !== group) {
         // Entering one from the line's shell, or leaving one (for the line, or the next subshell).
@@ -1612,14 +1627,16 @@ export class Permissions {
         wrappers: wrapped?.wrappers ?? [],
         cwd: here,
         // A system shell whose script the reader read (`bash -c '…'`, `bash <<'EOF'`) only runs the commands that follow it.
-        inert: isInert(words) || this.harmlessFilter(words, here) || (command.script === true && this.systemProgram(words[0], here)),
+        inert: isInert(words) || this.harmlessFilter(words, here) || (command.script === true && (words[0] === "eval" || this.systemProgram(words[0], here))),
         // A shell or interpreter reading code from its input, when the reader couldn't read that code.
         ...(command.script !== true && readsCode(words) && (command.reads.length > 0 || command.inputUnknown === true || commands[index - 1]?.joint === "|") ? { stdinCode: true } : {}),
       });
       if (!moves(command)) continue;
-      const [program, target, ...rest] = command.words;
-      const certain = program === "cd" && target !== undefined && target !== UNKNOWN && target !== "-" && rest.length === 0 && !command.scoped && !process.env.CDPATH;
-      here = certain && here !== undefined ? resolvePath(here, target) : undefined;
+      // Where it moves the shell (final pass, `DIRECTORY_MOVES`): `cd [-L|-P] DIR`, `pushd DIR` (onto a stack), `popd`
+      // (back to what the stack holds). Anything else (`cd -`, `pushd +N`, `CDPATH`, a scoped one): unknown from here.
+      const move = command.scoped || process.env.CDPATH ? undefined : directoryMove(command.words);
+      if (move?.push && here !== undefined) stack.push(here);
+      here = move === undefined || here === undefined ? undefined : move.pop ? stack.pop() : resolvePath(here, move.to!);
     }
     return out;
   }
@@ -1941,7 +1958,9 @@ export class Permissions {
     // A secret leaving the machine: the always-ask floor, for the line as a whole — the code it runs included.
     const exfiltration = exfiltrates(commands, facts, parsed.expands, code);
     const nested = [...code.values()].find((found) => found.floor)?.floor;
+    const staged = exfiltration ? undefined : this.bulkStagedSecret(commands);
     if (exfiltration) worst = { tier: "danger", kind: exfiltration, key: "secret-off-machine", floor: true };
+    else if (staged) worst = { tier: "danger", kind: staged, key: "secret-off-machine", floor: true };
     else if (nested) worst = { tier: "danger", kind: nested.kind, key: nested.key, floor: true };
     else {
       // A write whose target is known only by what a listing could print (round 6, W5, risk.ts `runtimeWriteSets`).
@@ -1950,7 +1969,61 @@ export class Permissions {
     }
     const opaqueCode = [...code.values()].flatMap((found) => (found.opaque ? [`${found.origin} (${found.language}): ${found.opaque}`] : []));
     const unresolved = commands.flatMap((item) => unresolvedWrites(item, facts));
-    return { ...worst, commands, assessments, parsed, ...(opaqueCode.length ? { opaqueCode } : {}), ...(unresolved.length ? { unresolved } : {}) };
+    const scripts = [...code.values()].flatMap((found) => found.scripts ?? []);
+    // A sourced file's variables matter only where the line uses a word known only when it runs (`$TARGET`).
+    const dependsOnRuntime = commands.some((item) => item.words.includes(UNKNOWN) || item.writes.includes(UNKNOWN) || item.reads.includes(UNKNOWN));
+    const unread = unreadParts(command).filter((what) => dependsOnRuntime || !what.startsWith("the variables "));
+    return { ...worst, commands, assessments, parsed, ...(opaqueCode.length ? { opaqueCode } : {}), ...(unresolved.length ? { unresolved } : {}), ...(scripts.length ? { scripts } : {}), ...(unread.length ? { unread } : {}) };
+  }
+
+  /**
+   * A secret sent by staging a folder in bulk (final pass): a line that stages by folder or by everything (`git add .`,
+   * `-A`, `--all`, a folder operand, `git commit -a`) and then pushes stages every file git doesn't ignore. Such a line
+   * sends a secret when the working tree holds one git would add: an untracked secret no ignore rule hides (`git
+   * ls-files -o --exclude-standard`), or any secret inside it when the same line first changes the ignore rules
+   * (`.gitignore`, `.git/info/exclude`, `core.excludesFile`).
+   */
+  private bulkStagedSecret(commands: readonly LineCommand[]): string | undefined {
+    const gitSub = (item: LineCommand) => {
+      const words = unwrapped(item.words);
+      if (basename(words[0] ?? "") !== "git") return undefined;
+      let i = 1;
+      while (i < words.length && words[i].startsWith("-")) i += /^-(C|c)$/.test(words[i]) ? 2 : 1;
+      return { sub: words[i], rest: words.slice(i + 1) };
+    };
+    const bulk = commands.findIndex((item) => {
+      const git = gitSub(item);
+      if (!git) return false;
+      if (git.sub === "add") return git.rest.some((word) => word === "." || word === "-A" || word === "--all" || word === "*" || word === ":/" || (word !== UNKNOWN && !word.startsWith("-") && item.cwd !== undefined && (() => { try { return statSync(this.classify(word, item.cwd).path).isDirectory(); } catch { return false; } })()));
+      return git.sub === "commit" && git.rest.some((word) => /^-[a-zA-Z]*a[a-zA-Z]*$/.test(word) || word === "--all");
+    });
+    if (bulk < 0) return undefined;
+    if (!commands.slice(bulk + 1).some((item) => gitSub(item)?.sub === "push")) return undefined;
+    const at = commands[bulk].cwd;
+    if (at === undefined) return undefined;
+    const top = gitRoots(this.paths.canonical(at, this.cwd)).top;
+    if (!top) return undefined;
+    const ignoreFile = (path: string) => /(^|\/)\.gitignore$|\/\.git\/info\/exclude$/.test(path);
+    const editsIgnore = commands.slice(0, bulk).some((item) => {
+      const view = item.words.filter((word) => word !== UNKNOWN);
+      return item.writes.some((path) => ignoreFile(path)) || (/^(sed|gsed|perl|truncate|rm|mv|cp|tee)$/.test(basename(view[0] ?? "")) && view.slice(1).some((word) => ignoreFile(word))) || (gitSub(item)?.sub === "config" && view.some((word) => /core\.excludesFile/i.test(word)));
+    });
+    if (editsIgnore) {
+      const inside = this.secretInside(top);
+      if (inside) return `sends a secret off this machine (${displayPath(inside, this.home)}, which this line un-ignores, stages and pushes) through git push`;
+      return undefined;
+    }
+    // What the bulk add stages: its pathspecs (`git add src`), else the whole tree (`-A`, `.` at the top, `commit -a`).
+    const add = gitSub(commands[bulk]);
+    const specs = add?.sub === "add" ? add.rest.filter((word) => word !== UNKNOWN && !word.startsWith("-")) : [];
+    const listed = spawnSync("git", ["-C", this.paths.canonical(at, this.cwd), "ls-files", "-o", "--exclude-standard", "--full-name", "-z", "--", ...(specs.length ? specs : [":/"])], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000 });
+    if (listed.status !== 0) return undefined;
+    for (const name of listed.stdout.split("\0").slice(0, 2000)) {
+      if (!name) continue;
+      const classification = this.classify(join(top, name), top);
+      if (classification.zone === "sensitive") return `sends a secret off this machine (${displayPath(classification.path, this.home)}, untracked and not ignored, which this line stages and pushes) through git push`;
+    }
+    return undefined;
   }
 
   /**
@@ -1966,13 +2039,80 @@ export class Permissions {
     /** What earlier commands of the line wrote, with its text (undefined: known only when it runs). */
     const written = new Map<string, string | undefined>();
     for (const [index, item] of commands.entries()) {
-      const found = this.codeFinding(item, commands[index - 1], written, depth);
+      const found = this.codeFinding(item, commands[index - 1], written, depth) ?? this.scriptFinding(item, written, depth) ?? this.laterFinding(item, commands[index - 1], written, depth);
       if (found) out.set(item, found);
-      const text = item.input ?? (/^(echo|printf)$/.test(item.words[0] ?? "") && !item.words.includes(UNKNOWN) ? (literalOutput(item.words) ?? `${item.words.slice(1).join(" ")}\n`) : undefined);
-      for (const path of item.writes) if (path !== UNKNOWN && (item.cwd !== undefined || isAbsolute(path))) written.set(this.classify(path, item.cwd).path, text);
-      if (item.words[0] === "tee") for (const path of item.words.slice(1)) if (path !== UNKNOWN && !path.startsWith("-") && (item.cwd !== undefined || isAbsolute(path))) written.set(this.classify(path, item.cwd).path, item.input);
+      this.noteLineWrite(item, written);
     }
     return out;
+  }
+
+  /** What one command of a line writes, with its text when the line says it (`echo`/`printf`, a heredoc, `tee`), into `written`. */
+  private noteLineWrite(item: LineCommand, written: Map<string, string | undefined>): void {
+    const text = item.input ?? (/^(echo|printf)$/.test(item.words[0] ?? "") && !item.words.includes(UNKNOWN) ? (literalOutput(item.words) ?? `${item.words.slice(1).join(" ")}\n`) : undefined);
+    for (const path of item.writes) if (path !== UNKNOWN && (item.cwd !== undefined || isAbsolute(path))) written.set(this.classify(path, item.cwd).path, text);
+    if (item.words[0] === "tee") for (const path of item.words.slice(1)) if (path !== UNKNOWN && !path.startsWith("-") && (item.cwd !== undefined || isAbsolute(path))) written.set(this.classify(path, item.cwd).path, item.input);
+  }
+
+  /**
+   * Code a command sets up and runs later, when this line gives its text (final pass, scripts.ts): the git hooks a
+   * git command triggers that this line (or this task) wrote, a crontab fed literal entries (`echo … | crontab -`,
+   * `crontab FILE` this line wrote). Read as the shell lines they are, like a project script.
+   */
+  private laterFinding(item: LineCommand, before: LineCommand | undefined, written: ReadonlyMap<string, string | undefined>, depth: number): CodeFinding | undefined {
+    if (depth > MAX_CODE_DEPTH) return undefined;
+    const words = unwrapped(item.words);
+    const at = item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd);
+    const lines: string[] = [];
+    let by = "";
+    const hooks = triggeredHooks(words);
+    if (hooks.length && at !== undefined) {
+      const top = gitRoots(at).top ?? at;
+      for (const hook of hooks) {
+        const path = this.classify(join(top, ".git", "hooks", hook), at).path;
+        const text = written.has(path) ? written.get(path) : this.taskWrote(path) ? readScript(path).text : undefined;
+        if (text) {
+          lines.push(...shellLines(text));
+          by = `the git hook ${hook} \`${words.slice(0, 2).join(" ")}\` runs`;
+        }
+      }
+    }
+    if (basename(words[0] ?? "") === "crontab" && !words.includes("-l") && !words.includes("-r")) {
+      const file = words.slice(1).find((word) => !word.startsWith("-") && word !== UNKNOWN);
+      const text = file === undefined || file === "-" ? (item.input ?? (before?.joint === "|" ? this.pipedCode(before, written) : undefined)) : written.get(this.classify(file, at).path);
+      if (text) {
+        lines.push(...scheduledLines(text));
+        by = "the crontab's entries";
+      }
+    }
+    if (!lines.length) return undefined;
+    return this.scanFinding(lines.join("\n"), "shell", at, depth, by);
+  }
+
+  /** A file's text for the project-script readers: what this line wrote there first, else the disk (scripts.ts). */
+  private scriptReader(written: ReadonlyMap<string, string | undefined>): (path: string) => string | undefined {
+    return (path) => {
+      const canonical = this.classify(path, this.cwd).path;
+      if (written.has(canonical)) return written.get(canonical);
+      return readText(path);
+    };
+  }
+
+  /**
+   * The project scripts a command runs (scripts.ts: a shell file, a make recipe, a package script, a justfile recipe),
+   * read as the shell lines they are (final pass): their floor findings, dangers and opaque code are the command's,
+   * as inline code's are. A script this line wrote first is read from what it wrote.
+   */
+  private scriptFinding(item: LineCommand, written: ReadonlyMap<string, string | undefined>, depth: number): CodeFinding | undefined {
+    if (depth > MAX_CODE_DEPTH) return undefined;
+    const scripts = projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd), this.scriptReader(written));
+    if (!scripts.length) return undefined;
+    let finding: CodeFinding | undefined;
+    for (const script of scripts) {
+      const found = this.scanFinding(script.lines.join("\n"), "shell", script.cwd, depth, `the project script \`${script.by}\``);
+      if (!finding || (found.floor && !finding.floor) || (found.worst && !finding.worst && !finding.floor)) finding = { ...found, scripts: [...(finding?.scripts ?? []), script] };
+      else finding.scripts = [...(finding.scripts ?? []), script];
+    }
+    return finding;
   }
 
   private codeFinding(item: LineCommand, before: LineCommand | undefined, written: ReadonlyMap<string, string | undefined>, depth: number): CodeFinding | undefined {
@@ -2420,7 +2560,9 @@ export class Permissions {
         if (verdict.decision === "approve") {
           // `approve-once`: this call runs, and nothing is remembered; so does an approval of a danger, of a
           // line that reads a secret (risk.ts `once`) or the installed app's data, or of an ask the owner's words answered.
-          const kept = verdict.once || dangerous || installedRead || line.once === true || line.assessments?.some((assessment) => assessment.once === true) ? [] : memo;
+          // A line that runs a project script (final pass): its approval was of the script's lines as they are now; a
+          // remembered pattern would cover them after any edit. Once.
+          const kept = verdict.once || dangerous || installedRead || line.once === true || line.scripts?.length || line.unread?.length || line.assessments?.some((assessment) => assessment.once === true) ? [] : memo;
           for (const pattern of kept) this.addCommandGrant(pattern, "chat", "judge", label);
           const quoted = audit.explicit?.ok && audit.explicit.quote ? ` (your words: "${audit.explicit.quote}")` : "";
           finish({ decision: "allow", decidedBy: "judge", reason: `${verdict.reason}${quoted}`, scope: kept.length ? "chat" : "once", prompted: false });
@@ -2554,6 +2696,9 @@ export class Permissions {
     const evidence: { -readonly [K in keyof JudgeEvidence]: JudgeEvidence[K] } = {};
     // Code it runs that can't be read, and paths known only when it runs that could be the permission system (round 5).
     if (line?.opaqueCode?.length) evidence.opaqueCode = line.opaqueCode;
+    // The project scripts it runs, their lines as read (final pass), and what the code couldn't read.
+    if (line?.scripts?.length) evidence.projectScripts = line.scripts.map((script) => `\`${script.by}\` runs: ${script.lines.slice(0, 12).map((text) => text.slice(0, 160)).join(" ; ")}${script.lines.length > 12 ? " ; …" : ""}`);
+    if (line?.unread?.length) evidence.unread = line.unread;
     if (line?.unresolved?.length) evidence.unresolved = line.unresolved;
     if (targets) {
       const known = "targets" in targets ? targets.targets : (targets.known ?? []);
@@ -2591,8 +2736,27 @@ export class Permissions {
     // What the project scripts it runs do (final pass, scripts.ts): their lines' units, read as lines of their own.
     if (this.scriptDepth >= 2) return cls;
     const extra: ActionClass["units"][number][] = [];
+    const written = new Map<string, string | undefined>();
     for (const item of line.commands) {
-      for (const script of projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd))) {
+      const here = item.cwd === undefined ? cwd : this.paths.canonical(item.cwd, this.cwd);
+      // Inline code's own effects (final pass): the commands it spawns, read as lines of their own, and the processes
+      // it signals by pid (code.ts `SIGNAL_CALLS`).
+      const inline = codeOf(runWords(item.words), UNKNOWN, undefined);
+      const spawned: ProjectScript[] = [];
+      if (inline && inline.source.from === "inline" && inline.interpreter.language !== "shell") {
+        const language = inline.interpreter.language as Parameters<typeof scanCode>[1];
+        const scan = scanCode(inline.source.text, language, secretName);
+        if (scan.commands.length) spawned.push({ by: `${basename(item.words[0] ?? "")} code`, lines: scan.commands.slice(0, 16), cwd: here });
+        const pids = signaledPids(inline.source.text, language);
+        if (pids.length) {
+          const scopes = pids.map((pid): DenialScope => ({ kind: "process", name: pid, says: [pid] }));
+          extra.push({ effects: ["stop"], scopes, destroys: true });
+        }
+      }
+      // A script this line wrote before running it is read from what it wrote (final pass).
+      const scripts = projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd), this.scriptReader(written));
+      this.noteLineWrite(item, written);
+      for (const script of [...spawned, ...scripts]) {
         this.scriptDepth++;
         try {
           for (const text of script.lines) {
@@ -2610,6 +2774,12 @@ export class Permissions {
 
   /** Whether a command runs a project script whose lines can destroy something (scripts.ts), for the cheap check of `gateLine`. */
   private runsScript(item: LineCommand): boolean {
+    // Inline code that spawns commands or signals a pid (final pass) runs other lines too.
+    const inline = codeOf(runWords(item.words), UNKNOWN, undefined);
+    if (inline && inline.source.from === "inline" && inline.interpreter.language !== "shell") {
+      const language = inline.interpreter.language as Parameters<typeof scanCode>[1];
+      if (signaledPids(inline.source.text, language).length || scanCode(inline.source.text, language, secretName).commands.length) return true;
+    }
     return projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd)).length > 0;
   }
 
@@ -2661,6 +2831,7 @@ export class Permissions {
       if (runtime) {
         unit.destroys = true;
         for (const effect of runtime.operand.effects ?? []) if (!unit.effects.includes(effect)) unit.effects.push(effect);
+        if (runtime.operand.root !== undefined) add(pathScope(runtime.operand.root, item.cwd));
         if (runtime.operand.kinds.some((kind) => kind !== "path")) (unit.runtime ??= []).push(runtime.operand);
         if (runtime.globs.length) (unit.globs ??= []).push(...runtime.globs);
       }
@@ -2685,6 +2856,12 @@ export class Permissions {
       const tool = readTool(item.words);
       actions.add(tool && "row" in tool ? [program, ...tool.row.sub].join(" ") : program);
       // `GH_REPO=o/r gh …` is `gh … --repo o/r` (schema.ts `ENV_OPTIONS`): the same request in either spelling.
+      // A publish of the folder's own package (schema.ts `FOLDER_PUBLISHERS`): that package, by whichever tool.
+      const published = folderPackage(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd), readText);
+      if (published !== undefined) {
+        effect("publish");
+        add(scopeOf({ kind: "package", name: published, says: [published.replace(/^folder:.*\//, "")] }));
+      }
       const found = commandEffects(withEnvOptions(item.words, envPrefixOf(item)), {
         sink: (words) => sinkOf(viewOf(words)),
         current: program === "git" ? this.gitAt(item.cwd ?? cwd)?.current : undefined,
@@ -3080,7 +3257,13 @@ export class Permissions {
     for (const word of [...(this.ownerWords?.messages ?? [])].reverse()) {
       if (word.source === "reply") continue;
       const text = consentText(word);
-      if (names.some((name) => name.length >= 2 && mentions(text, name))) return word.text;
+      // Naming it where the words keep it (final pass): the clause that names it negates, defers or asks ("but don't
+      // touch feat/x yet", "keep x?") names it to keep it, not to give it away. Clauses split at punctuation and "but".
+      const clauses = text.split(/(?<=[?？!！。])\s*|(?<=\.)\s+|[,;，；、\n]|\s(?:but|except|however|aber|mais|pero)\s|但是?|不过|只是/iu).filter(Boolean);
+      if (clauses.some((clause) => names.some((name) => name.length >= 2 && mentions(clause, name)) && !(QUESTION.test(clause) || NEGATION_WORDS.test(clause) || RETRACT_WORDS.test(clause)))) return word.text;
+      if (names.some((name) => name.length >= 2 && mentions(text, name)) && !clauses.some((clause) => names.some((name) => name.length >= 2 && mentions(clause, name)))) {
+        if (!(QUESTION.test(text) || NEGATION_WORDS.test(text) || RETRACT_WORDS.test(text))) return word.text;
+      }
     }
     return undefined;
   }
@@ -4200,6 +4383,25 @@ export function toolOverride(config: PermissionsConfig, name: string, server: st
 function envPrefixOf(item: { env: readonly string[]; envValues?: readonly string[] }): { name: string; value: string }[] {
   return (item.envValues ?? []).flatMap((value, at) => (item.env[at] !== undefined && value !== UNKNOWN ? [{ name: item.env[at], value }] : []));
 }
+
+/**
+ * How a builtin moves the shell (final pass, data): to a literal folder (`cd [-L|-P|-e|-@] DIR`, `pushd [-n] DIR`;
+ * `pushd` keeps where it was), or back (`popd`). Undefined: where it goes is known only when it runs.
+ */
+function directoryMove(words: readonly string[]): { to?: string; push?: boolean; pop?: boolean } | undefined {
+  const [program, ...args] = words;
+  if (program === "popd") return args.every((arg) => arg === "-q") ? { pop: true } : undefined;
+  if (program !== "cd" && program !== "pushd") return undefined;
+  const operands = args.filter((arg) => !(program === "cd" ? /^-[LPe@]+$/ : /^-q$/).test(arg));
+  if (operands.length !== 1) return undefined;
+  const target = operands[0];
+  if (target === UNKNOWN || target === "-" || /^[+-]\d+$/.test(target) || target.startsWith("-")) return undefined;
+  return { to: target, ...(program === "pushd" ? { push: true } : {}) };
+}
+
+/** The lexicon's negation and retraction/deferral words, every language (ownerNames). */
+const NEGATION_WORDS = listWords("negate");
+const RETRACT_WORDS = listWords("retract");
 
 /** A target's actions that delete or stop it (explicit.ts `Target.action`). */
 const DESTROYING_ACTIONS = /^(delete|destroy|erase|remove|stop|kill|close|uninstall|prune)$/;
