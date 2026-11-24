@@ -801,6 +801,17 @@ impl Shell {
             } => {
                 let (approve, reject, details) =
                     (work_id.clone(), work_id.clone(), work_id.clone());
+                // Its level, picked here as on its card and page.
+                let work = self
+                    .state
+                    .read(cx)
+                    .bot_records
+                    .work
+                    .iter()
+                    .find(|w| w.id == *work_id)
+                    .cloned();
+                let picker = work
+                    .and_then(|work| self.level_picker(&format!("{key}-level"), &work, theme, cx));
                 NeedContent::of(
                     div()
                         .flex()
@@ -826,6 +837,7 @@ impl Shell {
                                         })),
                                 )
                                 .child(div().flex_1())
+                                .children(picker)
                                 .child(
                                     quiet_button(&format!("{key}-reject"), "Reject", theme)
                                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -842,12 +854,14 @@ impl Shell {
                                 .child(
                                     primary_button(&format!("{key}-approve"), "Approve", theme)
                                         .on_click(cx.listener(move |this, _, _, cx| {
+                                            let held = this
+                                                .state
+                                                .read(cx)
+                                                .plan_level_picks
+                                                .get(&approve)
+                                                .copied();
                                             this.decide_need(
-                                                serde_json::json!({
-                                                    "op": "resolveBotPlan",
-                                                    "workId": approve,
-                                                    "approve": true,
-                                                }),
+                                                crate::plan_level::approve_params(&approve, held),
                                                 cx,
                                             )
                                         })),

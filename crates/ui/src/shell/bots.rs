@@ -93,7 +93,8 @@ pub(super) struct BoardUi {
     /// The work item whose Stop is armed (a second click stops it), and the
     /// task that disarms it.
     stop_armed: Option<String>,
-    /// The work page whose permission level menu is open (its work id).
+    /// The plan level picker whose menu is open (its element id: the work
+    /// page's header, or a plan's card on the Needs you page).
     level_menu: crate::kit::popover::Popup<String>,
     stop_disarm: Option<Task<()>>,
     /// The Activity panel's kind filter; `None` shows everything.

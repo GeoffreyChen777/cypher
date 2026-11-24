@@ -860,7 +860,7 @@ impl Shell {
         let mut controls: Vec<AnyElement> = Vec::new();
         // The level its sessions run at, while it can still change: the
         // header says it once, and a pick on a running plan applies at once.
-        controls.extend(self.level_picker(work, theme, cx));
+        controls.extend(self.level_picker("bot-work-level", work, theme, cx));
         if thread_listed {
             let thread = PanelItem::Thread(work.thread_chat_id.clone().unwrap_or_default());
             let tip = match super::choice::choice_words(&work.coordinator_choice, |id| {
@@ -1020,10 +1020,11 @@ impl Shell {
         )
     }
 
-    /// The plan's permission level picker ([`crate::plan_level`]); `None`
-    /// once the plan is past changing it.
-    fn level_picker(
+    /// The plan's permission level picker ([`crate::plan_level`]) under
+    /// element id `key`; `None` once the plan is past changing it.
+    pub(super) fn level_picker(
         &self,
+        key: &str,
         work: &BotWork,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -1033,15 +1034,16 @@ impl Shell {
         }
         let held = self.state.read(cx).plan_level_picks.get(&work.id).copied();
         let level = crate::plan_level::shown(work, held);
-        let (pressed, opened) = (work.id.clone(), work.id.clone());
+        let (pressed, opened) = (key.to_string(), key.to_string());
         let tip = SharedString::from(match crate::plan_level::quote(work) {
             Some(quote) => {
                 format!("Permissions for this plan's sessions. You asked: \u{201c}{quote}\u{201d}")
             }
             None => "Permissions for this plan's sessions".to_string(),
         });
-        let mut trigger = crate::plan_level::trigger("bot-work-level", level, theme)
-            .debug_selector(|| "bot-work-level".into())
+        let selector = key.to_string();
+        let mut trigger = crate::plan_level::trigger(key.to_string(), level, theme)
+            .debug_selector(move || selector.clone())
             .tooltip(move |_, cx| {
                 let tip = tip.clone();
                 cx.new(|_| super::super::session::FindTooltip(tip)).into()
@@ -1062,11 +1064,11 @@ impl Shell {
                     cx.notify();
                 }
             }));
-        if self.board.level_menu.get() == Some(&work.id) {
+        if self.board.level_menu.get().is_some_and(|open| open == key) {
             let closing = self.board.level_menu.closing_since();
             let work = work.clone();
             trigger = trigger.child(crate::plan_level::menu(
-                "bot-work-level",
+                key,
                 level,
                 closing,
                 theme,
