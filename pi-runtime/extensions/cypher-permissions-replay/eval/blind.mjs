@@ -64,7 +64,7 @@ import { parseArgs } from "node:util";
 
 const { values: args } = parseArgs({ options: { cases: { type: "string" }, out: { type: "string" }, score: { type: "string" }, corpus: { type: "string" }, "merged-by-chat": { type: "boolean", default: false } } });
 
-const KNOWN_SETUP = new Set(["repo", "defaultBranch", "chatBranch", "planBranch", "createdBranches", "createdTags", "createdDirs", "createdWorktrees", "openedPRs", "mergedBranches", "startedProcesses", "foreign", "spoof", "otherChats", "deniedEarlier", "files", "wroteFiles"]);
+const KNOWN_SETUP = new Set(["repo", "defaultBranch", "chatBranch", "planBranch", "createdBranches", "createdTags", "createdDirs", "createdWorktrees", "openedPRs", "mergedBranches", "startedProcesses", "foreign", "spoof", "otherChats", "deniedEarlier", "files", "fileContents", "wroteFiles"]);
 
 const user = (content) => ({ type: "message", message: { role: "user", content } });
 const assistant = (text) => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
@@ -136,12 +136,16 @@ export function convert(blind) {
   const ran = [];
   const fake = { dirs: [], refs: [], repos: [], files: [] };
   // A list of paths, or (red-team 6) an object of path → contents (the contents are no fact the harness keeps).
-  for (const path of Array.isArray(setup.files) ? setup.files : Object.keys(setup.files ?? {})) {
+  // `fileContents` (blind-7): path → contents, the same as `files`' object form.
+  const fileEntries = new Map();
+  for (const path of Array.isArray(setup.files) ? setup.files : Object.keys(setup.files ?? {})) fileEntries.set(path, Array.isArray(setup.files) ? undefined : setup.files[path]);
+  for (const [path, contents] of Object.entries(setup.fileContents ?? {})) fileEntries.set(path, contents);
+  for (const [path, contents] of fileEntries) {
     const at = absolute(path, cwd);
     if (at.startsWith("@HOME@/") || at.startsWith("/tmp/")) (at.endsWith("/") ? fake.dirs : fake.files).push(at.replace(/\/$/, ""));
     else notes.push(`file ${path}: outside the fake machine (not made)`);
     // Final pass: a file's stated contents are kept (a script, a Makefile, a package.json the line runs: scripts.ts reads them).
-    if (!Array.isArray(setup.files) && typeof setup.files[path] === "string" && !at.endsWith("/")) (fake.contents ??= {})[at] = setup.files[path];
+    if (typeof contents === "string" && !at.endsWith("/")) (fake.contents ??= {})[at] = contents;
   }
   // "T was tagged on X's tip, which is not on origin/main": the tag is made on X, a branch one commit ahead.
   const tagBase = {};
@@ -228,11 +232,22 @@ export function convert(blind) {
   const processes = {};
   // A started process: `{pid}` (sets #1–#3) or the pid itself (set #4).
   for (const p of setup.startedProcesses ?? []) processes[String(typeof p === "object" ? p.pid : p)] = "chat";
+  // A pattern kill (`pkill -f P`, `killall P`) whose pattern is in a started process's command line given as text
+  // (mutations-6: `startedProcesses: ["npx vite --port 5173"]`) and in no other chat's process: it matches the chat's.
+  {
+    const pattern = /\b(?:pkill(?:\s+-\w+)*|killall)\s+(?:-f\s+)?(['"]?)([^'";&|]+)\1/.exec(blind.command ?? "")?.[2]?.trim();
+    const texts = (setup.startedProcesses ?? []).filter((p) => typeof p === "string" && !/^\d+$/.test(p));
+    const others = (setup.otherChats ?? []).filter((o) => o.kind === "process").map((o) => String(o.name ?? ""));
+    if (pattern && texts.some((t) => t.includes(pattern)) && !others.some((t) => t.includes(pattern))) processes.pgrep = "chat";
+  }
   if (setup.foreign) {
     // A pid the setup also lists as this chat's (`startedProcesses`, "started by this chat") stays the chat's.
     for (const m of setup.foreign.matchAll(/\bpid (\d+) is (\S+)/g)) if (processes[m[1]] !== "chat") processes[m[1]] = m[2].startsWith("/Applications/") ? "app" : "foreign";
     // A pattern kill whose matches include the installed app's processes.
     if (/\b(pkill|killall)\b/.test(blind.command ?? "") && /installed app/i.test(setup.foreign)) processes.pgrep = "app";
+    // A pattern kill whose only match is this chat's started process ("… started by this chat; no other process
+    // matches", "the only process matching 'X' is pid N, which this chat started"): the processes it matches are the chat's.
+    else if (/\b(pkill|killall)\b/.test(blind.command ?? "") && (setup.startedProcesses ?? []).length && /no other process matches|\bthe only process matching\b[^;]*\bthis chat started\b/i.test(setup.foreign)) processes.pgrep = "chat";
     notes.push(`foreign "${setup.foreign}": by absence`);
   }
   // Round 4: what the setup says another chat, session or task holds, among the words the command acts on,
@@ -350,7 +365,7 @@ export function convert(blind) {
     notes.push("reply: the agent's last text is its proposal");
   }
   // Files this chat wrote with the write tool (`wroteFiles`, paths as in `files`), before its commands.
-  const wrote = (setup.wroteFiles ?? []).flatMap((path) => writeCall(absolute(path, cwd), typeof setup.files?.[path] === "string" ? setup.files[path] : ""));
+  const wrote = (setup.wroteFiles ?? []).flatMap((path) => writeCall(absolute(path, cwd), typeof setup.files?.[path] === "string" ? setup.files[path] : typeof setup.fileContents?.[path] === "string" ? setup.fileContents[path] : ""));
   const work = [...wrote, ...ran.flatMap(([command, output]) => toolCall(command, output)), ...agentText.map(assistant)];
   const entryOf = (word) => {
     switch (word.source) {
