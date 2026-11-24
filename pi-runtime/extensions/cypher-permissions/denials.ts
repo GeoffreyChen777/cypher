@@ -182,6 +182,8 @@ function namesOf(scope: DenialScope): string[] {
 
 const NEGATION = listWords("negate");
 const RETRACTION = listWords("retract");
+/** The retraction words proper ("wait", "cancel"), without the deferrals `RETRACTION` also holds. */
+const RETRACTION_ONLY = listWords("retractOnly");
 
 /**
  * The owner word newer than the denial (not among those seen when they denied it), of a lifting kind,
@@ -204,6 +206,32 @@ export function liftedBy(denial: DenialRecord, scope: DenialScope, owner: OwnerW
     // A line the owner quotes whole asks for it; anything else must say what it asks for.
     if (scope.kind !== "line" && !actions.some((action) => actionWords(action).test(text))) continue;
     return word.text;
+  }
+  return undefined;
+}
+
+/**
+ * The newest owner word since the denial that would lift it but for a deferral or preference word alone
+ * (lexicon.ts `defer`: "later", "下周", "rather"): it names the scope, says an action word of the effect, and
+ * is no question, negation or retraction proper. A deferral word is often what the request is about ("只看下周
+ * 的事件": next week's events), so such a word neither lifts the denial nor keeps it on the floor: the reviewing
+ * model reads it, with the denial as evidence (`Denials.check` `review`).
+ */
+export function deferredLift(denial: DenialRecord, scope: DenialScope, owner: OwnerWords | undefined, unit?: DenialUnit): string | undefined {
+  if (!owner) return undefined;
+  const seen = new Set(denial.seen);
+  const units = unit ? [unit] : unitsOf(denial);
+  const names = [...new Set([...namesOf(scope), ...units.flatMap((item) => item.scopes.filter((other) => scopeMatches(other, scope)).flatMap(namesOf))])];
+  const actions = [...new Set(units.flatMap((item) => item.effects.flatMap((effect) => CLASS_WORDS[effect] ?? [])))];
+  for (const word of [...owner.messages].reverse()) {
+    if (seen.has(wordHash(word))) continue;
+    if (!LIFTING_SOURCES.has(word.source ?? "typed")) continue;
+    const text = consentText(word);
+    const named = scope.kind === "line" ? text.includes(scope.name) : names.some((name) => mentions(text, name));
+    if (!named) continue;
+    if (QUESTION.test(text) || NEGATION.test(text) || RETRACTION_ONLY.test(text)) return undefined;
+    if (scope.kind !== "line" && !actions.some((action) => actionWords(action).test(text))) continue;
+    return RETRACTION.test(text) ? word.text : undefined;
   }
   return undefined;
 }
@@ -310,20 +338,27 @@ export class Denials {
    * words since haven't lifted, with the scope it covers; and the denials of the same effect on other
    * targets (evidence for the judge).
    */
-  check(asked: ActionClass, owner: OwnerWords | undefined): { active?: { denial: DenialRecord; scope: DenialScope }; similar: DenialRecord[] } {
+  check(asked: ActionClass, owner: OwnerWords | undefined): { active?: { denial: DenialRecord; scope: DenialScope }; review?: { denial: DenialRecord; scope: DenialScope; word: string }; similar: DenialRecord[] } {
     this.load();
     const similar: DenialRecord[] = [];
+    let review: { denial: DenialRecord; scope: DenialScope; word: string } | undefined;
     for (const denial of [...this.records].reverse()) {
       const match = classMatch(denial, asked) ?? tokenMatch(denial, asked);
       if (match) {
-        if (liftedBy(denial, match.scope, owner, match.unit) === undefined) return { active: { denial, scope: match.scope }, similar };
+        if (liftedBy(denial, match.scope, owner, match.unit) === undefined) {
+          // Asked for since, with a deferral word in the same words: the judge's, with the denial as evidence.
+          const word = deferredLift(denial, match.scope, owner, match.unit);
+          if (word === undefined) return { active: { denial, scope: match.scope }, ...(review ? { review } : {}), similar };
+          review ??= { denial, scope: match.scope, word };
+          similar.unshift(denial);
+        }
         continue;
       }
       // The same effect on another target (a read or a run only by the same program): evidence.
       const sameAction = denial.actions.some((action) => asked.actions.includes(action));
       if (unitsOf(denial).some((unit) => asked.units.some((other) => unit.effects.some((effect) => other.effects.includes(effect) && (sameAction || (effect !== "read" && effect !== "run")))))) similar.push(denial);
     }
-    return { similar: similar.slice(0, 3) };
+    return { ...(review ? { review } : {}), similar: similar.slice(0, 3) };
   }
 
   all(): readonly DenialRecord[] {

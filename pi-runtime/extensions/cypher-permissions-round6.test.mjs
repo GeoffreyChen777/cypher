@@ -221,6 +221,38 @@ test("W1: with no matching denial the default-allowed and covered requests pass 
   assert.deepEqual([c.asked.length, c.prompts.length], [0, 0]);
 });
 
+test("W1: a denial asked for since in words that also defer is the judge's, with the denial as evidence; a negation or retraction keeps the floor", async () => {
+  const path = join(elsewhere, "data.db");
+  // Per language: the owner names the denied file and says to read it, in words that also hold a deferral word
+  // (lexicon.ts `defer`) as what they want read. Then the same with a negation and with a retraction proper.
+  const deferred = ["ok, now read data.db, only next week's rows", "好的，现在可以读 data.db 了，只看下周的事件", "read data.db for tomorrow's schedule"];
+  const held = ["don't read data.db", "wait, read data.db later", "先别读 data.db", "read data.db?"];
+  for (const text of [...deferred, ...held]) {
+    for (const tool of ["read", "grep"]) {
+      const permissions = engine();
+      deny(permissions, `sqlite3 ${path} .tables`);
+      permissions.ownerWords = { messages: [...permissions.ownerWords.messages, { source: "typed", text, at: 10 }], agentWritten: false };
+      const c = judged(APPROVE, { choice: "Deny" });
+      const result = await permissions.authorize([{ capability: "read", path }], { tool }, c);
+      if (deferred.includes(text)) {
+        assert.equal(result.ok, true, `${tool} "${text}": the judge approves`);
+        assert.deepEqual([c.asked.length, c.prompts.length], [0, 1], `${tool} "${text}": reviewed, not the floor`);
+        assert.match(c.prompts[0], /owner denied a request like it/, "the denial is evidence");
+        assert.ok(permissions.gated.some((item) => item.held === "owner-denied-review"));
+      } else {
+        assert.equal(result.ok, false, `${tool} "${text}": held`);
+        assert.deepEqual([c.asked.length, c.prompts.length], [1, 0], `${tool} "${text}": the floor, no judge`);
+      }
+    }
+  }
+  // A sandboxed line held for review is refused with a pointer to escalate, and an escalation is reviewed.
+  const permissions = engine();
+  deny(permissions, `sqlite3 ${path} .tables`);
+  permissions.ownerWords = { messages: [...permissions.ownerWords.messages, { source: "typed", text: deferred[0], at: 10 }], agentWritten: false };
+  const hit = await permissions.gateLine("bash:sandbox", `sqlite3 ${path} 'select * from rows'`, workspace);
+  assert.equal(hit?.review, true);
+});
+
 // --- W2: typed targets by declaration ---------------------------------------------------------------
 
 test("W2: every API route reads back its effect and entities, for random names", () => {

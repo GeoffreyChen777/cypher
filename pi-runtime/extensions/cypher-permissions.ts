@@ -424,7 +424,9 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
       // that is held is reviewed as an escalation; a sandboxed one is refused with what holds it.
       const held = check.kind === "outside" ? await st.gateLine("bash:outside", command, ctx.cwd) : !escalate ? await st.gateLine("bash:sandbox", command, ctx.cwd) : undefined;
       if (held && check.kind !== "outside" && !escalate) {
-        const reason = `Permission denied: ${held.reason} (${held.detail}). Only the user can allow this: run it again with \`escalate\` to ask them.`;
+        const reason = held.review
+          ? `Permission denied: ${held.reason} (${held.detail}). Run it again with \`escalate\` to have it reviewed.`
+          : `Permission denied: ${held.reason} (${held.detail}). Only the user can allow this: run it again with \`escalate\` to ask them.`;
         st.audit.write({ tool: "bash", command, capability: "escalate", decision: "deny", decidedBy: "policy", reason, prompted: false });
         return refused(reason, { purpose }) as never;
       }

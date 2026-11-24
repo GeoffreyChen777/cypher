@@ -730,12 +730,13 @@ export function nounWords(noun: string): RegExp {
   return cached(`noun:${noun}`, () => compile(all((language) => language.nouns, noun as NounKey)));
 }
 
-type ListKey = "negate" | "retract" | "defer" | "remind" | "carryOn" | "filler" | "baseBefore" | "baseAfter" | "headBefore" | "headAfter";
+type ListKey = "negate" | "retract" | "retractOnly" | "defer" | "remind" | "carryOn" | "filler" | "baseBefore" | "baseAfter" | "headBefore" | "headAfter";
 
 /** One list of every language, as one regex (`g` for scanning). */
 export function listWords(key: ListKey, global = false): RegExp {
   // A preference or deferral takes a request back as a "wait" does.
-  const of = (language: Language) => (key === "retract" ? [...language.retract, ...(language.defer ?? [])] : (language[key] ?? []));
+  // `retractOnly`: the retraction words proper, without the deferrals (denials.ts `deferredLift`).
+  const of = (language: Language) => (key === "retract" ? [...language.retract, ...(language.defer ?? [])] : key === "retractOnly" ? language.retract : (language[key] ?? []));
   return cached(`${key}:${global}`, () => compile(LANGUAGES.flatMap(of), global ? "giu" : "iu"));
 }
 

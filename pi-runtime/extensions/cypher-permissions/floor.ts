@@ -107,6 +107,12 @@ export interface FloorHit {
   id: FloorId;
   reason: string;
   detail: string;
+  /**
+   * Held for review, not the floor: an owner-denied request the owner has asked for since in words that also
+   * defer or prefer (denials.ts `deferredLift`). What would have run without review is reviewed by the judge,
+   * with the denial as evidence; `elevate` takes no floor from it.
+   */
+  review?: true;
 }
 
 /** The first floor row of `stage` that applies, with its detail; undefined when none does. */

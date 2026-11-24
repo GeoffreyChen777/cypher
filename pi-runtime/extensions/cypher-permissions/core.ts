@@ -1252,7 +1252,7 @@ export class Permissions {
         ...(request.held?.id === "other-task" ? { otherTask: request.held.detail } : {}),
       },
       "before",
-    ) ?? request.held;
+    ) ?? (request.held?.review ? undefined : request.held);
     const base: AuditRecord = {
       decision: "deny",
       decidedBy: "user",
@@ -2702,8 +2702,10 @@ export class Permissions {
       },
       "before",
     );
-    this.gated?.push({ entry, ...(hit ? { held: hit.id } : {}) });
-    return hit;
+    // Asked for since in words that also defer (denials.ts `deferredLift`): reviewed by the judge, not the floor.
+    const reviewed: FloorHit | undefined = !hit && denied?.review ? { id: "owner-denied", reason: "you denied a request like it in this chat", detail: `you denied \`${denied.review.denial.what}\`; since then you wrote "${denied.review.word.slice(0, 120)}"`, review: true } : undefined;
+    this.gated?.push({ entry, ...(hit ? { held: hit.id } : reviewed ? { held: "owner-denied-review" } : {}) });
+    return hit ?? reviewed;
   }
 
   /** A file tool's (or a tool's) request as an action class: its effect and its paths (denials.ts), as `elevate` reads one. */
@@ -2911,7 +2913,7 @@ export class Permissions {
   }
 
   /** The owner's denials of `cls` (denials.ts), checked against their words as of now. */
-  private async deniedLike(cls: ActionClass): Promise<{ active?: { denial: DenialRecord; scope: DenialScope }; similar: DenialRecord[] }> {
+  private async deniedLike(cls: ActionClass): Promise<{ active?: { denial: DenialRecord; scope: DenialScope }; review?: { denial: DenialRecord; scope: DenialScope; word: string }; similar: DenialRecord[] }> {
     if (!this.denials.any()) return { similar: [] };
     await this.refreshOwnerWords();
     return this.denials.check(cls, this.ownerWords);
