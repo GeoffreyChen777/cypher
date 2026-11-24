@@ -1948,8 +1948,10 @@ Each is fixed in its mechanism; tests `cypher-permissions-final-it4.test.mjs` (E
   `compose push` are pushes of the images they tag, so a denied `docker push X` is not redone that way.
 - **Owner words.** The owner's own speech is their text without what they quote: fences and quoted lines, inline
   quoted speech of several words, and a forwarded or pasted message from its header on (explicit.ts `ownSpeech`). A
-  Deny is not lifted by quoted or forwarded text, nor by a condition ("if the tests pass, force-push main",
-  `CONDITION_WORDS`: that asks for later, which a deferral already sends to the judge). Keeping verbs ("leave X alone",
+  Deny is not lifted by speech the owner attributes to someone (`you said "…"`) or forwarded text, nor by a condition
+  ("if the tests pass, force-push main", `LIFT_CONDITION`: a conditional opening a clause asks for later, which a
+  deferral already sends to the judge); a quoted command the owner asks to run (`ok, run "git push --force origin
+  main"`) still lifts. Keeping verbs ("leave X alone",
   keep, spare, preserve, 保留, 别动) don't name X to act on.
 - **Harness**: the replay gives the extension the chat's transcript (as production does from `sessionManager`), and
   blind.mjs has a `wroteFiles` form for a file this chat wrote with the write tool, so scripts a chat wrote and then ran
