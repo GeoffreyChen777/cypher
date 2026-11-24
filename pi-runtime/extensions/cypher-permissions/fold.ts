@@ -37,6 +37,29 @@ function tr(args: readonly string[], text: string): string | undefined {
   return [...text].map((c) => map.get(c) ?? c).join("");
 }
 
+/** A `sed` given one substitution (`s#a#b#`, `-e s/a/b/g`) and nothing else (iteration 4). */
+function sedScript(args: readonly string[]): string | undefined {
+  const scripts = args[0] === "-e" ? args.slice(1) : args;
+  return scripts.length === 1 && /^s(.).*\1.*\1g?$/s.test(scripts[0]) ? scripts[0] : undefined;
+}
+
+/** A substitution applied line by line, its pattern a basic regular expression without groups or intervals. */
+function sedApply(script: string, text: string): string | undefined {
+  const delimiter = script[1];
+  const parts = script.slice(2).split(delimiter);
+  if (parts.length !== 3 || !/^g?$/.test(parts[2])) return undefined;
+  const [pattern, replacement] = parts;
+  if (/[\\(){}|+?]/.test(pattern) || /\\/.test(replacement)) return undefined;
+  let regex: RegExp;
+  try {
+    regex = new RegExp(pattern, parts[2] === "g" ? "g" : "");
+  } catch {
+    return undefined;
+  }
+  const value = replacement.replace(/\$/g, "$$$$").replace(/&/g, "$$&");
+  return text.split("\n").map((line) => line.replace(regex, value)).join("\n");
+}
+
 /** The transforms (data): a program, when its words make it one, and what it makes of its input. */
 export const TRANSFORMS: readonly { program: string; when: (args: readonly string[]) => boolean; apply: (text: string, args: readonly string[]) => string | undefined }[] = [
   { program: "base64", when: (args) => args.some((arg) => /^(-d|-D|--decode)$/.test(arg)), apply: (text) => Buffer.from(text.replace(/\s+/g, ""), "base64").toString("utf8") },
@@ -46,6 +69,7 @@ export const TRANSFORMS: readonly { program: string; when: (args: readonly strin
   { program: "xxd", when: (args) => args.includes("-r") && args.includes("-ps"), apply: (text) => Buffer.from(text.replace(/\s+/g, ""), "hex").toString("utf8") },
   { program: "rev", when: (args) => args.length === 0, apply: (text) => text.split("\n").map((line) => [...line].reverse().join("")).join("\n") },
   { program: "tr", when: () => true, apply: (text, args) => (args.length === 2 && /^(A-Za-z|a-zA-Z)$/.test(args[0]) && /^(N-ZA-Mn-za-m|n-za-mN-ZA-M)$/.test(args[1]) ? rot13(text) : tr(args, text)) },
+  { program: "sed", when: (args) => sedScript(args) !== undefined, apply: (text, args) => sedApply(sedScript(args)!, text) },
   { program: "cat", when: (args) => args.length === 0, apply: (text) => text },
   { program: "tee", when: (args) => args.length === 0, apply: (text) => text },
   { program: "head", when: (args) => args.length === 0, apply: (text) => text },

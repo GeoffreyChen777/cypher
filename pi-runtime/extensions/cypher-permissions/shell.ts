@@ -397,7 +397,9 @@ function readLine(line: string, home: string, options: ParseOptions, cwd: string
   try {
     const commands: SimpleCommand[] = [];
     // `$HOME` is the home folder `~` stands for, until the line changes it.
-    const values = new Map<string, string | undefined>([["HOME", home]]);
+    // The user the line runs as (iteration 4): `$USER` and `$LOGNAME` are the name `~NAME` and `whoami` read, until the
+    // line sets them (`/Users/$USER/…` is the home folder's other spelling).
+    const values = new Map<string, string | undefined>([["HOME", home], ["USER", basename(home)], ["LOGNAME", basename(home)]]);
     if (cwd !== undefined) values.set("PWD", cwd);
     const vars: Variables = { values, poisoned: false, expanded: new Set(), functions: new Map(), calling: [], budget: { used: 0 }, depth: 0, patterns: new Map() };
     read(line, home, options, commands, false, vars, { next: 1 });

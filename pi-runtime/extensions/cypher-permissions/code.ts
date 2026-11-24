@@ -680,7 +680,31 @@ const ENV_ALL = /^\s*(?:[),;}\]]|$|\.(?:items|keys|values|copy|to_h|to_a|each|en
  * its literals may name, the credential variables it reads, and what makes it unreadable.
  * `secretName` decides what a credential's variable is called (risk.ts).
  */
+/**
+ * String constants the code builds from literal pieces (iteration 4): `'permis'+'sions.json'`, `['a','b'].join('')`,
+ * `String.fromCharCode(47)`, `"a" "b"` in Python, `'a' . 'b'` in Perl/PHP — folded into one literal before scanning,
+ * so a name split across literals is the name it makes.
+ */
+export function foldLiterals(code: string, language?: Language): string {
+  // Python joins adjacent literals (`'a' 'b'`); elsewhere they are no expression.
+  const joint = language === "python" ? String.raw`(?:\+|\.(?!\w)|(?<=['"])[ \t]+(?=['"]))` : String.raw`(?:\+|\.(?!\w))`;
+  const pair = new RegExp(String.raw`(['"])((?:(?!\1)[^\\\n]|\\.)*)\1\s*` + joint + String.raw`\s*(['"])((?:(?!\3)[^\\\n]|\\.)*)\3`, "g");
+  let out = code;
+  for (let pass = 0; pass < 8; pass++) {
+    const before = out;
+    out = out
+      .replace(/String\.fromCharCode\(\s*(\d{1,3}(?:\s*,\s*\d{1,3})*)\s*\)/g, (_, codes: string) => JSON.stringify(String.fromCharCode(...codes.split(/\s*,\s*/).map(Number))))
+      .replace(/\bchr\(\s*(\d{1,3})\s*\)/g, (_, n: string) => JSON.stringify(String.fromCharCode(Number(n))))
+      .replace(/\[\s*((?:(['"])(?:[^'"\\]|\\.)*\2\s*,\s*)*(['"])(?:[^'"\\]|\\.)*\3)\s*\]\s*\.\s*join\(\s*(['"])\4\s*\)/g, (_, items: string) => JSON.stringify([...items.matchAll(/(['"])((?:[^'"\\]|\\.)*)\1/g)].map((m) => m[2]).join("")))
+      .replace(/(['"])\s*\.join\(\s*\[\s*((?:(['"])(?:[^'"\\]|\\.)*\3\s*,\s*)*(['"])(?:[^'"\\]|\\.)*\4)\s*\]\s*\)/g, (match: string, quote: string, items: string) => (match.startsWith(`${quote}${quote}`) ? JSON.stringify([...items.matchAll(/(['"])((?:[^'"\\]|\\.)*)\1/g)].map((m) => m[2]).join("")) : match))
+      .replace(pair, (_, a: string, x: string, b: string, y: string) => JSON.stringify(`${x}${y}`));
+    if (out === before) break;
+  }
+  return out;
+}
+
 export function scanCode(code: string, language: Language, secretName: (name: string) => boolean): CodeScan {
+  code = foldLiterals(code, language);
   const literals = literalsOf(code);
   const scan: CodeScan = { network: [], spawn: [], commands: [], paths: [], reads: false, writes: false, env: [], opaque: [], urls: [] };
   if (language === "unread") {

@@ -129,7 +129,13 @@ export function secretByContent(path: string, secretName: (name: string) => bool
     const read = readSync(fd, buffer, 0, buffer.length, 0);
     const text = buffer.subarray(0, read).toString("utf8");
     if (text.includes("\u0000")) return /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(text);
-    return CONTENT_MARKERS.some((marker) => marker.test(text)) || credentialLine(text, secretName);
+    if (CONTENT_MARKERS.some((marker) => marker.test(text)) || credentialLine(text, secretName)) return true;
+    // A derived copy (iteration 4): a file that is one base64 or hex blob is read as what it decodes to.
+    const blob = text.replace(/\s+/g, "");
+    let decoded: string | undefined;
+    if (blob.length >= 16 && /^[A-Za-z0-9+/]+={0,2}$/.test(blob) && blob.length % 4 === 0) decoded = Buffer.from(blob, "base64").toString("utf8");
+    else if (blob.length >= 16 && /^(?:[0-9a-fA-F]{2})+$/.test(blob)) decoded = Buffer.from(blob, "hex").toString("utf8");
+    return decoded !== undefined && !/[\u0000-\u0008\u000e-\u001f]/.test(decoded) && (CONTENT_MARKERS.some((marker) => marker.test(decoded!)) || credentialLine(decoded, secretName));
   } catch {
     return false;
   } finally {
@@ -155,4 +161,18 @@ export function commandText(text: string): string | undefined {
   if (!first) return undefined;
   const name = first.replace(/^.*\//, "");
   return COMMAND_STARTS.has(name) ? trimmed : undefined;
+}
+
+/**
+ * Places that leave the machine by themselves (iteration 4, data): folders a sync client uploads (iCloud Drive,
+ * CloudStorage providers, Dropbox, Google Drive, OneDrive, Box) and volumes mounted under /Volumes (a share, a
+ * removable disk). A copy of a secret into one is a send.
+ */
+export const OFF_MACHINE_PLACES: readonly RegExp[] = [
+  /^~\/Library\/Mobile Documents\//, /^~\/Library\/CloudStorage\//, /^~\/(?:Dropbox|Google Drive|OneDrive[^/]*|Box|Box Sync|pCloud Drive|MEGA|Sync|Nextcloud|ownCloud)(?:\/|$)/, /^\/Volumes\/[^/]+\//, /^\/(?:mnt|media)\/[^/]+\/[^/]+/,
+];
+
+/** The off-machine place a path (`~`-relative or absolute) is in, if any. */
+export function offMachinePlace(display: string): string | undefined {
+  return OFF_MACHINE_PLACES.some((place) => place.test(display)) ? display : undefined;
 }

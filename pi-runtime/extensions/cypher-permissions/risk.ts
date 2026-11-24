@@ -2082,6 +2082,34 @@ export const SECRET_SOURCES: readonly { id: string; program: string; verbs: read
   { id: "a stored credential", program: "docker-credential-desktop", verbs: ["get"] },
 ];
 
+/**
+ * The service that issued a stored credential, by the program that prints it (data, iteration 4): its token used for
+ * that service is the tool's own credential at work, not a secret leaving for elsewhere.
+ */
+export const CREDENTIAL_ISSUERS: Readonly<Record<string, RegExp>> = {
+  gh: /^(?:api\.)?github\.com$|^(?:[\w-]+\.)*githubusercontent\.com$/i,
+  glab: /^(?:[\w-]+\.)*gitlab\.com$/i,
+  gcloud: /^(?:[\w-]+\.)*(?:googleapis\.com|google\.com)$/i,
+  az: /^(?:[\w-]+\.)*(?:azure\.com|microsoft\.com|windows\.net|microsoftonline\.com)$/i,
+  aws: /^(?:[\w-]+\.)*amazonaws\.com$/i,
+  npm: /^registry\.npmjs\.org$/i,
+  heroku: /^(?:[\w-]+\.)*heroku\.com$/i,
+};
+
+/** The issuer of the credential a printer prints (`CREDENTIAL_ISSUERS`), when the table knows it. */
+export function issuerOf(view: CommandView): RegExp | undefined {
+  return credentialSource(view) === undefined ? undefined : CREDENTIAL_ISSUERS[view.program];
+}
+
+/** Whether every URL a command's words name is a host of `issuer`, and it names one. */
+export function onlyReaches(words: readonly string[], issuer: RegExp): boolean {
+  const hosts = words.flatMap((word) => {
+    const host = /^[a-z][\w+.-]*:\/\/(?:[^@/]*@)?([^/:?#]+)/i.exec(word)?.[1];
+    return host ? [host] : [];
+  });
+  return hosts.length > 0 && hosts.every((host) => issuer.test(host));
+}
+
 /** The source row a command is, by `SECRET_SOURCES` (its program and leading positionals). */
 export function credentialSource(view: CommandView): string | undefined {
   for (const row of SECRET_SOURCES) {
@@ -2254,7 +2282,8 @@ function fileWords(command: RiskCommand, view: CommandView, patterns: string[] =
     const before = view.args[at - 1] ?? "";
     if (usesKey(view.program, before)) continue;
     if (runLines.some((line) => word === line || word.endsWith(`=${line}`))) continue;
-    if (DOWNLOADERS.has(view.program) && WRITES_OUTPUT.test(before)) continue;
+    // (Iteration 4: a bundle ending in an output flag, `-sSLo FILE`, gives the file to that flag.)
+    if (DOWNLOADERS.has(view.program) && (WRITES_OUTPUT.test(before) || /^-[a-zA-Z]*[oO]$/.test(before))) continue;
     if (at === written && !before.startsWith("-")) continue;
     if (word === UNKNOWN) {
       // `~/.ssh/id_*`: every path it may stand for (resolve.ts), when where it starts is known and local.
@@ -2566,10 +2595,13 @@ export function lineFlow(given: readonly RiskCommand[], facts: RiskFacts, expand
     const remote = /^(ssh|mosh)$/.test(view.program) ? sshHostIndex(words) : undefined;
     if (words.some((word, at) => word !== UNKNOWN && (remote === undefined || at <= remote) && namesSecret(word))) secret ??= "a value in this line";
   }
-  // A stored credential printed for another command that sends (`gh auth token | curl -d @- …`).
+  // A stored credential printed for another command that sends (`gh auth token | curl -d @- …`). Not when every
+  // other sink reaches only the service that issued it (iteration 4: `curl -H "Authorization: Bearer $(gh auth token)"
+  // https://api.github.com/…`): a tool's credential used for its own service, the judge's.
   if (secret === undefined) {
     for (const printer of printers) {
-      if ([...sinks].some((other) => other !== printer)) {
+      const issuer = issuerOf(viewOf(printer.words));
+      if ([...sinks].some((other) => other !== printer && !(issuer && onlyReaches(other.words, issuer)))) {
         secret = credentialSource(viewOf(printer.words));
         break;
       }
