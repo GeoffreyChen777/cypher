@@ -695,6 +695,93 @@ When several paths are requested together, the strictest mode wins.
   agent can't write it.
 - When the judge asks the user, its reason is shown in the dialog.
 
+#### 7.3.0 The floor and the defaults, as built (final pass, 2026-11-24)
+
+This is the current description; §7.3.1–§7.3.17 below are the history of how each part came to be (the rounds, the
+red teams, the cases that showed each gap). Where they differ, this section holds.
+
+**One pipeline.** Every way a request can be allowed (core.ts `ENTRY_POINTS`: a file tool's default allow, a grant, a
+rule, `request_permission`, an MCP or extension tool, a rule-allowed or sandboxed bash line, an escalation) calls
+`Permissions.gate` first: the owner's denials and the floor's `before` rows. A request the floor holds is put to the
+owner with no judge; everything else is the reviewing model's call, with the code's findings in its prompt as
+evidence. Nothing to match (no denial, no other chat's ledger, no secret, no permission-system path) costs nothing.
+
+**The floor** (floor.ts `FLOOR`, the only deterministic asks):
+
+| row | asks when | read by |
+|---|---|---|
+| `secret-off-machine` | a secret or credential would leave this machine | sources × sinks below |
+| `permission-system` | a change to the permission system itself (§3.6) | every path through one resolver |
+| `owner-rule` | the owner's own rule says ask/deny | command rules, request kinds |
+| `owner-denied` | the owner clicked Deny on the same effect over the same, a containing or a contained target, and no own word of theirs since asks for it | denials.ts |
+| `other-task` | the line destroys, or writes into, another task's entity or working tree, and the owner's words don't name it | `otherTaskOf`, task ids |
+| `no-judge` | no reviewing model could decide | after the review |
+
+**Secrets: sources.** A sensitive file — by name (config.ts `DEFAULT_SENSITIVE` and the owner's patterns) or, where
+the file exists, by content (defaults.ts `secretByContent`: private keys, cloud and forge tokens, credential-named
+`KEY=value` lines, and a file that is one base64/hex blob of those); a command whose output is a stored or minted
+credential (risk.ts `SECRET_SOURCES`, also when inline code spawns it); a variable named like a credential, or one
+whose name is known only when it runs.
+
+**Secrets: sinks, closed by their default.** A secret's *contents* given to any program not known to keep them on
+this machine (defaults.ts `LOCAL_CONSUMERS`: readers, filters, encoders, archivers, editors, the clipboard, shell
+builtins) — on its input, through a pipe, in an argument a substitution built — may leave: row 1. A secret *file*
+given to a program that names another machine (`namedRemote`: a host option, a URL, `//host/`, `host:path`) is sent;
+so is one written into a place that leaves the machine by itself (`OFF_MACHINE_PLACES`: iCloud Drive, sync clients'
+folders, mounted volumes), and one a container is told to use under a bind mount while it is told to reach another
+machine. The sink tables (risk.ts `NETWORK_SINKS`, code.ts network categories) stay for their programs' own forms
+(`@file`, `-T`, `--data-binary`, sockets, DNS). Not a send: a tool's own credential option (`OWN_CREDENTIAL`,
+`KEY_OPTIONS`: `--password-stdin`, `ssh -i`, `--kubeconfig`, `--env-file`), a download's destination (output
+options, bundled short flags ending in `o`), a command that runs on another machine (`runsElsewhere`), a token sent
+only to the service that issued it (`CREDENTIAL_ISSUERS`). The owner's consent never lifts row 1.
+
+**Reading a line.** shell.ts reads every command a line can run (pipes, lists, substitutions, functions, aliases,
+loops over literals, heredoc scripts, `eval`, `trap` text, assignment prefixes, ANSI-C quoting, parameter transforms,
+`$HOME`/`~NAME`/`$USER` and the user's home folder by name, `$(cd …; pwd)`, `git rev-parse --show-toplevel`). fold.ts
+computes printers and pure transforms of literals (`printf`, `echo`, `base64 -d`, `xxd -r`, `rev`, `tr`, one plain
+`sed s///`, `jq -rn`). resolve.ts is the one path resolver (braces, globs and their current matches, `..`, links
+followed, the data-volume firmlink). Any program not known to be plain (defaults.ts `PLAIN_PROGRAMS`) that is given
+words or text starting a command (`COMMAND_STARTS`), or an option that runs its value, is read as running them — one
+reading for the floor and the denials. Inline code (code.ts) is scanned for paths (literal pieces folded first),
+home forms, network categories, file operations and spawned commands. Project scripts (scripts.ts `SCRIPT_RUNNERS`:
+shell files, make, package scripts and install lifecycle, just, deno task, go-task, pre-commit) are read as lines of
+their own, never remembered; another's non-shell scripts and committed project shell scripts stay the judge's.
+
+**Other tasks.** Each chat's ledger records what it made (catalogue.ts creators); entries carry the engine's task id
+(`CYPHER_TASK_ID`: `workspace:<bot>`, `workspace:<bot>/plan:<work>`, `chat:<id>`, a subagent its root's). Same task:
+never held. Another known task: the floor. Unknown lineage: the floor outside this chat's working tree, the judge
+(with "another chat made it") inside it for kinds with a place. What counts: any destroying effect by the program
+tables and flow.ts group destroyers (deletes, stops, moves, `rsync --delete` destinations, `DROP`, patch deletes,
+selector and `--all` deletes, `kill-server`), operands known only at run time matched by their producers' tests, globs
+by what they could match, and writes or destroys inside another task's working tree outside this chat's own trees.
+
+**Denials.** A Deny records units (effect × typed target, schema.ts and effects.ts); a later request meets it when
+its units meet — another tool, an API route, a script, a build that pushes, a narrower or broader target. Only the
+owner's own words lift it, naming the target and the effect, not as a question, negation, retraction or condition,
+and not words they quote from someone else or forward (explicit.ts `ownSpeech`, `LIFT_CONDITION`). A dismissed
+prompt is no denial.
+
+**The owner's naming.** The owner's own speech (explicit.ts `ownText`, `ownSpeech`: no fenced or quoted text, no
+forwarded message) names what they ask; a negation, an exception ("except X"), a keeping verb ("leave X alone") or a
+condition names nothing to act on.
+
+**What goes to the judge, marked, never approved by default or remembered:** a path or command known only when it
+runs ("could be the permission system / a secret"), opaque or unreadable code, a secret path given to a program that
+names no machine, unknown origin of cluster and cloud resources, another chat's entity inside this working tree with
+unknown lineage, a line the reader can't follow. An approval of a line not read in full runs once (no pattern kept).
+
+**Lists still open** (each needs a format or a fact the code doesn't have): which printers and transforms fold
+(a word the folder can't compute keeps the judge's reading, since owner-approved lines write to computed paths);
+which manifests run code; `~+`, `~-`, `dirs`, `CDPATH`; SQL entities and services (`launchctl`); copies derived
+through encryption or compression; programs that send by their configuration (`lp`, ansible inventories).
+
+**Known gap found by the final test (blind-7, not fixed: the extension was frozen for it).** A project script is read
+for one finding: core.ts `scriptFinding` keeps the first danger `scanFinding` reports in the script's text, so a
+permission-system change on a later line (`docker compose down -v` then `rm -rf ~/.cypher/pi-runtime/agent/cypher-
+permissions`, b7-076) reaches the judge as "deletes container volumes" instead of the floor. The same script without
+the earlier danger floors. The fix is to keep a floor finding over a worse-but-judged one inside one text; the live
+judge asked on b7-076 in the final run, round 6's extension approved it.
+
 #### 7.3.10 Round 3: the judge decides, the code's checks are evidence (2026-11-23)
 
 The owner's instruction is quoted in §7.3.1. Their standing rule holds too: mechanisms and
@@ -939,6 +1026,8 @@ consent); each is a mechanism, re-checked on a second blind set the fix pass nev
   retraction: `retracts`, `forbids`).
 
 #### 7.3.1 The floor: the only deterministic asks (rewritten in round 3, 2026-11-23)
+
+(History: the current description of the floor is §7.3.0.)
 
 The owner (round 3): *"除了非常危险的，必须弹窗用户允许，其他的都可以走模型判断。尤其是用户的上一轮对话已经要求做的事情，审核模型一定要放行。绝对不要再弹窗。"*
 (except for the truly dangerous, which must prompt the owner, everything may go to the
@@ -2189,7 +2278,13 @@ Commands:
 | `cypher-permissions/created.ts` | What this task made, read from the commands it ran: the facts a danger over its own leavings rests on (§7.3.3) |
 | `cypher-permissions/catalogue.ts` | The creator/destroyer catalogue: per tool and subcommand, the entity it creates, destroys, stops, starts or merges and where its name comes from; plan before a run, settle after (§7.3.3) |
 | `cypher-permissions/ledger.ts` | The provenance ledger: per chat, on disk where the sandbox can't write (§7.3.3); round 5 step 2: the taint ledger (`taintFile`) of files and repositories written from a secret |
-| `cypher-permissions/fold.ts` | Round 5 step 2: constant folding of pure transforms (`TRANSFORMS`: base64 -d, xxd -r, rev, tr, printf escapes) for computed names |
+| `cypher-permissions/fold.ts` | Constant folding of printers and pure transforms (`TRANSFORMS`: base64 -d, xxd -r, rev, tr, sed `s///`, printf, jq -rn; `USER_PRINTERS`) for computed names |
+| `cypher-permissions/defaults.ts` | The lists closed by their default (§7.3.0): `LOCAL_CONSUMERS`, `PLAIN_PROGRAMS`, `COMMAND_STARTS`, `OWN_CREDENTIAL`, `OUTPUT_OPTIONS`, `namedRemote`, `runsElsewhere`, `OFF_MACHINE_PLACES`, `secretByContent` |
+| `cypher-permissions/code.ts` | Inline code: interpreters, `foldLiterals`, `scanCode` (paths, home forms, network categories, file operations, spawned commands) |
+| `cypher-permissions/resolve.ts` | The one path resolver: braces, globs, `..`, links, the data-volume firmlink, the home folder by the user's name |
+| `cypher-permissions/scripts.ts` | `SCRIPT_RUNNERS`: project scripts and manifests read as lines of their own |
+| `cypher-permissions/effects.ts`, `schema.ts`, `flow.ts` | Effect classes and wrappers; per-tool target schemas and API routes; run-time operands, group destroyers |
+| `cypher-permissions/denials.ts`, `lexicon.ts` | The owner's denials as units and what lifts them; the owner-word lexicon (negation, retraction, questions; several languages) |
 | `cypher-permissions/lifecycle.ts` | Lifecycle closure: the follow-ups an action implies, as data (§7.3.6) |
 | `cypher-permissions/explicit.ts` | Explicit requests: the owner's words, what a dangerous line acts on, the quote, target and retraction checks (§7.3.2); `scanConsents`/`scanDataConsent`, the same checks on every owner word as evidence (§7.3.10) |
 | `cypher-permissions/entities.ts` | Target identity: typed entities and `relation`/`covers`/`identifies`/`namesOf` (§7.3.5) |
