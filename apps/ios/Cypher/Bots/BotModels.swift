@@ -151,6 +151,9 @@ struct PlanSettings: Codable, Hashable, Sendable {
     var timeLimitMinutes: Int?
     var runningMax: Int?
     var sessionsMax: Int?
+    /// The permission level new plans are proposed at (`sandbox` values,
+    /// PermissionLevel); nil is Edit project.
+    var level: String?
 
     static let defaultTimeLimit = 240
     static let timeLimitRange = 15...(72 * 60)
@@ -165,7 +168,10 @@ struct PlanSettings: Codable, Hashable, Sendable {
     /// The limits the settings offer; a workspace's own is added.
     static let timeLimitChoices = [60, 120, 240, 480, 720, 1_440]
 
-    var isDefault: Bool { timeLimitMinutes == nil && runningMax == nil && sessionsMax == nil }
+    var isDefault: Bool { timeLimitMinutes == nil && runningMax == nil && sessionsMax == nil && level == nil }
+
+    /// The level a new plan is proposed at (bot_records.rs `level`).
+    var planLevel: PermissionLevel { PermissionLevel.of(sandbox: level) }
 
     var timeLimit: Int { Self.clamp(timeLimitMinutes ?? Self.defaultTimeLimit, Self.timeLimitRange) }
     var running: Int { runningMax.map { Self.clamp($0, Self.runningRange) } ?? Self.defaultRunning }

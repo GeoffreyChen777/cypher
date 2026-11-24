@@ -191,6 +191,9 @@ final class WorkspaceStore: WorkspaceData {
         }
     }
 
+    /// The device group made this phone receive-only.
+    var receiveOnly: Bool { config.trust?.isReceiveOnly == true }
+
     // MARK: Presence
 
     func deviceOnline(_ deviceId: String) -> Bool {

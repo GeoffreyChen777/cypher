@@ -374,11 +374,16 @@ struct BotSettingsSheet: View {
                 LabeledContent("Sessions per plan", value: "\(value.plans.sessions)")
             }
             .accessibilityIdentifier("bot-settings-sessions-max")
+            LabeledContent("Permissions") {
+                PlanLevelPicker(level: value.planLevel, identifier: "bot-settings-level") {
+                    draft.wrappedValue.planLevel = $0
+                }
+            }
         } header: {
             Text("Plans")
         } footer: {
             Text(
-                "A plan stops at its time limit, with its sessions; it can ask for its own, and you can add time while it runs. Approved plans wait for a free slot."
+                "A plan stops at its time limit, with its sessions; it can ask for its own, and you can add time while it runs. Approved plans wait for a free slot. New plans run at this permission level; you can change a plan's on its card."
             )
         }
         .groupedRowStyle()
