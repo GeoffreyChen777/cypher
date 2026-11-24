@@ -12,6 +12,7 @@
 
 import { basename } from "node:path";
 
+import type { EffectClass } from "./effects.ts";
 import type { EntityKind } from "./entities.ts";
 import { typedTargets } from "./schema.ts";
 import { UNKNOWN } from "./shell.ts";
@@ -28,16 +29,72 @@ export interface RuntimeOperand {
   tests: NameTest[];
   /** The consumer, for the dialog. */
   by: string;
+  /** What it does to them, when its row says (`GROUP_DESTROYERS`): a group's members deleted are a `change`. */
+  effects?: EffectClass[];
+}
+
+/**
+ * Commands that destroy a project's resources as a group (final pass, data): what they destroy is every entity of
+ * the kinds their options name whose name carries the project's (`docker compose down -v` removes the volumes
+ * `<project>_*`, the same volume a denied `docker volume rm atlas_pgdata` named), or, when the members are declared
+ * in a file the line doesn't show (`kubectl delete -f`, `terraform destroy`), every entity of the kinds. `kinds`:
+ * always; `options`: more kinds with an option (`-v` the volumes, `--rmi` the images); `project`: how the group's
+ * name is found (compose: `-p`, else the compose file's folder, else the folder it runs in).
+ */
+export const GROUP_DESTROYERS: readonly { program: readonly string[]; sub: readonly string[]; option?: RegExp; kinds: readonly EntityKind[]; options?: readonly { option: RegExp; kinds: readonly EntityKind[] }[]; project?: "compose" }[] = [
+  // Its networks are `resource`s as its volumes are (schema.ts): only `-v` reaches that kind, so a denied volume isn't met by a plain `down`.
+  { program: ["docker", "podman"], sub: ["compose", "down"], kinds: ["container"], options: [{ option: /^(-v|--volumes)$/, kinds: ["resource"] }, { option: /^--rmi(=.*)?$/, kinds: ["image"] }], project: "compose" },
+  { program: ["docker-compose", "podman-compose"], sub: ["down"], kinds: ["container"], options: [{ option: /^(-v|--volumes)$/, kinds: ["resource"] }, { option: /^--rmi(=.*)?$/, kinds: ["image"] }], project: "compose" },
+  { program: ["docker", "podman"], sub: ["compose", "rm"], kinds: ["container"], options: [{ option: /^(-v|--volumes)$/, kinds: ["resource"] }], project: "compose" },
+  { program: ["docker-compose", "podman-compose"], sub: ["rm"], kinds: ["container"], options: [{ option: /^(-v|--volumes)$/, kinds: ["resource"] }], project: "compose" },
+  { program: ["kubectl", "oc"], sub: ["delete"], option: /^(-f|--filename|-k|--kustomize)(=.*)?$/, kinds: ["namespace", "resource"] },
+  { program: ["terraform", "tofu"], sub: ["destroy"], kinds: ["resource"] },
+];
+
+/** A compose project's name (`-p`, `--project-name`, else the compose file's folder, else `cwd`), as compose normalizes it. */
+function composeProject(words: readonly string[], cwd: string | undefined): string | undefined {
+  let name: string | undefined;
+  let file: string | undefined;
+  for (const [i, word] of words.entries()) {
+    if (word === "-p" || word === "--project-name") name = words[i + 1];
+    else if (word.startsWith("--project-name=")) name = word.slice("--project-name=".length);
+    else if (word === "-f" || word === "--file") file = words[i + 1];
+  }
+  if (name === UNKNOWN || file === UNKNOWN) return undefined;
+  name ??= file?.includes("/") ? basename(file.replace(/\/[^/]*$/, "")) : cwd !== undefined ? basename(cwd) : undefined;
+  return name?.toLowerCase().replace(/[^a-z0-9_-]/g, "") || undefined;
+}
+
+/** The group a command destroys (`GROUP_DESTROYERS`), as a runtime operand; undefined when it is none. */
+export function groupOperand(inner: readonly string[], cwd: string | undefined): RuntimeOperand | undefined {
+  const program = basename(inner[0] ?? "");
+  const positionals = inner.slice(1).filter((word, i, all) => !word.startsWith("-") && !/^(-p|--project-name|-f|--file|-n|--namespace)$/.test(all[i - 1] ?? ""));
+  const row = GROUP_DESTROYERS.find((candidate) => candidate.program.includes(program) && candidate.sub.every((word, at) => positionals[at] === word) && (!candidate.option || inner.some((word) => candidate.option!.test(word))));
+  if (!row) return undefined;
+  const kinds = new Set<EntityKind>(row.kinds);
+  for (const extra of row.options ?? []) if (inner.some((word) => extra.option.test(word))) for (const kind of extra.kinds) kinds.add(kind);
+  const tests: NameTest[] = [];
+  if (row.project === "compose") {
+    const project = composeProject(inner, cwd);
+    if (!project) return undefined;
+    tests.push({ regex: new RegExp(`^${project.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[-_]`) });
+  }
+  return { kinds: [...kinds], tests, by: inner.slice(0, 1 + row.sub.length).join(" "), effects: ["change"] };
 }
 
 /**
  * Operand kinds of destroyers the schema table has no row for: program, subcommand words (all present in
  * order among the positionals' first words), the kinds a runtime operand there takes. Data, not cases.
  */
-export const RUNTIME_OPERANDS: readonly { program: string; sub?: readonly string[]; option?: RegExp; kinds: readonly EntityKind[] }[] = [
+export const RUNTIME_OPERANDS: readonly { program: string; sub?: readonly string[]; option?: RegExp; word?: RegExp; kinds: readonly EntityKind[] }[] = [
   { program: "git", sub: ["branch"], option: /^-(d|D|-delete)$/, kinds: ["branch"] },
   { program: "git", sub: ["tag"], option: /^-(d|-delete)$/, kinds: ["tag"] },
   { program: "git", sub: ["push"], option: /^(-d|--delete)$/, kinds: ["branch", "tag"] },
+  // Final pass: a refspec with an empty source deletes its destination (`git push origin :refs/tags/{}`), whatever
+  // spells it; `word`: the runtime operand's word. The ref's prefix says its kind.
+  { program: "git", sub: ["push"], word: /^\+?:refs\/tags\//, kinds: ["tag"] },
+  { program: "git", sub: ["push"], word: /^\+?:refs\/heads\//, kinds: ["branch"] },
+  { program: "git", sub: ["push"], word: /^\+?:(?!refs\/)/, kinds: ["branch", "tag"] },
   { program: "git", sub: ["worktree", "remove"], kinds: ["worktree", "path"] },
   { program: "gh", sub: ["pr", "close"], kinds: ["pr"] },
   { program: "gh", sub: ["release", "delete"], kinds: ["release", "tag"] },
@@ -132,6 +189,10 @@ export function runtimeKinds(words: readonly string[]): EntityKind[] {
     if (row.program !== program) continue;
     if (row.sub && !row.sub.every((word, index) => positionals[index] === word)) continue;
     if (row.option && !words.some((word) => row.option!.test(word))) continue;
+    if (row.word) {
+      if (words.some((word) => word.includes(RUNTIME) && row.word!.test(word))) for (const kind of row.kinds) kinds.add(kind);
+      continue;
+    }
     if (words.includes(RUNTIME)) for (const kind of row.kinds) kinds.add(kind);
   }
   return [...kinds];
@@ -243,9 +304,10 @@ export function testsOf(words: readonly string[]): NameTest[] {
   return row?.read(words) ?? [];
 }
 
-/** Whether a name passes a test: as itself, or as a listing prints it (`worktree PATH`, `namespace/NAME`, `refs/heads/NAME`). */
-export function passes(test: NameTest, kind: string, name: string): boolean {
-  const forms = [name, `${kind} ${name}`, `${kind}/${name}`, ...(kind === "branch" ? [`refs/heads/${name}`] : kind === "tag" ? [`refs/tags/${name}`] : []), basename(name)];
+/** Whether a name passes a test: as itself, or as a listing prints it (`worktree PATH`, `namespace/NAME`, `refs/heads/NAME`), or by what else it is known by (`also`). */
+export function passes(test: NameTest, kind: string, name: string, also: readonly string[] = []): boolean {
+  // `also`: what else the entity is known by (a process's command line and ports; core.ts `entityForms`).
+  const forms = [name, `${kind} ${name}`, `${kind}/${name}`, ...(kind === "branch" ? [`refs/heads/${name}`] : kind === "tag" ? [`refs/tags/${name}`] : []), basename(name), ...also];
   if ("glob" in test) return forms.some((form) => globRegex(test.glob).test(form));
   if ("contains" in test) return forms.some((form) => form.includes(test.contains));
   return forms.some((form) => test.regex.test(form));

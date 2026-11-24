@@ -37,6 +37,7 @@ import { basename, dirname, join } from "node:path";
 import { CLASS_WORDS, classOf } from "./effects.ts";
 import type { EffectClass } from "./effects.ts";
 import { relation } from "./entities.ts";
+import { ENV_OPTIONS } from "./schema.ts";
 import type { EntityKind } from "./entities.ts";
 import { consentText, mentions, QUESTION } from "./explicit.ts";
 import type { OwnerWords } from "./explicit.ts";
@@ -85,6 +86,8 @@ export interface ActionClass {
    * denial matching (round 6, W2: `tokenMatch`); not recorded.
    */
   tokens?: readonly string[];
+  /** Every argv word, options too (`--opt=value` as two words), for a denied line's own words (`tokenMatch`); not recorded. */
+  argv?: readonly string[];
 }
 
 export interface DenialRecord extends Omit<ActionClass, "units"> {
@@ -162,12 +165,48 @@ export function tokenMatch(denied: Pick<DenialRecord, "units" | "actions" | "sco
   for (const unit of unitsOf(denied)) {
     if (!effectsMeet(unit.effects, effects)) continue;
     for (const scope of unit.scopes) {
-      if (scope.kind === "line") continue;
+      if (scope.kind === "line") {
+        // A line that names no typed target (final pass): asked again with every word it gave — its operands and its
+        // options' values, by any spelling (an environment variable for the option, `ENV_OPTIONS`; more words,
+        // a comment) — by the same program, it is the same request.
+        const needed = lineOperands(scope.name);
+        const program = needed.program;
+        const argv = new Set((asked.argv ?? []).map((word) => word.replace(/\/+$/, "")));
+        if (program && needed.words.filter((word) => !word.startsWith("-")).length >= 2 && (asked.actions ?? []).some((action) => action.split(" ")[0] === program) && needed.words.every((word) => argv.has(word))) return { unit, scope };
+        continue;
+      }
       const names = [scope.name, ...(scope.says ?? [])].filter((name) => name.length >= 2);
       if (names.some((name) => tokens.has(name))) return { unit, scope };
     }
   }
   return undefined;
+}
+
+/**
+ * A recorded line's program and the words it gave its program (operands, options and their values, quotes off), as
+ * the argv safety net compares them; an assignment in front of it is the option it stands for when the program reads
+ * one (`GH_REPO=o/r` is `--repo o/r`, schema.ts `ENV_OPTIONS`), else its value. Only a line of one command: a
+ * compound line's words belong to several requests.
+ */
+function lineOperands(line: string): { program?: string; words: string[] } {
+  if (/[;&|`]|\$\(/.test(line.replace(/'[^']*'|"[^"]*"/g, ""))) return { words: [] };
+  const words = [...line.matchAll(/'([^']*)'|"((?:[^"\\]|\\.)*)"|(\S+)/g)].map((match) => match[1] ?? match[2] ?? match[3]);
+  let at = 0;
+  const values: string[] = [];
+  const env: { name: string; value: string }[] = [];
+  while (at < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[at])) {
+    const word = words[at++];
+    env.push({ name: word.slice(0, word.indexOf("=")), value: word.slice(word.indexOf("=") + 1) });
+  }
+  const program = words[at] === undefined ? undefined : basename(words[at]);
+  const table = program ? ENV_OPTIONS[program] : undefined;
+  for (const { name, value } of env) values.push(...(table?.[name] ? [table[name], value] : [value]));
+  // Options too: a narrower request (`down` after a denied `down -v`) gives fewer of them.
+  const rest = words
+    .slice(at + 1)
+    .flatMap((word) => (/^--[^=]+=./.test(word) ? [word.slice(0, word.indexOf("=")), word.slice(word.indexOf("=") + 1)] : [word]))
+    .map((word) => word.replace(/\/+$/, ""));
+  return { program, words: [...values, ...rest].filter((word) => word.length > 0) };
 }
 
 /** The names the owner's words may use for a scope. */

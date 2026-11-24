@@ -319,6 +319,47 @@ export function apiDestroys(words: readonly string[]): boolean {
 export const DELETING_SUBCOMMAND = /^(delete|remove|rm|rb|terminate|destroy|purge|deregister|drop)(-[a-z-]+)?$/;
 
 /** One command's words (unwrapped), read by its schema: undefined when the table has none for it. */
+/**
+ * Environment variables a program reads in place of one of its options (final pass, data): `GH_REPO=o/r gh …` is
+ * `gh … --repo o/r`. Program → variable → the option it stands for. A variable in front of the command
+ * (`NAME=value cmd`) is read as that option when the command doesn't give the option itself (`withEnvOptions`),
+ * so typed targets, denials and the other-task floor read the same request in either spelling.
+ */
+export const ENV_OPTIONS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  gh: { GH_REPO: "--repo", GH_HOST: "--hostname" },
+  glab: { GITLAB_REPO: "--repo", GL_HOST: "--hostname", GITLAB_HOST: "--hostname" },
+  kubectl: { KUBECONFIG: "--kubeconfig", KUBECTL_CONTEXT: "--context" },
+  oc: { KUBECONFIG: "--kubeconfig" },
+  helm: { HELM_NAMESPACE: "--namespace", HELM_KUBECONTEXT: "--kube-context", KUBECONFIG: "--kubeconfig" },
+  aws: { AWS_PROFILE: "--profile", AWS_DEFAULT_PROFILE: "--profile", AWS_REGION: "--region", AWS_DEFAULT_REGION: "--region" },
+  gcloud: { CLOUDSDK_CORE_PROJECT: "--project", CLOUDSDK_ACTIVE_CONFIG_NAME: "--configuration", CLOUDSDK_COMPUTE_REGION: "--region", CLOUDSDK_COMPUTE_ZONE: "--zone" },
+  gsutil: { CLOUDSDK_CORE_PROJECT: "-p" },
+  az: { AZURE_SUBSCRIPTION_ID: "--subscription", AZURE_DEFAULTS_GROUP: "--resource-group" },
+  docker: { DOCKER_HOST: "--host", DOCKER_CONTEXT: "--context" },
+  podman: { CONTAINER_HOST: "--url", CONTAINER_CONNECTION: "--connection" },
+  git: { GIT_DIR: "--git-dir", GIT_WORK_TREE: "--work-tree" },
+  terraform: { TF_WORKSPACE: "-workspace" },
+  npm: { NPM_CONFIG_REGISTRY: "--registry", npm_config_registry: "--registry" },
+  psql: { PGHOST: "--host", PGDATABASE: "--dbname", PGUSER: "--username" },
+};
+
+/** `words` with the options its environment prefix stands for (`ENV_OPTIONS`) added, unless it gives them itself. */
+export function withEnvOptions(words: readonly string[], env: readonly { name: string; value: string }[]): readonly string[] {
+  if (!env.length) return words;
+  const program = basename(words[0] ?? "");
+  const table = ENV_OPTIONS[program];
+  if (!table) return words;
+  const end = words.indexOf("--");
+  const given = (option: string) => words.slice(1, end < 0 ? undefined : end).some((word) => word === option || word.startsWith(`${option}=`) || (option === "--repo" && word === "-R") || (option === "--namespace" && word === "-n"));
+  const added: string[] = [];
+  for (const { name, value } of env) {
+    const option = table[name];
+    if (option && !given(option) && !added.includes(option)) added.push(option, value);
+  }
+  if (!added.length) return words;
+  return end < 0 ? [...words, ...added] : [...words.slice(0, end), ...added, ...words.slice(end)];
+}
+
 export function typedTargets(words: readonly string[]): Typed | undefined {
   const program = basename(words[0] ?? "");
   const schema = SCHEMA_BY_PROGRAM.get(program);
