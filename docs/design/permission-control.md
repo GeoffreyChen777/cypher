@@ -1749,7 +1749,8 @@ behaviour.
   versions access`, `az keyvault secret show`, `gh auth status --show-token`, `sops -d`, password managers). They are
   sources for any sink in the line (the data-flow floor).
 - *The home folder by evaluating the user's name* (shell.ts): `$(eval WORDS)` reads its words again (`$(eval echo
-  ~$(whoami))`), `~NAME` of the user the line runs as is the home folder, `~$(…)` stays a literal `~` as bash keeps it,
+  ~$(whoami))`), `~NAME` of the user the line runs as is the home folder (a word's start, an assignment's value),
+  `~$(…)` stays a literal `~` as bash keeps it,
   and fold.ts `USER_PRINTERS` (`whoami`, `logname`, `id -un`) print the user's name.
 - *Parameter transforms of known values* (shell.ts `PARAMETER_TRANSFORMS`): `${V/#pat/rep}`, `/`, `//`, `/%`, `#`,
   `##`, `%`, `%%`, `^^`, `,,`, `${V:off:len}` are computed when the value and operands are known (a base64-decoded path
@@ -1787,8 +1788,9 @@ behaviour.
   progress — overwriting a file there is as destructive to it as a delete (the owner's own rule: never touch other
   sessions' uncommitted files). It is narrow by construction: a chat working inside that tree (its cwd), the same task
   (plan siblings, their workspace), a plain folder another chat made, and the owner's words naming the tree all pass.
-- *Unknown origin as evidence* (core.ts `originUnknown`, judge.ts): what a line deletes or stops (not files, not
-  processes) that neither this chat's ledger nor any other chat's names reaches the judge marked "who made it:
+- *Unknown origin as evidence* (core.ts `originUnknown`, judge.ts): what a line deletes or stops of a cluster or cloud
+  kind (ledger.ts `OTHER_TASK_FLOOR` since 6 without a place: namespace, context, cluster, bucket, project, typed by
+  the line's schema) that neither this chat's ledger nor any other chat's names reaches the judge marked "who made it:
   unknown … isn't shown to be this task's: approve only when the owner's words or the conversation account for this
   one". This is where a resource known only by absence (another chat's namespace made before ledgers, or by hand)
   ends: the code can't decide it, and it is not approved by default.
