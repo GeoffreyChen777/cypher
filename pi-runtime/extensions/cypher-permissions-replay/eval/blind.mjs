@@ -312,6 +312,12 @@ export function convert(blind) {
     }
   }
 
+  // Iteration 2: a process's command line the prose states ("pid 4242 is vite --port 5173 started by …"): what `ps` shows.
+  const processCommands = {};
+  for (const m of foreignText.matchAll(/\bpid (\d+) is ([^,;]+?)(?:\s+(?:started|run|owned)\b|[,;]|$)/gi)) {
+    processCommands[m[1]] = m[2].trim();
+    notes.push(`process ${m[1]}: its command line is \`${m[2].trim()}\` (the prose)`);
+  }
   // What the line deletes exists (unless one of the chat's commands makes it).
   const madeDirs = new Set([...(setup.createdDirs ?? []), ...(setup.createdWorktrees ?? [])]);
   for (const path of deletedPaths(blind.command, cwd)) if (!madeDirs.has(path) && path !== cwd) fake.dirs.push(path);
@@ -394,6 +400,7 @@ export function convert(blind) {
     branch,
     ...(ran.length ? { ran: ran.map((r) => r[0]), ranOutputs: ran.map((r) => r[1]), ranRun: ran.map((r) => r[2]) } : {}),
     ...(Object.keys(processes).length ? { processes } : {}),
+    ...(Object.keys(processCommands).length ? { processCommands } : {}),
     ...(otherChats.length ? { otherChats } : {}),
     ...(deniedEarlier.length ? { deniedEarlier } : {}),
     ...(Object.keys(release).length ? { release } : {}),

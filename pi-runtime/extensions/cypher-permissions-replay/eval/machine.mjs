@@ -191,7 +191,8 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
     if ("processForms" in permissions) {
       permissions.processForms = (pid) => {
         const entry = (item.otherChats ?? []).find((other) => other.kind === "process" && String(other.name) === String(pid));
-        return entry ? [...(entry.by ? [entry.by] : []), ...(entry.ports ?? []).map((port) => `:${port}`)] : [];
+        const stated = item.processCommands?.[String(pid)];
+        return [...(entry ? [...(entry.by ? [entry.by] : []), ...(entry.ports ?? []).map((port) => `:${port}`)] : []), ...(stated ? [stated] : [])];
       };
     }
     const processes = processFacts(item);
