@@ -160,7 +160,8 @@ export function consentText(word: OwnerWord): string {
  * prompt line (`$ git push --force …`, `% …`, `PS> …`), a CI or tool log. What it holds is what someone
  * else wrote or ran, not what the owner asks for.
  */
-const QUOTED = /```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|^[ \t]*(?:>|\$ |% |# |PS[^>\n]*> |❯ |➜ ).*$/gm;
+// A fence runs to its closing fence (or the end of the text: `$(?![\s\S])`, since `m` makes `$` end a line too).
+const QUOTED = /```[\s\S]*?(?:```|$(?![\s\S]))|~~~[\s\S]*?(?:~~~|$(?![\s\S]))|^[ \t]*(?:>|\$ |% |# |PS[^>\n]*> |❯ |➜ ).*$/gm;
 
 /** Words with which the owner's own text asks for what it quotes (`run this:`, `do it`), besides the actions' own. */
 const RUN_QUOTED = /\b(run|execute|exec|do (?:it|this|that|these)|go ahead|apply|paste|type)\b|执行|运行|跑一下|照做/i;

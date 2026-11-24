@@ -58,7 +58,7 @@ export interface Interpreter {
 
 export const INTERPRETERS: readonly Interpreter[] = [
   { language: "python", programs: /^(python|python\d(\.\d+)?|pypy\d?)$/, inline: ["-c"], clusters: "c", values: ["-W", "-X", "--check-hash-based-pycs"], modules: ["-m"], stdin: true, extensions: [".py"] },
-  { language: "javascript", programs: /^(node|nodejs)$/, inline: ["-e", "--eval", "-p", "--print"], clusters: "ep", loads: ["-r", "--require", "--import"], values: ["-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--env-file", "--title", "--max-old-space-size"], stdin: true, extensions: [".js", ".mjs", ".cjs"] },
+  { language: "javascript", programs: /^(node|nodejs|tsx|ts-node|esno|esrun)$/, inline: ["-e", "--eval", "-p", "--print"], clusters: "ep", loads: ["-r", "--require", "--import"], values: ["-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--env-file", "--title", "--max-old-space-size"], stdin: true, extensions: [".js", ".mjs", ".cjs"] },
   { language: "javascript", programs: /^deno$/, inline: [], subcommands: { eval: "inline", run: "script" }, values: ["--config", "-c", "--import-map", "--location", "--seed", "--v8-flags", "--env-file"], stdin: false, extensions: [".ts", ".js", ".mjs", ".tsx"] },
   { language: "javascript", programs: /^bun$/, inline: ["-e", "--eval", "-p", "--print"], subcommands: { run: "script" }, values: ["--cwd", "--config", "-c", "--env-file", "-r", "--preload"], stdin: false, extensions: [".ts", ".js", ".mjs", ".tsx"] },
   { language: "javascript", programs: /^(tsx|ts-node)$/, inline: ["-e", "--eval", "-p", "--print"], values: ["-r", "--require", "--tsconfig"], stdin: false, extensions: [".ts", ".tsx", ".js", ".mjs"] },
@@ -641,6 +641,14 @@ export function signaledPids(code: string, language: Language): string[] {
   return [...out];
 }
 
+/** Calls that read a file they don't name (data): dotenv's loaders read `./.env`. */
+export const IMPLIED_READS: readonly { languages: readonly Language[]; form: RegExp; paths: readonly string[] }[] = [
+  { languages: ["python"], form: /\b(?:load_dotenv|dotenv_values|find_dotenv)\s*\(\s*\)/, paths: ["./.env"] },
+  { languages: ["javascript"], form: /\bdotenv['"]?\)?\s*\.\s*config\s*\(\s*\)|['"]dotenv\/config['"]|process\.loadEnvFile\s*\(\s*\)/, paths: ["./.env"] },
+  { languages: ["ruby"], form: /\bDotenv\.load\s*(?:\(\s*\))?(?!\s*\()/, paths: ["./.env"] },
+  { languages: ["php"], form: /\bDotenv::create\w*\(/, paths: ["./.env"] },
+];
+
 export interface CodeScan {
   /** Names that reach the network (`requests`, `urlopen`). */
   network: string[];
@@ -682,6 +690,11 @@ export function scanCode(code: string, language: Language, secretName: (name: st
   const forms = COMMAND_FORMS[language];
   for (const regex of forms?.runs ?? []) for (const match of code.matchAll(regex)) if (match[1]?.trim()) scan.commands.push(match[1].trim());
   for (const item of forms?.opaque ?? []) if (item.form.test(code)) scan.opaque.push(item.why);
+  // Files a library reads without naming them (iteration 3, `IMPLIED_READS`: dotenv loads `./.env`).
+  for (const row of IMPLIED_READS) if (row.languages.includes(language) && row.form.test(code)) {
+    scan.reads = true;
+    for (const path of row.paths) if (!scan.paths.includes(path)) scan.paths.push(path);
+  }
   scan.network = capabilityNames(code, language, "network");
   if (language !== "sed") for (const category of networkCategories(code, literals)) if (!scan.network.includes(category)) scan.network.push(category);
   scan.spawn = capabilityNames(code, language, "spawn");

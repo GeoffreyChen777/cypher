@@ -103,9 +103,19 @@ export function printed(words: readonly string[], unknown: string, context: Fold
     const text = rest.join(" ");
     return `${flags.includes("e") ? unescape(text) : text}${flags.includes("n") ? "" : "\n"}`;
   }
+  // `jq -rn '"…"'` (iteration 3): a JSON string literal printed raw.
+  if (program === "jq" && args.some((arg) => /^-[a-zA-Z]*n/.test(arg)) && args.some((arg) => /^-[a-zA-Z]*r/.test(arg))) {
+    const filter = args.filter((arg) => !arg.startsWith("-"));
+    if (filter.length === 1 && /^"(?:[^"\\]|\\.)*"$/.test(filter[0])) {
+      try {
+        return `${JSON.parse(filter[0])}\n`;
+      } catch {}
+    }
+  }
   if (program === "printf" && args.length && !args[0].startsWith("-")) {
     let used = 1;
-    const text = unescape(args[0]).replace(/%[sbd]/g, () => args[used++] ?? "");
+    // `%b` expands the escapes of its argument (iteration 3), `%s` takes it as it is.
+    const text = unescape(args[0]).replace(/%[sbd]/g, (spec) => (spec === "%b" ? unescape(args[used++] ?? "") : (args[used++] ?? "")));
     return `${text}${args.slice(used).join(" ")}`;
   }
   return undefined;

@@ -122,7 +122,7 @@ const PRODUCERS: readonly { program: string; place(args: readonly string[], pwd:
   // What it prints is its own words (`D=$(echo ~/x)`, `$(realpath ../y)`, `$(dirname /a/b)`).
   { program: "echo", place: (args) => (args.length && !args.includes(UNKNOWN) && !args[0].startsWith("-") ? escapeGlob(args.join(" ")) : undefined) },
   { program: "realpath", place: (args) => (args.length === 1 && args[0] !== UNKNOWN && !args[0].startsWith("-") ? escapeGlob(args[0]) : undefined) },
-  { program: "dirname", place: (args) => (args.length === 1 && args[0] !== UNKNOWN && args[0].includes("/") ? escapeGlob(args[0].replace(/\/+[^/]*\/*$/, "") || "/") : undefined) },
+  { program: "dirname", place: (args, _pwd, globs) => (args.length === 1 && args[0] !== UNKNOWN && args[0].includes("/") ? escapeGlob(args[0].replace(/\/+[^/]*\/*$/, "") || "/") : args.length === 1 && args[0] === UNKNOWN && globs[0] && globs[0] !== UNKNOWN && /\/[^/*?[]+\/?$/.test(globs[0]) ? globs[0].replace(/\/+[^/]*\/*$/, "") || "/" : undefined) },
 ];
 
 /** `ls`'s one operand, as written (its globs kept). */
@@ -153,10 +153,23 @@ export function wholePathGlob(pattern: string, root: string): string {
 const SUBSET_PIPES: ReadonlySet<string> = new Set(["head", "tail", "sort", "uniq", "grep", "egrep", "fgrep", "shuf", "tac"]);
 
 /** A substitution's commands: one producer, or one producer piped through subset filters (`$(ls -t X | head -1)`). */
-function substitutionPlace(inner: readonly SimpleCommand[], pwd: string | undefined): string | undefined {
+function substitutionPlace(inner: readonly SimpleCommand[], pwd: string | undefined, home?: string): string | undefined {
+  // `$(cd [DIR]; pwd)` (iteration 3): the folder it moved to (home without an operand).
+  if (inner.length === 2 && inner[0].words[0] === "cd" && inner[1].words[0] === "pwd" && inner[1].words.length === 1 && inner[0].words.length <= 2 && !inner[0].words.includes(UNKNOWN)) {
+    const dir = inner[0].words[1];
+    if (dir === undefined) return home === undefined ? undefined : escapeGlob(home);
+    if (dir.startsWith("/")) return escapeGlob(dir);
+    return pwd === undefined ? undefined : escapeGlob(`${pwd.replace(/\/+$/, "")}/${dir}`);
+  }
+  // The substitution's own command after its nested substitutions (`$(dirname "$(ls X)")`): that command's place.
+  const last = inner.at(-1);
+  if (inner.length > 1 && last && inner.slice(0, -1).every((command) => command.joint === undefined) && !inner.slice(0, -1).some((command) => command.joint === "|")) {
+    const place = producedPlace(last.words, pwd, last.patterns, home);
+    if (place !== undefined) return place;
+  }
   if (!inner.length || !inner.slice(1).every((command) => SUBSET_PIPES.has(command.words[0] ?? "") && !command.words.includes(UNKNOWN))) return undefined;
   if (inner.length > 1 && !inner.slice(0, -1).every((command) => command.joint === "|")) return undefined;
-  return producedPlace(inner[0].words, pwd, inner[0].patterns);
+  return producedPlace(inner[0].words, pwd, inner[0].patterns, home);
 }
 
 /**
@@ -182,8 +195,35 @@ export function literalOutput(words: readonly string[]): string | undefined {
 }
 
 /** The place a producer's output is in (`PRODUCERS`), as a glob; undefined when it is no producer. */
-function producedPlace(words: readonly string[], pwd: string | undefined, patterns?: readonly (string | undefined)[]): string | undefined {
+/** A git checkout's top folder for a folder (core sets it: `git rev-parse --show-toplevel` reads it). */
+let gitTopOf: (dir: string) => string | undefined = () => undefined;
+export function setGitTop(find: (dir: string) => string | undefined): void {
+  gitTopOf = find;
+}
+
+/**
+ * Inline code whose whole output is the home folder (iteration 3: `python3 -c 'import os;print(os.path.expanduser("~"))'`,
+ * `node -p 'require("os").homedir()'`, `ruby -e 'puts Dir.home'`), by language: data.
+ */
+const HOME_PRINTERS: readonly { programs: RegExp; options: RegExp; code: RegExp }[] = [
+  { programs: /^python3?$/, options: /^-c$/, code: /^\s*(?:import\s+(?:os|pathlib)(?:\s*,\s*\w+)*\s*[;\n]\s*|from\s+pathlib\s+import\s+Path\s*[;\n]\s*)*print\(\s*(?:str\(\s*)?(?:os\.path\.expanduser\(\s*["']~["']\s*\)|os\.environ\[\s*["']HOME["']\s*\]|os\.getenv\(\s*["']HOME["']\s*\)|(?:pathlib\.)?Path\.home\(\s*\))\s*\)?\s*\)\s*;?\s*$/ },
+  { programs: /^(node|nodejs|bun|deno)$/, options: /^(-p|--print|-e|--eval|eval)$/, code: /^\s*(?:console\.log\(\s*)?(?:require\(\s*["'](?:node:)?os["']\s*\)|os)\.homedir\(\s*\)\s*\)?\s*;?\s*$|^\s*(?:console\.log\(\s*)?process\.env\.HOME\s*\)?\s*;?\s*$/ },
+  { programs: /^ruby$/, options: /^-e$/, code: /^\s*(?:puts|print)\s*\(?\s*(?:Dir\.home|ENV\[\s*["']HOME["']\s*\])\s*\)?\s*$/ },
+  { programs: /^perl$/, options: /^-e$/, code: /^\s*print\s*\(?\s*\$ENV\{\s*["']?HOME["']?\s*\}\s*\)?\s*;?\s*$/ },
+];
+
+function producedPlace(words: readonly string[], pwd: string | undefined, patterns?: readonly (string | undefined)[], home?: string): string | undefined {
   if (!words.length || words[0] === UNKNOWN) return undefined;
+  // `git rev-parse --show-toplevel`: the checkout's top folder (iteration 3).
+  if (words[0] === "git" && words.includes("rev-parse") && words.includes("--show-toplevel") && pwd !== undefined) {
+    const top = gitTopOf(pwd);
+    if (top !== undefined) return escapeGlob(top);
+  }
+  if (home !== undefined) {
+    const printer = HOME_PRINTERS.find((row) => row.programs.test(words[0].replace(/^.*\//, "")));
+    const at = printer ? words.findIndex((word) => printer.options.test(word)) : -1;
+    if (printer && at > 0 && words[at + 1] !== undefined && words[at + 1] !== UNKNOWN && printer.code.test(words[at + 1])) return escapeGlob(home);
+  }
   const row = PRODUCERS.find((candidate) => candidate.program === words[0]);
   // Each argument as a glob: a known word escaped, one known only when it runs by its pattern (else unknown).
   const globs = words.slice(1).map((word, index) => (word === UNKNOWN ? (patterns?.[index + 1] ?? UNKNOWN) : escapeGlob(word)));
@@ -1007,7 +1047,7 @@ function read(
       becomesUnknown();
       // A command whose output is a path in a known place (`$(mktemp -d)`, `$(pwd)`): that place.
       const inner = out.slice(before);
-      pat += substitutionPlace(inner, vars.poisoned ? undefined : vars.values.get("PWD")) ?? ANY;
+      pat += substitutionPlace(inner, vars.poisoned ? undefined : vars.values.get("PWD"), home) ?? ANY;
       inWord = true;
       return close;
     }
@@ -1076,6 +1116,42 @@ function read(
       pat += ANY;
       inWord = true;
       return i + 1;
+    }
+    // ANSI-C quoting (iteration 3): `$'\x2eenv'` is the text its escapes spell, as bash decodes it.
+    if (!inQuotes && next === "'") {
+      let j = i + 2;
+      let text = "";
+      for (; j < source.length && source[j] !== "'"; j++) {
+        if (source[j] !== "\\") {
+          text += source[j];
+          continue;
+        }
+        const rest = source.slice(j + 1);
+        const hex = /^x([0-9a-fA-F]{1,2})/.exec(rest);
+        const uni = /^[uU]([0-9a-fA-F]{1,8})/.exec(rest);
+        const oct = /^([0-7]{1,3})/.exec(rest);
+        const simple: Record<string, string> = { n: "\n", t: "\t", r: "\r", a: "\u0007", b: "\b", e: "\u001b", E: "\u001b", f: "\f", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?" };
+        if (hex) {
+          text += String.fromCharCode(parseInt(hex[1], 16));
+          j += hex[0].length;
+        } else if (uni) {
+          text += String.fromCodePoint(parseInt(uni[1], 16));
+          j += uni[0].length;
+        } else if (oct) {
+          text += String.fromCharCode(parseInt(oct[1], 8));
+          j += oct[0].length;
+        } else if (simple[rest[0] ?? ""] !== undefined) {
+          text += simple[rest[0]];
+          j += 1;
+        } else {
+          text += `\\${rest[0] ?? ""}`;
+          j += 1;
+        }
+      }
+      if (j >= source.length) throw new Opaque("an unterminated `$'…'`");
+      expand(text);
+      inWord = true;
+      return j;
     }
     if (!inQuotes && (next === "'" || next === '"')) throw new Opaque("`$'…'` quoting");
     // A lone `$` is itself.
