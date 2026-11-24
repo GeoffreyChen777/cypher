@@ -7,7 +7,9 @@
  * from Pi's factories with filesystem operations that check every path they
  * actually touch; `bash` and the ripgrep behind `grep` run inside Landstrip
  * with a policy compiled per launch. The chat's level comes from Cypher's
- * per-chat sandbox setting (`CYPHER_PERMISSION_LEVEL`).
+ * per-chat sandbox setting (`CYPHER_PERMISSION_LEVEL`), and follows it when the
+ * owner changes it mid-run (cypher-permissions/level.ts). At Full access
+ * nothing is sandboxed or reviewed, but the floor still asks the owner.
  *
  * Off unless `permissions.json` says `"enabled": true` (Settings →
  * Permissions). While off the extension registers nothing and Pi's own tools
@@ -79,6 +81,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
       // The chat's own transcript: what its tools wrote is this task's (code it runs is read, core.ts `taskWrote`).
       permissions.transcript = () => ctx.sessionManager?.getBranch() ?? [];
       permissions.ownerWordsNow = ownerWordsNow;
+      permissions.levelNow = levelNow;
       permissions.reload(ctx.cwd, ctx.sessionManager?.getBranch() ?? []);
     }
     return permissions;
@@ -101,6 +104,27 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
       client = await connectEngine({ timeoutMs: 2000 });
       const reply = await client!.call("OwnerWords", { chatId }, { timeoutMs: 3000 });
       return reply?.words ? parseOwnerWords(JSON.stringify(reply.words)) : undefined;
+    } catch {
+      return undefined;
+    } finally {
+      client?.close();
+    }
+  };
+
+  /**
+   * The level the engine holds this run to now (its `PermissionLevel` call on the agent socket), asked when
+   * the chat's level file changed. Undefined when the engine can't be asked: no higher level is taken.
+   */
+  const levelNow = async () => {
+    const chatId = process.env.CYPHER_CHAT_ID;
+    const module = process.env.CYPHER_ENGINE_CLIENT_MODULE;
+    if (!chatId || !module) return undefined;
+    let client: { call(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<{ level?: unknown } | undefined>; close(): void } | undefined;
+    try {
+      const { connectEngine } = await import(pathToFileURL(module).href);
+      client = await connectEngine({ timeoutMs: 2000 });
+      const reply = await client!.call("PermissionLevel", { chatId }, { timeoutMs: 3000 });
+      return typeof reply?.level === "string" ? reply.level : undefined;
     } catch {
       return undefined;
     } finally {
@@ -182,7 +206,14 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
     run: (approved: Approved | undefined) => Promise<T>,
   ): Promise<T> => {
     const st = state(ctx);
-    if (!st.enforcing) return run(undefined);
+    await st.syncLevel();
+    if (!st.enforcing) {
+      if (st.floorOnly) {
+        const held = await st.fullAccessFiles(requests, { tool, toolCallId }, requestContext(ctx, signal, toolCallId));
+        if (!held.ok) return refused(held.reason) as T;
+      }
+      return run(undefined);
+    }
     const auth = await st.authorize(requests, { tool, toolCallId }, requestContext(ctx, signal, toolCallId));
     if (!auth.ok) return refused(auth.reason) as T;
     try {
@@ -407,7 +438,14 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
       const marked = (env: NodeJS.ProcessEnv) => (marker ? { ...env, [marker.name]: marker.value } : env);
       const outside = () =>
         createBashToolDefinition(ctx.cwd, { shellPath, commandPrefix, spawnHook: (context) => ({ ...context, env: marked(context.env) }) });
-      if (!st.enforcing) return outside().execute(id, bashParams, signal, onUpdate, ctx);
+      await st.syncLevel();
+      if (!st.enforcing) {
+        if (st.floorOnly) {
+          const held = await st.fullAccessCommand(String(params.command ?? ""), ctx.cwd, requestContext(ctx, signal, id));
+          if (!held.ok) return refused(held.reason) as never;
+        }
+        return outside().execute(id, bashParams, signal, onUpdate, ctx);
+      }
       const command = String(params.command ?? "");
       st.shellPrefix = Boolean(commandPrefix);
       st.setTurn(ctx.sessionManager.getBranch());
@@ -556,6 +594,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
     }),
     async execute(id, params, signal, _onUpdate, ctx) {
       const st = state(ctx);
+      await st.syncLevel();
       const outcome = await st.requestPermission(params, requestContext(ctx, signal, id));
       if (!outcome.ok) return refused(outcome.text) as never;
       return withRecord({ content: [{ type: "text", text: outcome.text }], details: undefined }, outcome.record) as never;
@@ -618,11 +657,20 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
   pi.on("tool_call", async (event, ctx) => {
     if (OWN_TOOLS.has(event.toolName)) return undefined;
     const st = state(ctx);
-    if (!st.enforcing) return undefined;
-    if (event.toolName === APPLY_PATCH) {
+    await st.syncLevel();
+    const patchRequests = () => {
       const input = event.input as { input?: string; patch?: string };
       const patch = typeof input.input === "string" ? input.input : typeof input.patch === "string" ? input.patch : "";
-      const requests = patchOps(patch).map(({ path, op }) => ({ capability: "write" as const, path, diff: patch.slice(0, 4000), ...(op ? { op } : {}) }));
+      return patchOps(patch).map(({ path, op }) => ({ capability: "write" as const, path, diff: patch.slice(0, 4000), ...(op ? { op } : {}) }));
+    };
+    if (!st.enforcing) {
+      if (!st.floorOnly) return undefined;
+      const context = requestContext(ctx, undefined, event.toolCallId);
+      const held = event.toolName === APPLY_PATCH ? await st.fullAccessFiles(patchRequests(), { tool: APPLY_PATCH, toolCallId: event.toolCallId }, context) : await st.fullAccessTool(event.toolName, event.input, context);
+      return held.ok ? undefined : { block: true, reason: held.reason, terminate: held.abort };
+    }
+    if (event.toolName === APPLY_PATCH) {
+      const requests = patchRequests();
       const auth = await st.authorize(requests, { tool: APPLY_PATCH, toolCallId: event.toolCallId }, requestContext(ctx, undefined, event.toolCallId));
       if (!auth.ok) return { block: true, reason: auth.reason, terminate: auth.abort };
       st.inflight.set(inflightKey(event.toolCallId), auth.approved);
