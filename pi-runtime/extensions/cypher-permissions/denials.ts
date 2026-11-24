@@ -39,7 +39,7 @@ import type { EffectClass } from "./effects.ts";
 import { relation } from "./entities.ts";
 import { ENV_OPTIONS } from "./schema.ts";
 import type { EntityKind } from "./entities.ts";
-import { consentText, mentions, QUESTION } from "./explicit.ts";
+import { consentText, LIFT_CONDITION, mentions, ownSpeech, QUESTION } from "./explicit.ts";
 import type { OwnerWords } from "./explicit.ts";
 import { actionWords, listWords } from "./lexicon.ts";
 
@@ -249,10 +249,12 @@ export function liftedBy(denial: DenialRecord, scope: DenialScope, owner: OwnerW
   for (const word of [...owner.messages].reverse()) {
     if (seen.has(wordHash(word))) continue;
     if (!LIFTING_SOURCES.has(word.source ?? "typed")) continue;
-    const text = consentText(word);
+    // The owner's own speech (iteration 4): not what they quote back ("you said 'I'll force-push main'"), nor a
+    // forwarded message; and a condition ("if the tests pass, force-push main") asks for later, not now.
+    const text = ownSpeech(consentText(word), { attributedOnly: true });
     const named = scope.kind === "line" ? text.includes(scope.name) : names.some((name) => mentions(text, name));
     if (!named) continue;
-    if (QUESTION.test(text) || NEGATION.test(text) || RETRACTION.test(text)) continue;
+    if (QUESTION.test(text) || NEGATION.test(text) || RETRACTION.test(text) || LIFT_CONDITION.test(text)) continue;
     // A line the owner quotes whole asks for it; anything else must say what it asks for.
     if (scope.kind !== "line" && !actions.some((action) => actionWords(action).test(text))) continue;
     return word.text;

@@ -171,6 +171,33 @@ const RUN_QUOTED = /\b(run|execute|exec|do (?:it|this|that|these)|go ahead|apply
  * it ask for it (no question among them, an action word or "run this"); otherwise it is left out, so a
  * pasted log's `git push --force` is no request (rt5-100), while "run this: ```git push```" still is.
  */
+/** Words that make a sentence conditional (the languages the lexicon has): "if", "once", "unless" (iteration 2/4). */
+export const CONDITION_WORDS = /\b(if|unless|once|in case|provided|falls|wenn|sofern|si|sauf si|à condition|se|a menos que|caso|если|в случае)\b|如果|假如|要是|若是|万一|もし|場合|만약|경우/iu;
+
+/**
+ * A condition on what the owner asks, for lifting a Deny (iteration 4): a conditional conjunction that opens a clause
+ * ("if the tests pass, …", "…, once CI is green"). Words that are also ordinary ("once" as "one time", French "se") only
+ * at a clause's start.
+ */
+export const LIFT_CONDITION = /(?:^|[\s,;:—–(])(?:if|unless|provided(?: that)?|in case|as soon as|wenn|falls|sofern|sauf si|à condition)\s|(?:^|[,;:.!?—–]\s*)(?:once|si|se|caso|a menos que)\s|如果|假如|要是|若是|万一|もし|만약|если/iu;
+
+/** Verbs that keep what they name ("leave X alone", "keep X", "spare X", 保留, 别动): naming to keep (iteration 4). */
+export const KEEP_WORDS = /\b(leave\b[^.;,]*\balone|leave\s+(?:it|them|that|this)\b|keep|spare|preserve|retain|protect|hands off|don'?t touch|do not touch)\b|别动|不要动|保留|留着|放着/iu;
+
+/**
+ * The owner's own speech in one word (iteration 4): their text without what they quote — code fences and quoted lines
+ * (`ownText`), inline quoted speech of several words, and a forwarded or pasted message (from its header on: "----------
+ * Forwarded message", "Begin forwarded message:", a "From:" header line). Someone else's words are never consent.
+ */
+export function ownSpeech(text: string, { attributedOnly = false }: { attributedOnly?: boolean } = {}): string {
+  const unforwarded = text.replace(/(?:^|\n)[ \t>]*(?:-{3,}\s*(?:Forwarded message|Original Message)\s*-{0,}|Begin forwarded message:|From:\s+\S+@\S+)[\s\S]*$/i, "\n");
+  const quoted = /"([^"\n]*\s[^"\n]*)"|“([^”\n]*\s[^”\n]*)”|「([^」\n]*)」|«([^»\n]*\s[^»\n]*)»/gu;
+  // Only speech someone is said to have said (`you said "…"`, `he wrote: "…"`) when a quoted command may be the owner's
+  // own request to run it (a Deny's lift: `ok, run "git push --force origin main"`).
+  if (attributedOnly) return ownText(unforwarded).replace(new RegExp(`\\b(?:said|says|say|saying|wrote|writes|asked|told|claimed|claims|replied|meant|quote)\\b[^"“「«\\n]{0,24}(?:${quoted.source})`, "giu"), " ");
+  return ownText(unforwarded).replace(quoted, " ");
+}
+
 export function ownText(text: string): string {
   const outside = text.replace(QUOTED, " ");
   if (outside === text) return text;
