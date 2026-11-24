@@ -51,6 +51,8 @@ function processFacts(item) {
 
 /** Load `<extensions>/cypher-permissions/{core,shell}.ts` and build the fake machine for `cases`. */
 export async function createMachine({ extensions, cases, ownerWords = "full", judgeTimeoutMs }) {
+  // A replay is no chat of the session running it: the session's own task id (CYPHER_TASK_ID, set by the engine) stays out.
+  delete process.env.CYPHER_TASK_ID;
   const { Permissions } = await import(pathToFileURL(join(extensions, "cypher-permissions", "core.ts")).href);
   const denialsModule = await import(pathToFileURL(join(extensions, "cypher-permissions", "denials.ts")).href).catch(() => ({}));
   // The fake machine's read-only directories, on any host (an extension older than the hook reads the real disk).
