@@ -21,6 +21,9 @@ import { KIND_ALIASES, ledgerKind } from "./cypher-permissions/ledger.ts";
 import { KEY_OPTIONS, LISTERS, OPERAND_WRITERS, SUBSET_FILTERS, secretName } from "./cypher-permissions/risk.ts";
 import { API_ROUTES, TARGET_SCHEMAS, matchRoute, routeOf, typedTargets } from "./cypher-permissions/schema.ts";
 
+// A run inside a Cypher session inherits its CYPHER_TASK_ID (the engine sets it since the final pass): the tests set their own.
+delete process.env.CYPHER_TASK_ID;
+
 const SEEDS = process.env.PERMISSIONS_SEED ? [Number(process.env.PERMISSIONS_SEED)] : [20261124, 11, 909];
 
 function prng(seed) {

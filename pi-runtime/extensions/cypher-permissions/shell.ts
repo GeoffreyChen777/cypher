@@ -1687,12 +1687,15 @@ function closingQuote(source: string, start: number): number {
 
 /**
  * The value an assignment gives, known as written: `~` starting it (unquoted,
- * alone or before `/`) is the home folder, as bash expands it; any other `~`
- * (after `:`, `~user`) is not followed.
+ * alone or before `/`) is the home folder, as bash expands it, and so is `~NAME`
+ * of the user the line runs as; any other `~` (after `:`, another user's) is not followed.
  */
 function assignedValue(value: string, unquoted: string, home: string): string | undefined {
   if (!unquoted.includes("~")) return value;
   if ((unquoted === "~" || unquoted.startsWith("~/")) && value.startsWith(unquoted[0]) && !unquoted.slice(1).includes("~")) return home + value.slice(1);
+  // `~NAME` of the user the line runs as (final pass): the home folder too.
+  const user = /^~([A-Za-z_][\w.-]*)(?=\/|$)/.exec(unquoted)?.[1];
+  if (user !== undefined && userHome(user, home) === home && value.startsWith(`~${user}`) && !unquoted.slice(1 + user.length).includes("~")) return home + value.slice(1 + user.length);
   return undefined;
 }
 
