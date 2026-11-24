@@ -23,6 +23,7 @@ import { sshHostIndex } from "./commands.ts";
 import { readTool, remoteEffect } from "./tools.ts";
 import { UNKNOWN } from "./shell.ts";
 import { viewOf } from "./packs.ts";
+import { typedTargets } from "./schema.ts";
 import type { CommandView } from "./packs.ts";
 
 /** What a request does, as a class: what a denial is matched by. */
@@ -125,6 +126,9 @@ export interface Acted {
   name: string;
   remote?: string;
   repo?: string;
+  /** A resource's namespace; a resource's type (schema.ts). */
+  scope?: string;
+  type?: string;
 }
 
 /** What one command does (`commandEffects`): its effect classes, and the typed things it acts on. */
@@ -187,7 +191,16 @@ export function commandEffects(words: readonly string[], options: { sink?: (word
   const tool = readTool(inner);
   if (tool && "row" in tool) {
     effect(classOf(tool.action));
-    for (const entity of tool.entities) if (entity.name) out.targets.push({ kind: entity.kind, name: entity.name, ...(entity.repo ? { repo: entity.repo } : {}) });
+    for (const entity of tool.entities) if (entity.name) out.targets.push({ kind: entity.kind, name: entity.name, ...(entity.repo ? { repo: entity.repo } : {}), ...(entity.scope ? { scope: entity.scope } : {}), ...(entity.type ? { type: entity.type } : {}) });
+  }
+  // The declared schema (schema.ts, round 6): typed operands and options, REST routes by method.
+  const typed = typedTargets(inner);
+  if (typed) {
+    for (const value of typed.effects) effect(value);
+    for (const target of typed.targets) {
+      if (out.targets.some((other) => other.kind === target.kind && other.name === target.name && (other.scope ?? "") === (target.scope ?? ""))) continue;
+      out.targets.push({ kind: target.kind, name: target.name, ...(target.repo ? { repo: target.repo } : {}), ...(target.scope ? { scope: target.scope } : {}), ...(target.type ? { type: target.type } : {}) });
+    }
   }
   if (program === "git") {
     let i = 1;

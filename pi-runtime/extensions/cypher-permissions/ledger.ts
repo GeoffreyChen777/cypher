@@ -45,6 +45,11 @@ export interface LedgerEntity {
   version?: string;
   /** The taint ledger's: the secret the file or repository holds. */
   from?: string;
+  /**
+   * The task the chat belongs to (round 6, W3): a workspace with its threads, a plan with its sessions. Chats
+   * of one task never count as each other's "other task" (core.ts `othersMade`).
+   */
+  task?: string;
 }
 
 /** What a command did to the entity: made it (the default), started it, merged it. */
@@ -57,6 +62,21 @@ export interface LedgerEntry extends LedgerEntity {
   by?: string;
   at?: string;
   chatId?: string;
+}
+
+/**
+ * Other spellings of the kinds (round 6, W3): what a ledger written by another Runtime, a tool or a test
+ * calls a folder or a file is a `path`, a cluster's namespace a `namespace`.
+ */
+export const KIND_ALIASES: Readonly<Record<string, LedgerKind>> = {
+  dir: "path", directory: "path", folder: "path", file: "path", tmp: "path", scratch: "path",
+  ns: "namespace", ctx: "context", s3: "bucket", gcs: "bucket",
+};
+
+/** A kind as the ledger keeps it: its own name, or what `KIND_ALIASES` reads it as; undefined when it is no kind. */
+export function ledgerKind(kind: string): LedgerKind | undefined {
+  if ((LEDGER_KINDS as readonly string[]).includes(kind)) return kind as LedgerKind;
+  return KIND_ALIASES[kind.toLowerCase()];
 }
 
 /**
@@ -82,6 +102,11 @@ export const MATCHING: Readonly<Record<LedgerKind, Match>> = {
   container: "hex-prefix",
   image: "exact",
   resource: "exact",
+  namespace: "exact",
+  context: "exact",
+  cluster: "exact",
+  bucket: "path",
+  project: "caseless",
 };
 
 /** Bounds on one chat's ledger (the file and the memory). */
@@ -138,10 +163,11 @@ export function entryCovers(made: LedgerEntity, target: LedgerEntity): boolean {
 function validEntry(value: unknown): value is LedgerEntry {
   if (!value || typeof value !== "object") return false;
   const entry = value as Partial<LedgerEntry>;
-  if (typeof entry.kind !== "string" || !LEDGER_KINDS.includes(entry.kind as LedgerKind)) return false;
+  if (typeof entry.kind !== "string" || ledgerKind(entry.kind) === undefined) return false;
+  entry.kind = ledgerKind(entry.kind);
   if (typeof entry.name !== "string" || entry.name === "") return false;
   if (entry.action !== undefined && !["create", "start", "merge"].includes(entry.action)) return false;
-  for (const field of ["repo", "remote", "head", "version", "by", "at", "chatId", "from"] as const) {
+  for (const field of ["repo", "remote", "head", "version", "by", "at", "chatId", "from", "task"] as const) {
     if (entry[field] !== undefined && typeof entry[field] !== "string") return false;
   }
   return true;
@@ -156,6 +182,8 @@ export class Ledger {
   readonly file: string | undefined;
   private readonly chatId: string | undefined;
   private loaded = false;
+  /** The task this chat belongs to, written on each entry (round 6, W3). */
+  task: string | undefined;
 
   constructor(file: string | undefined, chatId: string | undefined) {
     this.file = file;
@@ -205,6 +233,7 @@ export class Ledger {
         ...(by ? { by: by.length > 200 ? `${by.slice(0, 200)}…` : by } : {}),
         at,
         ...(this.chatId ? { chatId: this.chatId } : {}),
+        ...(this.task && !rest.task ? { task: this.task } : {}),
       };
       if (this.take(entry)) fresh.push(entry);
     }

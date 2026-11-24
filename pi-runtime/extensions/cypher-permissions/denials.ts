@@ -50,12 +50,21 @@ export interface DenialScope {
   /** A branch's or tag's remote; a pull request's repository. */
   remote?: string;
   repo?: string;
+  /** A resource's namespace and type (schema.ts). */
+  scope?: string;
+  type?: string;
+  /** The fixed folder of a glob (where it looks), not a target named in full; not recorded. */
+  glob?: boolean;
 }
 
 /** What one part of a request does, to what (a bash pipeline; a file tool's access). */
 export interface DenialUnit {
   effects: readonly EffectClass[];
   scopes: readonly DenialScope[];
+  /** It destroys what it names (a delete, erase, stop, move away): the other-task floor's (round 6, W3); not recorded. */
+  destroys?: boolean;
+  /** The canonical globs it is given (what they could match it acts on); not recorded. */
+  globs?: readonly string[];
 }
 
 export interface ActionClass {
@@ -66,6 +75,11 @@ export interface ActionClass {
   /** Every scope of every unit (for the evidence and records before round 5). */
   scopes: readonly DenialScope[];
   units: readonly DenialUnit[];
+  /**
+   * The request's argv words (bash: every command's, the program's own name left out), for the safety net of
+   * denial matching (round 6, W2: `tokenMatch`); not recorded.
+   */
+  tokens?: readonly string[];
 }
 
 export interface DenialRecord extends Omit<ActionClass, "units"> {
@@ -94,7 +108,7 @@ export function wordHash(word: { text: string; at?: number }): string {
 /** Whether a denied scope and a requested one are the same thing, or one holds the other (entities.ts `relation`), typed. */
 export function scopeMatches(denied: DenialScope, asked: DenialScope): boolean {
   if (denied.kind === "line" || asked.kind === "line") return denied.kind === asked.kind && denied.name.replace(/\s+/g, " ").trim() === asked.name.replace(/\s+/g, " ").trim();
-  const entity = (scope: DenialScope) => ({ kind: scope.kind as EntityKind, name: scope.name, ...(scope.remote ? { remote: scope.remote } : {}), ...(scope.repo ? { repo: scope.repo } : {}) });
+  const entity = (scope: DenialScope) => ({ kind: scope.kind as EntityKind, name: scope.name, ...(scope.remote ? { remote: scope.remote } : {}), ...(scope.repo ? { repo: scope.repo } : {}), ...(scope.scope ? { scope: scope.scope } : {}), ...(scope.type ? { type: scope.type } : {}) });
   const how = relation(entity(denied), entity(asked));
   if (how === "same" || how === "contains" || how === "contained") return true;
   // What can't be told apart (a branch with its remote unsaid on one side) is the same name of the same kind.
@@ -115,6 +129,32 @@ export function classMatch(denied: Pick<DenialRecord, "units" | "actions" | "sco
       if (!unit.effects.some((effect) => other.effects.includes(effect))) continue;
       const scope = other.scopes.find((candidate) => unit.scopes.some((scope) => scopeMatches(scope, candidate)));
       if (scope) return { unit, scope };
+    }
+  }
+  return undefined;
+}
+
+/** Whether an effect of `asked` is one of `denied`'s, or is unknown (`run`: a program no table reads; an MCP or extension tool's own), which may be any. */
+function effectsMeet(denied: readonly EffectClass[], asked: readonly EffectClass[]): boolean {
+  const unknown = asked.some((effect) => effect === "run" || effect.startsWith("tool:"));
+  return denied.some((effect) => asked.includes(effect) || unknown);
+}
+
+/**
+ * The safety net of denial matching (round 6, W2), for tools without a schema: an argv word of the request
+ * equal to a denied target's name (or a name the owner would use for it) counts as touching that target,
+ * when the effects meet (`effectsMeet`). Typed matching (`classMatch`) stays first; this only adds matches.
+ */
+export function tokenMatch(denied: Pick<DenialRecord, "units" | "actions" | "scopes" | "tool">, asked: ActionClass): { unit: DenialUnit; scope: DenialScope } | undefined {
+  if (!asked.tokens?.length) return undefined;
+  const tokens = new Set(asked.tokens.map((token) => token.replace(/\/+$/, "")));
+  const effects = [...new Set(asked.units.flatMap((unit) => unit.effects))];
+  for (const unit of unitsOf(denied)) {
+    if (!effectsMeet(unit.effects, effects)) continue;
+    for (const scope of unit.scopes) {
+      if (scope.kind === "line") continue;
+      const names = [scope.name, ...(scope.says ?? [])].filter((name) => name.length >= 2);
+      if (names.some((name) => tokens.has(name))) return { unit, scope };
     }
   }
   return undefined;
@@ -225,7 +265,7 @@ export class Denials {
   /** Record the owner's Deny click on a request of `cls`. */
   record(cls: ActionClass, what: string, owner: OwnerWords | undefined): DenialRecord {
     this.load();
-    const scope = (item: DenialScope): DenialScope => ({ kind: item.kind, name: item.name, ...(item.says?.length ? { says: [...item.says] } : {}), ...(item.remote ? { remote: item.remote } : {}), ...(item.repo ? { repo: item.repo } : {}) });
+    const scope = (item: DenialScope): DenialScope => ({ kind: item.kind, name: item.name, ...(item.says?.length ? { says: [...item.says] } : {}), ...(item.remote ? { remote: item.remote } : {}), ...(item.repo ? { repo: item.repo } : {}), ...(item.scope ? { scope: item.scope } : {}), ...(item.type ? { type: item.type } : {}) });
     const record: DenialRecord = {
       tool: cls.tool,
       actions: [...cls.actions],
@@ -264,7 +304,7 @@ export class Denials {
     this.load();
     const similar: DenialRecord[] = [];
     for (const denial of [...this.records].reverse()) {
-      const match = classMatch(denial, asked);
+      const match = classMatch(denial, asked) ?? tokenMatch(denial, asked);
       if (match) {
         if (liftedBy(denial, match.scope, owner, match.unit) === undefined) return { active: { denial, scope: match.scope }, similar };
         continue;
