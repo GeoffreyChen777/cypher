@@ -26,7 +26,7 @@ import type { ActionClass, DenialRecord, DenialScope } from "./denials.ts";
 import { commandEffects, unwrapped } from "./effects.ts";
 import { groupOperand, passes, runtimeOperand } from "./flow.ts";
 import { projectScripts } from "./scripts.ts";
-import { apiDestroys, withEnvOptions } from "./schema.ts";
+import { apiDestroys, typedTargets, withEnvOptions } from "./schema.ts";
 import type { RuntimeOperand } from "./flow.ts";
 import type { EffectClass } from "./effects.ts";
 import type { LifecycleFacts } from "./lifecycle.ts";
@@ -2572,7 +2572,7 @@ export class Permissions {
       if (notOurs.length) evidence.notThisTask = notOurs.map((item) => `${item.what}: ${item.why}${item.named ? ` (the owner's words name it: "${item.named.length > 100 ? `${item.named.slice(0, 100)}…` : item.named}")` : ""}`);
       // Final pass: what it deletes or stops that no ledger on this machine accounts for — not this chat's, not another
       // chat's known one. Who made it is then known to no code here: the judge reads it as unknown, not as this task's.
-      const unknown = this.originUnknown("targets" in targets ? targets.targets : (targets.known ?? []), notOurs.map((item) => item.what));
+      const unknown = this.originUnknown("targets" in targets ? targets.targets : (targets.known ?? []), notOurs.map((item) => item.what), line);
       if (unknown.length) evidence.originUnknown = unknown;
     }
     return Object.keys(evidence).length ? evidence : undefined;
@@ -3150,17 +3150,27 @@ export class Permissions {
   }
 
   /**
-   * The entities a line deletes or stops (`DESTROYING_ACTIONS`) that this chat's ledger doesn't hold and no other chat's
-   * ledger names (`notThisTask` found none): their origin is unknown to the code (another task's, made before ledgers,
+   * The entities of a cluster or cloud kind (`OTHER_TASK_FLOOR` since 6, no place) a line deletes or stops
+   * (`DESTROYING_ACTIONS`) that this chat's ledger doesn't hold and no other chat's ledger names (`notThisTask` found
+   * none): their origin is unknown to the code (another task's, made before ledgers,
    * or by hand). Files are left out (whether a file is the task's is the working tree's question), and processes (their
    * facts tell whose they are).
    */
-  private originUnknown(targets: readonly Target[], known: readonly string[]): string[] {
+  private originUnknown(targets: readonly Target[], known: readonly string[], line?: LineAssessment): string[] {
     const out: string[] = [];
+    // The kinds the line's schema types its targets as (schema.ts): a namespace, not the generic resource.
+    const typed = new Map<string, string>();
+    for (const item of line?.commands ?? []) for (const target of typedTargets(unwrapped(item.words))?.targets ?? []) typed.set(target.name, target.kind);
     for (const target of targets) {
       // Processes are told by their facts (whose marker, which program), not by a ledger.
       if (!DESTROYING_ACTIONS.test(target.action) || target.kind === "path" || target.kind === "worktree" || target.kind === "process" || target.value === UNKNOWN) continue;
-      const kind = ledgerKind(target.entity?.kind ?? target.kind) ?? (target.kind as LedgerEntity["kind"]);
+      const kind = ledgerKind(typed.get(target.value) ?? target.entity?.kind ?? target.kind) ?? (target.kind as LedgerEntity["kind"]);
+      // Only the kinds the floor first held in round 6 that have no place (ledger.ts OTHER_TASK_FLOOR: a cluster's
+      // namespace, context, cluster, a bucket, a cloud project): made by cluster and cloud tools whose making is often
+      // in no chat's ledger here, and with no provenance line in the prompt before. Branches, pull requests, simulators,
+      // containers keep the evidence they had (the grade, "What this task did itself").
+      const row = OTHER_TASK_FLOOR[kind];
+      if (!row || row.since !== 6 || row.located) continue;
       const what = `${kind} ${target.value}`;
       if (known.includes(what) || known.includes(`${target.kind} ${target.value}`) || out.includes(what)) continue;
       // `resource` is the kind of what no table types more narrowly: it may be this chat's entry of any kind by that name.

@@ -459,6 +459,8 @@ test("what a line deletes that no ledger accounts for reaches the judge marked a
   own.created.ledger.record([{ kind: "namespace", name: ns }], `kubectl create namespace ${ns}`, false);
   const mine = await escalate(own, `kubectl delete namespace ${ns}`);
   assert.doesNotMatch(mine.prompt, /who made .*: unknown/);
+  // Kinds with provenance evidence of their own (a branch, a simulator, a container) are not marked.
+  for (const line of [`git branch -D old-${ns}`, `docker rm -f c-${ns}`]) assert.doesNotMatch((await escalate(engine(), line)).prompt, /who made .*: unknown/, line);
 });
 
 test("a recorded Deny of an edit holds the same change by another tool (`sed -i ''`); another file and a read pass", async () => {
