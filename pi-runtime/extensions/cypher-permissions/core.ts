@@ -25,7 +25,7 @@ import { Denials, denialsFile, forRecord } from "./denials.ts";
 import type { ActionClass, DenialRecord, DenialScope } from "./denials.ts";
 import { commandEffects, unwrapped } from "./effects.ts";
 import { consumerWords, groupOperand, passes, RUNTIME, runtimeOperand } from "./flow.ts";
-import { runsElsewhere } from "./defaults.ts";
+import { offMachinePlace, runsElsewhere } from "./defaults.ts";
 import { COMMAND_STARTS, commandText, LOCAL_CONSUMERS, namedRemote, OUTPUT_OPTIONS, OWN_CREDENTIAL, PLAIN_PROGRAMS, REMOTE_RUNNERS, secretByContent, TEXT_OPTIONS } from "./defaults.ts";
 import { projectScripts, readText, scheduledLines, shellLines, triggeredHooks, unreadParts } from "./scripts.ts";
 import type { ProjectScript } from "./scripts.ts";
@@ -49,7 +49,7 @@ import { globBase, hasGlob } from "./glob.ts";
 import { GRANT_ENTRY, GrantStore, newGrant, REVOKE_ENTRY, ROOT_ENTRY } from "./grants.ts";
 import type { Grant, GrantScope } from "./grants.ts";
 import { listWords } from "./lexicon.ts";
-import { checkDataConsent, checkExplicit, consentText, describeAttribute, describeTarget, lineTargets, mentions, ownText, QUESTION, repoName, scanConsents, scanDataConsent } from "./explicit.ts";
+import { checkDataConsent, checkExplicit, CONDITION_WORDS, consentText, describeAttribute, describeTarget, KEEP_WORDS, lineTargets, mentions, ownSpeech, ownText, QUESTION, repoName, scanConsents, scanDataConsent } from "./explicit.ts";
 import type { ExplicitClaim, ExplicitFacts, ExplicitResult, LineTargets, OwnerWords, Target, TargetFacts } from "./explicit.ts";
 import { answeredByConsent, conversationContext, judgePrompt, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
 import type { Concern, JudgeEvidence, JudgeRequest } from "./judge.ts";
@@ -64,7 +64,7 @@ import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs }
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
 import { benignEnv, systemLocation, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
-import { usesKey } from "./risk.ts";
+import { issuerOf, onlyReaches, usesKey } from "./risk.ts";
 import { assessCommand, assessOpaque, credentialSource, downloadsAndRuns, exfiltrates, SINK_PROGRAMS, installedProgram, lineFlow, listingSet, normalRefspec, redirectRisk, runtimeWriteSets, secretName, secretWrites, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
 import type { PatternFinding } from "./risk.ts";
 import { globsIntersect, resolvePattern, resolveText } from "./resolve.ts";
@@ -2226,6 +2226,12 @@ export class Permissions {
       if (word === UNKNOWN || word.startsWith("-") || /^[a-z][\w+.-]*:\/\//i.test(word) || (cwd === undefined && !isAbsolute(word) && !word.startsWith("~"))) return undefined;
       const name = word.replace(/^[^=@]*=?@/, "").replace(/^@/, "");
       if (!name || name.length > 512) return undefined;
+      // A glob (iteration 4: `@.[e]nv`, `@.e*`): the files it matches now, a secret among them.
+      if (/[*?[]/.test(name)) {
+        const found = this.couldBe(name, cwd);
+        const secret = found.matches.find((match) => match.zone === "sensitive" || secretByContent(match.path, secretName));
+        return secret ? displayPath(secret.path, this.home) : undefined;
+      }
       const classification = this.classify(name, cwd);
       let file = false;
       try {
@@ -2243,6 +2249,8 @@ export class Permissions {
       if (!found) return undefined;
       return this.classify(found, cwd).zone === "sensitive" ? undefined : found;
     };
+    /** The words of the command a secret would reach (for a credential's issuer test). */
+    let issuedFor: readonly string[] | undefined;
     const readsSecret = (item: LineCommand): string | undefined => {
       for (const path of item.reads) {
         const found = secretAt(path, item.cwd);
@@ -2252,7 +2260,7 @@ export class Permissions {
       // A stored credential printed (`gh auth token`, a key export) is a secret proper; the environment printers
       // (`ps eww`, `env`) are often an identity check on this machine: left to the data-flow floor's own reading.
       const source = credentialSource(view);
-      if (source && source !== "the environment") return source;
+      if (source && source !== "the environment") return issuerOf(view) && issuedFor ? (onlyReaches(issuedFor, issuerOf(view)!) ? undefined : source) : source;
       if (!CONTENT_PRINTERS.has(view.program)) return undefined;
       for (const word of view.args) {
         const found = secretAt(word, item.cwd);
@@ -2268,6 +2276,31 @@ export class Permissions {
       const view = viewOf(words);
       const interpreter = codeOf(words, UNKNOWN, undefined);
       const local = LOCAL_CONSUMERS.has(program) || interpreter !== undefined || FEEDER_NAMES.has(program);
+      // A container given a folder of this machine and told to use a secret in it (iteration 4: `docker run -v
+      // ~/.ssh:/k IMAGE -F f=@/k/id_ed25519 …`): what it names under the mount is that file here, and a container's
+      // program is told to reach another machine. (Its own folders are the container's; a mount it isn't told to use, or a
+      // line naming no other machine, no row 1.)
+      if (/^(docker|podman|nerdctl)$/.test(program) && words.some((word) => word === "run" || word === "create") && namedRemote(words, UNKNOWN) !== undefined) {
+        const mounts: { from: string; to: string }[] = [];
+        for (const [at, word] of words.entries()) {
+          const value = word === "-v" || word === "--volume" || word === "--mount" ? words[at + 1] : /^(-v|--volume=|--mount=)(.+)$/.exec(word)?.[2];
+          if (!value || value === UNKNOWN) continue;
+          const bind = /^type=bind,(?:.*,)?(?:source|src)=([^,]+),(?:.*,)?(?:target|dst|destination)=([^,]+)/.exec(value) ?? /^([^:]+):([^:]+)(?::[a-z,]+)?$/.exec(value);
+          if (bind && (bind[1].startsWith("/") || bind[1].startsWith("~") || bind[1].startsWith("."))) mounts.push({ from: bind[1], to: bind[2].replace(/\/+$/, "") });
+        }
+        for (const [at, word] of words.entries()) {
+          // A tool's own credential option (`--kubeconfig /kube/config`) uses it, as on this machine.
+          if (OWN_CREDENTIAL.test(words[at - 1] ?? "") || OWN_CREDENTIAL.test(word) || usesKey(basename(words[at - 2] ?? ""), words[at - 1] ?? "")) continue;
+          for (const part of [word, ...word.split(/[\s,=]+/)]) {
+            const name = part.replace(/^[^=@]*=?@/, "").replace(/^@/, "");
+            const mount = mounts.find((m) => name === m.to || name.startsWith(`${m.to}/`));
+            if (!mount) continue;
+            const here = `${mount.from.replace(/\/+$/, "")}${name.slice(mount.to.length)}`;
+            const found = secretAt(here, item.cwd);
+            if (found) return `sends a secret off this machine (${found}, mounted into the container that is told to use it)`;
+          }
+        }
+      }
       // A secret file named to a sink or to a program that talks to another machine.
       const remote = namedRemote(words, UNKNOWN);
       // A program that runs its words on another machine (ssh, docker exec, kubectl exec): its paths are that machine's.
@@ -2280,27 +2313,51 @@ export class Permissions {
           return pattern !== undefined && !/[*?[\u0001]/.test(pattern.replace(/\\./g, "")) ? pattern.replace(/\\(.)/g, "$1") : undefined;
         };
         for (const [at, raw] of words.entries()) {
-          const word = raw === UNKNOWN ? (exact(at) ?? raw) : raw;
+          // A glob it is given (iteration 4: `@.[e]nv`): the files it matches, by its pattern.
+          const globbed = (): string | undefined => {
+            const pattern = item.patterns?.[at + offset];
+            return pattern !== undefined && !pattern.includes("\u0001") && /[*?[]/.test(pattern) ? pattern : undefined;
+          };
+          const glob = raw === UNKNOWN ? globbed() : /[*?[]/.test(raw) ? raw : undefined;
+          const word = raw === UNKNOWN ? (exact(at) ?? glob ?? raw) : raw;
           // A tool's own key or credential option (per program: risk.ts `KEY_OPTIONS`; by name: `OWN_CREDENTIAL`).
           if (at === 0 || OWN_CREDENTIAL.test(words[at - 1] ?? "") || OWN_CREDENTIAL.test(word) || usesKey(program, words[at - 1] ?? "") || usesKey(program, word)) continue;
           // What it writes is no part of what it sends (`curl URL -o ca.pem`).
-          if (OUTPUT_OPTIONS.test(words[at - 1] ?? "") || /^(-o|--output)=?/.test(word) && OUTPUT_OPTIONS.test(word)) continue;
+          if (OUTPUT_OPTIONS.test(words[at - 1] ?? "") || /^-[a-zA-Z]*o$/.test(words[at - 1] ?? "") || /^(-o|--output)=?/.test(word) && OUTPUT_OPTIONS.test(word)) continue;
           // A listed sink's named secrets are the data-flow floor's (`exfiltrates`); here, what only the content tells.
           // (Only when the data-flow floor reads the command as that sink itself: through a wrapper it doesn't follow,
           // `stdbuf -oL curl …`, the name is checked here: one reading.)
           const listedOnly = !remote || Boolean(sinkOf(viewOf(item.words)));
           // A download's destination (the last operand after a remote one: `aws s3 cp s3://b/k.pem /tmp/k.pem`) is written.
           const positionals = words.slice(1).filter((w) => !w.startsWith("-"));
-          if (raw === positionals.at(-1) && positionals.length >= 2 && positionals.slice(0, -1).some((w) => /^[a-z][\w+.-]*:\/\/|^[\w.-]+@?[\w.-]*:[^/]/i.test(w))) continue;
+          // (Only for programs that copy from a source to a destination: a database client's last word is its input.)
+          if (COPIERS.has(program) && raw === positionals.at(-1) && positionals.length >= 2 && positionals.slice(0, -1).some((w) => /^[a-z][\w+.-]*:\/\/|^[\w.-]+@?[\w.-]*:[^/]/i.test(w))) continue;
           // An operand's text may name it too (`-c 'put .env env.txt'`, `-a 'src=.env dest=…'`).
-          const parts = word.split(/[\s,=]+/);
+          // Its text split into words, quotes and SQL punctuation off (`\\copy t from '.env'`, `INFILE '.env'`).
+          const parts = word.split(/[\s,=();]+/).map((part) => part.replace(/^['"`]+|['"`;]+$/g, ""));
           for (const [p, part] of [word, ...parts].entries()) {
             // Inside an operand's text, a key option of any program before it (`core.sshCommand=ssh -i KEY`) keeps it the tool's.
             const before = p > 0 ? (parts[p - 2] ?? "") : "";
             if (p > 0 && (OWN_CREDENTIAL.test(before) || usesKey("ssh", before) || usesKey(program, before))) continue;
-            const found = listedOnly ? contentSecret(part, item.cwd) : secretAt(part, item.cwd);
+            // A glob's matches are no name the data-flow floor reads: checked here by name and content.
+            const found = listedOnly && !glob ? contentSecret(part, item.cwd) : secretAt(part, item.cwd);
             if (found) return `sends a secret off this machine (${found}) through ${program}${remote ? `, which talks to ${remote}` : ""}`;
           }
+        }
+      }
+      // A secret copied or written into a place that leaves the machine by itself (iteration 4: iCloud Drive, a sync
+      // client's folder, a mounted volume): a send by place, whichever program writes it.
+      {
+        const positionals = words.slice(1).filter((word) => !word.startsWith("-") && word !== UNKNOWN);
+        const destinations = [...item.writes.filter((path) => path !== UNKNOWN), ...(/^(cp|mv|install|ditto|rsync|gcp|ln|tee)$/.test(program) && positionals.length >= 2 ? [positionals.at(-1)!] : []), ...(program === "tee" ? positionals : [])];
+        for (const destination of destinations) {
+          if (item.cwd === undefined && !isAbsolute(destination) && !destination.startsWith("~")) continue;
+          const place = offMachinePlace(displayPath(this.classify(destination, item.cwd).path, this.home)) ?? offMachinePlace(destination);
+          if (!place) continue;
+          // Its sources: what it reads, and its operands but the destination it is given (a redirection's are all sources).
+          const sources = [...item.reads, ...(item.writes.includes(destination) ? positionals : positionals.slice(0, -1))];
+          const found = sources.map((source) => secretAt(source, item.cwd)).find(Boolean) ?? (index > 0 && commands[index - 1].joint === "|" ? readsSecret(commands[index - 1]) : undefined);
+          if (found) return `sends a secret off this machine (${found}, into ${place}, a place that leaves the machine)`;
         }
       }
       if (local || ownCredential(words)) continue;
@@ -2313,6 +2370,7 @@ export class Permissions {
       // before it that no `&&`, `||`, `;` or `&` separates from it, their own pipes included).
       const piped = index > 0 && commands[index - 1].joint === "|";
       if (piped || words.includes(UNKNOWN)) {
+        issuedFor = words;
         for (let at = index - 1; at >= 0 && (commands[at].joint === undefined || commands[at].joint === "|"); at--) {
           const found = readsSecret(commands[at]);
           if (!found) continue;
@@ -2352,7 +2410,22 @@ export class Permissions {
       const words = item.words;
       const program = basename(words[0] ?? "");
       if (program !== "xargs" && program !== "parallel") continue;
-      const secret = item.reads.find((path) => path !== UNKNOWN && (item.cwd !== undefined || isAbsolute(path)) && this.classify(path, item.cwd).zone === "sensitive" && existsSync(this.classify(path, item.cwd).path));
+      let secret = item.reads.find((path) => path !== UNKNOWN && (item.cwd !== undefined || isAbsolute(path)) && this.classify(path, item.cwd).zone === "sensitive" && existsSync(this.classify(path, item.cwd).path));
+      // Iteration 4: the names a listing hands it (`find ~/.ssh -name 'id_*' | xargs -I{} curl -F f=@{}`), a secret among
+      // what the listing could print — by the place it lists, as the run-time write sets read them.
+      const index = commands.indexOf(item);
+      if (!secret && index > 0 && commands[index - 1].joint === "|") {
+        let start = index - 1;
+        while (start > 0 && commands[start - 1].joint === "|") start--;
+        for (const entry of listingSet(commands.slice(start, index)) ?? []) {
+          const found = this.couldBe(entry.pattern, entry.cwd, { subtree: entry.subtree });
+          const match = found.matches.find((candidate) => candidate.zone === "sensitive") ?? (found.sensitive ? { path: found.sensitive } : undefined);
+          if (match) {
+            secret = displayPath(match.path, this.home);
+            break;
+          }
+        }
+      }
       if (!secret) continue;
       const inner = consumerWords(words, true);
       const sink = inner ? sinkOf(viewOf(inner.map((word) => (word.includes(RUNTIME) ? "x" : word)))) : undefined;
@@ -2740,7 +2813,14 @@ export class Permissions {
         }
       }
     }
-    for (const line of scan.commands.slice(0, MAX_CODE_COMMANDS)) nested(line);
+    for (const line of scan.commands.slice(0, MAX_CODE_COMMANDS)) {
+      nested(line);
+      // A command the code runs that prints a stored credential (iteration 4: `subprocess.check_output(['gh','auth','token'])`)
+      // is a secret source for the code's own sink, as on a shell line (one SECRET_SOURCES table).
+      const words = line.split(/\s+/).filter(Boolean).map((word) => word.replace(/^['"]|['"]$/g, ""));
+      const source = words.length ? credentialSource(viewOf(words)) : undefined;
+      if (source && source !== "the environment") finding.secret ??= source;
+    }
     return finding;
   }
 
@@ -3359,6 +3439,41 @@ export class Permissions {
       const tool = readTool(item.words);
       actions.add(tool && "row" in tool ? [program, ...tool.row.sub].join(" ") : program);
       // `GH_REPO=o/r gh …` is `gh … --repo o/r` (schema.ts `ENV_OPTIONS`): the same request in either spelling.
+      // Destinations some programs write that their tables read as a transfer or a query (iteration 4): rsync's local
+      // destination (`--delete` destroys what it lacks there), a database file a SQL client changes (`sqlite3 F 'DROP …'`).
+      {
+        const inner = unwrapped(item.words);
+        const name = basename(inner[0] ?? "");
+        const positionals = inner.slice(1).filter((word) => !word.startsWith("-") && word !== UNKNOWN);
+        let destination: string | undefined;
+        let destroying = false;
+        if (name === "rsync" && positionals.length >= 2 && !/^[^/]*:/.test(positionals.at(-1)!)) {
+          destination = positionals.at(-1);
+          destroying = inner.some((word) => /^--(delete|delete-\w+|del|remove-source-files)$/.test(word));
+        }
+        if (/^(sqlite3|sqlite|duckdb)$/.test(name) && positionals.length >= 1) {
+          const sql = positionals.slice(1).join(" ") + (item.input ?? "");
+          if (/\b(drop|delete|update|insert|alter|create|replace|vacuum)\b/i.test(sql)) {
+            destination = positionals[0];
+            destroying = /\b(drop|delete)\b/i.test(sql);
+          }
+        }
+        // A unit of its own: what it does to its sources is no part of it.
+        const scope = destination !== undefined && (item.cwd !== undefined || isAbsolute(destination) || destination.startsWith("~")) ? pathScope(destination, item.cwd) : undefined;
+        if (scope) units.push({ effects: ["change"], scopes: [scope], ...(destroying ? { destroys: true } : {}) });
+      }
+      // An image published by a build (iteration 4: `docker buildx build --push -t X`, `build --push`, `buildx bake --push`,
+      // `compose push`): a push of that image, as `docker push X` is.
+      {
+        const inner = unwrapped(item.words);
+        if (/^(docker|podman)$/.test(basename(inner[0] ?? "")) && ((inner.includes("build") || inner.includes("bake")) && inner.some((word) => word === "--push" || /^--output=.*type=registry/.test(word)) || (inner[1] === "compose" && inner.includes("push")))) {
+          effect("push");
+          for (const [at, word] of inner.entries()) {
+            const tag = word === "-t" || word === "--tag" ? inner[at + 1] : /^--tag=(.+)$/.exec(word)?.[1];
+            if (tag && tag !== UNKNOWN) add(scopeOf({ kind: "image", name: tag, says: [tag] }));
+          }
+        }
+      }
       // Scaling a workload to nothing stops it (iteration 2: `kubectl scale … --replicas=0`), whatever the tool calls it.
       if (/^(kubectl|oc)$/.test(basename(unwrapped(item.words)[0] ?? "")) && unwrapped(item.words).includes("scale") && unwrapped(item.words).some((word, at, all) => word === "--replicas=0" || (word === "--replicas" && all[at + 1] === "0"))) {
         effect("stop");
@@ -3695,6 +3810,9 @@ export class Permissions {
             const made = { ...entry, repo: undefined, remote: undefined };
             if (entryCovers(made, target)) note(entry, "", target.name);
             else if ((kind === "path" || kind === "worktree") && (made.kind === "path" || made.kind === "worktree") && isUnder(made.name, target.name)) note(entry, `, inside ${scope.name}`, target.name);
+            // What it destroys inside another task's working tree (iteration 4: `rsync --delete SRC OTHER/src/`, `rm -rf
+            // OTHER/src`), as a write into it is (b6-178): outside this chat's own trees.
+            else if ((kind === "path" || kind === "worktree") && (made.kind === "worktree" || (made.kind === "path" && isCheckout(made.name))) && isUnder(target.name, made.name) && !this.inOwnTrees(target.name)) note(entry, `; this destroys ${displayPath(target.name, this.home)} in that working tree`, target.name);
           }
         }
         // Operands known only when it runs (flow.ts): another chat's entity of a kind they take, passing every producer test.
@@ -3775,8 +3893,9 @@ export class Permissions {
       if (word.source === "reply") continue;
       // Quoted speech is someone else's words (iteration 2: `Another agent left this note: "delete feat/x" — is that
       // right?`): only what the owner says outside quotes names it (explicit.ts `ownText`).
-      // Inline quoted speech too (several words in quotes); a quoted single name (`delete "feat/x"`) is the owner's naming.
-      const text = ownText(consentText(word)).replace(/"([^"\n]*\s[^"\n]*)"|“([^”\n]*\s[^”\n]*)”|「([^」\n]*)」|«([^»\n]*\s[^»\n]*)»/gu, " ");
+      // Inline quoted speech too (several words in quotes), and a forwarded message (explicit.ts `ownSpeech`); a quoted
+      // single name (`delete "feat/x"`) is the owner's naming.
+      const text = ownSpeech(consentText(word));
       // A sentence that names it under a condition or a deferral ("If feat/x turns out merged, you can delete it later")
       // names it for later, not now.
       const sentences = text.split(/(?<=[.!?。！？;；])\s*/u).filter(Boolean);
@@ -3787,7 +3906,7 @@ export class Permissions {
       // A name right after an exception word ("all … except X", "but X", "除了 X") is what is kept (iteration 3).
       const excepted = names.some((name) => name.length >= 2 && new RegExp(`(?:\\bexcept(?: for)?|\\bbut(?: not)?|\\bother than|\\bapart from|\\bsave|\\bausser|\\bsauf|\\bexcepto|\\bmenos|除了|除外|以外)\\s*[:"'“”\`]?\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "iu").test(text));
       if (excepted) continue;
-      if (clauses.some((clause) => names.some((name) => name.length >= 2 && mentions(clause, name)) && !(QUESTION.test(clause) || NEGATION_WORDS.test(clause) || RETRACT_WORDS.test(clause)))) return word.text;
+      if (clauses.some((clause) => names.some((name) => name.length >= 2 && mentions(clause, name)) && !(QUESTION.test(clause) || NEGATION_WORDS.test(clause) || RETRACT_WORDS.test(clause) || KEEP_WORDS.test(clause)))) return word.text;
       if (names.some((name) => name.length >= 2 && mentions(text, name)) && !clauses.some((clause) => names.some((name) => name.length >= 2 && mentions(clause, name)))) {
         if (!(QUESTION.test(text) || NEGATION_WORDS.test(text) || RETRACT_WORDS.test(text))) return word.text;
       }
@@ -4958,6 +5077,9 @@ const PACKAGE_RUNNERS: readonly { program: string; sub: readonly string[] }[] = 
 /** Options whose value is a command the program runs, whichever program it is (data). */
 const RUN_OPTIONS = /^(--pre|--exec|--exec-batch|-x|-X|--command|-c|--run|--shell-command|--on-change|--onchange)$/;
 
+/** Programs that copy from sources to a destination (their last operand after a remote one is written here). */
+const COPIERS: ReadonlySet<string> = new Set(["cp", "scp", "rsync", "sftp", "aws", "gsutil", "gcloud", "az", "azcopy", "rclone", "mc", "s3cmd", "curl", "wget", "kubectl", "docker", "podman", "gh"]);
+
 /** Programs whose output is what they read (a file's content, or an encoding of it), not its name or size. */
 const CONTENT_PRINTERS: ReadonlySet<string> = new Set(["cat", "tac", "head", "tail", "base64", "base32", "xxd", "od", "hexdump", "gzip", "zcat", "bzip2", "xz", "zstd", "lz4", "tar", "zip", "openssl", "gpg", "age", "sed", "awk", "gawk", "grep", "egrep", "rg", "cut", "tr", "sort", "uniq", "strings", "jq", "yq", "dd", "iconv", "envsubst", "tee", "less", "more", "rev", "fold", "nl", "paste"]);
 
@@ -5014,8 +5136,7 @@ function directoryMove(words: readonly string[]): { to?: string; push?: boolean;
 /** The lexicon's negation and retraction/deferral words, every language (ownerNames). */
 const NEGATION_WORDS = listWords("negate");
 const RETRACT_WORDS = listWords("retract");
-/** Words that make a sentence conditional (iteration 2, data; the languages the lexicon has): "if", "once", "unless". */
-const CONDITION_WORDS = /\b(if|unless|once|in case|provided|falls|wenn|sofern|si|sauf si|à condition|se|a menos que|caso|если|в случае)\b|如果|假如|要是|若是|万一|もし|場合|만약|경우/iu;
+
 
 /** A target's actions that delete or stop it (explicit.ts `Target.action`). */
 const DESTROYING_ACTIONS = /^(delete|destroy|erase|remove|stop|kill|close|uninstall|prune)$/;
