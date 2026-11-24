@@ -6,9 +6,9 @@
 // Kept apart from harness.mjs on purpose: the harness imports the worktree's
 // extension statically, and the eval must not depend on (or be edited with)
 // the code it measures.
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
@@ -51,7 +51,10 @@ function processFacts(item) {
 
 /** Load `<extensions>/cypher-permissions/{core,shell}.ts` and build the fake machine for `cases`. */
 export async function createMachine({ extensions, cases, ownerWords = "full", judgeTimeoutMs }) {
+  // A replay is no chat of the session running it: the session's own task id (CYPHER_TASK_ID, set by the engine) stays out.
+  delete process.env.CYPHER_TASK_ID;
   const { Permissions } = await import(pathToFileURL(join(extensions, "cypher-permissions", "core.ts")).href);
+  const denialsModule = await import(pathToFileURL(join(extensions, "cypher-permissions", "denials.ts")).href).catch(() => ({}));
   // The fake machine's read-only directories, on any host (an extension older than the hook reads the real disk).
   const commandsModule = await import(pathToFileURL(join(extensions, "cypher-permissions", "commands.ts")).href);
   commandsModule.setSystemDirectory?.((path) => /^\/(Applications|Library|System|usr|opt\/local)\//.test(path));
@@ -87,6 +90,15 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
   // before the chat's own commands, and not made by them: directories, local tags and branches.
   for (const item of cases) {
     for (const dir of item.fake?.dirs ?? []) mkdirSync(expand(dir), { recursive: true });
+    // `files` (round 6): files that exist, inside the fake machine only.
+    for (const file of item.fake?.files ?? []) {
+      const at = expand(file);
+      if (!at.startsWith(scratch)) continue;
+      mkdirSync(dirname(at), { recursive: true });
+      const content = item.fake?.contents?.[file];
+      if (content !== undefined) writeFileSync(at, expand(content));
+      else if (!existsSync(at)) writeFileSync(at, "fixture\n");
+    }
     for (const ref of item.fake?.refs ?? []) {
       const at = expand(item.cwd);
       spawnSync("git", ["-C", at, ref.kind === "tag" ? "tag" : "branch", ref.name], { stdio: "ignore" });
@@ -174,6 +186,15 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
     }
     // The chat's own workspace branch (production reads it from git at the chat's folders; the fake repos are on main).
     if (item.workspaceBranch) permissions.workspaceBranches = () => [item.workspaceBranch];
+    // Final pass: what another chat's process is known by on the fake machine (production: `ps`, `lsof`): the command
+    // that started it (blind.mjs `by`) and its `ports`. Nothing else runs here.
+    if ("processForms" in permissions) {
+      permissions.processForms = (pid) => {
+        const entry = (item.otherChats ?? []).find((other) => other.kind === "process" && String(other.name) === String(pid));
+        const stated = item.processCommands?.[String(pid)];
+        return [...(entry ? [...(entry.by ? [entry.by] : []), ...(entry.ports ?? []).map((port) => `:${port}`)] : []), ...(stated ? [stated] : [])];
+      };
+    }
     const processes = processFacts(item);
     permissions.ownsProcesses = processes.owns;
     permissions.processFacts = processes.facts;
@@ -187,6 +208,9 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
     const base = conversation ? JSON.parse(expand(JSON.stringify(conversation))) : user;
     const extra = conversation ? [] : (item.branch ?? []);
     const branch = [...base, ...JSON.parse(expand(JSON.stringify(extra)))];
+    // The chat's transcript, as production gives it (cypher-permissions.ts: `sessionManager.getBranch()`; final pass,
+    // iteration 4): what its tools wrote before this process.
+    permissions.transcript = () => branch;
     // `deniedEarlier` (round 4): earlier prompts of this chat the owner answered Deny or closed (`dismissed`),
     // replayed through the same permission object before the case's request, as production records them: the
     // request is asked (a stub verdict ask-user on a standing concern), the dialog answers "Deny" or nothing, and the owner's words
@@ -214,8 +238,8 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
         complete: async () => JSON.stringify({ decision: "ask-user", reason: "an earlier prompt the owner answered", concern: "not-owner" }),
       };
       const recordedBefore = permissions.denials?.any?.() ? 1 : 0;
+      const line = denied.command !== undefined ? expand(denied.command) : undefined;
       try {
-        const line = denied.command !== undefined ? expand(denied.command) : undefined;
         if ((denied.capability ?? "escalate") === "escalate" && line !== undefined) await permissions.requestEscalation(line, { label: "replay" }, earlierCtx);
         else if (denied.tool === "request_permission") await permissions.requestPermission({ capability: denied.capability, paths: denied.paths.map(expand) }, earlierCtx);
         else await permissions.authorize(denied.paths.map((path) => ({ capability: denied.capability ?? "read", path: expand(path) })), { tool: denied.tool }, earlierCtx);
@@ -224,8 +248,21 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
         permissions.ownerWords = fullWords;
         continue;
       }
+      // Final pass: a Deny of a request this code never shows (a default-allowed read or edit) is the case's premise:
+      // recorded as a Deny of that request records it (`injected`), so what the code does with such a denial is measured.
+      let injected = false;
+      if (!shown.length && denied.choice === "deny" && permissions.denials?.record && !(permissions.denials.any() && !recordedBefore)) {
+        try {
+          const cls =
+            line !== undefined && (denied.capability ?? "escalate") === "escalate"
+              ? (denialsModule.forRecord ?? ((x) => x))(permissions.lineClassOf(line, cwd))
+              : permissions.fileClass(denied.tool, denied.capability ?? "read", (denied.paths ?? []).map((path) => permissions.classify?.(expand(path), cwd)?.path ?? expand(path)));
+          permissions.denials.record(cls, line ?? (denied.paths ?? []).map(expand).join(" "), permissions.ownerWords);
+          injected = true;
+        } catch {}
+      }
       permissions.ownerWords = fullWords;
-      earlier.push({ choice: denied.choice, prompted: shown.length > 0, denialRecorded: Boolean(permissions.denials?.any?.()) && !recordedBefore });
+      earlier.push({ choice: denied.choice, prompted: shown.length > 0, denialRecorded: Boolean(permissions.denials?.any?.()) && !recordedBefore, ...(injected ? { injected: true } : {}) });
     }
     const judged = [];
     const answers = [];
@@ -254,7 +291,7 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
     const command = item.command !== undefined ? expand(item.command) : undefined;
     if (item.capability === "escalate") result = await permissions.requestEscalation(command, proposal ?? item.proposal ?? { label: "replay" }, ctx);
     else if (item.tool === "request_permission") result = await permissions.requestPermission({ capability: item.capability, paths: item.paths.map(expand) }, ctx);
-    else result = await permissions.authorize(item.paths.map((path) => ({ capability: item.capability, path: expand(path) })), { tool: item.tool }, ctx);
+    else result = await permissions.authorize(item.paths.map((path, index) => ({ capability: item.capability, path: expand(path), ...(item.ops?.[index] ? { op: item.ops[index] } : {}) })), { tool: item.tool }, ctx);
     // The case's own record (not one of an earlier prompt's, `deniedEarlier`).
     const audit = records.slice(mark).at(-1) ?? {};
     const remembered = permissions.grants.all().filter((grant) => grant.scope !== "once").length > before;

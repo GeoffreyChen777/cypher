@@ -493,7 +493,8 @@ export function systemLocation(value: string): boolean {
 
 let systemDirectory = (path: string): boolean => {
   try {
-    const real = realpathSync(value);
+    // (final pass: this read `value`, a name not in scope, so the check was always false outside the fake machines)
+    const real = realpathSync(path);
     const home = process.env.HOME ? realpathSync(process.env.HOME) : undefined;
     if (home && (real === home || real.startsWith(`${home}/`))) return false;
     if (!statSync(real).isDirectory()) return false;
@@ -559,6 +560,16 @@ export function unwrap(words: readonly string[]): Unwrapped | undefined {
           else if (!/^(--preserve-status|--foreground|-v|--verbose|--signal=\S+|--kill-after=\S+|-s\S+|-k\S+)$/.test(rest[i])) return undefined;
         }
         if (!/^\d+(\.\d+)?[smhd]?$/.test(rest[i] ?? "")) return undefined;
+        i++;
+        break;
+      // `script [-aeFkqr] [-t SECS] FILE CMD…` (BSD, macOS): runs CMD with its output kept in FILE (iteration 2). The Linux
+      // form takes `-c 'CMD'`, a string: no wrapper of the next words then.
+      case "script":
+        for (; i < rest.length && rest[i].startsWith("-"); i++) {
+          if (rest[i] === "-t" || rest[i] === "-T") i++;
+          else if (!/^-[aeFkqrp]+$/.test(rest[i])) return undefined;
+        }
+        if (rest[i] === undefined || rest[i + 1] === undefined) return undefined;
         i++;
         break;
       case "caffeinate":

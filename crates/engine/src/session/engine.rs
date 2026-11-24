@@ -50,6 +50,7 @@ use crate::util::lock;
 mod recovery;
 mod run_task;
 mod steer;
+mod task_id;
 
 use run_task::*;
 use steer::RoutedSteer;
@@ -1773,10 +1774,14 @@ impl Inner {
     /// (messaging tools then honestly report unavailable).
     fn host_context(&self, chat_id: &str) -> RunHostContext {
         let mut profile = RunProfile::Root;
+        let mut task = None;
         let memory = self.memory.get();
         if let Some(ws) = self.workspace()
             && let Ok(Some(chat)) = ws.chat(chat_id)
         {
+            task = task_id::task_id(&chat, &ws.read_bot_records(), |id| {
+                ws.chat(id).ok().flatten()
+            });
             if let Some(pass) = memory.and_then(|m| m.run_env(chat_id)) {
                 profile = RunProfile::Memory(pass);
             } else if let Some(bot) = crate::bots::profile::bot_env(&ws, &chat) {
@@ -1790,6 +1795,7 @@ impl Inner {
             profile,
             memory_prompt: memory.and_then(|m| m.prompt_for(chat_id)),
             owner_words: self.owner_words(chat_id),
+            task_id: task,
         }
     }
 

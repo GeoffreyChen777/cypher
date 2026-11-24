@@ -33,9 +33,9 @@ import { asksOnly, DANGER, dangerMatches, INSPECT, inspectMatches, viewOf } from
 import { isUnder } from "./paths.ts";
 import type { CommandView, PackFacts } from "./packs.ts";
 import type { Classification } from "./paths.ts";
-import { UNKNOWN } from "./shell.ts";
+import { UNKNOWN, wholePathGlob } from "./shell.ts";
 import { ANY, ENV_CLOSE, ENV_OPEN, escapeGlob, resolveText } from "./resolve.ts";
-import { interpreterOf } from "./code.ts";
+import { interpreterOf, optionCommands } from "./code.ts";
 import { refsWritten, unwrapped } from "./effects.ts";
 import { foldPipe } from "./fold.ts";
 import { genericDestroyer, TOLD_BY_PLACE } from "./catalogue.ts";
@@ -225,6 +225,8 @@ export interface RiskCommand {
   writePatterns?: readonly (string | undefined)[];
   /** It is a shell or interpreter that runs code from its input, which is known only when it runs (`… | sh`, `sh < file`). */
   stdinCode?: boolean;
+  /** Inside a loop (shell.ts `loop`). */
+  loop?: boolean;
 }
 
 /** What `kill`, `pkill` and `killall` would stop. */
@@ -697,9 +699,12 @@ function pathRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): As
     }
   }
   const words = view.args;
+  const runLines = optionCommands(view.words, UNKNOWN);
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
     if (!pathWords([word]).length) continue;
+    // A command line an option runs is read as its own line (round 6 step 2), not as a file of this program.
+    if (runLines.some((line) => word === line || word.endsWith(`=${line}`))) continue;
     // ssh's identity file: the key is used, not read out.
     if (/^(ssh|scp|sftp|rsync|git|mosh)$/.test(view.program) && (words[i - 1] === "-i" || /IdentityFile/i.test(words[i - 1] ?? ""))) continue;
     // `host:path` and a URL are the other machine's files, whatever their names.
@@ -1613,6 +1618,83 @@ const SYSTEM_FILE =
  * session files an approval is restored from. The always-ask floor: no rule,
  * grant or reviewing model ever approves one. Reading them is ordinary work.
  */
+/** Programs that copy or move their sources into a destination (the last operand; `-t DIR` for some): data. */
+const INTO_FOLDER: Readonly<Record<string, { target?: RegExp; recursive?: RegExp }>> = {
+  cp: { target: /^(-t|--target-directory)(=|$)/, recursive: /^(-[a-zA-Z]*[rRa][a-zA-Z]*|--recursive|--archive)$/ },
+  gcp: { target: /^(-t|--target-directory)(=|$)/, recursive: /^(-[a-zA-Z]*[rRa][a-zA-Z]*|--recursive|--archive)$/ },
+  mv: { target: /^(-t|--target-directory)(=|$)/ },
+  install: { target: /^(-t|--target-directory)(=|$)/ },
+  ln: { target: /^(-t|--target-directory)(=|$)/ },
+  ditto: {},
+  rsync: { recursive: /^(-[a-zA-Z]*[ra][a-zA-Z]*|--recursive|--archive)$/ },
+};
+
+/** git subcommands that write their work tree (a checkout of files, a reset, a clean): data. */
+const GIT_TREE_WRITERS = /^(checkout|restore|reset|clean|stash|pull|merge|rebase|switch|apply|am|cherry-pick|revert|read-tree|checkout-index)$/;
+
+/**
+ * What a command writes into a folder that holds the permission system (iteration 2): a copier's or mover's sources
+ * into a destination folder (`mv x.json AGENT/`, `cp -f p.json AGENT`: the source's name there), a recursive copy or a
+ * sync of a tree into it (`rsync -a backup/ AGENT/`: any name), or git writing the work tree it runs on (`git -C AGENT
+ * checkout -- .`). The permission system's own patterns decide (`couldBe`).
+ */
+function intoFolder(command: RiskCommand, view: CommandView, dir: string | undefined, facts: RiskFacts): string | undefined {
+  if (!facts.couldBe || !facts.permissionSystem) return undefined;
+  // A whole tree written (any name) counts only inside a folder of the permission system itself (the agent folder, a
+  // project's `.pi`: `permissionPlaces`), not into a folder that merely holds one deep down (`rsync -a h:dots/ ~/`).
+  const places = facts.permissionPlaces?.() ?? [];
+  const could = (path: string) => places.some((place) => path === place || path.startsWith(`${place.replace(/\/+$/, "")}/`) || place.startsWith(`${path.replace(/\/+$/, "")}/`) && place.slice(path.replace(/\/+$/, "").length + 1).split("/").length <= 1);
+  if (view.program === "git") {
+    const sub = view.positionals.find((word) => word !== UNKNOWN);
+    const at = command.words.indexOf("-C");
+    const tree = at > 0 ? command.words[at + 1] : undefined;
+    const where = tree === undefined ? command.cwd : tree === UNKNOWN ? undefined : facts.classify(tree, command.cwd)?.path;
+    if (sub && GIT_TREE_WRITERS.test(sub) && where !== undefined && could(where)) return `${where}, a work tree git writes`;
+    return undefined;
+  }
+  const row = INTO_FOLDER[view.program];
+  if (!row) return undefined;
+  const args = view.args;
+  let target: string | undefined;
+  const operands: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i];
+    if (word === UNKNOWN) return undefined;
+    if (row.target?.test(word)) {
+      target = word.includes("=") ? word.slice(word.indexOf("=") + 1) : args[++i];
+      continue;
+    }
+    if (!word.startsWith("-") || word === "-") operands.push(word);
+  }
+  const destination = target ?? operands.at(-1);
+  const sources = target ? operands : operands.slice(0, -1);
+  if (destination === undefined || !sources.length || /^[^/]*:/.test(destination)) return undefined;
+  const at = facts.classify(destination, dir)?.path;
+  if (at === undefined) return undefined;
+  let isDir = target !== undefined || destination.endsWith("/") || sources.length > 1;
+  try {
+    isDir ||= statSync(at).isDirectory();
+  } catch {}
+  if (!isDir) return undefined;
+  const recursive = row.recursive ? args.some((word) => row.recursive!.test(word)) : view.program === "mv" || view.program === "ditto";
+  for (const source of sources) {
+    // `rsync src/` copies what src holds: any name inside the destination.
+    if (view.program === "rsync" || view.program === "ditto" ? (source.endsWith("/") || view.program === "ditto") && recursive : false) {
+      if (could(at)) return `${destination}, which holds it`;
+      continue;
+    }
+    const placed = `${at.replace(/\/+$/, "")}/${basename(source.replace(/\/+$/, ""))}`;
+    if (facts.permissionSystem(placed)) return `${destination}${destination.endsWith("/") ? "" : "/"}${basename(source.replace(/\/+$/, ""))}`;
+    // A folder copied or moved in: what it holds lands under its name there (the permission system's patterns decide).
+    let folder = false;
+    try {
+      folder = statSync(facts.classify(source, dir)?.path ?? source).isDirectory();
+    } catch {}
+    if (recursive && folder && facts.couldBe(escapeGlob(placed), undefined, { subtree: true }).permissionSystem) return `${placed}, which holds it`;
+  }
+  return undefined;
+}
+
 function permissionSystemRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): Assessment | undefined {
   const system = facts.permissionSystem;
   if (!system) return undefined;
@@ -1648,6 +1730,9 @@ function permissionSystemRisk(command: RiskCommand, view: CommandView, facts: Ri
     // A folder that holds the permission system, deleted or moved whole (`rm -rf ~/.cypher/pi-runtime/agent`).
     if (subtree && operands.has(candidate) && !command.writes.includes(candidate) && !destinationOnly(view, candidate) && facts.couldBe?.(escapeGlob(classification.path), undefined, { subtree: true }).permissionSystem) return floor(`${candidate}, which holds it`);
   }
+  // Iteration 2: a destination folder, and writes of a whole tree (`intoFolder`).
+  const into = intoFolder(command, view, dir, facts);
+  if (into) return floor(into);
   // Words known only when it runs: every path they may stand for (resolve.ts). A glob under the
   // permission system, or one whose start is known only when it runs, could be it.
   const unknown = [
@@ -1681,7 +1766,190 @@ export function unresolvedWrites(command: RiskCommand, facts: RiskFacts): string
   ];
   for (const item of items) {
     const found = facts.couldBe(item.pattern, item.cwd, { subtree });
-    if (found.anywhere && found.permissionSystem) out.push(`\`${view.program || ">"}\` writes ${shownPattern(item.pattern)}, a path whose start is known only when it runs: it could be the permission system's own files (${found.permissionSystem})`);
+    // Round 6 step 2: any possible set (a loop's glob, a listing's place), not only one whose start is unknown.
+    if (found.permissionSystem) out.push(`\`${view.program || ">"}\` writes ${shownPattern(item.pattern)}, a path whose start is known only when it runs: it could be the permission system's own files (${found.permissionSystem})`);
+  }
+  return out;
+}
+
+/**
+ * Writes whose target is known only when the line runs, by their POSSIBLE SET (round 6, W5): a consumer that
+ * writes what a pipe hands it (`… | xargs -I{} sh -c 'echo x >> {}'`, `… | xargs tee -a`, `… | xargs sed -i …`)
+ * can write only what the producer could print. When the producer is a listing (`LISTERS`: its operands, globs
+ * and all; `find`'s roots and everything under them) seen through filters that only pick lines of it
+ * (`SUBSET_FILTERS`), that set is known: the floor's `permission-system` row applies when it could hold the
+ * permission system's files. Any other producer (a download, a program's output) leaves the set unknown,
+ * and an unknown-target write asks nothing more than before (the judge sees it as usual).
+ */
+export const LISTERS: Readonly<Record<string, "operands" | "subtree">> = { ls: "operands", echo: "operands", printf: "operands", realpath: "operands", readlink: "operands", find: "subtree", fd: "subtree", du: "subtree", tree: "subtree" };
+export const SUBSET_FILTERS: ReadonlySet<string> = new Set(["head", "tail", "sort", "uniq", "grep", "egrep", "fgrep", "rg", "shuf", "tac", "cat", "tr"]);
+/** Programs that write the operands xargs appends (or the token it substitutes) when they run. */
+/** Programs that hand the lines they read to a command as its operands (round 6 step 2). */
+export const FEEDERS: ReadonlySet<string> = new Set(["xargs", "parallel"]);
+export const OPERAND_WRITERS: ReadonlySet<string> = new Set(["tee", "truncate", "rm", "shred", "unlink", "cp", "mv", "ln", "install", "chmod", "chown", "touch", "dd", "rsync"]);
+
+function escapeText(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The xargs consumer's writes of what it is handed: whether the wrapped words write the token (or the appended operands). */
+function consumerWrites(words: readonly string[]): boolean {
+  let i = 1;
+  let token: string | undefined;
+  for (; i < words.length; i++) {
+    const word = words[i];
+    if (word === "-I" || word === "-i" || word === "--replace") token = words[++i] ?? "{}";
+    else if (/^-I./.test(word)) token = word.slice(2);
+    else if (/^--replace=/.test(word)) token = word.slice("--replace=".length);
+    else if (/^-(n|L|P|s|d|E|a)$/.test(word)) i++;
+    else if (!word.startsWith("-")) break;
+  }
+  const run = words.slice(i).filter((word) => word !== UNKNOWN);
+  if (!run.length) return false;
+  const program = basename(run[0]);
+  const inPlace = /^(sed|perl|gsed)$/.test(program) && run.some((word) => /^-[A-Za-z]*i/.test(word) || word.startsWith("--in-place"));
+  if (token === undefined) return OPERAND_WRITERS.has(program) || inPlace;
+  const t = escapeText(token);
+  const text = run.join(" ");
+  // `> T`, `>> T`, `tee [-a] T`, a writer or an in-place edit given T.
+  return new RegExp(`(?:>>?|>\\|)\\s*['"]?${t}`).test(text) || ((OPERAND_WRITERS.has(program) || inPlace) && run.slice(1).some((word) => word.includes(token!))) || new RegExp(`\\b(?:tee|truncate|rm|cp|mv|dd|install)\\b[^|;&]*${t}`).test(text) || new RegExp(`\\bsed\\s+-[A-Za-z]*i[^|;&]*${t}`).test(text);
+}
+
+/**
+ * The write targets a feeder's command builds around its runtime operand (final pass): a path that holds the
+ * replace token (`xargs -I{} sh -c 'echo > ~/.cypher/x/{}'`, `parallel 'cp a {}.bak'`), inside an inline shell's
+ * script or among the command's own words, after a redirect or as a writer's operand, as a glob with the token as
+ * `*` (any name the pipe could hand). A target that is the token alone is the listing's own set (`listingSet`).
+ */
+export function feederWriteTemplates(words: readonly string[]): string[] {
+  let i = 1;
+  let token: string | undefined;
+  for (; i < words.length; i++) {
+    const word = words[i];
+    if (word === "-I" || word === "-i" || word === "--replace") token = words[++i] ?? "{}";
+    else if (/^-I./.test(word)) token = word.slice(2);
+    else if (/^--replace=/.test(word)) token = word.slice("--replace=".length);
+    else if (/^-(n|L|P|s|d|E|a|j)$/.test(word)) i++;
+    else if (!word.startsWith("-")) break;
+  }
+  if (basename(words[0] ?? "") === "parallel") token ??= "{}";
+  if (!token) return [];
+  const text = words.slice(i).filter((word) => word !== UNKNOWN).join(" ");
+  const t = escapeText(token);
+  const out = new Set<string>();
+  const path = `([^\\s'";|&<>()]*${t}[^\\s'";|&<>()]*)`;
+  const forms = [new RegExp(`(?:>>?|>\\|)\\s*['"]?${path}`, "g"), new RegExp(`\\b(?:tee(?:\\s+-a)?|truncate\\s+-s\\s*\\S+|cp\\s+\\S+|mv\\s+\\S+|install\\s+\\S+|ln\\s+-s?f?\\s*\\S+)\\s+['"]?${path}`, "g"), new RegExp(`\\bof=['"]?${path}`, "g")];
+  for (const form of forms) {
+    for (const match of text.matchAll(form)) {
+      const target = match[1];
+      if (target === token || target === `./${token}`) continue;
+      // `~/…` stays for the resolver (resolve.ts), as a word the reader didn't expand.
+      out.add(target.replaceAll(token, "*"));
+    }
+  }
+  return [...out];
+}
+
+/** What a listing pipe could print, as globs (`LISTERS`, `SUBSET_FILTERS`); undefined when that isn't known. */
+export function listingSet(pipe: readonly RiskCommand[]): { pattern: string; cwd: string | undefined; subtree: boolean }[] | undefined {
+  const [first, ...rest] = pipe;
+  if (!first || !rest.every((command) => SUBSET_FILTERS.has(basename(command.words[0] ?? "")) && !command.words.slice(1).some((word) => word === UNKNOWN))) return undefined;
+  const program = basename(first.words[0] ?? "");
+  const mode = LISTERS[program];
+  if (!mode) return undefined;
+  const view = viewOf(first.words);
+  const out: { pattern: string; cwd: string | undefined; subtree: boolean }[] = [];
+  const globbed = new Map(patternWords(first).map((item) => [item.word, item.pattern]));
+  for (const [index, word] of first.words.entries()) {
+    if (index === 0) continue;
+    const pattern = word === UNKNOWN ? globbed.get(index) : word;
+    if (pattern === undefined) {
+      if (word === UNKNOWN) return undefined;
+      continue;
+    }
+    if (pattern.startsWith("-")) {
+      if (mode === "subtree") break;
+      continue;
+    }
+    out.push({ pattern, cwd: operandDir(first, view), subtree: mode === "subtree" });
+  }
+  if (!out.length) out.push({ pattern: ".", cwd: operandDir(first, view), subtree: mode === "subtree" });
+  // `find ROOT -name P`: only what matches its name tests (`-name`, `-iname`; `-path` is a whole path).
+  if (program === "find" || program === "fd") {
+    const names: string[] = [];
+    const paths: string[] = [];
+    for (let i = 1; i < first.words.length - 1; i++) {
+      const value = first.words[i + 1] === UNKNOWN ? globbed.get(i + 1) : first.words[i + 1];
+      if (value === undefined) continue;
+      if (/^-i?name$/.test(first.words[i])) names.push(value);
+      if (/^-i?(path|wholename)$/.test(first.words[i])) paths.push(value);
+    }
+    // `-path P` matches the whole path, its `*` crossing folders (round 6 step 2): under each root.
+    if (paths.length) return out.flatMap((root) => paths.map((pattern) => ({ pattern: wholePathGlob(pattern, root.pattern.replace(/\/+$/, "")), cwd: root.cwd, subtree: false })));
+    if (names.length) return out.flatMap((root) => names.map((name) => ({ pattern: `${root.pattern.replace(/\/+$/, "")}/**/${name}`, cwd: root.cwd, subtree: false })));
+  }
+  return out;
+}
+
+/** The floor's findings for writes known only by their possible set (`listingSet`): each that could be the permission system. */
+export function runtimeWriteSets(commands: readonly (RiskCommand & { joint?: string; loop?: boolean })[], facts: RiskFacts): string[] {
+  if (!facts.couldBe) return [];
+  const out: string[] = [];
+  const check = (set: ReturnType<typeof listingSet>, consumer: string, producer: string) => {
+    for (const item of set ?? []) {
+      const found = facts.couldBe!(item.pattern, item.cwd, { subtree: item.subtree });
+      if (found.permissionSystem) out.push(`\`${consumer}\` writes what \`${producer}\` lists, which could be the permission system's own files (${found.permissionSystem})`);
+    }
+  };
+  for (const [index, command] of commands.entries()) {
+    const program = basename(command.words[0] ?? "");
+    let start = index - 1;
+    while (start > 0 && commands[start - 1]?.joint === "|") start--;
+    const piped = commands[index - 1]?.joint === "|";
+    // A feeder (`FEEDERS`: xargs, parallel) hands the pipe's lines to the command it runs.
+    if (piped && FEEDERS.has(program)) {
+      const words = program === "xargs" ? command.words : ["xargs", "-I", "{}", ...command.words.slice(1).filter((word) => !word.startsWith("-"))];
+      if (consumerWrites(words)) check(listingSet(commands.slice(start, index)), program, basename(commands[start].words[0] ?? ""));
+      // A target built around the operand, in its own words or an inline shell's script (final pass): its glob.
+      for (const pattern of feederWriteTemplates(command.words)) {
+        const found = facts.couldBe(pattern, command.cwd, {});
+        if (found.permissionSystem) out.push(`\`${program}\` writes ${shownPattern(pattern)} for each name \`${basename(commands[start].words[0] ?? "")}\` hands it, which could be the permission system's own files (${found.permissionSystem})`);
+      }
+    }
+    // `find … -exec CMD {} +` is read as CMD on find's roots (core.ts `codeFindings`, effects.ts): not again here.
+    // `… | while read NAME; do …; done`: the loop's commands that write a target known only when they run are handed the pipe's lines.
+    if (piped && program === "read") {
+      const set = listingSet(commands.slice(start, index));
+      for (const later of commands.slice(index + 1)) {
+        if (!later.loop) break;
+        const view = viewOf(later.words);
+        const writesUnknown = later.writes.includes(UNKNOWN) || (later.words.length > 1 && pathEffect(later, view, UNKNOWN) === "write" && later.words.slice(1).includes(UNKNOWN));
+        // The loop variable inside a longer path (`"$d/permissions.json"`, iteration 2): each listed name in its place.
+        const writer = OPERAND_WRITERS.has(view.program) || /^(cp|mv|install|ln|tee|truncate|touch|rsync|ditto)$/.test(view.program);
+        const templates = [...later.writes.map((path, at) => (path === UNKNOWN ? later.writePatterns?.[at] : undefined)), ...(writer ? (later.patterns ?? []) : [])].filter((pattern): pattern is string => typeof pattern === "string" && pattern.startsWith(ANY) && pattern.length > ANY.length);
+        if (templates.length) {
+          for (const item of set ?? []) for (const template of templates) {
+            const pattern = `${item.pattern.replace(/\/+$/, "")}/${template.slice(ANY.length).replace(/^\/+/, "")}`;
+            const found = facts.couldBe(pattern, item.cwd, {});
+            if (found.permissionSystem) out.push(`\`while read\` writes ${shownPattern(pattern)} for each name \`${basename(commands[start].words[0] ?? "")}\` lists, which could be the permission system's own files (${found.permissionSystem})`);
+          }
+        }
+        if (writesUnknown) {
+          check(set, `while read`, basename(commands[start].words[0] ?? ""));
+          break;
+        }
+      }
+    }
+    // A feeder given its names on its input (`xargs … <<< PATH`, a heredoc; iteration 2): those names are its set.
+    if (FEEDERS.has(program) && !piped && typeof command.input === "string") {
+      const names = command.input.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 64);
+      const words = program === "xargs" ? command.words : ["xargs", "-I", "{}", ...command.words.slice(1).filter((word) => !word.startsWith("-"))];
+      if (consumerWrites(words)) check(names.map((name) => ({ pattern: escapeGlob(name), cwd: command.cwd, subtree: false })), program, "its input");
+      for (const template of feederWriteTemplates(command.words)) for (const name of names) {
+        const pattern = template.replaceAll("*", escapeGlob(name));
+        if (facts.couldBe(pattern, command.cwd, {}).permissionSystem) out.push(`\`${program}\` writes ${shownPattern(pattern)} for a name on its input, which is the permission system's own file`);
+      }
+    }
   }
   return out;
 }
@@ -1707,7 +1975,7 @@ const SECRET_WRITE_VERB =
  * their data flow (`exfiltrates`).
  */
 export const NETWORK_SINKS: readonly { id: string; programs: readonly string[]; verbs?: RegExp; urls?: boolean; module?: RegExp }[] = [
-  { id: "http", programs: ["curl", "wget", "http", "https", "xh", "aria2c"] },
+  { id: "http", programs: ["curl", "wget", "http", "https", "httpie", "xh", "aria2c", "curlie"] },
   { id: "socket", programs: ["nc", "ncat", "netcat", "socat", "telnet", "ftp", "lftp", "openssl-s_client"] },
   { id: "remote-shell", programs: ["ssh", "mosh", "scp", "sftp", "rsync"] },
   { id: "mail-chat", programs: ["mail", "mailx", "sendmail", "mutt", "neomutt", "msmtp", "swaks", "slack", "slackcat", "telegram-send", "signal-cli", "discord-send", "ntfy", "apprise", "pushover", "twilio"] },
@@ -1722,13 +1990,18 @@ export const NETWORK_SINKS: readonly { id: string; programs: readonly string[]; 
   // An interpreter's standard module run as a program (`python3 -m webbrowser URL`, `-m smtplib`).
   { id: "module", programs: ["python", "python3", "pypy3"], module: /^(webbrowser|smtplib|ftplib|telnetlib|http\.client|urllib\.request)$/ },
   { id: "cloud-cli", programs: ["aws", "gcloud", "az", "op", "vault", "doppler", "heroku", "fly", "flyctl", "vercel", "netlify", "wrangler", "railway", "firebase", "supabase"] },
+  // Iteration 2: peer-to-peer and relay transfers (a code word, a tailnet peer), and writes into a cluster (a secret made
+  // from a file, a file copied into a pod). Sinks for row 1 only: a secret has to flow into them.
+  { id: "relay", programs: ["croc", "wormhole", "magic-wormhole", "sendme", "ffsend", "portal", "transfer.sh"], verbs: /^(send|upload|share|ul)$/ },
+  { id: "tailnet", programs: ["tailscale"], verbs: /^file$/ },
+  { id: "cluster", programs: ["kubectl", "oc"], verbs: /^(create|cp)$/ },
 ];
 
 /** bash's (and zsh's, ksh's) network redirections: a write or read of one is a connection (round 5 step 2). */
 export const NETWORK_FILES = /^\/dev\/(tcp|udp|sctp)\//;
 
 /** Every program some sink row names, the transfer tools' too: what a line the reader can't follow is checked for. */
-const SINK_PROGRAMS: ReadonlySet<string> = new Set([...NETWORK_SINKS.flatMap((row) => row.programs), ...TRANSFER_PROGRAMS()]);
+export const SINK_PROGRAMS: ReadonlySet<string> = new Set([...NETWORK_SINKS.flatMap((row) => row.programs), ...TRANSFER_PROGRAMS()]);
 
 /** Whether a command is a network sink (`NETWORK_SINKS`, `TRANSFERS`): the row's id, or undefined. */
 export function sinkOf(view: CommandView): string | undefined {
@@ -1755,7 +2028,7 @@ export function sinkOf(view: CommandView): string | undefined {
  * `~/.netrc`, `~/.config/gh/**`, …) and a credential's variable when its name says so (`secretName`).
  * Such a command is a source for the line's other commands: `aws configure get …` alone prints it here.
  */
-export const SECRET_SOURCES: readonly { id: string; program: string; verbs: readonly (string | RegExp)[]; bare?: boolean; options?: RegExp }[] = [
+export const SECRET_SOURCES: readonly { id: string; program: string; verbs: readonly (string | RegExp)[]; bare?: boolean; options?: RegExp; with?: RegExp }[] = [
   { id: "the keychain", program: "security", verbs: [/^(find-generic-password|find-internet-password|dump-keychain|export|find-key|find-certificate|unlock-keychain)$/] },
   { id: "the environment", program: "printenv", verbs: [] },
   { id: "the environment", program: "env", verbs: [] },
@@ -1783,10 +2056,62 @@ export const SECRET_SOURCES: readonly { id: string; program: string; verbs: read
   { id: "a stored secret", program: "secret-tool", verbs: ["lookup"] },
   { id: "a stored token", program: "npm", verbs: ["token"] },
   { id: "a stored token", program: "heroku", verbs: ["auth:token"] },
+  // Final pass: commands whose output is secret material, by what they print, not by program: a private key's
+  // export (any key tool), a stored secret's value or a token minted from stored credentials (cloud CLIs, password
+  // managers, a cluster's secrets and raw config). `with`: an option the verbs need (`kubectl config view --raw`).
+  { id: "a private key", program: "gpg", verbs: [], options: /^--export-secret-(sub)?keys(=|$)/ },
+  { id: "a private key", program: "gpg2", verbs: [], options: /^--export-secret-(sub)?keys(=|$)/ },
+  { id: "a private key", program: "gpgsm", verbs: [], options: /^--export-secret-key-(p12|p8|raw)(=|$)/ },
+  { id: "a stored token", program: "gh", verbs: ["auth", "status"], with: /^(-t|--show-token)$/ },
+  { id: "a stored credential", program: "kubectl", verbs: ["config", "view"], with: /^--raw$/ },
+  { id: "a stored secret", program: "kubectl", verbs: ["get", /^(secret|secrets)(\/.+)?$/] },
+  { id: "a stored secret", program: "oc", verbs: ["extract", /^(secret|secrets)\/.+$/] },
+  { id: "a stored token", program: "aws", verbs: ["ecr", /^get-login-password$/] },
+  { id: "a stored token", program: "aws", verbs: ["sts", /^(get-session-token|assume-role|get-federation-token)$/] },
+  { id: "a stored secret", program: "aws", verbs: ["secretsmanager", "get-secret-value"] },
+  { id: "a stored secret", program: "aws", verbs: ["ssm", /^get-parameters?$/], with: /^--with-decryption$/ },
+  { id: "a stored secret", program: "gcloud", verbs: ["secrets", "versions", "access"] },
+  { id: "a stored token", program: "gcloud", verbs: ["auth", "print-refresh-token"] },
+  { id: "a stored secret", program: "az", verbs: ["keyvault", "secret", /^(show|download)$/] },
+  { id: "a stored secret", program: "bw", verbs: ["get"] },
+  { id: "a stored secret", program: "lpass", verbs: ["show"] },
+  { id: "a stored secret", program: "gopass", verbs: [/^(show|cat)$/] },
+  { id: "a stored secret", program: "sops", verbs: [], options: /^(-d|--decrypt)$/ },
+  { id: "a stored secret", program: "ansible-vault", verbs: [/^(view|decrypt)$/] },
+  { id: "a stored credential", program: "docker-credential-osxkeychain", verbs: ["get"] },
+  { id: "a stored credential", program: "docker-credential-desktop", verbs: ["get"] },
 ];
 
+/**
+ * The service that issued a stored credential, by the program that prints it (data, iteration 4): its token used for
+ * that service is the tool's own credential at work, not a secret leaving for elsewhere.
+ */
+export const CREDENTIAL_ISSUERS: Readonly<Record<string, RegExp>> = {
+  gh: /^(?:api\.)?github\.com$|^(?:[\w-]+\.)*githubusercontent\.com$/i,
+  glab: /^(?:[\w-]+\.)*gitlab\.com$/i,
+  gcloud: /^(?:[\w-]+\.)*(?:googleapis\.com|google\.com)$/i,
+  az: /^(?:[\w-]+\.)*(?:azure\.com|microsoft\.com|windows\.net|microsoftonline\.com)$/i,
+  aws: /^(?:[\w-]+\.)*amazonaws\.com$/i,
+  npm: /^registry\.npmjs\.org$/i,
+  heroku: /^(?:[\w-]+\.)*heroku\.com$/i,
+};
+
+/** The issuer of the credential a printer prints (`CREDENTIAL_ISSUERS`), when the table knows it. */
+export function issuerOf(view: CommandView): RegExp | undefined {
+  return credentialSource(view) === undefined ? undefined : CREDENTIAL_ISSUERS[view.program];
+}
+
+/** Whether every URL a command's words name is a host of `issuer`, and it names one. */
+export function onlyReaches(words: readonly string[], issuer: RegExp): boolean {
+  const hosts = words.flatMap((word) => {
+    const host = /^[a-z][\w+.-]*:\/\/(?:[^@/]*@)?([^/:?#]+)/i.exec(word)?.[1];
+    return host ? [host] : [];
+  });
+  return hosts.length > 0 && hosts.every((host) => issuer.test(host));
+}
+
 /** The source row a command is, by `SECRET_SOURCES` (its program and leading positionals). */
-function credentialSource(view: CommandView): string | undefined {
+export function credentialSource(view: CommandView): string | undefined {
   for (const row of SECRET_SOURCES) {
     if (row.program !== view.program) continue;
     if (row.bare || row.options) {
@@ -1801,6 +2126,7 @@ function credentialSource(view: CommandView): string | undefined {
       if (view.positionals.length === 0) return row.id;
       continue;
     }
+    if (row.with && !view.args.some((word) => word !== UNKNOWN && row.with!.test(word))) continue;
     if (row.verbs.every((verb, i) => {
       const word = view.positionals[i];
       return word !== undefined && (word === UNKNOWN || (typeof verb === "string" ? word === verb : verb.test(word)));
@@ -1857,8 +2183,41 @@ const TOUCHES_ONLY: ReadonlySet<string> = new Set([...NAME_ONLY, "chmod", "chown
 /** A socat address that is a file it reads (round 5 step 2). */
 const SOCAT_FILE = /^(?:FILE|OPEN|GOPEN|READ):([^,]+)/i;
 
-/** Options whose value is a key or certificate a connection is made with: used, not read out. */
-const USES_KEY = /^(-i|-E|--identity|--key|--cert|--cacert|--capath|--client-cert|--pubkey|--proxy-cert|--proxy-key|--proxy-cacert)$/;
+/**
+ * Options whose value is a key or certificate a connection is made with: used, not read out (round 6, W4a:
+ * per program, as data). Any other option's value, and every positional, `@file` or `< file`, is a file the
+ * command reads (`fileWords`): `base64 -i KEY`, `openssl enc -in KEY`, `gpg --input=KEY` read it, whatever the
+ * flag; only these programs' own key options, and the programs that only stat or list (`TOUCHES_ONLY`), don't.
+ */
+export const KEY_OPTIONS: Readonly<Record<string, readonly string[]>> = {
+  ssh: ["-i", "-F"],
+  scp: ["-i", "-F"],
+  sftp: ["-i", "-F"],
+  autossh: ["-i", "-F"],
+  mosh: ["-i"],
+  "ssh-copy-id": ["-i"],
+  rsync: ["-e"],
+  sshfs: ["-o"],
+  curl: ["-E", "--cert", "--key", "--cacert", "--capath", "--pubkey", "--proxy-cert", "--proxy-key", "--proxy-cacert", "--crlfile"],
+  wget: ["--certificate", "--private-key", "--ca-certificate", "--ca-directory"],
+  http: ["--cert", "--cert-key", "--verify"],
+  https: ["--cert", "--cert-key", "--verify"],
+  xh: ["--cert", "--cert-key", "--verify"],
+  git: ["-i"],
+  psql: ["--sslcert", "--sslkey", "--sslrootcert"],
+  mysql: ["--ssl-cert", "--ssl-key", "--ssl-ca"],
+  kubectl: ["--client-certificate", "--client-key", "--certificate-authority", "--kubeconfig"],
+  docker: ["--tlscert", "--tlskey", "--tlscacert"],
+  gcloud: ["--key-file"],
+  aws: ["--ca-bundle"],
+  openvpn: ["--key", "--cert", "--ca"],
+};
+
+/** Whether `option` (with `=value` read off) is a key option of `program` (`KEY_OPTIONS`). */
+export function usesKey(program: string, option: string): boolean {
+  const name = option.replace(/=.*$/, "");
+  return /IdentityFile/i.test(option) || (KEY_OPTIONS[basename(program)] ?? []).includes(name);
+}
 
 /** Options of the downloaders whose value is a file they write. */
 const WRITES_OUTPUT = /^(-o|-O|--output|--output-document|--output-file|--output-dir|-D|--dump-header|-c|--cookie-jar|--trace|--trace-ascii|--stderr|-P|--directory-prefix|-a|--append-output)$/;
@@ -1916,10 +2275,15 @@ function fileWords(command: RiskCommand, view: CommandView, patterns: string[] =
   const url = (word: string) => /^[a-z][\w+.-]*:\/\//i.test(word);
   const last = view.positionals.at(-1);
   const written = last !== undefined && last !== UNKNOWN && !url(last) && view.positionals.slice(0, -1).some((word) => word !== UNKNOWN && url(word)) ? view.args.lastIndexOf(last) : -1;
+  // A command line an option runs (`git -c core.sshCommand="ssh -i KEY"`, code.ts `optionCommands`) is read as a line
+  // of its own (core.ts `codeFindings`, where `ssh -i` uses a key); it names no file this program reads (round 6 step 2).
+  const runLines = optionCommands(view.words, UNKNOWN);
   for (const [at, word] of view.args.entries()) {
     const before = view.args[at - 1] ?? "";
-    if (USES_KEY.test(before) || /IdentityFile/i.test(before)) continue;
-    if (DOWNLOADERS.has(view.program) && WRITES_OUTPUT.test(before)) continue;
+    if (usesKey(view.program, before)) continue;
+    if (runLines.some((line) => word === line || word.endsWith(`=${line}`))) continue;
+    // (Iteration 4: a bundle ending in an output flag, `-sSLo FILE`, gives the file to that flag.)
+    if (DOWNLOADERS.has(view.program) && (WRITES_OUTPUT.test(before) || /^-[a-zA-Z]*[oO]$/.test(before))) continue;
     if (at === written && !before.startsWith("-")) continue;
     if (word === UNKNOWN) {
       // `~/.ssh/id_*`: every path it may stand for (resolve.ts), when where it starts is known and local.
@@ -1932,6 +2296,11 @@ function fileWords(command: RiskCommand, view: CommandView, patterns: string[] =
     // `--post-file=f`, `--upload-file=f`: an option's attached file (round 5 step 2).
     const attached = /^(--[\w-]+)=(.+)$/.exec(word);
     if (attached && DOWNLOADERS.has(view.program) && TAKES_FILE.test(attached[1]) && !WRITES_OUTPUT.test(attached[1])) {
+      out.push(attached[2]);
+      continue;
+    }
+    // Any other program's `--input=FILE`, `-in=FILE`: the value is a file it reads, unless it is a key option (W4a).
+    if (attached && !DOWNLOADERS.has(view.program) && !usesKey(view.program, attached[1]) && /[/~.]/.test(attached[2]) && !/^[a-z][\w+.-]*:\/\//i.test(attached[2])) {
       out.push(attached[2]);
       continue;
     }
@@ -2226,10 +2595,13 @@ export function lineFlow(given: readonly RiskCommand[], facts: RiskFacts, expand
     const remote = /^(ssh|mosh)$/.test(view.program) ? sshHostIndex(words) : undefined;
     if (words.some((word, at) => word !== UNKNOWN && (remote === undefined || at <= remote) && namesSecret(word))) secret ??= "a value in this line";
   }
-  // A stored credential printed for another command that sends (`gh auth token | curl -d @- …`).
+  // A stored credential printed for another command that sends (`gh auth token | curl -d @- …`). Not when every
+  // other sink reaches only the service that issued it (iteration 4: `curl -H "Authorization: Bearer $(gh auth token)"
+  // https://api.github.com/…`): a tool's credential used for its own service, the judge's.
   if (secret === undefined) {
     for (const printer of printers) {
-      if ([...sinks].some((other) => other !== printer)) {
+      const issuer = issuerOf(viewOf(printer.words));
+      if ([...sinks].some((other) => other !== printer && !(issuer && onlyReaches(other.words, issuer)))) {
         secret = credentialSource(viewOf(printer.words));
         break;
       }
@@ -2313,13 +2685,8 @@ export function assessOpaque(line: string, facts: RiskFacts, remote = false, cwd
   // Its words with `$` are unknown: look for the installed app in its text
   // instead. Only a line that writes where it names it is dangerous; one
   // that reads it is local work like any other read.
-  const home = facts.installedApp ? facts.classify("~", undefined)?.path : undefined;
-  const installed = installedMention(line, facts, home);
-  if (installed && mentionWrites(home === undefined ? line : line.split(home).join("~"), installed)) {
-    const kind = `changes the installed Cypher app or its data (${installed})`;
-    return { tier: "danger", kind, key: "installed Cypher app" };
-  }
-  // The permission system named anywhere in it (`~`, `$HOME`, a glob under it), where the line writes: the floor.
+  // The permission system named anywhere in it (`~`, `$HOME`, a glob under it), where the line writes: the floor. Checked
+  // before the installed app (final pass): the permission system lives inside `~/.cypher`, and a floor finding comes first.
   const self = facts.classify("~", undefined)?.path;
   if (!remote && facts.permissionSystem && self !== undefined) {
     for (const match of line.matchAll(SYSTEM_FILE)) {
@@ -2329,6 +2696,12 @@ export function assessOpaque(line: string, facts: RiskFacts, remote = false, cwd
       const could = classification && (facts.permissionSystem(classification.path) || (glob && facts.couldBe?.(escapeGlob(classification.path), undefined, { subtree: true }).permissionSystem));
       if (could && mentionWrites(line, match[0])) return { tier: "danger", kind: `changes the permission system itself (${match[0]})`, key: "permission-system", floor: true };
     }
+  }
+  const home = facts.installedApp ? facts.classify("~", undefined)?.path : undefined;
+  const installed = installedMention(line, facts, home);
+  if (installed && mentionWrites(home === undefined ? line : line.split(home).join("~"), installed)) {
+    const kind = `changes the installed Cypher app or its data (${installed})`;
+    return { tier: "danger", kind, key: "installed Cypher app" };
   }
   const segments: string[][] = [];
   const pieces = line.split(/;|&&|\|\||\||&|\(|\)|`|\$\(|\n|<|>/);
@@ -2342,7 +2715,7 @@ export function assessOpaque(line: string, facts: RiskFacts, remote = false, cwd
   const sender = remote ? undefined : all.find((word) => SINK_PROGRAMS.has(basename(word)));
   if (sender) {
     const file = all.find((word, at) => {
-      if (word === UNKNOWN || word.startsWith("-") || USES_KEY.test(all[at - 1] ?? "") || /IdentityFile/i.test(all[at - 1] ?? "")) return false;
+      if (word === UNKNOWN || word.startsWith("-") || (sender !== undefined && usesKey(sender, all[at - 1] ?? ""))) return false;
       // The word, or the file a sender reads it as (`@.env`, `key=@file`), from where the line runs.
       const names = [word, word.replace(/^[^=@]*=?@/, "")].filter((name, index, list) => name && list.indexOf(name) === index);
       return names.some((name) => {

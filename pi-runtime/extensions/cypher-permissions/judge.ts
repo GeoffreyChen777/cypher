@@ -30,8 +30,19 @@ export interface JudgeEvidence {
   denials?: readonly string[];
   /** What the line acts on that another chat or task made or holds (core.ts `notThisTask`), in words. */
   notThisTask?: readonly string[];
+  /** What it deletes or stops that no ledger on this machine accounts for (core.ts `originUnknown`), in words. */
+  originUnknown?: readonly string[];
+  /**
+   * What it destroys that another chat made inside this chat's own working tree, which task that chat belongs to
+   * being unknown (core.ts `otherTaskOf` `review`, round 6 narrowing), in words. Held for review, not the floor.
+   */
+  otherChats?: readonly string[];
   /** Code it runs that Cypher can't read (round 5, code.ts): built or decoded at run time, obfuscated, a binary, a script not there. */
   opaqueCode?: readonly string[];
+  /** Project scripts the line runs, with their lines (core.ts `scriptFinding`, final pass). */
+  projectScripts?: readonly string[];
+  /** What Cypher couldn't read of the line (code set up to run later, a function's arguments, a sourced file's variables). */
+  unread?: readonly string[];
   /** Paths it writes whose start is known only when it runs and that could be the permission system (round 5, risk.ts `unresolvedWrites`). */
   unresolved?: readonly string[];
 }
@@ -267,6 +278,10 @@ function evidenceLines(request: JudgeRequest): string[] {
   }
   for (const denial of evidence.denials ?? []) lines.push(`- the owner denied a request like it in this chat: ${denial}. Their Deny is their decision: ask ("retracted") about the same action unless their words since ask for this target`);
   for (const item of evidence.notThisTask ?? []) lines.push(`- not this task's: ${item}. Ask ("other-task") unless the owner's words name it`);
+  for (const item of evidence.originUnknown ?? []) lines.push(`- who made ${item}: unknown. This chat's ledger doesn't hold it and no other chat's ledger names it, so Cypher can't tell whether it is this task's, another task's, or made by hand. It isn't shown to be this task's: approve only when the owner's words or the conversation account for this one (it is named, or it is plainly what they asked to remove); else ask ("other-task" or "destroys-data")`);
+  for (const item of evidence.otherChats ?? []) lines.push(`- another chat's work in this chat's working tree: ${item}. Which task that chat belongs to is unknown: sessions of one plan share a worktree. Approve when the request and the conversation show it is this task's own cleanup (its plan, its scratch, what it was asked to do); ask ("other-task") when nothing here accounts for removing another chat's work`);
+  for (const item of evidence.projectScripts ?? []) lines.push(`- project script: ${item}`);
+  for (const item of evidence.unread ?? []) lines.push(`- Cypher couldn't read: ${item}`);
   for (const item of evidence.opaqueCode ?? []) lines.push(`- opaque code: ${item}. Cypher can't tell what it does: approve only when the owner's words account for running it; else ask ("opaque-code")`);
   for (const item of evidence.unresolved ?? []) lines.push(`- path known only when it runs: ${item}. Approve when the line or the conversation shows where it goes (a variable it sets, this task's own folders); else ask ("opaque-code")`);
   return lines;

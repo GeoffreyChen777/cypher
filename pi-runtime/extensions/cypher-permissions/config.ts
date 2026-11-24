@@ -7,6 +7,7 @@
 
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isCommandRule, patternError } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
 
@@ -101,6 +102,33 @@ export const DEFAULT_SENSITIVE: readonly string[] = [
   "~/.config/gh/**",
   "~/.git-credentials",
   "~/.config/git/credentials",
+  // Iteration 3 (names; what a file holds is read too: defaults.ts `secretByContent`).
+  "~/.config/sops/age/keys.txt",
+  "~/.android/adbkey",
+  "~/.gem/credentials",
+  "~/.m2/settings.xml",
+  "~/.m2/settings-security.xml",
+  "~/.config/glab-cli/config.yml",
+  "~/.config/configstore/*.json",
+  "~/.ngrok2/ngrok.yml",
+  "~/.config/ngrok/ngrok.yml",
+  // Iteration 2: tools' own credential stores (a token or password file, by the tool that writes it).
+  "~/.cargo/credentials",
+  "~/.cargo/credentials.toml",
+  "~/.vault-token",
+  "~/.config/hub",
+  "~/.terraform.d/credentials.tfrc.json",
+  "~/.pgpass",
+  "~/.my.cnf",
+  "~/.s3cfg",
+  "~/.config/rclone/rclone.conf",
+  "~/.cache/huggingface/token",
+  "~/.huggingface/token",
+  "~/.claude/.credentials.json",
+  "~/.codex/auth.json",
+  "~/.config/op/**",
+  "~/.password-store/**",
+  "~/.local/share/keyrings/**",
   "~/Library/Keychains/**",
   "~/Library/Cookies/**",
   "~/Library/Application Support/Google/Chrome/**",
@@ -130,6 +158,18 @@ export const DEFAULT_SENSITIVE: readonly string[] = [
   "**/*.pfx",
   "**/*.keystore",
   "**/*.jks",
+  // Iteration 2: project files that hold secrets by their tool's convention (direnv, Cloudflare's local vars, a cloud
+  // service account's key). Not `*.tfvars`, which as often holds plain settings: the judge's.
+  "**/.envrc",
+  // A file named for its environment (`prod.env`, `secrets.env`); App Store Connect keys. (A project's `.npmrc` is
+  // as often plain registry settings that npm reads in the sandbox: a token in it is found by its content.)
+  "**/*.env",
+  "!**/*.example.env",
+  "!**/*.sample.env",
+  "**/*.p8",
+  "**/.dev.vars",
+  "**/service-account*.json",
+  "**/*-service-account.json",
   // Cypher's and Pi's own credentials and other chats' transcripts. Not the
   // files the user attached to a chat (`uploads/`): they are there to be read.
   "~/.cypher*/session.json",
@@ -213,7 +253,26 @@ export const DEFAULT_PROTECTED: readonly string[] = [
  *
  * Reading them is ordinary work (a diagnosis reads the audit log).
  */
+/** This extension's own files, where this process loaded them from (`…/extensions/cypher-permissions{.ts,/**}`). */
+const SELF_EXTENSION: readonly string[] = (() => {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    let real = here;
+    try {
+      real = realpathSync.native(here);
+    } catch {}
+    return [`${real}/**`, `${dirname(real)}/cypher-permissions.ts`];
+  } catch {
+    return [];
+  }
+})();
+
 export const DEFAULT_PERMISSION_SYSTEM: readonly string[] = [
+  // Iteration 2: the installed Runtime's copy of the permission extension (the Runtime itself is the installed app's).
+  "~/.cypher/pi-runtime/current/**/extensions/cypher-permissions.ts",
+  "~/.cypher/pi-runtime/current/**/extensions/cypher-permissions/**",
+  "~/.cypher/pi-runtime/versions/*/**/extensions/cypher-permissions.ts",
+  "~/.cypher/pi-runtime/versions/*/**/extensions/cypher-permissions/**",
   // Any Cypher instance's or Pi's policy, settings, extensions, audit and sessions.
   "~/.cypher*/pi-runtime/agent/permissions.json",
   "~/.cypher*/*/pi-runtime/agent/permissions.json",
@@ -270,6 +329,8 @@ export function permissionSystemPatterns(agentDir: string | undefined): string[]
       `${dir}/sessions/**`,
       `${dir}/permission-audit.jsonl`,
       `${dir}/cypher-permissions/**`,
+      // Iteration 2: the extension that enforces it, as this process loaded it (wherever the Runtime is).
+      ...SELF_EXTENSION,
       ...DEFAULT_PERMISSION_SYSTEM,
     ]),
   ];

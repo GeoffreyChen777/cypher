@@ -47,10 +47,15 @@ export type EntityKind =
   | "package"
   | "container"
   | "image"
-  | "resource";
+  | "resource"
+  | "namespace"
+  | "context"
+  | "cluster"
+  | "bucket"
+  | "project";
 
 export const ENTITY_KINDS: readonly EntityKind[] = [
-  "repo", "remote", "branch", "pr", "tag", "release", "path", "worktree", "process", "simulator", "host", "package", "container", "image", "resource",
+  "repo", "remote", "branch", "pr", "tag", "release", "path", "worktree", "process", "simulator", "host", "package", "container", "image", "resource", "namespace", "context", "cluster", "bucket", "project",
 ];
 
 /** Kinds that live in a repository: qualifying them with the current one changes nothing. */
@@ -380,8 +385,24 @@ function relate(a: Entity, b: Entity): Relation {
       if (b.name.startsWith(`${a.name}:`) || b.name.startsWith(`${a.name}@`)) return "contains";
       if (a.name.startsWith(`${b.name}:`) || a.name.startsWith(`${b.name}@`)) return "contained";
       return "unrelated";
+    // Round 6 (W2): a namespace holds the resources scoped to it; the others are names of their own kind.
+    case "namespace":
+      if (b.kind === "namespace") return a.name === b.name ? "same" : "unrelated";
+      if (b.kind === "resource") return b.scope === undefined ? "unknown" : b.scope === a.name ? "contains" : "unrelated";
+      return "unrelated";
+    case "context":
+    case "cluster":
+    case "project":
+      return b.kind === a.kind ? (a.name.toLowerCase() === b.name.toLowerCase() ? "same" : "unrelated") : "unrelated";
+    case "bucket":
+      if (b.kind !== "bucket") return "unrelated";
+      if (a.name === b.name) return "same";
+      if (b.name.startsWith(`${a.name}/`)) return "contains";
+      if (a.name.startsWith(`${b.name}/`)) return "contained";
+      return "unrelated";
     case "container":
     case "resource":
+      if (a.kind === "resource" && b.kind === "namespace") return flip(relate(b, a));
       if (b.kind !== a.kind) return "unrelated";
       if ((a.type ?? "") !== (b.type ?? "") && a.type && b.type) return "unrelated";
       if ((a.scope ?? "") !== (b.scope ?? "")) return a.scope && b.scope ? "unrelated" : "unknown";

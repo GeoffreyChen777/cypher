@@ -412,7 +412,9 @@ test("property: `A=1 cmd`, `env A=1 cmd` and `cmd` act on the same targets when 
 });
 
 test("evaluator: functions defined in the line run their bodies where they are called", () => {
-  assert.deepEqual(words('f() { rm -rf "$1"; git push; }; f a; f b'), [["rm", "-rf", U], ["git", "push"], ["rm", "-rf", U], ["git", "push"]]);
+  // A call's words are its body's positional parameters (final pass); one known only when it runs stays unknown.
+  assert.deepEqual(words('f() { rm -rf "$1"; git push; }; f a; f b'), [["rm", "-rf", "a"], ["git", "push"], ["rm", "-rf", "b"], ["git", "push"]]);
+  assert.deepEqual(words('f() { rm -rf "$1" $2; }; f "$X"'), [["rm", "-rf", U, U]]);
   assert.deepEqual(words("function g { ls; }; g"), [["ls"]]);
   assert.deepEqual(words("function g() {\n  ls\n}\ng"), [["ls"]]);
   // A name shadowing a program is the function.

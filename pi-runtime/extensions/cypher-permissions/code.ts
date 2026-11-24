@@ -58,7 +58,7 @@ export interface Interpreter {
 
 export const INTERPRETERS: readonly Interpreter[] = [
   { language: "python", programs: /^(python|python\d(\.\d+)?|pypy\d?)$/, inline: ["-c"], clusters: "c", values: ["-W", "-X", "--check-hash-based-pycs"], modules: ["-m"], stdin: true, extensions: [".py"] },
-  { language: "javascript", programs: /^(node|nodejs)$/, inline: ["-e", "--eval", "-p", "--print"], clusters: "ep", loads: ["-r", "--require", "--import"], values: ["-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--env-file", "--title", "--max-old-space-size"], stdin: true, extensions: [".js", ".mjs", ".cjs"] },
+  { language: "javascript", programs: /^(node|nodejs|tsx|ts-node|esno|esrun)$/, inline: ["-e", "--eval", "-p", "--print"], clusters: "ep", loads: ["-r", "--require", "--import"], values: ["-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--env-file", "--title", "--max-old-space-size"], stdin: true, extensions: [".js", ".mjs", ".cjs"] },
   { language: "javascript", programs: /^deno$/, inline: [], subcommands: { eval: "inline", run: "script" }, values: ["--config", "-c", "--import-map", "--location", "--seed", "--v8-flags", "--env-file"], stdin: false, extensions: [".ts", ".js", ".mjs", ".tsx"] },
   { language: "javascript", programs: /^bun$/, inline: ["-e", "--eval", "-p", "--print"], subcommands: { run: "script" }, values: ["--cwd", "--config", "-c", "--env-file", "-r", "--preload"], stdin: false, extensions: [".ts", ".js", ".mjs", ".tsx"] },
   { language: "javascript", programs: /^(tsx|ts-node)$/, inline: ["-e", "--eval", "-p", "--print"], values: ["-r", "--require", "--tsconfig"], stdin: false, extensions: [".ts", ".tsx", ".js", ".mjs"] },
@@ -253,7 +253,27 @@ export type Capability = "network" | "spawn" | "read" | "write" | "env" | "home"
  * (`requests`, `http.client`, `Net::HTTP`, `curl_init`); `(` at its end asks for a call. `"*"` rows
  * hold for every language.
  */
+/**
+ * Calls that delete a file or a folder, per language (final pass, data): one table, read both as writes (the
+ * permission-system floor for code gates on writes) and as destroys (core.ts `CODE_DELETES`: denials, the other-task floor).
+ */
+export const DELETE_NAMES: Readonly<Partial<Record<Language, readonly string[]>>> = {
+  python: ["shutil.rmtree", "rmtree", "os.remove", "os.unlink", "os.rmdir", "os.removedirs", ".unlink(", ".rmdir(", "send2trash"],
+  javascript: ["rmSync", "rmdirSync", "unlinkSync", "fs.rm", "fs.rmdir", "fs.unlink", "fs.promises.rm", "fs.promises.unlink", "fs.promises.rmdir", "Deno.remove", "Deno.removeSync", "rimraf", "fse.remove", "fs.remove"],
+  ruby: ["FileUtils.rm", "FileUtils.rm_r", "FileUtils.rm_rf", "FileUtils.remove_dir", "FileUtils.remove_entry", "File.delete", "File.unlink", "Dir.rmdir", "Dir.delete"],
+  perl: ["unlink", "rmdir", "rmtree", "remove_tree", "File::Path"],
+  php: ["unlink(", "rmdir("],
+  powershell: ["Remove-Item", "rm ", "del ", "rmdir "],
+  swift: ["removeItem", "trashItem"],
+  julia: ["rm("],
+  lua: ["os.remove"],
+  r: ["unlink(", "file.remove"],
+  tcl: ["file delete"],
+};
+
 export const CAPABILITIES: readonly { capability: Capability; languages: readonly Language[] | "*"; names: readonly string[] }[] = [
+  // Deleting is writing (final pass): the permission-system floor for code reads both.
+  ...Object.entries(DELETE_NAMES).map(([language, names]) => ({ capability: "write" as Capability, languages: [language as Language], names: names! })),
   // Reaching the network.
   { capability: "network", languages: ["python"], names: ["urllib", "urllib2", "urllib3", "urlopen", "requests", "httpx", "aiohttp", "http.client", "httplib", "socket", "smtplib", "ftplib", "telnetlib", "xmlrpc", "paramiko", "pycurl", "websocket", "websockets", "grpc", "boto3", "botocore", "asyncssh", "fabric"] },
   { capability: "network", languages: ["javascript"], names: ["fetch(", "XMLHttpRequest", "WebSocket", "EventSource", "sendBeacon", "node:http", "node:https", "node:http2", "node:net", "node:tls", "node:dgram", "require('http')", "require('https')", "require('net')", "require('tls')", "require('dgram')", 'require("http")', 'require("https")', 'require("net")', 'require("tls")', 'require("dgram")', "http.request", "https.request", "http.get", "https.get", "net.connect", "net.createConnection", "tls.connect", "axios", "node-fetch", "undici", "superagent", "needle", "got(", "ky(", "Deno.connect", "Deno.connectTls", "Bun.connect", "Bun.fetch", "socket.io-client"] },
@@ -274,7 +294,8 @@ export const CAPABILITIES: readonly { capability: Capability; languages: readonl
   { capability: "spawn", languages: ["ruby"], names: ["system(", "exec(", "spawn(", "Open3", "IO.popen", "Kernel.exec", "Kernel.system", "%x", "`", "Process.spawn", "PTY.spawn"] },
   { capability: "spawn", languages: ["perl"], names: ["system(", "system ", "exec(", "exec ", "qx", "`", "open3", "IPC::Open3", "IPC::Run", "Capture::Tiny"] },
   { capability: "spawn", languages: ["php"], names: ["shell_exec", "exec(", "system(", "passthru", "proc_open", "popen(", "`", "pcntl_exec"] },
-  { capability: "spawn", languages: ["applescript"], names: ["do shell script", "doShellScript", "NSTask", "Application('Terminal')"] },
+  // JXA's form too (iteration 2: `app.doShellScript("…")`, a member call).
+  { capability: "spawn", languages: ["applescript"], names: ["do shell script", "doShellScript", ".doShellScript(", "NSTask", "Application('Terminal')"] },
   { capability: "spawn", languages: ["lua"], names: ["os.execute", "io.popen"] },
   { capability: "spawn", languages: ["r"], names: ["system(", "system2(", "shell(", "processx"] },
   { capability: "spawn", languages: ["tcl"], names: ["exec", "open |", "spawn"] },
@@ -348,23 +369,133 @@ export const CAPABILITIES: readonly { capability: Capability; languages: readonl
   { capability: "dynamic", languages: ["swift"], names: ["dlopen", "dlsym", "NSClassFromString", "base64Encoded"] },
 ];
 
+/**
+ * The home folder in any syntax, across shells and languages (round 6, W4b): one table of forms, not a name per
+ * language. A literal that starts with one (`"$ENV{HOME}/.pypirc"`, `f"{Path.home()}/.netrc"`,
+ * `` `${process.env.HOME}/.npmrc` ``, `"#{Dir.home}/.aws"`) is read as `~/…`, and code that uses any of them
+ * finds the home folder (its other literals may be home-relative).
+ */
+export const HOME_FORMS: readonly RegExp[] = [
+  /\$\{?HOME\}?(?![\w])/,
+  /\$\{?(?:env:)?(?:HOME|USERPROFILE)\}?/i,
+  /\$ENV\s*\{\s*['"]?HOME['"]?\s*\}/,
+  /%(?:HOME|USERPROFILE)%/i,
+  /\bENV\s*\[\s*['"]HOME['"]\s*\]/,
+  /\bENV\s*\.fetch\s*\(\s*['"]HOME['"]/,
+  /\bENVIRON\s*\[\s*['"]HOME['"]\s*\]/,
+  /\b(?:os\.)?environ(?:\.get)?\s*[[(]\s*['"]HOME['"]\s*[\])]/,
+  /\b(?:os\.|Sys\.|_?w?)?getenv\s*\(\s*['"]HOME['"]\s*\)/i,
+  /\b(?:process|Bun)\.env(?:\.HOME\b|\s*\[\s*['"]HOME['"]\s*\])/,
+  /\bDeno\.env\.get\s*\(\s*['"]HOME['"]\s*\)/,
+  /\b(?:os\.)?homedir\s*\(\s*\)/,
+  /\bPath\.home\s*\(\s*\)/,
+  /\bexpanduser\s*\(\s*['"]~['"]\s*\)/,
+  /\bDir\.home\b/,
+  /\bNSHomeDirectory\s*\(\s*\)/,
+  /\bFileManager\.default\.homeDirectoryForCurrentUser\b/,
+  /\$_SERVER\s*\[\s*['"]HOME['"]\s*\]/,
+  /\[Environment\]::GetFolderPath\(\s*['"]?UserProfile['"]?\s*\)/i,
+  /\bSystem\.getProperty\s*\(\s*['"]user\.home['"]\s*\)/,
+  /\bstd::env::home_dir\s*\(\s*\)|\bdirs::home_dir\s*\(\s*\)|\bos\.UserHomeDir\s*\(\s*\)/,
+  // Round 6 step 2: Tcl's `$env(HOME)`, `$::env(HOME)`.
+  /\$(?:::)?env\(HOME\)/,
+];
+
+/** `NAME = <home form>` (`h, _ := os.UserHomeDir()`, `home = Path.home()`, `set h $env(HOME)`): a name the code keeps the home folder in. */
+const HOME_HELD = new RegExp(`(?:^|[\\s;({])(?:set\\s+|(?:my|local|let|const|var)\\s+)?\\$?([A-Za-z_]\\w*)(?:\\s*,\\s*[A-Za-z_]\\w*)*\\s*(?::=|=|\\s)\\s*(?:${HOME_FORMS.map((form) => form.source).join("|")})`, "g");
+
+/** An interpolation around a home form inside a literal: `#{…}`, `${…}`, `{…}` (f-strings), `$(…)`. */
+const HOME_AT_START = new RegExp(`^(?:#\\{|\\$\\{|\\{|\\$\\()?\\s*(?:${HOME_FORMS.map((form) => form.source).join("|")})\\s*[})]?`);
+
+/** A literal's text with a leading home form read as `~` (`"$ENV{HOME}/.pypirc"` → `~/.pypirc`); else as it is. */
+export function homeRelative(text: string): string {
+  const match = HOME_AT_START.exec(text);
+  if (!match || match[0].length === 0) return text;
+  const rest = text.slice(match[0].length);
+  return rest === "" || rest.startsWith("/") || rest.startsWith("\\") ? `~${rest.replace(/^\\/, "/")}` : text;
+}
+
+/** A home form joined to what follows it (`os.environ['HOME'] + '/.pypirc'`, `path.join(os.homedir(), '.npmrc')`, `Path.home() / '.netrc'`). */
+const HOME_JOINED = new RegExp(`(?:${HOME_FORMS.map((form) => form.source).join("|")})\\s*(?:\\+|\\.\\.|\\.|,|/|&|\\.\\s*)\\s*$`);
+
+/** The literals of code that follow a home form they are joined to, as `~/…`. */
+export function homeJoined(code: string, literals: readonly Literal[]): string[] {
+  const out: string[] = [];
+  // Round 6 step 2: a variable the home folder is kept in is a home form too, and the literals a join gives after it
+  // are one path (`filepath.Join(h, ".ssh", "id_ed25519")`), as is a literal right after it (awk's `ENVIRON["HOME"] "/x"`).
+  const held = [...code.matchAll(HOME_HELD)].map((match) => match[1]).filter((name) => name.length >= 1);
+  const joined = held.length ? new RegExp(`(?:${[...HOME_FORMS.map((form) => form.source), ...held.map((name) => `(?<![\\w.])\\$?${name}(?![\\w(])`)].join("|")})\\s*(?:\\+|\\.\\.|\\.|,|/|&)?\\s*$`) : HOME_JOINED_LOOSE;
+  for (const [index, literal] of literals.entries()) {
+    const before = code.slice(Math.max(0, literal.at - 120), literal.at);
+    if (!joined.test(before) || !literal.text || /^[a-z][\w+.-]*:\/\//i.test(literal.text)) continue;
+    let path = literal.text.replace(/^[/\\]+/, "");
+    // The literals after it in the same join, separated by a comma (or a separator literal) — only when the home form
+    // itself is a join's argument (`join(h, '.ssh', 'id')`). After a concatenation (`homedir() + '/x'`), the next
+    // comma-separated literal is the call's next argument (`writeFileSync(h + '/x', '{}')`), no part of the path (final pass).
+    const separator = /(\+|\.\.|\.|,|\/|&)?\s*$/.exec(before.replace(/\s+$/, ""))?.[1];
+    for (let next = index + 1; separator === "," && next < literals.length; next++) {
+      const between = code.slice(literals[next - 1].end, literals[next].at);
+      if (!/^\s*,\s*$/.test(between) || !literals[next].text) break;
+      path += `/${literals[next].text.replace(/^[/\\]+/, "")}`;
+    }
+    out.push(`~/${path}`);
+  }
+  return out;
+}
+
+/** `HOME_JOINED` with the separator optional: juxtaposition joins too (awk, Tcl). */
+const HOME_JOINED_LOOSE = new RegExp(`(?:${HOME_FORMS.map((form) => form.source).join("|")})\\s*(?:\\+|\\.\\.|\\.|,|/|&)?\\s*$`);
+
+/** Whether code finds the home folder by any form (`HOME_FORMS`). */
+export function usesHome(code: string): boolean {
+  return HOME_FORMS.some((form) => form.test(code));
+}
+
+/**
+ * Network capability by category, in any language (round 6, W4c): raw sockets, socket devices, HTTP
+ * clients, DNS lookups, and host:port literals of another machine. With the names of `CAPABILITIES`, not
+ * instead of them: a library the table doesn't name still opens a socket, speaks HTTP or resolves a name.
+ */
+export const NETWORK_CATEGORIES: readonly { category: string; form: RegExp }[] = [
+  { category: "a raw socket", form: /\b(?:socket\s*\(|socket\.socket|Socket(?:::|\.|\s*\()|TCPSocket|UDPSocket|TcpClient|UdpClient|TCPServer|SOCK_STREAM|SOCK_DGRAM|AF_INET6?|NWConnection|net\.Dial|DatagramSocket|SocketChannel|ServerSocket|fsockopen|stream_socket_client|IO::Socket)/ },
+  { category: "a socket device", form: /\/dev\/(?:tcp|udp)\// },
+  // Iteration 2: an app driven to send what it is given (Mail, Messages, Outlook), by AppleScript or JXA.
+  { category: "an app that sends mail or messages", form: /tell\s+application\s+"(?:Mail|Messages|Microsoft Outlook|Outlook|Spark|Airmail)"[\s\S]*\bsend\b|Application\(\s*['"](?:Mail|Messages|Microsoft Outlook)['"]\s*\)[\s\S]*\.send\s*\(/ },
+  { category: "an HTTP client", form: /\b(?:Http(?:s)?(?:Client|Connection|Request|URLConnection)|HTTPS?Connection|WebClient|WebRequest|URLSession|urlopen|curl_easy|libcurl|reqwest|ureq|http\.(?:Get|Post|NewRequest)|[Hh]ttps?\.(?:get|post|put|request)\s*\()/ },
+  { category: "a DNS lookup", form: /\b(?:gethostbyname|getaddrinfo|dns\.(?:lookup|resolve\w*)|Resolv(?:::DNS)?|Net::DNS|InetAddress\.getByName|LookupHost|res_query)\b/ },
+];
+
+/** A host:port literal naming another machine (not this one): `"198.51.100.23:9001"`, `"exfil.example.com:443"`. */
+const HOST_PORT = /^(?:(?:\d{1,3}\.){3}\d{1,3}|(?:[a-z0-9-]+\.)+[a-z]{2,}|\[[0-9a-f:]+\]):\d{2,5}$/i;
+const THIS_MACHINE = /^(?:127\.|0\.0\.0\.0|localhost|\[::1\]|::1)/i;
+
+/** The network categories code uses (`NETWORK_CATEGORIES`, host:port literals). */
+export function networkCategories(code: string, literals: readonly { text: string }[]): string[] {
+  const out = NETWORK_CATEGORIES.filter((row) => row.form.test(code)).map((row) => row.category);
+  if (literals.some((literal) => HOST_PORT.test(literal.text.trim()) && !THIS_MACHINE.test(literal.text.trim()))) out.push("a host:port of another machine");
+  return out;
+}
+
 function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** A name of `CAPABILITIES` as a regex: an identifier, not part of a longer one; `(` at its end allows spaces before it. */
-function nameRegex(name: string): RegExp {
+function nameRegex(name: string, member: boolean): RegExp {
   const call = name.endsWith("(");
   const body = escapeRegex(call ? name.slice(0, -1) : name);
-  const start = /^[\w$]/.test(name) ? "(?<![\\w$.])" : "";
+  // For writes, a member call counts (`fs.rmSync`, `shutil.rmtree` read as `rmtree`; final pass). Other capabilities keep
+  // their names whole (`re.compile` is no `compile(`, `regex.exec` no `exec`).
+  const start = /^[\w$]/.test(name) ? (member ? "(?<![\\w$])" : "(?<![\\w$.])") : "";
   const end = call ? "\\s*\\(" : /[\w$]$/.test(name) ? "(?![\\w$])" : "";
   return new RegExp(`${start}${body}${end}`);
 }
 
 const NAME_CACHE = new Map<string, RegExp>();
-function nameMatches(name: string, text: string): boolean {
-  let regex = NAME_CACHE.get(name);
-  if (!regex) NAME_CACHE.set(name, (regex = nameRegex(name)));
+function nameMatches(name: string, text: string, member = false): boolean {
+  const key = `${member ? "m" : "w"}\u0000${name}`;
+  let regex = NAME_CACHE.get(key);
+  if (!regex) NAME_CACHE.set(key, (regex = nameRegex(name, member)));
   return regex.test(text);
 }
 
@@ -373,7 +504,7 @@ export function capabilityNames(text: string, language: Language, capability: Ca
   const names: string[] = [];
   for (const row of CAPABILITIES) {
     if (row.capability !== capability || (row.languages !== "*" && !row.languages.includes(language))) continue;
-    for (const name of row.names) if (nameMatches(name, text) && !names.includes(name)) names.push(name);
+    for (const name of row.names) if (nameMatches(name, text, capability === "write") && !names.includes(name)) names.push(name);
   }
   return names;
 }
@@ -486,6 +617,38 @@ const BARE_PATHS: ReadonlySet<Language> = new Set(["powershell"]);
 const MAX_ESCAPES = 8;
 
 /** What reading code found (`scanCode`). */
+/**
+ * Calls that signal a process by its pid, per language (final pass, data): what they stop is that process (the
+ * other-task floor, denials of a kill). The pid must be a literal; one known only when it runs stays the judge's.
+ */
+export const SIGNAL_CALLS: readonly { languages: readonly Language[]; pattern: RegExp }[] = [
+  { languages: ["python"], pattern: /\bos\.kill(?:pg)?\s*\(\s*(\d+)/g },
+  { languages: ["python"], pattern: /\bpsutil\.Process\s*\(\s*(\d+)\s*\)\s*\.\s*(?:kill|terminate|send_signal)/g },
+  { languages: ["javascript"], pattern: /\b(?:process|Deno)\.kill\s*\(\s*(\d+)/g },
+  { languages: ["ruby"], pattern: /\bProcess\.kill\s*\(\s*[^,()]+,\s*(\d+)/g },
+  { languages: ["perl"], pattern: /\bkill\s*\(?\s*(?:['"]?-?\w+['"]?)\s*,\s*(\d+)/g },
+  { languages: ["php"], pattern: /\bposix_kill\s*\(\s*(\d+)/g },
+  { languages: ["lua", "r", "tcl", "julia", "swift", "powershell"], pattern: /\b(?:Stop-Process\s+-Id|kill\s*\(?)\s*(\d{2,})/g },
+];
+
+/** The pids a piece of code signals (`SIGNAL_CALLS`). */
+export function signaledPids(code: string, language: Language): string[] {
+  const out = new Set<string>();
+  for (const row of SIGNAL_CALLS) {
+    if (!row.languages.includes(language)) continue;
+    for (const match of code.matchAll(row.pattern)) out.add(match[1]);
+  }
+  return [...out];
+}
+
+/** Calls that read a file they don't name (data): dotenv's loaders read `./.env`. */
+export const IMPLIED_READS: readonly { languages: readonly Language[]; form: RegExp; paths: readonly string[] }[] = [
+  { languages: ["python"], form: /\b(?:load_dotenv|dotenv_values|find_dotenv)\s*\(\s*\)/, paths: ["./.env"] },
+  { languages: ["javascript"], form: /\bdotenv['"]?\)?\s*\.\s*config\s*\(\s*\)|['"]dotenv\/config['"]|process\.loadEnvFile\s*\(\s*\)/, paths: ["./.env"] },
+  { languages: ["ruby"], form: /\bDotenv\.load\s*(?:\(\s*\))?(?!\s*\()/, paths: ["./.env"] },
+  { languages: ["php"], form: /\bDotenv::create\w*\(/, paths: ["./.env"] },
+];
+
 export interface CodeScan {
   /** Names that reach the network (`requests`, `urlopen`). */
   network: string[];
@@ -517,7 +680,31 @@ const ENV_ALL = /^\s*(?:[),;}\]]|$|\.(?:items|keys|values|copy|to_h|to_a|each|en
  * its literals may name, the credential variables it reads, and what makes it unreadable.
  * `secretName` decides what a credential's variable is called (risk.ts).
  */
+/**
+ * String constants the code builds from literal pieces (iteration 4): `'permis'+'sions.json'`, `['a','b'].join('')`,
+ * `String.fromCharCode(47)`, `"a" "b"` in Python, `'a' . 'b'` in Perl/PHP — folded into one literal before scanning,
+ * so a name split across literals is the name it makes.
+ */
+export function foldLiterals(code: string, language?: Language): string {
+  // Python joins adjacent literals (`'a' 'b'`); elsewhere they are no expression.
+  const joint = language === "python" ? String.raw`(?:\+|\.(?!\w)|(?<=['"])[ \t]+(?=['"]))` : String.raw`(?:\+|\.(?!\w))`;
+  const pair = new RegExp(String.raw`(['"])((?:(?!\1)[^\\\n]|\\.)*)\1\s*` + joint + String.raw`\s*(['"])((?:(?!\3)[^\\\n]|\\.)*)\3`, "g");
+  let out = code;
+  for (let pass = 0; pass < 8; pass++) {
+    const before = out;
+    out = out
+      .replace(/String\.fromCharCode\(\s*(\d{1,3}(?:\s*,\s*\d{1,3})*)\s*\)/g, (_, codes: string) => JSON.stringify(String.fromCharCode(...codes.split(/\s*,\s*/).map(Number))))
+      .replace(/\bchr\(\s*(\d{1,3})\s*\)/g, (_, n: string) => JSON.stringify(String.fromCharCode(Number(n))))
+      .replace(/\[\s*((?:(['"])(?:[^'"\\]|\\.)*\2\s*,\s*)*(['"])(?:[^'"\\]|\\.)*\3)\s*\]\s*\.\s*join\(\s*(['"])\4\s*\)/g, (_, items: string) => JSON.stringify([...items.matchAll(/(['"])((?:[^'"\\]|\\.)*)\1/g)].map((m) => m[2]).join("")))
+      .replace(/(['"])\s*\.join\(\s*\[\s*((?:(['"])(?:[^'"\\]|\\.)*\3\s*,\s*)*(['"])(?:[^'"\\]|\\.)*\4)\s*\]\s*\)/g, (match: string, quote: string, items: string) => (match.startsWith(`${quote}${quote}`) ? JSON.stringify([...items.matchAll(/(['"])((?:[^'"\\]|\\.)*)\1/g)].map((m) => m[2]).join("")) : match))
+      .replace(pair, (_, a: string, x: string, b: string, y: string) => JSON.stringify(`${x}${y}`));
+    if (out === before) break;
+  }
+  return out;
+}
+
 export function scanCode(code: string, language: Language, secretName: (name: string) => boolean): CodeScan {
+  code = foldLiterals(code, language);
   const literals = literalsOf(code);
   const scan: CodeScan = { network: [], spawn: [], commands: [], paths: [], reads: false, writes: false, env: [], opaque: [], urls: [] };
   if (language === "unread") {
@@ -527,7 +714,13 @@ export function scanCode(code: string, language: Language, secretName: (name: st
   const forms = COMMAND_FORMS[language];
   for (const regex of forms?.runs ?? []) for (const match of code.matchAll(regex)) if (match[1]?.trim()) scan.commands.push(match[1].trim());
   for (const item of forms?.opaque ?? []) if (item.form.test(code)) scan.opaque.push(item.why);
+  // Files a library reads without naming them (iteration 3, `IMPLIED_READS`: dotenv loads `./.env`).
+  for (const row of IMPLIED_READS) if (row.languages.includes(language) && row.form.test(code)) {
+    scan.reads = true;
+    for (const path of row.paths) if (!scan.paths.includes(path)) scan.paths.push(path);
+  }
   scan.network = capabilityNames(code, language, "network");
+  if (language !== "sed") for (const category of networkCategories(code, literals)) if (!scan.network.includes(category)) scan.network.push(category);
   scan.spawn = capabilityNames(code, language, "spawn");
   if (scan.commands.length && !scan.spawn.length) scan.spawn.push("a command form");
   scan.reads = capabilityNames(code, language, "read").length > 0;
@@ -552,9 +745,9 @@ export function scanCode(code: string, language: Language, secretName: (name: st
     }
   }
   // Paths its literals may name: as written, joined, and from home when it finds the home folder.
-  const home = capabilityNames(code, language, "home").length > 0;
+  const home = capabilityNames(code, language, "home").length > 0 || usesHome(code);
   const bare = BARE_PATHS.has(language) ? [...code.matchAll(/(?<=^|[\s=(,])(?:~|\.{1,2})?\/?[\w.-]*[./][\w.-]+(?:\/[\w.-]+)*/g)].map((match) => match[0]).filter((word) => !/^[\w-]+\.[A-Z]/.test(word)) : [];
-  for (const text of [...literals.map((literal) => literal.text), ...joinedPaths(code, literals), ...bare]) {
+  for (const text of [...literals.map((literal) => literal.text), ...joinedPaths(code, literals), ...bare].map(homeRelative).concat(homeJoined(code, literals))) {
     if (/^[a-z][\w+.-]*:\/\//i.test(text)) {
       scan.urls.push(text);
       continue;

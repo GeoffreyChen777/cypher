@@ -23,6 +23,7 @@ import { sshHostIndex } from "./commands.ts";
 import { readTool, remoteEffect } from "./tools.ts";
 import { UNKNOWN } from "./shell.ts";
 import { viewOf } from "./packs.ts";
+import { apiPath, hasSchema, typedTargets } from "./schema.ts";
 import type { CommandView } from "./packs.ts";
 
 /** What a request does, as a class: what a denial is matched by. */
@@ -125,6 +126,9 @@ export interface Acted {
   name: string;
   remote?: string;
   repo?: string;
+  /** A resource's namespace; a resource's type (schema.ts). */
+  scope?: string;
+  type?: string;
 }
 
 /** What one command does (`commandEffects`): its effect classes, and the typed things it acts on. */
@@ -147,6 +151,51 @@ export function classOf(action: string): EffectClass {
 
 /** Programs that read their sources' contents while they write something (data, round 5 step 2). */
 export const READS_ITS_SOURCES: ReadonlySet<string> = new Set(["cp", "gcp", "mv", "rsync", "scp", "sftp", "ditto", "install", "ln", "link", "tar", "gtar", "bsdtar", "zip", "7z", "7za", "rar", "cpio", "pax", "gzip", "bzip2", "xz", "zstd", "lz4", "openssl", "gpg", "age", "base64", "xxd", "dd", "tee", "split", "sed", "awk", "sort", "uniq", "tr", "iconv", "pbcopy", "xclip", "xsel", "wl-copy"]);
+
+/**
+ * Operands that are no files, by program (data, round 6 step 2): a stream editor's script is its first operand
+ * unless an option gives it (`-e`, `-f`); its value options' values are no operands either (`sed -i ''` BSD's
+ * empty suffix, `awk -v x=1`).
+ */
+export const NON_PATH_OPERANDS: readonly { programs: readonly string[]; script: boolean; scriptOptions: RegExp; values: RegExp }[] = [
+  { programs: ["sed", "gsed"], script: true, scriptOptions: /^(-e|--expression|-f|--file)(=|$)/, values: /^(-e|--expression|-f|--file|-l|--line-length)$/ },
+  { programs: ["awk", "gawk", "mawk", "nawk"], script: true, scriptOptions: /^(-f|--file)(=|$)/, values: /^(-f|--file|-v|--assign|-F|--field-separator)$/ },
+  { programs: ["perl", "ruby"], script: false, scriptOptions: /^$/, values: /^(-e|-E|-I|-M|-m|-x|-r)$/ },
+  // An interpreter's inline code is code (read by code.ts), not a file.
+  { programs: ["python", "python2", "python3", "pypy", "pypy3"], script: false, scriptOptions: /^$/, values: /^(-c|-m|-W|-X)$/ },
+  { programs: ["node", "nodejs", "bun", "deno"], script: false, scriptOptions: /^$/, values: /^(-e|--eval|-p|--print|-r|--require)$/ },
+  { programs: ["php"], script: false, scriptOptions: /^$/, values: /^(-r|-d)$/ },
+  { programs: ["osascript", "lua", "luajit", "tclsh", "pwsh", "powershell"], script: false, scriptOptions: /^$/, values: /^(-e|-l|-c|-Command|-command)$/ },
+  { programs: ["jq", "yq"], script: true, scriptOptions: /^(-f|--from-file)(=|$)/, values: /^(--arg|--argjson|--slurpfile|--rawfile|-f|--from-file|--indent)$/ },
+];
+
+/** The indices of a command's words that are no paths (`NON_PATH_OPERANDS`). */
+export function nonPathOperands(words: readonly string[]): Set<number> {
+  const out = new Set<number>();
+  const row = NON_PATH_OPERANDS.find((candidate) => candidate.programs.includes(basename(words[0] ?? "")));
+  if (!row) return out;
+  let scriptGiven = !row.script || words.some((word) => row.scriptOptions.test(word));
+  for (let i = 1; i < words.length; i++) {
+    const word = words[i];
+    if (row.values.test(word)) {
+      out.add(i + 1);
+      i++;
+      continue;
+    }
+    // `-i ''` (BSD's in-place suffix): the empty word after it.
+    if (/^-[A-Za-z]*i$/.test(word) && words[i + 1] === "") {
+      out.add(i + 1);
+      i++;
+      continue;
+    }
+    if (word.startsWith("-") || word === "" || word === UNKNOWN) continue;
+    if (!scriptGiven) {
+      out.add(i);
+      scriptGiven = true;
+    }
+  }
+  return out;
+}
 
 /** Options of git that take a value before the subcommand. */
 const GIT_GLOBAL_VALUES = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"]);
@@ -187,7 +236,16 @@ export function commandEffects(words: readonly string[], options: { sink?: (word
   const tool = readTool(inner);
   if (tool && "row" in tool) {
     effect(classOf(tool.action));
-    for (const entity of tool.entities) if (entity.name) out.targets.push({ kind: entity.kind, name: entity.name, ...(entity.repo ? { repo: entity.repo } : {}) });
+    for (const entity of tool.entities) if (entity.name) out.targets.push({ kind: entity.kind, name: entity.name, ...(entity.repo ? { repo: entity.repo } : {}), ...(entity.scope ? { scope: entity.scope } : {}), ...(entity.type ? { type: entity.type } : {}) });
+  }
+  // The declared schema (schema.ts, round 6): typed operands and options, REST routes by method.
+  const typed = typedTargets(inner);
+  if (typed) {
+    for (const value of typed.effects) effect(value);
+    for (const target of typed.targets) {
+      if (out.targets.some((other) => other.kind === target.kind && other.name === target.name && (other.scope ?? "") === (target.scope ?? ""))) continue;
+      out.targets.push({ kind: target.kind, name: target.name, ...(target.repo ? { repo: target.repo } : {}), ...(target.scope ? { scope: target.scope } : {}), ...(target.type ? { type: target.type } : {}) });
+    }
   }
   if (program === "git") {
     let i = 1;
@@ -215,6 +273,14 @@ export function commandEffects(words: readonly string[], options: { sink?: (word
       if (remote && !refspecs.length && options.current) out.targets.push({ kind: "branch", name: options.current, remote });
       return out;
     }
+    // A ref deleted by any of git's forms (`GIT_REF_WRITERS`: `branch -D`, `update-ref -d`, `symbolic-ref -d`): a change
+    // of that branch (iteration 3), so a denial of one meets the others.
+    const written = refsWritten(viewOf(inner));
+    if (written?.verb !== "deletes" && GIT_REF_WRITERS.some((row) => row.sub === sub && row.verb === "deletes" && (!row.options || args.some((word) => row.options!.test(word))))) effect("change");
+    if (written?.verb === "deletes") {
+      effect("change");
+      for (const ref of written.refs) if (ref !== UNKNOWN) out.targets.push(ref.startsWith("refs/tags/") ? { kind: "tag", name: ref.slice("refs/tags/".length) } : { kind: "branch", name: ref.replace(/^refs\/heads\//, "") });
+    }
     const row = GIT_OPERANDS.find((candidate) => candidate.subs.includes(sub ?? ""));
     const dashes = args.indexOf("--");
     const before = dashes < 0 ? args : args.slice(0, dashes);
@@ -234,8 +300,10 @@ export function commandEffects(words: readonly string[], options: { sink?: (word
   // A copy, an archive or an encoding reads what it is given as well as writing (round 5 step 2: a denied
   // read of a key also covers `cp key ./id.txt`).
   if (READS_ITS_SOURCES.has(program)) effect("read");
+  // The transport (round 6 step 2): a network CLI whose action the tables state (`gh pr comment` comments, `aws s3 ls`
+  // reads) does that, not "send" on top; only a sink the tables don't read sends.
   const sink = options.sink?.(inner);
-  if (sink) effect("send");
+  if (sink && !(tool && "row" in tool) && !typed?.effects.length) effect("send");
   if (/^(ssh|mosh)$/.test(program)) {
     const at = sshHostIndex(inner);
     const host = at === undefined ? undefined : inner[at];
@@ -252,7 +320,15 @@ export function commandEffects(words: readonly string[], options: { sink?: (word
     if (url) out.targets.push({ kind: "host", name: url });
   }
   // Its operands: a file program's, or what is shaped like a path. A program the tool table reads names entities, not paths.
-  if (!tool || !("row" in tool)) for (const word of inner.slice(1)) if (pathShaped(word) || (changes !== undefined && word !== UNKNOWN && !word.startsWith("-") && !/^[a-z][\w+.-]*:\/\//i.test(word))) out.paths.push(word);
+  // Round 6 step 2: an empty word, a program's script operand (`NON_PATH_OPERANDS`: `sed 's/a/b/'`) and a program the
+  // schema types (its operands are entities, its REST routes no files) name no paths by position.
+  const notPaths = nonPathOperands(inner);
+  const schemaTyped = hasSchema(program);
+  if (!tool || !("row" in tool))
+    for (const [at, word] of inner.entries()) {
+      if (at === 0 || word === "" || notPaths.has(at)) continue;
+      if (schemaTyped ? pathShaped(word) && apiPath(word) === undefined && !out.targets.some((target) => target.name === word) : pathShaped(word) || (changes !== undefined && word !== UNKNOWN && !word.startsWith("-") && !/^[a-z][\w+.-]*:\/\//i.test(word))) out.paths.push(word);
+    }
   if (!out.effects.length) effect(options.reads?.(inner) === false ? "run" : "read");
   return out;
 }
@@ -270,6 +346,8 @@ export const GIT_REF_WRITERS: readonly { sub: string; options?: RegExp; verb: st
   { sub: "branch", options: /^(-[A-Za-z]*f|--force)$/, verb: "resets", refs: "first" },
   { sub: "checkout", options: /^-[A-Za-z]*B$/, verb: "resets", refs: "value" },
   { sub: "switch", options: /^(-[A-Za-z]*C|--force-create)$/, verb: "resets", refs: "value" },
+  // Iteration 3: `update-ref -d REF` deletes it, as `branch -D` does.
+  { sub: "update-ref", options: /^(-d|--delete)$/, verb: "deletes", refs: "first" },
   { sub: "update-ref", verb: "rewrites", refs: "first" },
   { sub: "symbolic-ref", options: /^(-d|--delete)$/, verb: "deletes", refs: "first" },
 ];

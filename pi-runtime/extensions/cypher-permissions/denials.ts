@@ -27,6 +27,9 @@
  * file and no command in the sandbox can write it.
  */
 
+import type { RuntimeOperand } from "./flow.ts";
+import { passes } from "./flow.ts";
+import { globsIntersect } from "./resolve.ts";
 import { createHash } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -34,8 +37,9 @@ import { basename, dirname, join } from "node:path";
 import { CLASS_WORDS, classOf } from "./effects.ts";
 import type { EffectClass } from "./effects.ts";
 import { relation } from "./entities.ts";
+import { ENV_OPTIONS } from "./schema.ts";
 import type { EntityKind } from "./entities.ts";
-import { consentText, mentions, QUESTION } from "./explicit.ts";
+import { consentText, LIFT_CONDITION, mentions, ownSpeech, QUESTION } from "./explicit.ts";
 import type { OwnerWords } from "./explicit.ts";
 import { actionWords, listWords } from "./lexicon.ts";
 
@@ -50,12 +54,23 @@ export interface DenialScope {
   /** A branch's or tag's remote; a pull request's repository. */
   remote?: string;
   repo?: string;
+  /** A resource's namespace and type (schema.ts). */
+  scope?: string;
+  type?: string;
+  /** The fixed folder of a glob (where it looks), not a target named in full; not recorded. */
+  glob?: boolean;
 }
 
 /** What one part of a request does, to what (a bash pipeline; a file tool's access). */
 export interface DenialUnit {
   effects: readonly EffectClass[];
   scopes: readonly DenialScope[];
+  /** It destroys what it names (a delete, erase, stop, move away): the other-task floor's (round 6, W3); not recorded. */
+  destroys?: boolean;
+  /** The canonical globs it is given (what they could match it acts on); not recorded. */
+  globs?: readonly string[];
+  /** Operands known only when it runs, by their producers' possible set (round 6 step 2, flow.ts); not recorded. */
+  runtime?: readonly RuntimeOperand[];
 }
 
 export interface ActionClass {
@@ -66,6 +81,13 @@ export interface ActionClass {
   /** Every scope of every unit (for the evidence and records before round 5). */
   scopes: readonly DenialScope[];
   units: readonly DenialUnit[];
+  /**
+   * The request's argv words (bash: every command's, the program's own name left out), for the safety net of
+   * denial matching (round 6, W2: `tokenMatch`); not recorded.
+   */
+  tokens?: readonly string[];
+  /** Every argv word, options too (`--opt=value` as two words), for a denied line's own words (`tokenMatch`); not recorded. */
+  argv?: readonly string[];
 }
 
 export interface DenialRecord extends Omit<ActionClass, "units"> {
@@ -94,7 +116,7 @@ export function wordHash(word: { text: string; at?: number }): string {
 /** Whether a denied scope and a requested one are the same thing, or one holds the other (entities.ts `relation`), typed. */
 export function scopeMatches(denied: DenialScope, asked: DenialScope): boolean {
   if (denied.kind === "line" || asked.kind === "line") return denied.kind === asked.kind && denied.name.replace(/\s+/g, " ").trim() === asked.name.replace(/\s+/g, " ").trim();
-  const entity = (scope: DenialScope) => ({ kind: scope.kind as EntityKind, name: scope.name, ...(scope.remote ? { remote: scope.remote } : {}), ...(scope.repo ? { repo: scope.repo } : {}) });
+  const entity = (scope: DenialScope) => ({ kind: scope.kind as EntityKind, name: scope.name, ...(scope.remote ? { remote: scope.remote } : {}), ...(scope.repo ? { repo: scope.repo } : {}), ...(scope.scope ? { scope: scope.scope } : {}), ...(scope.type ? { type: scope.type } : {}) });
   const how = relation(entity(denied), entity(asked));
   if (how === "same" || how === "contains" || how === "contained") return true;
   // What can't be told apart (a branch with its remote unsaid on one side) is the same name of the same kind.
@@ -109,15 +131,93 @@ export function unitsOf(record: Pick<DenialRecord, "units" | "actions" | "scopes
 }
 
 /** The denied unit and the scope of `asked` a denial covers: the same effect class on the same thing, or one holding the other. */
-export function classMatch(denied: Pick<DenialRecord, "units" | "actions" | "scopes" | "tool">, asked: ActionClass): { unit: DenialUnit; scope: DenialScope } | undefined {
+/**
+ * Effects that are part of another (final pass, data): removing what runs stops it first (`docker rm -f`, `kill` then
+ * delete), so a denied destroy covers stopping the same entity (and scaling it to nothing, a stop: iteration 2). Only for
+ * a denied unit that destroys.
+ */
+export const EFFECT_PARTS: Readonly<Partial<Record<EffectClass, readonly EffectClass[]>>> = { change: ["stop"] };
+
+function covers(unit: DenialUnit, asked: DenialUnit): boolean {
+  return unit.effects.some((effect) => asked.effects.includes(effect) || (unit.destroys === true && (EFFECT_PARTS[effect] ?? []).some((part) => asked.effects.includes(part))));
+}
+
+export function classMatch(denied: Pick<DenialRecord, "units" | "actions" | "scopes" | "tool">, asked: ActionClass, formsOf?: (kind: string, name: string) => readonly string[]): { unit: DenialUnit; scope: DenialScope } | undefined {
   for (const unit of unitsOf(denied)) {
     for (const other of asked.units) {
-      if (!unit.effects.some((effect) => other.effects.includes(effect))) continue;
+      if (!covers(unit, other)) continue;
       const scope = other.scopes.find((candidate) => unit.scopes.some((scope) => scopeMatches(scope, candidate)));
       if (scope) return { unit, scope };
+      // Round 6 step 2: what it acts on known only when it runs, by its possible set — a producer's (flow.ts) or a glob's.
+      const reached = unit.scopes.find((scope) => scope.kind !== "line" && (other.runtime ?? []).some((operand) => (operand.kinds as readonly string[]).includes(scope.kind) && operand.tests.every((test) => passes(test, scope.kind, scope.name, formsOf?.(scope.kind, scope.name) ?? []))));
+      if (reached) return { unit, scope: reached };
+      const globbed = unit.scopes.find((scope) => PATH_KINDS.has(scope.kind) && !scope.glob && (other.globs ?? []).some((glob) => globsIntersect(glob, scope.name) || globsIntersect(`${glob.replace(/\/+$/, "")}/**`, scope.name)));
+      if (globbed) return { unit, scope: globbed };
     }
   }
   return undefined;
+}
+
+/** Whether an effect of `asked` is one of `denied`'s, or is unknown (`run`: a program no table reads; an MCP or extension tool's own), which may be any. */
+function effectsMeet(denied: readonly EffectClass[], asked: readonly EffectClass[]): boolean {
+  const unknown = asked.some((effect) => effect === "run" || effect.startsWith("tool:"));
+  return denied.some((effect) => asked.includes(effect) || unknown);
+}
+
+/**
+ * The safety net of denial matching (round 6, W2), for tools without a schema: an argv word of the request
+ * equal to a denied target's name (or a name the owner would use for it) counts as touching that target,
+ * when the effects meet (`effectsMeet`). Typed matching (`classMatch`) stays first; this only adds matches.
+ */
+export function tokenMatch(denied: Pick<DenialRecord, "units" | "actions" | "scopes" | "tool">, asked: ActionClass): { unit: DenialUnit; scope: DenialScope } | undefined {
+  if (!asked.tokens?.length) return undefined;
+  const tokens = new Set(asked.tokens.map((token) => token.replace(/\/+$/, "")));
+  const effects = [...new Set(asked.units.flatMap((unit) => unit.effects))];
+  for (const unit of unitsOf(denied)) {
+    if (!effectsMeet(unit.effects, effects)) continue;
+    for (const scope of unit.scopes) {
+      if (scope.kind === "line") {
+        // A line that names no typed target (final pass): asked again with every word it gave — its operands and its
+        // options' values, by any spelling (an environment variable for the option, `ENV_OPTIONS`; more words,
+        // a comment) — by the same program, it is the same request.
+        const needed = lineOperands(scope.name);
+        const program = needed.program;
+        const argv = new Set((asked.argv ?? []).map((word) => word.replace(/\/+$/, "")));
+        if (program && needed.words.filter((word) => !word.startsWith("-")).length >= 2 && (asked.actions ?? []).some((action) => action.split(" ")[0] === program) && needed.words.every((word) => argv.has(word))) return { unit, scope };
+        continue;
+      }
+      const names = [scope.name, ...(scope.says ?? [])].filter((name) => name.length >= 2);
+      if (names.some((name) => tokens.has(name))) return { unit, scope };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A recorded line's program and the words it gave its program (operands, options and their values, quotes off), as
+ * the argv safety net compares them; an assignment in front of it is the option it stands for when the program reads
+ * one (`GH_REPO=o/r` is `--repo o/r`, schema.ts `ENV_OPTIONS`), else its value. Only a line of one command: a
+ * compound line's words belong to several requests.
+ */
+function lineOperands(line: string): { program?: string; words: string[] } {
+  if (/[;&|`]|\$\(/.test(line.replace(/'[^']*'|"[^"]*"/g, ""))) return { words: [] };
+  const words = [...line.matchAll(/'([^']*)'|"((?:[^"\\]|\\.)*)"|(\S+)/g)].map((match) => match[1] ?? match[2] ?? match[3]);
+  let at = 0;
+  const values: string[] = [];
+  const env: { name: string; value: string }[] = [];
+  while (at < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[at])) {
+    const word = words[at++];
+    env.push({ name: word.slice(0, word.indexOf("=")), value: word.slice(word.indexOf("=") + 1) });
+  }
+  const program = words[at] === undefined ? undefined : basename(words[at]);
+  const table = program ? ENV_OPTIONS[program] : undefined;
+  for (const { name, value } of env) values.push(...(table?.[name] ? [table[name], value] : [value]));
+  // Options too: a narrower request (`down` after a denied `down -v`) gives fewer of them.
+  const rest = words
+    .slice(at + 1)
+    .flatMap((word) => (/^--[^=]+=./.test(word) ? [word.slice(0, word.indexOf("=")), word.slice(word.indexOf("=") + 1)] : [word]))
+    .map((word) => word.replace(/\/+$/, ""));
+  return { program, words: [...values, ...rest].filter((word) => word.length > 0) };
 }
 
 /** The names the owner's words may use for a scope. */
@@ -132,6 +232,8 @@ function namesOf(scope: DenialScope): string[] {
 
 const NEGATION = listWords("negate");
 const RETRACTION = listWords("retract");
+/** The retraction words proper ("wait", "cancel"), without the deferrals `RETRACTION` also holds. */
+const RETRACTION_ONLY = listWords("retractOnly");
 
 /**
  * The owner word newer than the denial (not among those seen when they denied it), of a lifting kind,
@@ -147,13 +249,41 @@ export function liftedBy(denial: DenialRecord, scope: DenialScope, owner: OwnerW
   for (const word of [...owner.messages].reverse()) {
     if (seen.has(wordHash(word))) continue;
     if (!LIFTING_SOURCES.has(word.source ?? "typed")) continue;
-    const text = consentText(word);
+    // The owner's own speech (iteration 4): not what they quote back ("you said 'I'll force-push main'"), nor a
+    // forwarded message; and a condition ("if the tests pass, force-push main") asks for later, not now.
+    const text = ownSpeech(consentText(word), { attributedOnly: true });
     const named = scope.kind === "line" ? text.includes(scope.name) : names.some((name) => mentions(text, name));
     if (!named) continue;
-    if (QUESTION.test(text) || NEGATION.test(text) || RETRACTION.test(text)) continue;
+    if (QUESTION.test(text) || NEGATION.test(text) || RETRACTION.test(text) || LIFT_CONDITION.test(text)) continue;
     // A line the owner quotes whole asks for it; anything else must say what it asks for.
     if (scope.kind !== "line" && !actions.some((action) => actionWords(action).test(text))) continue;
     return word.text;
+  }
+  return undefined;
+}
+
+/**
+ * The newest owner word since the denial that would lift it but for a deferral or preference word alone
+ * (lexicon.ts `defer`: "later", "下周", "rather"): it names the scope, says an action word of the effect, and
+ * is no question, negation or retraction proper. A deferral word is often what the request is about ("只看下周
+ * 的事件": next week's events), so such a word neither lifts the denial nor keeps it on the floor: the reviewing
+ * model reads it, with the denial as evidence (`Denials.check` `review`).
+ */
+export function deferredLift(denial: DenialRecord, scope: DenialScope, owner: OwnerWords | undefined, unit?: DenialUnit): string | undefined {
+  if (!owner) return undefined;
+  const seen = new Set(denial.seen);
+  const units = unit ? [unit] : unitsOf(denial);
+  const names = [...new Set([...namesOf(scope), ...units.flatMap((item) => item.scopes.filter((other) => scopeMatches(other, scope)).flatMap(namesOf))])];
+  const actions = [...new Set(units.flatMap((item) => item.effects.flatMap((effect) => CLASS_WORDS[effect] ?? [])))];
+  for (const word of [...owner.messages].reverse()) {
+    if (seen.has(wordHash(word))) continue;
+    if (!LIFTING_SOURCES.has(word.source ?? "typed")) continue;
+    const text = consentText(word);
+    const named = scope.kind === "line" ? text.includes(scope.name) : names.some((name) => mentions(text, name));
+    if (!named) continue;
+    if (QUESTION.test(text) || NEGATION.test(text) || RETRACTION_ONLY.test(text)) return undefined;
+    if (scope.kind !== "line" && !actions.some((action) => actionWords(action).test(text))) continue;
+    return RETRACTION.test(text) ? word.text : undefined;
   }
   return undefined;
 }
@@ -225,13 +355,14 @@ export class Denials {
   /** Record the owner's Deny click on a request of `cls`. */
   record(cls: ActionClass, what: string, owner: OwnerWords | undefined): DenialRecord {
     this.load();
-    const scope = (item: DenialScope): DenialScope => ({ kind: item.kind, name: item.name, ...(item.says?.length ? { says: [...item.says] } : {}), ...(item.remote ? { remote: item.remote } : {}), ...(item.repo ? { repo: item.repo } : {}) });
+    const scope = (item: DenialScope): DenialScope => ({ kind: item.kind, name: item.name, ...(item.says?.length ? { says: [...item.says] } : {}), ...(item.remote ? { remote: item.remote } : {}), ...(item.repo ? { repo: item.repo } : {}), ...(item.scope ? { scope: item.scope } : {}), ...(item.type ? { type: item.type } : {}) });
     const record: DenialRecord = {
       tool: cls.tool,
       actions: [...cls.actions],
       ...(cls.concern ? { concern: cls.concern } : {}),
       scopes: cls.scopes.map(scope),
-      units: cls.units.map((unit) => ({ effects: [...unit.effects], scopes: unit.scopes.map(scope) })),
+      // Whether it destroys is kept (final pass): a denied destroy covers stopping the same entity (`EFFECT_PARTS`).
+      units: cls.units.map((unit) => ({ effects: [...unit.effects], scopes: unit.scopes.map(scope), ...(unit.destroys ? { destroys: true } : {}) })),
       at: new Date().toISOString(),
       what: what.length > 300 ? `${what.slice(0, 300)}…` : what,
       seen: (owner?.messages ?? []).slice(-MAX_SEEN).map((word) => wordHash(word)),
@@ -260,20 +391,27 @@ export class Denials {
    * words since haven't lifted, with the scope it covers; and the denials of the same effect on other
    * targets (evidence for the judge).
    */
-  check(asked: ActionClass, owner: OwnerWords | undefined): { active?: { denial: DenialRecord; scope: DenialScope }; similar: DenialRecord[] } {
+  check(asked: ActionClass, owner: OwnerWords | undefined, formsOf?: (kind: string, name: string) => readonly string[]): { active?: { denial: DenialRecord; scope: DenialScope }; review?: { denial: DenialRecord; scope: DenialScope; word: string }; similar: DenialRecord[] } {
     this.load();
     const similar: DenialRecord[] = [];
+    let review: { denial: DenialRecord; scope: DenialScope; word: string } | undefined;
     for (const denial of [...this.records].reverse()) {
-      const match = classMatch(denial, asked);
+      const match = classMatch(denial, asked, formsOf) ?? tokenMatch(denial, asked);
       if (match) {
-        if (liftedBy(denial, match.scope, owner, match.unit) === undefined) return { active: { denial, scope: match.scope }, similar };
+        if (liftedBy(denial, match.scope, owner, match.unit) === undefined) {
+          // Asked for since, with a deferral word in the same words: the judge's, with the denial as evidence.
+          const word = deferredLift(denial, match.scope, owner, match.unit);
+          if (word === undefined) return { active: { denial, scope: match.scope }, ...(review ? { review } : {}), similar };
+          review ??= { denial, scope: match.scope, word };
+          similar.unshift(denial);
+        }
         continue;
       }
       // The same effect on another target (a read or a run only by the same program): evidence.
       const sameAction = denial.actions.some((action) => asked.actions.includes(action));
       if (unitsOf(denial).some((unit) => asked.units.some((other) => unit.effects.some((effect) => other.effects.includes(effect) && (sameAction || (effect !== "read" && effect !== "run")))))) similar.push(denial);
     }
-    return { similar: similar.slice(0, 3) };
+    return { ...(review ? { review } : {}), similar: similar.slice(0, 3) };
   }
 
   all(): readonly DenialRecord[] {

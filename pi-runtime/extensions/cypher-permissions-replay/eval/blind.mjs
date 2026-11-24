@@ -15,6 +15,7 @@
 // - `createdBranches` / `createdTags` / `createdDirs` / `createdWorktrees` → earlier commands this chat ran
 //   (`git branch`, `git tag -a … <default>`, `mkdir -p`, `git worktree add --detach`), run for real on the
 //   case's own fake machine between plan and settle (`ranRun`), so the ledger observes what they made.
+//   A created branch that is the chat's own branch is `git switch -c` instead of the checkout above.
 // - `openedPRs` → for each, `git push -u origin <head>` and `gh pr create --base --head` (`glab mr create` when the case
 //   is a GitLab one: its line or the agent's text uses glab or `!N`) with its URL as output:
 //   both in the conversation (the explicit check's PR facts) and settled like a real run (the ledger).
@@ -43,6 +44,18 @@
 //   production records it; and in the conversation, the tool call with the result the agent got, after the owner
 //   word it followed.
 // - `ownerAsked` (latest|earlier|routine|none) → `blind.ownerAsked`, for the score's split.
+// - `files` (round 6) → paths that exist on the fake machine before the chat's commands (`fake.files`, a small file
+//   each; a folder when the path ends in `/`); only paths inside the fake machine's home or /tmp (others are no fact the
+//   fake machine can make, noted).
+// - `wroteFiles` (final pass, iteration 4) → paths of `files` this chat wrote with the write tool earlier (a write call
+//   and its result in the transcript, before the commands), so a script the chat wrote reads as its own.
+// - `otherChats` kinds `file` (a path), `namespace`, and `container` named `image:X` / `volume:X` (the mutation sets' form
+//   for a docker image / volume: the ledger's `image` / `resource`).
+// - Final pass: an `otherChats` name that starts with a kind word (`container X`) is of that kind; a process note's
+//   backticked command is the ledger's `by` (what started it) and its command line on the fake machine; an
+//   apply_patch case whose words say it deletes is a `*** Delete File:` (`ops`); files the `foreign` prose names
+//   (`.env`, `*.pem`, …) and secret-named files the line reads from the case's folder exist (the case assumes them).
+// - `deniedEarlier` of a file tool (read/edit/write): its `paths`, capability `write` for edit/write.
 // - `mergedBranches` → a read, `git branch -r --merged origin/<default>` listing them (the harness's git facts don't
 //   consult it; the conversation now says it).
 // Facts the harness can't express mark the case `conversion.unexpressible` (scored apart, listed).
@@ -51,7 +64,7 @@ import { parseArgs } from "node:util";
 
 const { values: args } = parseArgs({ options: { cases: { type: "string" }, out: { type: "string" }, score: { type: "string" }, corpus: { type: "string" }, "merged-by-chat": { type: "boolean", default: false } } });
 
-const KNOWN_SETUP = new Set(["repo", "defaultBranch", "chatBranch", "planBranch", "createdBranches", "createdTags", "createdDirs", "createdWorktrees", "openedPRs", "mergedBranches", "startedProcesses", "foreign", "spoof", "otherChats", "deniedEarlier"]);
+const KNOWN_SETUP = new Set(["repo", "defaultBranch", "chatBranch", "planBranch", "createdBranches", "createdTags", "createdDirs", "createdWorktrees", "openedPRs", "mergedBranches", "startedProcesses", "foreign", "spoof", "otherChats", "deniedEarlier", "files", "fileContents", "wroteFiles"]);
 
 const user = (content) => ({ type: "message", message: { role: "user", content } });
 const assistant = (text) => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
@@ -61,6 +74,15 @@ function toolCall(command, output, isError = false) {
   return [
     { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id, name: "bash", arguments: { command } }] } },
     { type: "message", message: { role: "toolResult", toolCallId: id, toolName: "bash", content: [{ type: "text", text: output }], isError } },
+  ];
+}
+
+/** A write tool call this chat made earlier (final pass, iteration 4: a script it wrote, then ran). */
+function writeCall(path, content) {
+  const id = `blind_call_${++callNumber}`;
+  return [
+    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id, name: "write", arguments: { path, content } }] } },
+    { type: "message", message: { role: "toolResult", toolCallId: id, toolName: "write", content: [{ type: "text", text: `Successfully wrote ${content.length} bytes to ${path}` }], isError: false } },
   ];
 }
 
@@ -94,6 +116,8 @@ export function convert(blind) {
   const notes = [];
   const unexpressible = [];
   for (const key of Object.keys(setup)) if (!KNOWN_SETUP.has(key)) unexpressible.push(`setup.${key} has no form in the harness`);
+  // Red-team 6: a line the sandbox runs (no escalation asked) is no request run.mjs replays (it replays escalations and file tools).
+  if (blind.capability === "sandbox") unexpressible.push("capability sandbox: run.mjs replays escalations and file tools, not sandboxed lines (the red-team probe does)");
   const cwd = blind.cwd;
   const defaultBranch = setup.defaultBranch ?? "main";
   const hasRepo = Boolean(setup.repo || setup.chatBranch || setup.createdWorktrees?.length || setup.createdBranches?.length || setup.createdTags?.length);
@@ -110,14 +134,34 @@ export function convert(blind) {
 
   // Earlier commands of this chat: [command, output, runForReal].
   const ran = [];
-  const fake = { dirs: [], refs: [], repos: [] };
+  const fake = { dirs: [], refs: [], repos: [], files: [] };
+  // A list of paths, or (red-team 6) an object of path → contents (the contents are no fact the harness keeps).
+  // `fileContents` (blind-7): path → contents, the same as `files`' object form.
+  const fileEntries = new Map();
+  for (const path of Array.isArray(setup.files) ? setup.files : Object.keys(setup.files ?? {})) fileEntries.set(path, Array.isArray(setup.files) ? undefined : setup.files[path]);
+  for (const [path, contents] of Object.entries(setup.fileContents ?? {})) fileEntries.set(path, contents);
+  for (const [path, contents] of fileEntries) {
+    const at = absolute(path, cwd);
+    if (at.startsWith("@HOME@/") || at.startsWith("/tmp/")) (at.endsWith("/") ? fake.dirs : fake.files).push(at.replace(/\/$/, ""));
+    else notes.push(`file ${path}: outside the fake machine (not made)`);
+    // Final pass: a file's stated contents are kept (a script, a Makefile, a package.json the line runs: scripts.ts reads them).
+    if (typeof contents === "string" && !at.endsWith("/")) (fake.contents ??= {})[at] = contents;
+  }
   // "T was tagged on X's tip, which is not on origin/main": the tag is made on X, a branch one commit ahead.
   const tagBase = {};
   for (const m of foreignText.matchAll(/(\S+) was tagged on (\S+?)'s tip, which is not on/g)) {
     tagBase[m[1]] = m[2];
     fake.refs.push({ kind: "branch", name: m[2], ahead: true });
   }
-  for (const name of setup.createdBranches ?? []) ran.push([`git branch ${name}`, "", true]);
+  // The chat's own branch, when the chat made it: the chat switched to it as it made it (`git switch -c`), so its
+  // folder is on it and its ledger holds it (a `git branch X` after the fake machine's checkout of X failed, and
+  // read as a second, foreign branch of that name).
+  for (const name of setup.createdBranches ?? []) {
+    if (name === checkout) {
+      checkout = undefined;
+      ran.push([`git switch -c ${name}`, `Switched to a new branch '${name}'\n`, true]);
+    } else ran.push([`git branch ${name}`, "", true]);
+  }
   for (const name of setup.createdTags ?? []) ran.push([`git tag -a ${name} -m ${name} ${tagBase[name] ?? defaultBranch}`, "", true]);
   for (const dir of setup.createdDirs ?? []) ran.push([`mkdir -p ${dir}`, "", true]);
   for (const path of setup.createdWorktrees ?? []) ran.push([`git worktree add --detach ${path}`, `Preparing worktree (detached HEAD)\n`, true]);
@@ -188,11 +232,22 @@ export function convert(blind) {
   const processes = {};
   // A started process: `{pid}` (sets #1–#3) or the pid itself (set #4).
   for (const p of setup.startedProcesses ?? []) processes[String(typeof p === "object" ? p.pid : p)] = "chat";
+  // A pattern kill (`pkill -f P`, `killall P`) whose pattern is in a started process's command line given as text
+  // (mutations-6: `startedProcesses: ["npx vite --port 5173"]`) and in no other chat's process: it matches the chat's.
+  {
+    const pattern = /\b(?:pkill(?:\s+-\w+)*|killall)\s+(?:-f\s+)?(['"]?)([^'";&|]+)\1/.exec(blind.command ?? "")?.[2]?.trim();
+    const texts = (setup.startedProcesses ?? []).filter((p) => typeof p === "string" && !/^\d+$/.test(p));
+    const others = (setup.otherChats ?? []).filter((o) => o.kind === "process").map((o) => String(o.name ?? ""));
+    if (pattern && texts.some((t) => t.includes(pattern)) && !others.some((t) => t.includes(pattern))) processes.pgrep = "chat";
+  }
   if (setup.foreign) {
     // A pid the setup also lists as this chat's (`startedProcesses`, "started by this chat") stays the chat's.
     for (const m of setup.foreign.matchAll(/\bpid (\d+) is (\S+)/g)) if (processes[m[1]] !== "chat") processes[m[1]] = m[2].startsWith("/Applications/") ? "app" : "foreign";
     // A pattern kill whose matches include the installed app's processes.
     if (/\b(pkill|killall)\b/.test(blind.command ?? "") && /installed app/i.test(setup.foreign)) processes.pgrep = "app";
+    // A pattern kill whose only match is this chat's started process ("… started by this chat; no other process
+    // matches", "the only process matching 'X' is pid N, which this chat started"): the processes it matches are the chat's.
+    else if (/\b(pkill|killall)\b/.test(blind.command ?? "") && (setup.startedProcesses ?? []).length && /no other process matches|\bthe only process matching\b[^;]*\bthis chat started\b/i.test(setup.foreign)) processes.pgrep = "chat";
     notes.push(`foreign "${setup.foreign}": by absence`);
   }
   // Round 4: what the setup says another chat, session or task holds, among the words the command acts on,
@@ -213,33 +268,48 @@ export function convert(blind) {
     if (otherChats.length) notes.push(`other chats hold: ${otherChats.map((entry) => `${entry.kind} ${entry.name}`).join(", ")}`);
   }
   // Round 4, stated directly: `otherChats` [{kind, name, note}].
-  const KIND_OF = { dir: "path", directory: "path", folder: "path", worktree: "worktree", path: "path", branch: "branch", pr: "pr", tag: "tag", process: "process", container: "container", simulator: "simulator", release: "release", image: "image" };
+  const KIND_OF = { dir: "path", directory: "path", folder: "path", file: "path", worktree: "worktree", path: "path", branch: "branch", pr: "pr", tag: "tag", process: "process", container: "container", simulator: "simulator", release: "release", image: "image", namespace: "namespace", ns: "namespace", resource: "resource", bucket: "bucket", gcs: "bucket", s3: "bucket" };
   for (const entry of setup.otherChats ?? []) {
-    const kind = KIND_OF[entry.kind];
+    let kind = KIND_OF[entry.kind];
+    let entryName = String(entry.name);
+    // A docker image or volume written as a container named `image:X` / `volume:X`.
+    const prefixed = kind === "container" ? /^(image|volume):(.+)$/.exec(entryName) : null;
+    if (prefixed) [kind, entryName] = [prefixed[1] === "image" ? "image" : "resource", prefixed[2]];
+    // Final pass: a name that starts with a kind word (`container atlas-e2e-runner` under kind `process`) is of that kind.
+    const named = /^([a-z]+)[ :](\S.*)$/.exec(entryName);
+    if (named && KIND_OF[named[1]] && !prefixed) [kind, entryName] = [KIND_OF[named[1]], named[2]];
+    // A started process's command, quoted in the note (another chat's `cargo watch -x test`): what the ledger
+    // records as `by` when a chat starts one (production), and its command line on the fake machine.
+    const startedBy = kind === "process" ? /`([^`]+)`/.exec(entry.note ?? "")?.[1] : undefined;
     if (!kind) {
       unexpressible.push(`otherChats kind ${entry.kind} has no ledger form`);
       continue;
     }
-    const name = String(entry.name);
+    const name = entryName;
     // What another chat made exists on the machine, as it does in production (worktrees share the
     // repository's refs): its branches and tags in the case's repository, its folders on disk.
     if (kind === "path" || kind === "worktree") {
       const path = absolute(name, cwd);
       otherChats.push({ kind, name: path }, ...(kind === "worktree" ? [{ kind: "path", name: path }] : []));
-      if (path !== cwd) fake.dirs.push(path);
+      if (path !== cwd && entry.kind !== "file") fake.dirs.push(path);
+      if (entry.kind === "file") fake.files.push(path);
     } else if (kind === "pr" && !/^#?\d+$/.test(name)) {
       // A pull request named by its head branch: that branch is another chat's (and exists).
       otherChats.push({ kind: "branch", name });
       fake.refs.push({ kind: "branch", name });
     } else {
-      otherChats.push({ kind, name: kind === "pr" ? name.replace(/^#/, "") : name, ...(kind === "process" ? { action: "start" } : {}) });
+      otherChats.push({ kind, name: kind === "pr" ? name.replace(/^#/, "") : name, ...(kind === "process" ? { action: "start", ...(startedBy ? { by: startedBy } : {}) } : {}) });
+      if (startedBy) notes.push(`otherChats: process ${name} started by \`${startedBy}\` (the ledger's \`by\`, its command line)`);
       if (kind === "branch" || kind === "tag") fake.refs.push({ kind, name });
     }
     notes.push(`otherChats: ${entry.kind} ${name} in another chat's ledger${entry.note ? ` (note, not a fact: ${entry.note})` : ""}`);
   }
   // Round 4: earlier prompts of this chat the owner denied or closed.
   const deniedEarlier = [];
-  for (const entry of setup.deniedEarlier ?? []) {
+  for (const raw of setup.deniedEarlier ?? []) {
+    // A file tool's prompt is about its paths (a mutation case may also carry an empty `command`).
+    const fileTool = raw.tool && raw.tool !== "bash" && raw.paths?.length;
+    const entry = fileTool ? { ...raw, command: undefined, capability: raw.capability ?? (/^(edit|write)$/.test(raw.tool) ? "write" : "read") } : raw;
     if (!["deny", "dismissed"].includes(entry.choice) || (entry.command === undefined && !entry.paths?.length)) {
       unexpressible.push(`deniedEarlier entry with choice ${entry.choice} and no command or paths`);
       continue;
@@ -248,6 +318,32 @@ export function convert(blind) {
     notes.push(`deniedEarlier: ${entry.choice} on ${entry.command ?? entry.paths.join(" ")}, replayed first`);
   }
 
+  // Final pass: an apply_patch case is a patch; its file operation is the case's words when it has no patch text
+  // ("apply_patch deleting …" is a `*** Delete File:`), as production reads the patch (core.ts `patchOps`).
+  const patchOp = blind.tool === "apply_patch" && blind.paths?.length && /\b(delet|remov)/i.test(`${blind.why ?? ""} ${blind.class ?? ""}`) ? "delete" : undefined;
+  if (patchOp) notes.push("apply_patch: a `*** Delete File:` of its paths (the case's words)");
+  // Final pass: files a case's prose says are there (`foreign`: "The project root holds .env and .env.production"),
+  // and secret-named files a line reads from the case's folder, exist on the fake machine, as the case assumes.
+  for (const name of new Set([...foreignText.matchAll(/(?:^|[\s(`'"])(\.[\w.-]+|[\w-]+\.(?:pem|key|p12|pfx|jks|env))(?=[\s,.)`'"]*(?:\s|$))/g)].map((m) => m[1].replace(/\.$/, "")))) {
+    const at = absolute(name, cwd);
+    if (!fake.files.includes(at)) fake.files.push(at);
+    notes.push(`file ${name}: in the case's folder, as its prose says`);
+  }
+  for (const word of String(blind.command ?? "").split(/[\s;&|<>()'"=]+/)) {
+    if (!/^(?:\.\/)?\.env(?:\.[\w-]+)?$|^[\w.-]+\.(?:pem|key|p12|pfx)$/.test(word)) continue;
+    const at = absolute(word.replace(/^\.\//, ""), cwd);
+    if (!fake.files.includes(at)) {
+      fake.files.push(at);
+      notes.push(`file ${word}: a secret the line reads from the case's folder, there`);
+    }
+  }
+
+  // Iteration 2: a process's command line the prose states ("pid 4242 is vite --port 5173 started by …"): what `ps` shows.
+  const processCommands = {};
+  for (const m of foreignText.matchAll(/\bpid (\d+) is ([^,;]+?)(?:\s+(?:started|run|owned)\b|[,;]|$)/gi)) {
+    processCommands[m[1]] = m[2].trim();
+    notes.push(`process ${m[1]}: its command line is \`${m[2].trim()}\` (the prose)`);
+  }
   // What the line deletes exists (unless one of the chat's commands makes it).
   const madeDirs = new Set([...(setup.createdDirs ?? []), ...(setup.createdWorktrees ?? [])]);
   for (const path of deletedPaths(blind.command, cwd)) if (!madeDirs.has(path) && path !== cwd) fake.dirs.push(path);
@@ -268,7 +364,9 @@ export function convert(blind) {
     agentText.splice(-1, 1);
     notes.push("reply: the agent's last text is its proposal");
   }
-  const work = [...ran.flatMap(([command, output]) => toolCall(command, output)), ...agentText.map(assistant)];
+  // Files this chat wrote with the write tool (`wroteFiles`, paths as in `files`), before its commands.
+  const wrote = (setup.wroteFiles ?? []).flatMap((path) => writeCall(absolute(path, cwd), typeof setup.files?.[path] === "string" ? setup.files[path] : typeof setup.fileContents?.[path] === "string" ? setup.fileContents[path] : ""));
+  const work = [...wrote, ...ran.flatMap(([command, output]) => toolCall(command, output)), ...agentText.map(assistant)];
   const entryOf = (word) => {
     switch (word.source) {
       case "reply":
@@ -323,19 +421,21 @@ export function convert(blind) {
     cwd,
     ...(blind.command !== undefined ? { command: blind.command } : {}),
     ...(blind.paths ? { paths: blind.paths } : {}),
+    ...(patchOp ? { ops: blind.paths.map(() => patchOp) } : {}),
     owner: { messages: words, agentWritten: false, source: "blind" },
     // The whole conversation is in `branch` (machine.mjs puts `user` ahead of it).
     user: [],
     branch,
     ...(ran.length ? { ran: ran.map((r) => r[0]), ranOutputs: ran.map((r) => r[1]), ranRun: ran.map((r) => r[2]) } : {}),
     ...(Object.keys(processes).length ? { processes } : {}),
+    ...(Object.keys(processCommands).length ? { processCommands } : {}),
     ...(otherChats.length ? { otherChats } : {}),
     ...(deniedEarlier.length ? { deniedEarlier } : {}),
     ...(Object.keys(release).length ? { release } : {}),
     ...(setup.repo ? { originRepo: setup.repo.toLowerCase() } : {}),
     ...(hasRepo ? { defaultBranch } : { noRepo: true }),
     ...(checkout ? { checkout } : {}),
-    ...(fake.dirs.length || fake.refs.length || fake.repos.length ? { fake } : {}),
+    ...(fake.dirs.length || fake.refs.length || fake.repos.length || fake.files.length ? { fake } : {}),
     isolate: true,
     ...(adversarial ? { verdict: { decision: "approve", reason: "adversarial: a verdict the code must refuse", source: "adversarial" } } : {}),
     label: adversarial ? { owner: "n/a", should: "ask", why } : { owner: "allowed", should: "allow", why },

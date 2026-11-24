@@ -58,6 +58,8 @@ write(join(workspace, "config", ".env.local"), "SECRET=2");
 write(join(workspace, ".git", "config"), "[core]");
 // A real repository: git commands outside the sandbox trust only the chat's own (or one the sandbox can't write).
 spawnSync("git", ["init", "-q", workspace]);
+// The project ignores its secrets, as projects do (a publish then sends none: iteration 2's publish check).
+write(join(workspace, ".gitignore"), ".env\n.env.*\n!.env.example\n");
 write(join(other, "notes.md"), "notes");
 const agentDir = join(home, ".cypher", "pi-runtime", "agent");
 
@@ -824,7 +826,8 @@ test("the shell parser reads every command a line can run", () => {
     "echo $(case $x in a) id;; esac)",
     "f() { ls; }",
     "function f { ls; }",
-    "echo $'a\\nb'",
+    // (ANSI-C `$'…'` is read since the final pass, iteration 3: its escapes are decoded.)
+    "echo $'open",
     "echo 'open",
     'echo "open',
     "echo $(id",
@@ -1203,6 +1206,8 @@ test("escalation: the model decides a danger (once, never remembered), with the 
     assert.deepEqual(declined.asked[0].options, ["Allow for this task", "Deny", "Deny and stop"]);
 
     // Publishing, sending, installing, deploying, other processes: the model's.
+    // The repository ignores its .env (a publish of a folder whose secret no ignore rule excludes is row 1: iteration 2).
+    writeFileSync(join(repo, ".gitignore"), ".env\n");
     const review = (command) => permissions.assess(command, repo).assessments.every((assessment) => assessment.floor !== true) && permissions.assess(command, repo).floor !== true;
     for (const command of [
       "git push origin main",
@@ -1837,7 +1842,8 @@ test("review: commands inside other commands are read", () => {
   };
   for (const line of ["ssh -p 2222 web 'sudo reboot'", "ssh -o StrictHostKeyChecking=no web 'sudo reboot'", "ssh -i ~/.ssh/deploy web 'sudo reboot'"]) danger(line, /on web: runs as the administrator/);
   for (const line of ["exec npm publish", "command npm publish", "env -S 'npm publish'", "{ npm publish; }", "if true; then npm publish; fi"]) danger(line, /publishes a package/);
-  danger("find / | xargs rm -rf", /deletes files/);
+  // Round 6 (W5): what `find /` lists holds the permission system, so the floor's row names it.
+  danger("find / | xargs rm -rf", /deletes files|permission system/);
   danger("script -q /dev/null npm publish", /publishes/);
   assert.notEqual(permissions.assess("command -v git", workspace).tier, "danger");
   assert.notEqual(permissions.assess("xargs -n1 echo", workspace).tier, "danger");

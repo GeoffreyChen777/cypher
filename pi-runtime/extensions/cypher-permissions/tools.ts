@@ -176,6 +176,7 @@ export const TOOLS: readonly ToolRow[] = [
 const NOUNS: Readonly<Record<EntityKind, string>> = {
   repo: "repository", remote: "remote", branch: "branch", pr: "pull request", tag: "tag", release: "release's tag", path: "path", worktree: "worktree",
   process: "process", simulator: "simulator", host: "host", package: "package", container: "container", image: "image", resource: "resource",
+  namespace: "namespace", context: "context", cluster: "cluster", bucket: "bucket", project: "project",
 };
 
 /** The words of a command split as its program reads them. */

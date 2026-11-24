@@ -51,7 +51,7 @@ export const LANGUAGES: readonly Language[] = [
     code: "en",
     actions: {
       create: ["open*", "create*", "make*", "file", "raise*", "submit*", "send*", "new", "set up", "add*", "init*"],
-      delete: ["delet*", "remov*", "drop*", "prune*", "clean up", "cleanup", "tidy*", "rm"],
+      delete: ["delet*", "remov*", "drop*", "prune*", "clean up", "cleanup", "tidy*", "rm", "uninstall*"],
       merge: ["merg*"],
       close: ["clos*"],
       comment: ["comment*", "reply*"],
@@ -102,7 +102,7 @@ export const LANGUAGES: readonly Language[] = [
     code: "zh",
     actions: {
       create: ["开", "提", "建", "创建", "新建", "发", "做一个", "弄一个"],
-      delete: ["删除", "删掉", "删了", "删", "移除", "清理", "清除"],
+      delete: ["删除", "删掉", "删了", "删", "移除", "清理", "清除", "卸载"],
       merge: ["合并", "合入", "合进", "并入", "合到", "合了"],
       close: ["关闭", "关掉"],
       comment: ["评论", "留言", "回复"],
@@ -153,7 +153,7 @@ export const LANGUAGES: readonly Language[] = [
     code: "ja",
     actions: {
       create: ["作成", "作って", "作る", "出して", "出す", "開いて", "立てて", "新規"],
-      delete: ["削除", "消して", "消す", "除去", "片付け"],
+      delete: ["削除", "消して", "消す", "除去", "片付け", "アンインストール"],
       merge: ["マージ", "統合", "取り込"],
       close: ["クローズ", "閉じ"],
       comment: ["コメント", "返信"],
@@ -245,7 +245,7 @@ export const LANGUAGES: readonly Language[] = [
     code: "de",
     actions: {
       create: ["erstell*", "öffne*", "anleg*", "leg an", "mach*", "eröffne*", "aufmach*"],
-      delete: ["lösch*", "entfern*", "aufräum*", "räum auf", "weg"],
+      delete: ["lösch*", "entfern*", "aufräum*", "räum auf", "weg", "deinstallier*"],
       merge: ["merg*", "zusammenführ*", "führ zusammen", "führe zusammen", "einpfleg*"],
       close: ["schließ*", "schliess*"],
       comment: ["kommentier*", "antwort*"],
@@ -289,7 +289,7 @@ export const LANGUAGES: readonly Language[] = [
     code: "fr",
     actions: {
       create: ["crée*", "créer", "créez", "ouvr*", "fais une", "faire une", "soumet*", "lance*"],
-      delete: ["supprim*", "efface*", "enlève*", "retire*", "nettoie*"],
+      delete: ["supprim*", "efface*", "enlève*", "retire*", "nettoie*", "désinstall*"],
       merge: ["fusionn*", "merg*", "intègr*"],
       close: ["ferm*", "clôtur*"],
       comment: ["comment*", "répond*"],
@@ -333,7 +333,7 @@ export const LANGUAGES: readonly Language[] = [
     code: "es",
     actions: {
       create: ["crea*", "abre", "abrir", "abra", "haz un", "haz una", "envía*", "levanta*"],
-      delete: ["borra*", "elimina*", "quita*", "limpia*"],
+      delete: ["borra*", "elimina*", "quita*", "limpia*", "desinstal*"],
       merge: ["fusiona*", "merge*", "haz merge", "integra*", "mezcla*"],
       close: ["cierra*", "cerrar"],
       comment: ["comenta*", "responde*"],
@@ -377,7 +377,7 @@ export const LANGUAGES: readonly Language[] = [
     code: "pt",
     actions: {
       create: ["cria*", "crie", "criar", "abra", "abre", "abrir", "faça um", "faz um", "envie"],
-      delete: ["apag*", "exclu*", "remov*", "delet*", "limp*"],
+      delete: ["apag*", "exclu*", "remov*", "delet*", "limp*", "desinstal*"],
       merge: ["mescl*", "funde", "fundir", "fundi", "faz merge", "faça merge", "merge*", "integr*"],
       close: ["fech*"],
       comment: ["coment*", "respond*"],
@@ -419,7 +419,7 @@ export const LANGUAGES: readonly Language[] = [
     code: "it",
     actions: {
       create: ["crea*", "apri*", "fai una", "fai un", "invia*"],
-      delete: ["cancell*", "elimin*", "rimuov*", "togli*", "pulisc*"],
+      delete: ["cancell*", "elimin*", "rimuov*", "togli*", "pulisc*", "disinstall*"],
       merge: ["unisci", "unire", "fondi", "fondere", "merg*", "integr*"],
       close: ["chiud*"],
       comment: ["comment*", "rispond*"],
@@ -528,7 +528,7 @@ export const LANGUAGES: readonly Language[] = [
     actions: {
       read: ["przeczyt*", "czyta*", "pokaż*", "otwórz*", "sprawdź*", "zobacz*"],
       create: ["utwórz", "stwórz", "otwórz", "załóż", "zrób"],
-      delete: ["usuń", "skasuj", "wyczyść"],
+      delete: ["usuń", "skasuj", "wyczyść", "odinstaluj"],
       merge: ["zmerguj", "scal*", "połącz", "merg*"],
       push: ["wypchnij", "pushnij", "push*", "wyślij"],
       publish: ["opublikuj", "wydaj"],
@@ -730,12 +730,13 @@ export function nounWords(noun: string): RegExp {
   return cached(`noun:${noun}`, () => compile(all((language) => language.nouns, noun as NounKey)));
 }
 
-type ListKey = "negate" | "retract" | "defer" | "remind" | "carryOn" | "filler" | "baseBefore" | "baseAfter" | "headBefore" | "headAfter";
+type ListKey = "negate" | "retract" | "retractOnly" | "defer" | "remind" | "carryOn" | "filler" | "baseBefore" | "baseAfter" | "headBefore" | "headAfter";
 
 /** One list of every language, as one regex (`g` for scanning). */
 export function listWords(key: ListKey, global = false): RegExp {
   // A preference or deferral takes a request back as a "wait" does.
-  const of = (language: Language) => (key === "retract" ? [...language.retract, ...(language.defer ?? [])] : (language[key] ?? []));
+  // `retractOnly`: the retraction words proper, without the deferrals (denials.ts `deferredLift`).
+  const of = (language: Language) => (key === "retract" ? [...language.retract, ...(language.defer ?? [])] : key === "retractOnly" ? language.retract : (language[key] ?? []));
   return cached(`${key}:${global}`, () => compile(LANGUAGES.flatMap(of), global ? "giu" : "iu"));
 }
 

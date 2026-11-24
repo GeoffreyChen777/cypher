@@ -42,7 +42,7 @@ import {
   checkedReaddir,
   checkedReadFile,
   checkedWriteFile,
-  patchPaths,
+  patchOps,
   PermissionDenied,
   Permissions,
   toolOverride,
@@ -56,7 +56,7 @@ import { OWNER_WORDS_ENV, parseOwnerWords } from "./cypher-permissions/explicit.
 
 const FS_HOOK = Symbol.for("cypher.permissions.fs");
 const APPLY_PATCH = "apply_patch";
-const OWN_TOOLS = new Set(["read", "write", "edit", "ls", "grep", "find", "bash", "request_permission"]);
+export const OWN_TOOLS = new Set(["read", "write", "edit", "ls", "grep", "find", "bash", "request_permission"]);
 
 type AnyResult = { content: { type: string; text?: string }[]; details?: unknown; isError?: boolean; structuredContent?: unknown };
 
@@ -420,7 +420,17 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
       // Outside the sandbox: commands the user allowed, or this one if the
       // user approves the agent's request now.
       let ranOutside: { note: string; record: PermissionRecord } | undefined;
-      if (check.kind === "outside") {
+      // Every path consults the owner's denials and the floor (round 6, W1, core.ts `gate`): a rule-allowed line
+      // that is held is reviewed as an escalation; a sandboxed one is refused with what holds it.
+      const held = check.kind === "outside" ? await st.gateLine("bash:outside", command, ctx.cwd) : !escalate ? await st.gateLine("bash:sandbox", command, ctx.cwd) : undefined;
+      if (held && check.kind !== "outside" && !escalate) {
+        const reason = held.review
+          ? `Permission denied: ${held.reason} (${held.detail}). Run it again with \`escalate\` to have it reviewed.`
+          : `Permission denied: ${held.reason} (${held.detail}). Only the user can allow this: run it again with \`escalate\` to ask them.`;
+        st.audit.write({ tool: "bash", command, capability: "escalate", decision: "deny", decidedBy: "policy", reason, prompted: false });
+        return refused(reason, { purpose }) as never;
+      }
+      if (check.kind === "outside" && !held) {
         const rules = [...new Set(check.rules.map((rule) => describePattern(rule.match)))];
         st.audit.write({ tool: "bash", command, capability: "escalate", decision: "allow", decidedBy: rules.length ? "rule" : "inspect", tier: check.tier, prompted: false });
         const why = [...(check.inspected ? ["it only inspects"] : []), ...(rules.length ? [`allowed by ${rules.map((rule) => `\`${rule}\``).join(", ")}`] : [])];
@@ -428,8 +438,8 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
           note: why.join("; "),
           record: { outcome: "outside", scope: "rule", rule: rules.length ? rules.join(", ") : "inspection", purpose: check.rules.find((rule) => rule.label)?.label },
         };
-      } else if (escalate) {
-        const outcome = await st.requestEscalation(command, escalate, requestContext(ctx, signal, id));
+      } else if (escalate || held) {
+        const outcome = await st.requestEscalation(command, escalate ?? { label: purpose ?? "a command your rules allow", reason: `${held!.reason}: ${held!.detail}` }, requestContext(ctx, signal, id));
         if (!outcome.ok) return refused(outcome.reason, { purpose }) as never;
         const by = outcome.by === "judge" ? " by the reviewing model" : "";
         ranOutside = {
@@ -612,7 +622,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
     if (event.toolName === APPLY_PATCH) {
       const input = event.input as { input?: string; patch?: string };
       const patch = typeof input.input === "string" ? input.input : typeof input.patch === "string" ? input.patch : "";
-      const requests = patchPaths(patch).map((path) => ({ capability: "write" as const, path, diff: patch.slice(0, 4000) }));
+      const requests = patchOps(patch).map(({ path, op }) => ({ capability: "write" as const, path, diff: patch.slice(0, 4000), ...(op ? { op } : {}) }));
       const auth = await st.authorize(requests, { tool: APPLY_PATCH, toolCallId: event.toolCallId }, requestContext(ctx, undefined, event.toolCallId));
       if (!auth.ok) return { block: true, reason: auth.reason, terminate: auth.abort };
       st.inflight.set(inflightKey(event.toolCallId), auth.approved);
@@ -621,9 +631,11 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
     // MCP and other extension tools: a tool-level decision.
     const mcp = event.toolName.match(/^mcp__(.+?)__(.+)$/);
     const decision = toolOverride(st.config, event.toolName, mcp?.[1]);
-    if (decision === "allow") return undefined;
+    // Allowed by its setting: the owner's denials and the floor first (round 6, W1).
+    const held = decision === "allow" ? await st.gateTool("tool:setting", event.toolName, event.input) : undefined;
+    if (decision === "allow" && !held) return undefined;
     if (decision === "deny") return { block: true, reason: `Permission denied: the ${event.toolName} tool is disabled by the permission settings.` };
-    const outcome = await st.requestToolUse(event.toolName, event.input, requestContext(ctx, undefined, event.toolCallId));
+    const outcome = await st.requestToolUse(event.toolName, event.input, requestContext(ctx, undefined, event.toolCallId), held ? { held } : {});
     if (!outcome.ok) return { block: true, reason: outcome.reason, terminate: outcome.abort };
     return undefined;
   });

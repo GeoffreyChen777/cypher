@@ -45,6 +45,11 @@ export interface LedgerEntity {
   version?: string;
   /** The taint ledger's: the secret the file or repository holds. */
   from?: string;
+  /**
+   * The task the chat belongs to (round 6, W3): a workspace with its threads, a plan with its sessions. Chats
+   * of one task never count as each other's "other task" (core.ts `othersMade`).
+   */
+  task?: string;
 }
 
 /** What a command did to the entity: made it (the default), started it, merged it. */
@@ -57,6 +62,21 @@ export interface LedgerEntry extends LedgerEntity {
   by?: string;
   at?: string;
   chatId?: string;
+}
+
+/**
+ * Other spellings of the kinds (round 6, W3): what a ledger written by another Runtime, a tool or a test
+ * calls a folder or a file is a `path`, a cluster's namespace a `namespace`.
+ */
+export const KIND_ALIASES: Readonly<Record<string, LedgerKind>> = {
+  dir: "path", directory: "path", folder: "path", file: "path", tmp: "path", scratch: "path",
+  ns: "namespace", ctx: "context", s3: "bucket", gcs: "bucket",
+};
+
+/** A kind as the ledger keeps it: its own name, or what `KIND_ALIASES` reads it as; undefined when it is no kind. */
+export function ledgerKind(kind: string): LedgerKind | undefined {
+  if ((LEDGER_KINDS as readonly string[]).includes(kind)) return kind as LedgerKind;
+  return KIND_ALIASES[kind.toLowerCase()];
 }
 
 /**
@@ -82,7 +102,71 @@ export const MATCHING: Readonly<Record<LedgerKind, Match>> = {
   container: "hex-prefix",
   image: "exact",
   resource: "exact",
+  namespace: "exact",
+  context: "exact",
+  cluster: "exact",
+  bucket: "path",
+  project: "caseless",
 };
+
+/**
+ * How the other-task floor came to hold each kind (round 6 narrowing, core.ts `otherTaskOf`). `since`: 4 for a kind
+ * the floor held before round 6 (a danger line's named target, `notThisTask`, from round 4 on: branches, pull
+ * requests, worktrees, processes, …); 6 for one round 6 (W3) first brought under it, on any destroy: a file or
+ * folder (before, held only when a danger line named it), and the kinds round 6 added. `located`: its name is a
+ * place in the file system, so it can lie inside a chat's working tree.
+ *
+ * A destroy of another chat's entity of a kind with `since: 6` and `located`, inside this chat's own working tree,
+ * when the two chats' lineage is unknown (`taskRelation`), is held for the judge's review, not the floor: parallel sessions of one plan
+ * share a worktree, and without a task id a sibling's scratch folder reads as another task's.
+ */
+export const OTHER_TASK_FLOOR: Readonly<Record<LedgerKind, { since: 4 | 6; located: boolean }>> = {
+  repo: { since: 4, located: false },
+  remote: { since: 4, located: false },
+  branch: { since: 4, located: false },
+  pr: { since: 4, located: false },
+  tag: { since: 4, located: false },
+  release: { since: 4, located: false },
+  path: { since: 6, located: true },
+  worktree: { since: 4, located: true },
+  process: { since: 4, located: false },
+  simulator: { since: 4, located: false },
+  host: { since: 4, located: false },
+  package: { since: 4, located: false },
+  container: { since: 4, located: false },
+  image: { since: 4, located: false },
+  resource: { since: 4, located: false },
+  namespace: { since: 6, located: false },
+  context: { since: 6, located: false },
+  cluster: { since: 6, located: false },
+  bucket: { since: 6, located: false },
+  project: { since: 6, located: false },
+};
+
+/**
+ * How two chats' tasks relate (final pass; design §7.3.13), from their task ids (`CYPHER_TASK_ID`, set by the
+ * engine: `workspace:<bot>` for a workspace's chat and threads, `workspace:<bot>/plan:<work>` for a plan's
+ * sessions and thread, `chat:<id>` for an owner's plain chat; a subagent takes its root chat's):
+ * - `same`: equal, or one is the other's prefix by whole `/` segments (a workspace's chat and its plans'
+ *   sessions; two sessions of one plan; a subagent and its parent);
+ * - `other`: both are tasks the engine knows the bounds of (`workspace:` ids) and neither contains the other
+ *   (two plans, two workspaces);
+ * - `unknown`: either id is missing (an entry an older Runtime wrote, a chat no engine named) or either is only
+ *   a chat's lineage (`chat:`): the owner may split one piece of work over two plain chats by hand, so two
+ *   lineages are no known other task. Unknown lineage is what the round-6 narrowing reads (core.ts `otherTaskOf`).
+ */
+export type TaskRelation = "same" | "other" | "unknown";
+
+export function taskRelation(a: string | undefined, b: string | undefined): TaskRelation {
+  if (!a || !b) return "unknown";
+  if (a === b) return "same";
+  const left = a.split("/");
+  const right = b.split("/");
+  const shared = Math.min(left.length, right.length);
+  if (left.slice(0, shared).every((segment, index) => segment === right[index])) return "same";
+  if (left[0].startsWith("chat:") || right[0].startsWith("chat:")) return "unknown";
+  return "other";
+}
 
 /** Bounds on one chat's ledger (the file and the memory). */
 const MAX_ENTRIES = 2000;
@@ -138,10 +222,11 @@ export function entryCovers(made: LedgerEntity, target: LedgerEntity): boolean {
 function validEntry(value: unknown): value is LedgerEntry {
   if (!value || typeof value !== "object") return false;
   const entry = value as Partial<LedgerEntry>;
-  if (typeof entry.kind !== "string" || !LEDGER_KINDS.includes(entry.kind as LedgerKind)) return false;
+  if (typeof entry.kind !== "string" || ledgerKind(entry.kind) === undefined) return false;
+  entry.kind = ledgerKind(entry.kind);
   if (typeof entry.name !== "string" || entry.name === "") return false;
   if (entry.action !== undefined && !["create", "start", "merge"].includes(entry.action)) return false;
-  for (const field of ["repo", "remote", "head", "version", "by", "at", "chatId", "from"] as const) {
+  for (const field of ["repo", "remote", "head", "version", "by", "at", "chatId", "from", "task"] as const) {
     if (entry[field] !== undefined && typeof entry[field] !== "string") return false;
   }
   return true;
@@ -156,6 +241,8 @@ export class Ledger {
   readonly file: string | undefined;
   private readonly chatId: string | undefined;
   private loaded = false;
+  /** The task this chat belongs to, written on each entry (round 6, W3). */
+  task: string | undefined;
 
   constructor(file: string | undefined, chatId: string | undefined) {
     this.file = file;
@@ -205,6 +292,7 @@ export class Ledger {
         ...(by ? { by: by.length > 200 ? `${by.slice(0, 200)}…` : by } : {}),
         at,
         ...(this.chatId ? { chatId: this.chatId } : {}),
+        ...(this.task && !rest.task ? { task: this.task } : {}),
       };
       if (this.take(entry)) fresh.push(entry);
     }

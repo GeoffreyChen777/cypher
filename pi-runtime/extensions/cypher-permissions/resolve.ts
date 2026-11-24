@@ -73,8 +73,37 @@ const MAX_LINKS = 40;
  * (`readlink`), as a write through it would create the target (round 5 step 2): the path is where the
  * link points, not the link.
  */
+/**
+ * macOS's data volume spells every user path a second way (`/System/Volumes/Data/Users/…`, a firmlink realpath keeps):
+ * the same file as `/Users/…` (iteration 2). Folded when the path without the prefix is one of the system's own roots.
+ */
+const DATA_VOLUME = "/System/Volumes/Data";
+function unfirmlinked(path: string): string {
+  if (!path.startsWith(`${DATA_VOLUME}/`)) return path;
+  const rest = path.slice(DATA_VOLUME.length);
+  const root = `/${rest.split("/")[1] ?? ""}`;
+  try {
+    return root !== "/" && lstatSync(root) ? rest : path;
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * The user's folder spelled by their name (iteration 4: `/Users/$USER/…`, `/home/$LOGNAME/…`, with `$USER` the home
+ * folder's name, shell.ts): the home folder, wherever it is.
+ */
+function byUserName(path: string, home: string): string {
+  const name = basename(home);
+  for (const root of ["/Users", "/home"]) {
+    const spelled = `${root}/${name}`;
+    if (spelled !== home && (path === spelled || path.startsWith(`${spelled}/`))) return `${home}${path.slice(spelled.length)}`;
+  }
+  return path;
+}
+
 export function canonicalize(path: string, cwd: string, home = homedir(), links = 0): string {
-  const absolute = resolve(cwd, expandHome(path.startsWith("@") ? path.slice(1) : path, home));
+  const absolute = byUserName(unfirmlinked(resolve(cwd, expandHome(path.startsWith("@") ? path.slice(1) : path, home))), home);
   const tail: string[] = [];
   let current = absolute;
   for (;;) {

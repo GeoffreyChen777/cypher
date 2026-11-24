@@ -253,6 +253,7 @@ fn run_profiles_spawn_exact_args() {
         chat_id: Some("session".into()),
         memory_prompt: Some("<memory>…</memory>".into()),
         owner_words: None,
+        task_id: None,
         ..Default::default()
     };
     assert_eq!(
@@ -270,6 +271,7 @@ fn run_profiles_spawn_exact_args() {
         chat_id: Some("child-chat".into()),
         memory_prompt: Some("<memory>…</memory>".into()),
         owner_words: None,
+        task_id: None,
         profile: RunProfile::Child(ChildRunEnv {
             system_prompt: "You review code.".into(),
             tools: vec!["read".into()],
@@ -301,6 +303,7 @@ fn run_profiles_spawn_exact_args() {
         chat_id: Some("child-chat".into()),
         memory_prompt: None,
         owner_words: None,
+        task_id: None,
         profile: RunProfile::Child(ChildRunEnv {
             system_prompt: "You review code.".into(),
             tools: vec!["read".into(), "send_message".into()],
@@ -347,6 +350,7 @@ fn run_profiles_spawn_exact_args() {
             chat_id: Some("bot-chat".into()),
             memory_prompt: None,
             owner_words: None,
+            task_id: None,
             profile: RunProfile::Bot(BotRunEnv {
                 bot_id: "bot-1".into(),
                 origin,
@@ -404,6 +408,7 @@ fn run_profiles_spawn_exact_args() {
                     chat_id: Some("bot-chat".into()),
                     memory_prompt: None,
                     owner_words: None,
+                    task_id: None,
                     profile: RunProfile::Bot(BotRunEnv {
                         bot_id: "bot-1".into(),
                         origin: BotOrigin::Owner,
@@ -440,6 +445,7 @@ fn run_profiles_spawn_exact_args() {
                         chat_id: Some("bot-chat".into()),
                         memory_prompt: None,
                         owner_words: None,
+                        task_id: None,
                         profile: RunProfile::Bot(BotRunEnv {
                             bot_id: "bot-1".into(),
                             origin: BotOrigin::Owner,
@@ -466,6 +472,7 @@ fn run_profiles_spawn_exact_args() {
         chat_id: Some("bot-chat".into()),
         memory_prompt: None,
         owner_words: None,
+        task_id: None,
         profile: RunProfile::Bot(BotRunEnv {
             bot_id: "bot-1".into(),
             origin: BotOrigin::Peer,
@@ -632,6 +639,48 @@ fn the_owner_words_reach_the_permission_extension() {
     }
 }
 
+/// The run's task id reaches the permission extension as `CYPHER_TASK_ID`,
+/// and a run without one never inherits the engine's or another chat's.
+#[test]
+fn the_task_id_reaches_the_permission_extension() {
+    let harness = harness();
+    let task = |cmd: &tokio::process::Command| {
+        cmd.as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "CYPHER_TASK_ID")
+            .map(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+    };
+    let request = request("scenario:happy");
+    for id in ["workspace:atlas/plan:p1", "workspace:atlas", "chat:c1"] {
+        let host = RunHostContext {
+            chat_id: Some("session".into()),
+            task_id: Some(id.into()),
+            ..Default::default()
+        };
+        let cmd = harness
+            .spawn_run_command(Some(&request.cwd), &host, None, &request)
+            .expect("run command builds");
+        assert_eq!(task(&cmd), Some(Some(id.to_string())));
+        let cmd = harness
+            .spawn_command(None, &host, None)
+            .expect("command builds");
+        assert_eq!(task(&cmd), Some(Some(id.to_string())), "every spawn path");
+    }
+    for host in [
+        RunHostContext::default(),
+        RunHostContext {
+            chat_id: Some("session".into()),
+            task_id: Some(String::new()),
+            ..Default::default()
+        },
+    ] {
+        let cmd = harness
+            .spawn_run_command(Some(&request.cwd), &host, None, &request)
+            .expect("run command builds");
+        assert_eq!(task(&cmd), Some(None), "cleared, never inherited");
+    }
+}
+
 /// A subagent's file-tool denials tell it to call `request_permission`, and
 /// Pi registers no tool its `--tools` allowlist leaves out.
 #[test]
@@ -642,6 +691,7 @@ fn subagents_with_file_tools_can_request_permission() {
             chat_id: Some("child-chat".into()),
             memory_prompt: None,
             owner_words: None,
+            task_id: None,
             profile: cypher_harness::RunProfile::Child(cypher_harness::ChildRunEnv {
                 system_prompt: String::new(),
                 tools: tools.iter().map(|tool| tool.to_string()).collect(),
@@ -2685,6 +2735,7 @@ fn a_bot_working_directly_gets_its_roots_and_level() {
         chat_id: Some("bot-chat".into()),
         memory_prompt: None,
         owner_words: None,
+        task_id: None,
         profile: RunProfile::Bot(BotRunEnv {
             bot_id: "bot-1".into(),
             origin: BotOrigin::Owner,

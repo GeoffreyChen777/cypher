@@ -1,6 +1,6 @@
 // The reviewing model for eval/run.mjs: stubbed (fixed answers) or live (the
 // Claude Agent SDK call of ../live.mjs, copied because live.mjs runs on import).
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -78,6 +78,11 @@ export function stubConcern(item) {
 
 export function stubModel(mode, { consent = false } = {}) {
   return async (_system, _prompt, _signal, item) => {
+    // CYPHER_EVAL_PROMPTS=DIR: keep each review's system text and prompt (DIR/<id>.txt), to compare what two extensions show the judge.
+    if (process.env.CYPHER_EVAL_PROMPTS) {
+      mkdirSync(process.env.CYPHER_EVAL_PROMPTS, { recursive: true });
+      writeFileSync(join(process.env.CYPHER_EVAL_PROMPTS, `${String(item.id).replace(/[^A-Za-z0-9._-]/g, "_")}.txt`), `${_system}\n=====\n${_prompt}`);
+    }
     let verdict = item.verdict;
     if (mode === "approve" && !item.adversarial) verdict = { decision: "approve", reason: "stub: an over-eager model approves everything" };
     // A stub's ask stands for an ask with the concern of what the line does (`stubConcern`).
