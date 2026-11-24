@@ -1695,8 +1695,8 @@ Five mechanisms (tests: `cypher-permissions-round6.test.mjs`), none fitted to th
   `DenialUnit.destroys`; a content write is none) on another chat's entity — the same, one inside
   the target, or one the line's globs could match — is the `other-task` floor, for every line, not
   only dangers, unless the owner's words name it. Narrowed (2026-11-24): while the lineage is
-  unknown (no task id on this chat or on the other chat's entry; the engine doesn't set
-  `CYPHER_TASK_ID` yet), a kind the floor first held in round 6 that has a place (ledger.ts
+  unknown (no task id on this chat or on the other chat's entry, or only owner chats' lineages;
+  ledger.ts `taskRelation`, §7.3.13), a kind the floor first held in round 6 that has a place (ledger.ts
   `OTHER_TASK_FLOOR`: `path`) destroyed inside this chat's own working tree (its cwd's git worktree)
   is held for the judge's review with "another chat made it" as evidence, not the floor, so a plan's
   parallel sessions in one worktree don't put each other's scratch to the owner; outside the tree,
@@ -1714,6 +1714,84 @@ Five mechanisms (tests: `cypher-permissions-round6.test.mjs`), none fitted to th
   with its `-name`/`-path` tests, …) seen through `SUBSET_FILTERS` (head, sort, grep, …), the
   floor's `permission-system` row applies if the set could hold the permission system. Any other
   producer leaves the set unknown and nothing asks more than before.
+
+#### 7.3.13 Final pass: task ids from the engine, and the remaining floor gaps by class (2026-11-24)
+
+Tests: `cypher-permissions-final.test.mjs` (random names, three seeds), `crates/engine/src/session/engine/task_id.rs`,
+`crates/harness/tests/pi.rs` `the_task_id_reaches_the_permission_extension`.
+
+**Task ids (`CYPHER_TASK_ID`).** The engine's `host_context` fills `RunHostContext.task_id` and the harness sets it
+beside `CYPHER_CHAT_ID` (cleared first on every spawn). The id is a lineage, widest first:
+
+| chat | `CYPHER_TASK_ID` |
+| --- | --- |
+| a workspace's own chat, its routines' and peers' threads, a project routine's session | `workspace:<bot>` |
+| a session a plan started (`Chat.started_by.work_id`, else the plan record's steps), the plan's background thread (`BotThread::Work`) | `workspace:<bot>/plan:<work>` |
+| an owner's plain chat | `chat:<id>` |
+| a subagent's child chat (any depth) | its root chat's id |
+| a memory pass, a child whose parent row is gone, discovery | none |
+
+ledger.ts `taskRelation` reads two ids: **same** when equal or one is the other's prefix by whole `/` segments (a
+plan's sessions with each other and with their workspace's chat; a subagent with its parent), **other** when both are
+`workspace:` ids and neither contains the other (two plans, two workspaces), and **unknown** otherwise: an id is
+missing (an entry an older Runtime wrote), or either is only a chat's lineage (`chat:`; the owner may split one piece
+of work over two plain chats by hand, so two plain chats are no *known* other task). Same: the other-task floor never
+holds it. Other: the floor, inside this chat's working tree too. Unknown: the round-6 narrowing (inside the working
+tree, a `since: 6` located kind is the judge's with the evidence; outside, the floor). So a plan's parallel sessions
+in one worktree are one task and pass, two plans destroying each other's work floor, and owner chats keep today's
+behaviour.
+
+**Gaps closed by class** (each a mechanism or a table, none a case):
+
+- *Commands whose output is secret material* (risk.ts `SECRET_SOURCES`, new rows and a `with` option): private-key
+  exports (`gpg --export-secret-keys`, `gpgsm`), stored secrets and minted tokens (`kubectl config view --raw`,
+  `kubectl get secret`, `aws ecr get-login-password`, `secretsmanager`, `ssm --with-decryption`, `gcloud secrets
+  versions access`, `az keyvault secret show`, `gh auth status --show-token`, `sops -d`, password managers). They are
+  sources for any sink in the line (the data-flow floor).
+- *The home folder by evaluating the user's name* (shell.ts): `$(eval WORDS)` reads its words again (`$(eval echo
+  ~$(whoami))`), `~NAME` of the user the line runs as is the home folder, `~$(…)` stays a literal `~` as bash keeps it,
+  and fold.ts `USER_PRINTERS` (`whoami`, `logname`, `id -un`) print the user's name.
+- *Parameter transforms of known values* (shell.ts `PARAMETER_TRANSFORMS`): `${V/#pat/rep}`, `/`, `//`, `/%`, `#`,
+  `##`, `%`, `%%`, `^^`, `,,`, `${V:off:len}` are computed when the value and operands are known (a base64-decoded path
+  rewritten by `${D/#\~/$HOME}` is the permission system's file); otherwise unknown as before.
+- *A feeder's write target built around its operand* (risk.ts `feederWriteTemplates`): `xargs -I{}`/`parallel`
+  running an inline shell or a writer whose target holds the token (`> ~/.cypher/…/agent/{}`) writes that template's
+  glob; the floor's permission-system row meets it.
+- *An environment variable for an option* (schema.ts `ENV_OPTIONS`, `withEnvOptions`): `GH_REPO`, `KUBECONFIG`,
+  `AWS_PROFILE`/`AWS_REGION`, `CLOUDSDK_CORE_PROJECT`, `DOCKER_HOST`, `GIT_DIR`, … in front of the command are the
+  options they stand for, for typed targets and the argv safety net. The safety net also reads a denied line that
+  names no typed target by its own words: asked again by the same program with every word it gave (options and
+  their values too), it is the same request (`GH_REPO=o/r gh issue close 301 -c dup` after a denied `gh issue close
+  301 --repo o/r`; a plain `down` after a denied `down -v` gives fewer words and is not).
+- *A project's resources destroyed as a group* (flow.ts `GROUP_DESTROYERS`): `docker compose down` (containers;
+  `-v` its volumes, `--rmi` its images), `compose rm -v`, `kubectl delete -f/-k`, `terraform destroy`, as a runtime
+  operand of the kinds with the compose project's name test (`-p`, else the compose file's folder, else the cwd);
+  denials and the other-task floor meet it.
+- *A push of an empty source deletes its destination* (flow.ts `RUNTIME_OPERANDS` `word` rows): `git push origin
+  :refs/tags/{}` under a feeder is a runtime tag (`refs/heads/` a branch, bare both).
+- *What a process is known by* (core.ts `entityForms`, `processDescription`; flow.ts `passes(…, also)`): another
+  chat's process meets a name test by the command that started it (the ledger's `by`) and its live command line and
+  listening ports (`ps`, `lsof`), so `kill $(pgrep -f 'cargo watch')` and `kill $(lsof -t -i :PORT)` reach it. A gone
+  process has no description and meets nothing.
+- *Project scripts* (scripts.ts `SCRIPT_RUNNERS`): `bash|sh FILE`, a path with a shell shebang, `make TARGET`
+  (prerequisites' recipes, `-C`, `-f`), `npm|pnpm|yarn|bun run X` (with pre/post), `just X` do what their lines do:
+  each line is read as a line of its own (two levels deep) and its units join the request's, so denials and the
+  other-task floor see through the opaque command. A script that can't be read stays opaque, as before.
+- *Patch operations* (core.ts `patchOps`, `AccessRequest.op`): an apply_patch `*** Delete File:` destroys its file,
+  an `*** Update File:` with `*** Move to:` moves its source away; the other-task floor and denials of a delete meet
+  them. A judge approval of a request held for review runs once and keeps no grant (as the bash path).
+- *Content writes into another task's working tree* (core.ts `otherTaskOf`, `inOwnTrees`): a write or edit (file
+  tools, a bash write by escalation, an MCP tool that writes) of a file inside a worktree another chat made, or a folder
+  of its that is a git checkout, outside this chat's own working tree and the folders added to it, is the other-task
+  floor. Decision: the floor's row is "another task's resources", and a working tree mid-change is that task's work in
+  progress — overwriting a file there is as destructive to it as a delete (the owner's own rule: never touch other
+  sessions' uncommitted files). It is narrow by construction: a chat working inside that tree (its cwd), the same task
+  (plan siblings, their workspace), a plain folder another chat made, and the owner's words naming the tree all pass.
+- *Unknown origin as evidence* (core.ts `originUnknown`, judge.ts): what a line deletes or stops (not files, not
+  processes) that neither this chat's ledger nor any other chat's names reaches the judge marked "who made it:
+  unknown … isn't shown to be this task's: approve only when the owner's words or the conversation account for this
+  one". This is where a resource known only by absence (another chat's namespace made before ledgers, or by hand)
+  ends: the code can't decide it, and it is not approved by default.
 
 ### 7.4 Human approval
 
