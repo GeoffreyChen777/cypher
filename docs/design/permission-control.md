@@ -1876,6 +1876,42 @@ Tests: `cypher-permissions-final-it2.test.mjs` (9, three seeds). Each family jud
 - *Owner naming*: quoted speech (several words in quotes) and sentences with a condition or deferral word don't name
   another chat's work.
 
+#### 7.3.16 Final pass, iteration 3: lists closed by their default (2026-11-24)
+
+Three red teams in a row found new members of the same open lists (senders, wrappers, credential names, printers,
+script runners). Each list is now read from its finite other side (defaults.ts); tests `cypher-permissions-final-it3.test.mjs`.
+
+- **Senders, closed by default** (core.ts `defaultSink`). A secret's *contents* handed to a program not in
+  `LOCAL_CONSUMERS` (readers, filters, encoders, archivers, editors, the clipboard, the shell's builtins) — on its input,
+  through a pipe, or in an argument a substitution built — may leave the machine: row 1. A secret *file* given to a
+  program that names another machine (`namedRemote`: a host option, a URL, `//host/`, `host:path`) is sent. Narrowed for
+  the cap: not into the tool's own credential option (`OWN_CREDENTIAL`, risk.ts `KEY_OPTIONS`: `--password-stdin`,
+  `-i KEY`, `--kubeconfig`, `--env-file`), not the environment printers (`ps eww` checks on this machine), not a download's
+  destination, not a command that runs on another machine (`runsElsewhere`). A file path handed to an unknown program
+  that names no other machine stays the judge's (`docker run --env-file .env`, `lp`, `ansible` with an inventory): row 1
+  can't tell a tool using its configuration from one sending it. The sink tables stay for their programs' own forms.
+- **Wrappers, closed by default** (core.ts `operandLines`). Any program not in `PLAIN_PROGRAMS` (printers, searchers,
+  git, gh, database clients, interpreters — read by their own readers) and not running elsewhere, given words that start
+  a command (`COMMAND_STARTS`) or an operand whose text is one, may run them; so may an option that runs its value
+  (`--pre`, `-x`, `--exec`, `-c`), a `trap`, an assignment whose value is a command line (`GIT_SSH_COMMAND`, `LESSOPEN`,
+  `GIT_EDITOR`), a line read into a variable the line then runs, and a package runner's package. These lines are read for
+  the floor and give units to the denials and the other-task floor (one reading for both).
+- **Secret names, closed by content** (defaults.ts `secretByContent`): a file that holds a private key, a cloud or forge
+  token, or credential-named `KEY=value` lines is a secret whatever its name, where row 1 reads files. The name list
+  (config.ts `DEFAULT_SENSITIVE`) stays for files that aren't there yet and for the sandbox's own read policy.
+- **Printers and folds**: still a list (shell.ts, fold.ts), now with the shell's own ANSI-C quoting, `printf %b`, `jq -rn`,
+  `$(cd; pwd)`, a substitution's own command after its nested ones, code whose whole output is home, `git rev-parse
+  --show-toplevel`. A word the folder can't compute keeps the round-5 reading: a write whose start is unknown is the
+  judge's ("could be the permission system" evidence), since owner-approved lines write to `$T/x` routinely; an exact
+  place it did compute is that path.
+- **Script runners**: a list of manifests and their tools (scripts.ts: make, package managers' scripts and install
+  lifecycle, just, deno task, go-task, pre-commit), since a manifest's format must be read to know what runs.
+- **Never remembered when unread**: an approval of a line with a word, redirection or path known only when it runs,
+  opaque code or unread parts runs once.
+- Also: `request_permission` meets the gate whether its paths elevate or not; links made by bind mounts and by inline
+  code's symlink calls are followed; a name after an exception word in the owner's words is kept; a fence in their words
+  runs to its closing fence; `update-ref -d`, `fuser -k`, selector and `kill-server` group deletes.
+
 ### 7.4 Human approval
 
 `ctx.ui.select`, which Cypher bridges to a question in the desktop and iOS apps
