@@ -67,11 +67,29 @@ const USER_PRINTERS: readonly { program: string; when: (args: readonly string[])
   { program: "id", when: (args) => args.length > 0 && args.every((arg) => /^-(un|nu|u|n)$/.test(arg)) && args.join("").includes("u") && args.join("").includes("n") },
 ];
 
+/**
+ * Commands that print a path they are given, resolved (final pass, data): `realpath X`, `readlink -f X`, `grealpath`,
+ * Folded to X itself; where X really leads (symlinks, `..`) is resolved where the path is
+ * classified, as any literal path is. `basename`/`dirname` print a part of it.
+ */
+const PATH_PRINTERS: readonly { program: string; when: (args: readonly string[]) => boolean; apply: (operand: string) => string }[] = [
+  { program: "realpath", when: (args) => args.every((arg) => /^-[esmqPL]+$/.test(arg) || !arg.startsWith("-")), apply: (operand) => operand },
+  { program: "grealpath", when: (args) => args.every((arg) => /^-[esmqPL]+$/.test(arg) || !arg.startsWith("-")), apply: (operand) => operand },
+  { program: "readlink", when: (args) => args.some((arg) => /^-[a-zA-Z]*[fem]/.test(arg) || /^--canonicalize/.test(arg)), apply: (operand) => operand },
+  { program: "basename", when: (args) => args.every((arg) => !arg.startsWith("-")) && args.length === 1, apply: (operand) => operand.replace(/\/+$/, "").split("/").pop() ?? operand },
+  { program: "dirname", when: (args) => args.every((arg) => !arg.startsWith("-")) && args.length === 1, apply: (operand) => operand.replace(/\/+$/, "").replace(/\/[^/]*$/, "") || (operand.startsWith("/") ? "/" : ".") },
+];
+
 /** The literal text a command prints of its own (`echo`, `printf` with `\x`/octal escapes, `echo -e`, a user-name printer), or undefined. */
 export function printed(words: readonly string[], unknown: string, context: FoldContext = {}): string | undefined {
   const [program, ...args] = words;
   if (program === undefined || words.includes(unknown)) return undefined;
   if (context.user && USER_PRINTERS.some((row) => row.program === program && row.when(args))) return `${context.user}\n`;
+  const pathPrinter = PATH_PRINTERS.find((row) => row.program === program && row.when(args));
+  if (pathPrinter) {
+    const operands = args.filter((arg) => !arg.startsWith("-"));
+    if (operands.length === 1 && operands[0] !== "") return `${pathPrinter.apply(operands[0])}\n`;
+  }
   const unescape = (text: string) =>
     text
       .replace(/\\x([0-9a-fA-F]{1,2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))

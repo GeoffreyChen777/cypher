@@ -253,7 +253,27 @@ export type Capability = "network" | "spawn" | "read" | "write" | "env" | "home"
  * (`requests`, `http.client`, `Net::HTTP`, `curl_init`); `(` at its end asks for a call. `"*"` rows
  * hold for every language.
  */
+/**
+ * Calls that delete a file or a folder, per language (final pass, data): one table, read both as writes (the
+ * permission-system floor for code gates on writes) and as destroys (core.ts `CODE_DELETES`: denials, the other-task floor).
+ */
+export const DELETE_NAMES: Readonly<Partial<Record<Language, readonly string[]>>> = {
+  python: ["shutil.rmtree", "rmtree", "os.remove", "os.unlink", "os.rmdir", "os.removedirs", ".unlink(", ".rmdir(", "send2trash"],
+  javascript: ["rmSync", "rmdirSync", "unlinkSync", "fs.rm", "fs.rmdir", "fs.unlink", "fs.promises.rm", "fs.promises.unlink", "fs.promises.rmdir", "Deno.remove", "Deno.removeSync", "rimraf", "fse.remove", "fs.remove"],
+  ruby: ["FileUtils.rm", "FileUtils.rm_r", "FileUtils.rm_rf", "FileUtils.remove_dir", "FileUtils.remove_entry", "File.delete", "File.unlink", "Dir.rmdir", "Dir.delete"],
+  perl: ["unlink", "rmdir", "rmtree", "remove_tree", "File::Path"],
+  php: ["unlink(", "rmdir("],
+  powershell: ["Remove-Item", "rm ", "del ", "rmdir "],
+  swift: ["removeItem", "trashItem"],
+  julia: ["rm("],
+  lua: ["os.remove"],
+  r: ["unlink(", "file.remove"],
+  tcl: ["file delete"],
+};
+
 export const CAPABILITIES: readonly { capability: Capability; languages: readonly Language[] | "*"; names: readonly string[] }[] = [
+  // Deleting is writing (final pass): the permission-system floor for code reads both.
+  ...Object.entries(DELETE_NAMES).map(([language, names]) => ({ capability: "write" as Capability, languages: [language as Language], names: names! })),
   // Reaching the network.
   { capability: "network", languages: ["python"], names: ["urllib", "urllib2", "urllib3", "urlopen", "requests", "httpx", "aiohttp", "http.client", "httplib", "socket", "smtplib", "ftplib", "telnetlib", "xmlrpc", "paramiko", "pycurl", "websocket", "websockets", "grpc", "boto3", "botocore", "asyncssh", "fabric"] },
   { capability: "network", languages: ["javascript"], names: ["fetch(", "XMLHttpRequest", "WebSocket", "EventSource", "sendBeacon", "node:http", "node:https", "node:http2", "node:net", "node:tls", "node:dgram", "require('http')", "require('https')", "require('net')", "require('tls')", "require('dgram')", 'require("http")', 'require("https")', 'require("net")', 'require("tls")', 'require("dgram")', "http.request", "https.request", "http.get", "https.get", "net.connect", "net.createConnection", "tls.connect", "axios", "node-fetch", "undici", "superagent", "needle", "got(", "ky(", "Deno.connect", "Deno.connectTls", "Bun.connect", "Bun.fetch", "socket.io-client"] },
@@ -408,8 +428,11 @@ export function homeJoined(code: string, literals: readonly Literal[]): string[]
     const before = code.slice(Math.max(0, literal.at - 120), literal.at);
     if (!joined.test(before) || !literal.text || /^[a-z][\w+.-]*:\/\//i.test(literal.text)) continue;
     let path = literal.text.replace(/^[/\\]+/, "");
-    // The literals after it in the same join, separated by a comma (or a separator literal).
-    for (let next = index + 1; next < literals.length; next++) {
+    // The literals after it in the same join, separated by a comma (or a separator literal) — only when the home form
+    // itself is a join's argument (`join(h, '.ssh', 'id')`). After a concatenation (`homedir() + '/x'`), the next
+    // comma-separated literal is the call's next argument (`writeFileSync(h + '/x', '{}')`), no part of the path (final pass).
+    const separator = /(\+|\.\.|\.|,|\/|&)?\s*$/.exec(before.replace(/\s+$/, ""))?.[1];
+    for (let next = index + 1; separator === "," && next < literals.length; next++) {
       const between = code.slice(literals[next - 1].end, literals[next].at);
       if (!/^\s*,\s*$/.test(between) || !literals[next].text) break;
       path += `/${literals[next].text.replace(/^[/\\]+/, "")}`;
@@ -455,18 +478,21 @@ function escapeRegex(text: string): string {
 }
 
 /** A name of `CAPABILITIES` as a regex: an identifier, not part of a longer one; `(` at its end allows spaces before it. */
-function nameRegex(name: string): RegExp {
+function nameRegex(name: string, member: boolean): RegExp {
   const call = name.endsWith("(");
   const body = escapeRegex(call ? name.slice(0, -1) : name);
-  const start = /^[\w$]/.test(name) ? "(?<![\\w$.])" : "";
+  // For writes, a member call counts (`fs.rmSync`, `shutil.rmtree` read as `rmtree`; final pass). Other capabilities keep
+  // their names whole (`re.compile` is no `compile(`, `regex.exec` no `exec`).
+  const start = /^[\w$]/.test(name) ? (member ? "(?<![\\w$])" : "(?<![\\w$.])") : "";
   const end = call ? "\\s*\\(" : /[\w$]$/.test(name) ? "(?![\\w$])" : "";
   return new RegExp(`${start}${body}${end}`);
 }
 
 const NAME_CACHE = new Map<string, RegExp>();
-function nameMatches(name: string, text: string): boolean {
-  let regex = NAME_CACHE.get(name);
-  if (!regex) NAME_CACHE.set(name, (regex = nameRegex(name)));
+function nameMatches(name: string, text: string, member = false): boolean {
+  const key = `${member ? "m" : "w"}\u0000${name}`;
+  let regex = NAME_CACHE.get(key);
+  if (!regex) NAME_CACHE.set(key, (regex = nameRegex(name, member)));
   return regex.test(text);
 }
 
@@ -475,7 +501,7 @@ export function capabilityNames(text: string, language: Language, capability: Ca
   const names: string[] = [];
   for (const row of CAPABILITIES) {
     if (row.capability !== capability || (row.languages !== "*" && !row.languages.includes(language))) continue;
-    for (const name of row.names) if (nameMatches(name, text) && !names.includes(name)) names.push(name);
+    for (const name of row.names) if (nameMatches(name, text, capability === "write") && !names.includes(name)) names.push(name);
   }
   return names;
 }
@@ -588,6 +614,30 @@ const BARE_PATHS: ReadonlySet<Language> = new Set(["powershell"]);
 const MAX_ESCAPES = 8;
 
 /** What reading code found (`scanCode`). */
+/**
+ * Calls that signal a process by its pid, per language (final pass, data): what they stop is that process (the
+ * other-task floor, denials of a kill). The pid must be a literal; one known only when it runs stays the judge's.
+ */
+export const SIGNAL_CALLS: readonly { languages: readonly Language[]; pattern: RegExp }[] = [
+  { languages: ["python"], pattern: /\bos\.kill(?:pg)?\s*\(\s*(\d+)/g },
+  { languages: ["python"], pattern: /\bpsutil\.Process\s*\(\s*(\d+)\s*\)\s*\.\s*(?:kill|terminate|send_signal)/g },
+  { languages: ["javascript"], pattern: /\b(?:process|Deno)\.kill\s*\(\s*(\d+)/g },
+  { languages: ["ruby"], pattern: /\bProcess\.kill\s*\(\s*[^,()]+,\s*(\d+)/g },
+  { languages: ["perl"], pattern: /\bkill\s*\(?\s*(?:['"]?-?\w+['"]?)\s*,\s*(\d+)/g },
+  { languages: ["php"], pattern: /\bposix_kill\s*\(\s*(\d+)/g },
+  { languages: ["lua", "r", "tcl", "julia", "swift", "powershell"], pattern: /\b(?:Stop-Process\s+-Id|kill\s*\(?)\s*(\d{2,})/g },
+];
+
+/** The pids a piece of code signals (`SIGNAL_CALLS`). */
+export function signaledPids(code: string, language: Language): string[] {
+  const out = new Set<string>();
+  for (const row of SIGNAL_CALLS) {
+    if (!row.languages.includes(language)) continue;
+    for (const match of code.matchAll(row.pattern)) out.add(match[1]);
+  }
+  return [...out];
+}
+
 export interface CodeScan {
   /** Names that reach the network (`requests`, `urlopen`). */
   network: string[];
