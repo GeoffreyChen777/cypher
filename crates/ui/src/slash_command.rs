@@ -1,7 +1,7 @@
 //! Whether a message is a slash command — the one rule the transcript (the
 //! command chip, find, the quiet working trailer), the composer (send gates,
-//! which command a question belongs to) and iOS share
-//! (`protocol/vectors/slash-commands-v1.json`).
+//! which command a question belongs to) and iOS share: a mirror listed in
+//! `protocol/README.md`, pinned by `protocol/vectors/slash-commands-v1.json`.
 //!
 //! A message runs as a command only when its first token is `/name` and the
 //! chat's host offers `name` for its harness: pi runs a registered command

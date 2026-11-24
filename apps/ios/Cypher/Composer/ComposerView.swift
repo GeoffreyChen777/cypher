@@ -61,7 +61,14 @@ struct ComposerView: View {
     }
 
     private var isSlashDraft: Bool {
-        text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/")
+        SlashCommandText.isCommand(text, known: knownCommands)
+    }
+
+    /// The host's command names once its list has loaded, for telling a
+    /// command from a message that merely starts with `/` (a path).
+    private var knownCommands: Set<String>? {
+        guard commands.deviceId == chat.deviceId, !commands.loading, commands.error == nil else { return nil }
+        return SlashCommandText.names(commands.commands)
     }
 
     private var sessionRow: SessionRow? { model.sessionRow(chatId: chat.id) }
@@ -388,7 +395,7 @@ struct ComposerView: View {
                 text: prompt, attachmentCount: staged.count,
                 commentCount: batch?.comments.count ?? 0)
         else { return }
-        guard !CommentPrompt.blocksSlash(prompt, hasComments: hasComments) else {
+        guard !CommentPrompt.blocksSlash(prompt, hasComments: hasComments, known: knownCommands) else {
             uploadError = "Comments accompany a normal message, not a slash command. Send or remove the comments first."
             return
         }
@@ -396,7 +403,7 @@ struct ComposerView: View {
         // draft, attachments and comments stay put on any failure.
         let refIds = Mentions.sessionRefIds(in: prompt)
         if !refIds.isEmpty {
-            if prompt.hasPrefix("/") {
+            if SlashCommandText.isCommand(prompt, known: knownCommands) {
                 uploadError = "Session references accompany a normal message, not a slash command."
                 return
             }
@@ -478,8 +485,10 @@ struct ComposerView: View {
         }
         let queued =
             runLive
-            ? store.sendSteer(prompt: content, agentPrompt: agentPrompt)
-            : store.sendRun(prompt: content, chat: chat, attachments: paths, agentPrompt: agentPrompt)
+            ? store.sendSteer(prompt: content, agentPrompt: agentPrompt, knownCommands: knownCommands)
+            : store.sendRun(
+                prompt: content, chat: chat, attachments: paths, agentPrompt: agentPrompt,
+                knownCommands: knownCommands)
         if !queued {
             uploadError = "Couldn't queue the message. Your draft has been kept."
         } else {
