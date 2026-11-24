@@ -204,6 +204,8 @@ export const API_ROUTES: readonly ApiRoute[] = [
   { methods: ["DELETE"], route: "repos/:owner/:repo/branches/:branch/protection", effect: "change", entities: { branch: "branch" } },
   { methods: ["DELETE"], route: "projects/:project/repository/branches/:branch*", effect: "change", entities: { branch: "branch" } },
   { methods: ["DELETE"], route: "projects/:project/repository/tags/:tag*", effect: "change", entities: { tag: "tag" } },
+  // A release addressed by its tag (final pass): the same release as by its id (`gh release delete TAG`).
+  { methods: ["DELETE", "PATCH"], route: "repos/:owner/:repo/releases/tags/:release", effect: "change", entities: { release: "release" } },
   { methods: ["DELETE", "PATCH"], route: "repos/:owner/:repo/releases/:release", effect: "change", entities: { release: "release" } },
   { methods: ["POST"], route: "repos/:owner/:repo/releases", effect: "publish" },
   { methods: ["POST"], route: "projects/:project/releases", effect: "publish" },
@@ -344,6 +346,33 @@ export const ENV_OPTIONS: Readonly<Record<string, Readonly<Record<string, string
 };
 
 /** `words` with the options its environment prefix stands for (`ENV_OPTIONS`) added, unless it gives them itself. */
+/**
+ * Commands that publish the package of the folder they run in, named by no operand (final pass, data): what they
+ * publish is that package, by the name its manifest gives (else the folder), so the same publish by another tool
+ * (`pnpm publish` after a denied `npm publish`) is the same request. `sub`: the words before its options.
+ */
+export const FOLDER_PUBLISHERS: readonly { programs: readonly string[]; sub: readonly string[]; manifest: string; name: RegExp }[] = [
+  ...["npm", "pnpm", "bun"].map((program) => ({ programs: [program], sub: ["publish"], manifest: "package.json", name: /"name"\s*:\s*"([^"]+)"/ })),
+  { programs: ["yarn"], sub: ["publish"], manifest: "package.json", name: /"name"\s*:\s*"([^"]+)"/ },
+  { programs: ["yarn"], sub: ["npm", "publish"], manifest: "package.json", name: /"name"\s*:\s*"([^"]+)"/ },
+  { programs: ["cargo"], sub: ["publish"], manifest: "Cargo.toml", name: /^\s*name\s*=\s*"([^"]+)"/m },
+  { programs: ["poetry"], sub: ["publish"], manifest: "pyproject.toml", name: /^\s*name\s*=\s*"([^"]+)"/m },
+  { programs: ["flit"], sub: ["publish"], manifest: "pyproject.toml", name: /^\s*name\s*=\s*"([^"]+)"/m },
+  { programs: ["hatch"], sub: ["publish"], manifest: "pyproject.toml", name: /^\s*name\s*=\s*"([^"]+)"/m },
+];
+
+/** The package a folder publisher publishes (`FOLDER_PUBLISHERS`): its manifest's name, else `folder:<dir>`; undefined when it names one itself. */
+export function folderPackage(words: readonly string[], cwd: string | undefined, read: (path: string) => string | undefined): string | undefined {
+  const program = basename(words[0] ?? "");
+  const positionals = words.slice(1).filter((word) => !word.startsWith("-"));
+  const row = FOLDER_PUBLISHERS.find((candidate) => candidate.programs.includes(program) && candidate.sub.every((word, at) => positionals[at] === word));
+  if (!row || cwd === undefined) return undefined;
+  // An operand after the subcommand names what it publishes (a folder or a tarball): read by the tables, not here.
+  if (positionals.length > row.sub.length && positionals[row.sub.length] !== UNKNOWN) return undefined;
+  const text = read(`${cwd.replace(/\/+$/, "")}/${row.manifest}`);
+  return row.name.exec(text ?? "")?.[1] ?? `folder:${cwd}`;
+}
+
 export function withEnvOptions(words: readonly string[], env: readonly { name: string; value: string }[]): readonly string[] {
   if (!env.length) return words;
   const program = basename(words[0] ?? "");

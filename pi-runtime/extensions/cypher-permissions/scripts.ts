@@ -23,9 +23,12 @@ export interface ProjectScript {
   cwd: string;
 }
 
-type Reader = (words: readonly string[], cwd: string) => ProjectScript[] | undefined;
+/** Reads a file's text (from disk; a line's own earlier writes first: `projectScripts`'s `read`). */
+export type ReadFile = (path: string) => string | undefined;
 
-function readText(path: string): string | undefined {
+type Reader = (words: readonly string[], cwd: string, read: ReadFile) => ProjectScript[] | undefined;
+
+export function readText(path: string): string | undefined {
   try {
     if (!existsSync(path) || !statSync(path).isFile() || statSync(path).size > MAX_BYTES) return undefined;
     return readFileSync(path, "utf8");
@@ -54,18 +57,18 @@ export function shellLines(text: string): string[] {
 }
 
 /** A file a shell runs: `bash FILE`, `sh -e FILE`, `source FILE` (no `-c`, which is inline code the reader reads). */
-const shellFile: Reader = (words, cwd) => {
+const shellFile: Reader = (words, cwd, read) => {
   const args = words.slice(1);
   if (args.some((word) => word === "-c" || /^-[a-zA-Z]*c$/.test(word) || word === "-s")) return undefined;
   const file = args.find((word) => !word.startsWith("-") && !word.startsWith("+"));
   if (!file) return undefined;
   const path = isAbsolute(file) ? file : join(cwd, file);
-  const text = readText(path);
+  const text = read(path);
   return text === undefined ? undefined : [{ by: words.slice(0, 2).join(" "), lines: shellLines(text), cwd }];
 };
 
 /** A makefile's recipe for each target (prerequisites' recipes first, one level), or the first target's. */
-const makeRecipe: Reader = (words, cwd) => {
+const makeRecipe: Reader = (words, cwd, read) => {
   let dir = cwd;
   let file: string | undefined;
   const targets: string[] = [];
@@ -77,8 +80,8 @@ const makeRecipe: Reader = (words, cwd) => {
     else if (word.startsWith("-") || word.includes("=")) continue;
     else targets.push(word);
   }
-  const path = file ? (isAbsolute(file) ? file : join(dir, file)) : ["GNUmakefile", "makefile", "Makefile"].map((name) => join(dir, name)).find((candidate) => existsSync(candidate));
-  const text = path ? readText(path) : undefined;
+  const path = file ? (isAbsolute(file) ? file : join(dir, file)) : ["GNUmakefile", "makefile", "Makefile"].map((name) => join(dir, name)).find((candidate) => read(candidate) !== undefined);
+  const text = path ? read(path) : undefined;
   if (text === undefined) return undefined;
   const rules = new Map<string, { prerequisites: string[]; recipe: string[] }>();
   let order: string[] = [];
@@ -119,7 +122,7 @@ const makeRecipe: Reader = (words, cwd) => {
 const LIFECYCLE = new Set(["test", "start", "stop", "restart", "t", "tst"]);
 
 /** A package manager's script (`npm run X`, `npm test`, `pnpm X`, `yarn X`, `bun run X`) with its pre/post scripts. */
-const packageScript: Reader = (words, cwd) => {
+const packageScript: Reader = (words, cwd, read) => {
   const program = basename(words[0] ?? "");
   let dir = cwd;
   const positionals: string[] = [];
@@ -133,7 +136,7 @@ const packageScript: Reader = (words, cwd) => {
   if (positionals[0] === "run" || positionals[0] === "run-script") name = positionals[1];
   else if (positionals[0] && (LIFECYCLE.has(positionals[0]) || program !== "npm")) name = positionals[0] === "t" || positionals[0] === "tst" ? "test" : positionals[0];
   if (!name) return undefined;
-  const text = readText(join(dir, "package.json"));
+  const text = read(join(dir, "package.json"));
   if (text === undefined) return undefined;
   let scripts: Record<string, unknown> = {};
   try {
@@ -146,8 +149,8 @@ const packageScript: Reader = (words, cwd) => {
 };
 
 /** A justfile recipe (`just X`; the first recipe without one): its indented lines. */
-const justRecipe: Reader = (words, cwd) => {
-  const text = ["justfile", "Justfile", ".justfile"].map((name) => readText(join(cwd, name))).find((value) => value !== undefined);
+const justRecipe: Reader = (words, cwd, read) => {
+  const text = ["justfile", "Justfile", ".justfile"].map((name) => read(join(cwd, name))).find((value) => value !== undefined);
   if (text === undefined) return undefined;
   const wanted = words.slice(1).find((word) => !word.startsWith("-"));
   const recipes = new Map<string, string[]>();
@@ -170,11 +173,11 @@ const justRecipe: Reader = (words, cwd) => {
 };
 
 /** A file run by its path (`./scripts/clean.sh`, `tools/reset`) whose first line names a shell. */
-const pathScript: Reader = (words, cwd) => {
+const pathScript: Reader = (words, cwd, read) => {
   const program = words[0] ?? "";
   if (!program.includes("/")) return undefined;
   const path = isAbsolute(program) ? program : join(cwd, program);
-  const text = readText(path);
+  const text = read(path);
   if (text === undefined || !/^#!\s*(?:\/usr\/bin\/env\s+(?:-S\s+)?)?(?:\/[\w/]*\/)?(sh|bash|zsh|dash|ksh)\b/.test(text)) return undefined;
   return [{ by: program, lines: shellLines(text), cwd }];
 };
@@ -188,10 +191,77 @@ export const SCRIPT_RUNNERS: readonly { programs: readonly string[]; read: Reade
 ];
 
 /** The project scripts a command (unwrapped words, its folder) runs, read from disk; empty when it runs none. */
-export function projectScripts(words: readonly string[], cwd: string | undefined): ProjectScript[] {
+export function projectScripts(words: readonly string[], cwd: string | undefined, read: ReadFile = readText): ProjectScript[] {
   if (!words.length || cwd === undefined) return [];
   const program = basename(words[0]);
   const row = SCRIPT_RUNNERS.find((candidate) => candidate.programs.includes(program));
-  const found = row ? row.read(words, cwd) : pathScript(words, cwd);
+  const found = row ? row.read(words, cwd, read) : pathScript(words, cwd, read);
   return (found ?? []).filter((script) => script.lines.length > 0).map((script) => ({ ...script, cwd: script.cwd || dirname(cwd) }));
+}
+
+/**
+ * Code a command sets up to run later (final pass, data). `HOOK_TRIGGERS`: the git hooks a git subcommand runs, so a
+ * hook this line writes and then triggers (`printf … > .git/hooks/pre-commit && git commit`) is read as the lines it
+ * runs. `scheduledLines`: a crontab's entries without their schedule fields. What can't be read this way is marked for
+ * the judge (`unreadParts`), never approved by default.
+ */
+export const HOOK_TRIGGERS: Readonly<Record<string, readonly string[]>> = {
+  commit: ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit"],
+  push: ["pre-push"],
+  merge: ["pre-merge-commit", "post-merge"],
+  pull: ["post-merge"],
+  checkout: ["post-checkout"],
+  switch: ["post-checkout"],
+  rebase: ["pre-rebase", "post-rewrite"],
+  am: ["applypatch-msg", "pre-applypatch", "post-applypatch"],
+};
+
+/** The hooks a git command runs (`HOOK_TRIGGERS`), by its subcommand; none with `--no-verify`/`-n` for commit and push. */
+export function triggeredHooks(words: readonly string[]): string[] {
+  if (basename(words[0] ?? "") !== "git") return [];
+  let i = 1;
+  while (i < words.length && words[i].startsWith("-")) i += /^-(C|c)$|^--(git-dir|work-tree)$/.test(words[i]) ? 2 : 1;
+  const sub = words[i];
+  const hooks = sub ? HOOK_TRIGGERS[sub] : undefined;
+  if (!hooks) return [];
+  if ((sub === "commit" || sub === "push") && words.some((word) => word === "--no-verify" || (sub === "commit" && word === "-n"))) return [];
+  return [...hooks];
+}
+
+/** A crontab's command lines: each entry without its five schedule fields (or its `@reboot`-style macro); comments and settings out. */
+export function scheduledLines(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#") || /^[A-Za-z_][A-Za-z0-9_]*\s*=/.test(line)) continue;
+    const macro = /^@\w+\s+(.+)$/.exec(line);
+    const fields = /^(?:\S+\s+){5}(.+)$/.exec(line);
+    const command = macro?.[1] ?? fields?.[1];
+    if (command) out.push(command);
+  }
+  return out.slice(0, MAX_LINES);
+}
+
+/**
+ * What of a line the code can't read (final pass, data; evidence for the judge): a sourced file's variables, code set
+ * up to run later that isn't read here (a schedule, a launch agent, a startup file, a hook not written by this line).
+ */
+export const UNREAD_FORMS: readonly { what: (match: RegExpMatchArray) => string; pattern: RegExp }[] = [
+  { pattern: /(?:^|[;&|({]\s*|\b(?:then|do)\s+)(?:source|\.)\s+([^\s;&|)]+)/g, what: (m) => `the variables ${m[1]} sets (a sourced file is not read)` },
+  { pattern: /(?:^|[;&|({]\s*)(crontab)(?:\s+(?!-[lr]\b)[^;&|]*)?(?=$|[;&|)])/g, what: () => "code set up to run later (a crontab)" },
+  { pattern: /(?:^|[;&|({]\s*)(at|batch)\s+[^;&|]*/g, what: (m) => `code set up to run later (${m[1]})` },
+  // Written there (a redirect, a copier's destination), or switched on: a read of the folder is no setup.
+  { pattern: /(?:>>?\s*|\b(?:tee(?:\s+-a)?|cp|mv|ln|install|chmod)\s+(?:[^;&|]*\s)?)['"]?([^\s'";&|]*\.git\/hooks\/[\w.-]+)|\bgit\s+config\b[^;&|]*core\.hooksPath/g, what: (m) => `code set up to run later (a git hook: ${m[1] ?? "core.hooksPath"})` },
+  { pattern: /(?:>>?\s*|\b(?:tee(?:\s+-a)?|cp|mv|ln|install)\s+(?:[^;&|]*\s)?)['"]?([^\s'";&|]*Library\/Launch(?:Agents|Daemons)\/[^\s'";&|]*)|\blaunchctl\s+(?:load|bootstrap|enable)\b/g, what: (m) => `code set up to run later (a launch agent${m[1] ? `: ${m[1]}` : ""})` },
+  { pattern: /(?:>>?\s*|\b(?:tee(?:\s+-a)?|cp|mv|ln|install)\s+(?:[^;&|]*\s)?)['"]?([^\s'";&|]*\.config\/(?:systemd\/user|autostart)\/[^\s'";&|]*)|\bsystemctl\s+--user\s+(?:enable|start)\b/g, what: (m) => `code set up to run later (${m[1] ?? "a systemd user unit"})` },
+];
+
+/** The parts of a line the code can't read (`UNREAD_FORMS`), in words. Writes into startup files are the tables' own concern. */
+export function unreadParts(line: string): string[] {
+  const out: string[] = [];
+  for (const row of UNREAD_FORMS) for (const match of line.matchAll(row.pattern)) {
+    const what = row.what(match);
+    if (!out.includes(what)) out.push(what);
+  }
+  return out.slice(0, 6);
 }

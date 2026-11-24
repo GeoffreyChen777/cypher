@@ -131,10 +131,20 @@ export function unitsOf(record: Pick<DenialRecord, "units" | "actions" | "scopes
 }
 
 /** The denied unit and the scope of `asked` a denial covers: the same effect class on the same thing, or one holding the other. */
+/**
+ * Effects that are part of another (final pass, data): removing what runs stops it first (`docker rm -f`, `kill` then
+ * delete), so a denied destroy covers stopping the same entity. Only for a denied unit that destroys.
+ */
+export const EFFECT_PARTS: Readonly<Partial<Record<EffectClass, readonly EffectClass[]>>> = { change: ["stop"] };
+
+function covers(unit: DenialUnit, asked: DenialUnit): boolean {
+  return unit.effects.some((effect) => asked.effects.includes(effect) || (unit.destroys === true && (EFFECT_PARTS[effect] ?? []).some((part) => asked.effects.includes(part))));
+}
+
 export function classMatch(denied: Pick<DenialRecord, "units" | "actions" | "scopes" | "tool">, asked: ActionClass): { unit: DenialUnit; scope: DenialScope } | undefined {
   for (const unit of unitsOf(denied)) {
     for (const other of asked.units) {
-      if (!unit.effects.some((effect) => other.effects.includes(effect))) continue;
+      if (!covers(unit, other)) continue;
       const scope = other.scopes.find((candidate) => unit.scopes.some((scope) => scopeMatches(scope, candidate)));
       if (scope) return { unit, scope };
       // Round 6 step 2: what it acts on known only when it runs, by its possible set — a producer's (flow.ts) or a glob's.
@@ -348,7 +358,8 @@ export class Denials {
       actions: [...cls.actions],
       ...(cls.concern ? { concern: cls.concern } : {}),
       scopes: cls.scopes.map(scope),
-      units: cls.units.map((unit) => ({ effects: [...unit.effects], scopes: unit.scopes.map(scope) })),
+      // Whether it destroys is kept (final pass): a denied destroy covers stopping the same entity (`EFFECT_PARTS`).
+      units: cls.units.map((unit) => ({ effects: [...unit.effects], scopes: unit.scopes.map(scope), ...(unit.destroys ? { destroys: true } : {}) })),
       at: new Date().toISOString(),
       what: what.length > 300 ? `${what.slice(0, 300)}…` : what,
       seen: (owner?.messages ?? []).slice(-MAX_SEEN).map((word) => wordHash(word)),

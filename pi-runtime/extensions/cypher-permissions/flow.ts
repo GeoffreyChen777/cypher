@@ -31,6 +31,8 @@ export interface RuntimeOperand {
   by: string;
   /** What it does to them, when its row says (`GROUP_DESTROYERS`): a group's members deleted are a `change`. */
   effects?: EffectClass[];
+  /** The group itself as a place, when its row says (`group: "root"`: the folder whose configuration declares it). */
+  root?: string;
 }
 
 /**
@@ -41,14 +43,16 @@ export interface RuntimeOperand {
  * always; `options`: more kinds with an option (`-v` the volumes, `--rmi` the images); `project`: how the group's
  * name is found (compose: `-p`, else the compose file's folder, else the folder it runs in).
  */
-export const GROUP_DESTROYERS: readonly { program: readonly string[]; sub: readonly string[]; option?: RegExp; kinds: readonly EntityKind[]; options?: readonly { option: RegExp; kinds: readonly EntityKind[] }[]; project?: "compose" }[] = [
+export const GROUP_DESTROYERS: readonly { program: readonly string[]; sub: readonly string[]; option?: RegExp; kinds: readonly EntityKind[]; options?: readonly { option: RegExp; kinds: readonly EntityKind[] }[]; project?: "compose"; group?: "root" }[] = [
   // Its networks are `resource`s as its volumes are (schema.ts): only `-v` reaches that kind, so a denied volume isn't met by a plain `down`.
   { program: ["docker", "podman"], sub: ["compose", "down"], kinds: ["container"], options: [{ option: /^(-v|--volumes)$/, kinds: ["resource"] }, { option: /^--rmi(=.*)?$/, kinds: ["image"] }], project: "compose" },
   { program: ["docker-compose", "podman-compose"], sub: ["down"], kinds: ["container"], options: [{ option: /^(-v|--volumes)$/, kinds: ["resource"] }, { option: /^--rmi(=.*)?$/, kinds: ["image"] }], project: "compose" },
   { program: ["docker", "podman"], sub: ["compose", "rm"], kinds: ["container"], options: [{ option: /^(-v|--volumes)$/, kinds: ["resource"] }], project: "compose" },
   { program: ["docker-compose", "podman-compose"], sub: ["rm"], kinds: ["container"], options: [{ option: /^(-v|--volumes)$/, kinds: ["resource"] }], project: "compose" },
   { program: ["kubectl", "oc"], sub: ["delete"], option: /^(-f|--filename|-k|--kustomize)(=.*)?$/, kinds: ["namespace", "resource"] },
-  { program: ["terraform", "tofu"], sub: ["destroy"], kinds: ["resource"] },
+  { program: ["terraform", "tofu"], sub: ["destroy"], kinds: ["resource"], group: "root" },
+  // Final pass: the flag form of the same destroy (`terraform apply -destroy`, `plan -destroy` only plans).
+  { program: ["terraform", "tofu"], sub: ["apply"], option: /^-?-destroy$/, kinds: ["resource"], group: "root" },
 ];
 
 /** A compose project's name (`-p`, `--project-name`, else the compose file's folder, else `cwd`), as compose normalizes it. */
@@ -79,7 +83,11 @@ export function groupOperand(inner: readonly string[], cwd: string | undefined):
     if (!project) return undefined;
     tests.push({ regex: new RegExp(`^${project.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[-_]`) });
   }
-  return { kinds: [...kinds], tests, by: inner.slice(0, 1 + row.sub.length).join(" "), effects: ["change"] };
+  // A configuration root (`terraform -chdir=DIR`, else the folder it runs in): the group as one entity, so the same
+  // destroy in another spelling (`apply -destroy` after a denied `destroy`) meets the denial by that place.
+  const chdir = inner.find((word) => word.startsWith("-chdir="))?.slice("-chdir=".length);
+  const root = row.group === "root" ? (chdir ?? cwd) : undefined;
+  return { kinds: [...kinds], tests, by: [inner[0], ...row.sub].join(" "), effects: ["change"], ...(root !== undefined ? { root } : {}) };
 }
 
 /**
