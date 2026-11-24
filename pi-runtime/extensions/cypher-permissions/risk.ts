@@ -1975,7 +1975,7 @@ const SECRET_WRITE_VERB =
  * their data flow (`exfiltrates`).
  */
 export const NETWORK_SINKS: readonly { id: string; programs: readonly string[]; verbs?: RegExp; urls?: boolean; module?: RegExp }[] = [
-  { id: "http", programs: ["curl", "wget", "http", "https", "xh", "aria2c"] },
+  { id: "http", programs: ["curl", "wget", "http", "https", "httpie", "xh", "aria2c", "curlie"] },
   { id: "socket", programs: ["nc", "ncat", "netcat", "socat", "telnet", "ftp", "lftp", "openssl-s_client"] },
   { id: "remote-shell", programs: ["ssh", "mosh", "scp", "sftp", "rsync"] },
   { id: "mail-chat", programs: ["mail", "mailx", "sendmail", "mutt", "neomutt", "msmtp", "swaks", "slack", "slackcat", "telegram-send", "signal-cli", "discord-send", "ntfy", "apprise", "pushover", "twilio"] },
@@ -2001,7 +2001,7 @@ export const NETWORK_SINKS: readonly { id: string; programs: readonly string[]; 
 export const NETWORK_FILES = /^\/dev\/(tcp|udp|sctp)\//;
 
 /** Every program some sink row names, the transfer tools' too: what a line the reader can't follow is checked for. */
-const SINK_PROGRAMS: ReadonlySet<string> = new Set([...NETWORK_SINKS.flatMap((row) => row.programs), ...TRANSFER_PROGRAMS()]);
+export const SINK_PROGRAMS: ReadonlySet<string> = new Set([...NETWORK_SINKS.flatMap((row) => row.programs), ...TRANSFER_PROGRAMS()]);
 
 /** Whether a command is a network sink (`NETWORK_SINKS`, `TRANSFERS`): the row's id, or undefined. */
 export function sinkOf(view: CommandView): string | undefined {
@@ -2083,7 +2083,7 @@ export const SECRET_SOURCES: readonly { id: string; program: string; verbs: read
 ];
 
 /** The source row a command is, by `SECRET_SOURCES` (its program and leading positionals). */
-function credentialSource(view: CommandView): string | undefined {
+export function credentialSource(view: CommandView): string | undefined {
   for (const row of SECRET_SOURCES) {
     if (row.program !== view.program) continue;
     if (row.bare || row.options) {

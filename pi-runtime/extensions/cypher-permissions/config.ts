@@ -102,6 +102,16 @@ export const DEFAULT_SENSITIVE: readonly string[] = [
   "~/.config/gh/**",
   "~/.git-credentials",
   "~/.config/git/credentials",
+  // Iteration 3 (names; what a file holds is read too: defaults.ts `secretByContent`).
+  "~/.config/sops/age/keys.txt",
+  "~/.android/adbkey",
+  "~/.gem/credentials",
+  "~/.m2/settings.xml",
+  "~/.m2/settings-security.xml",
+  "~/.config/glab-cli/config.yml",
+  "~/.config/configstore/*.json",
+  "~/.ngrok2/ngrok.yml",
+  "~/.config/ngrok/ngrok.yml",
   // Iteration 2: tools' own credential stores (a token or password file, by the tool that writes it).
   "~/.cargo/credentials",
   "~/.cargo/credentials.toml",
@@ -151,6 +161,12 @@ export const DEFAULT_SENSITIVE: readonly string[] = [
   // Iteration 2: project files that hold secrets by their tool's convention (direnv, Cloudflare's local vars, a cloud
   // service account's key). Not `*.tfvars`, which as often holds plain settings: the judge's.
   "**/.envrc",
+  // A file named for its environment (`prod.env`, `secrets.env`); App Store Connect keys. (A project's `.npmrc` is
+  // as often plain registry settings that npm reads in the sandbox: a token in it is found by its content.)
+  "**/*.env",
+  "!**/*.example.env",
+  "!**/*.sample.env",
+  "**/*.p8",
   "**/.dev.vars",
   "**/service-account*.json",
   "**/*-service-account.json",
