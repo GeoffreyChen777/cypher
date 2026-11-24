@@ -170,7 +170,18 @@ struct PermissionRequest: Equatable {
 }
 
 /// The card: a shield header, the question, the facts, then the options.
+/// Embedded in a card of its own (a Needs you item's), it draws no frame,
+/// header or question (the card's head and title say them): the facts,
+/// then the options on one line under a hairline (needs.rs
+/// `asking_content`).
 struct PermissionPanel: View {
+    enum Style {
+        /// Over the composer: its own card.
+        case panel
+        /// Inside a `NeedsYouCard`.
+        case embedded
+    }
+
     let requestId: String
     let question: UserInputQuestion
     let request: PermissionRequest
@@ -178,12 +189,60 @@ struct PermissionPanel: View {
     var canRespond = true
     /// Why this request is back after an answer.
     var notice: String?
+    var style = Style.panel
     let respond: (String, [UserInputAnswer]) -> Void
 
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var contentHeight: CGFloat = 240
     @State private var answered = false
 
     var body: some View {
+        switch style {
+        case .panel: panel
+        case .embedded: embedded
+        }
+    }
+
+    private var embedded: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            facts
+            NeedsCardActions {
+                VStack(alignment: .leading, spacing: 8) {
+                    PermissionOptionRow(
+                        options: question.options, enabled: canRespond && !answered, choose: choose)
+                    if let note = footnote {
+                        Text(note.text)
+                            .font(Theme.sans(12, relativeTo: .caption))
+                            .foregroundStyle(note.color)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("permission-panel")
+    }
+
+    private var footnote: (text: String, color: Color)? {
+        if let notice, canRespond { return (notice, Theme.danger) }
+        if !canRespond { return ("Reconnect to answer", Theme.textFaint) }
+        return nil
+    }
+
+    private func choose(_ option: String) {
+        guard canRespond, !answered else { return }
+        answered = true
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        respond(requestId, [UserInputAnswer(questionId: question.id, labels: [option])])
+    }
+
+    /// A size in the panel's type: fixed over the composer, following
+    /// Dynamic Type in a card.
+    private func sans(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        Theme.sans(size, weight: weight, relativeTo: style == .embedded ? .body : nil)
+    }
+
+    private var panel: some View {
         VStack(spacing: 0) {
             header
             Rectangle().fill(Theme.border).frame(height: 1)
@@ -231,6 +290,14 @@ struct PermissionPanel: View {
                 .foregroundStyle(Theme.text)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("permission-question")
+            facts
+        }
+    }
+
+    /// What it asks about: the facts as rows on a wash, the notes, the
+    /// change or input.
+    private var facts: some View {
+        VStack(alignment: .leading, spacing: 12) {
             if !request.rows.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(request.rows.enumerated()), id: \.offset) { _, fact in
@@ -239,18 +306,22 @@ struct PermissionPanel: View {
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.elementHover, in: RoundedRectangle(cornerRadius: 12))
+                .background(
+                    Theme.elementHover,
+                    in: RoundedRectangle(
+                        cornerRadius: style == .embedded ? Theme.panelRadius : 12,
+                        style: style == .embedded ? .continuous : .circular))
             }
             ForEach(Array(request.sentences.enumerated()), id: \.offset) { _, fact in
                 Text(fact.value)
-                    .font(Theme.sans(12))
+                    .font(sans(12))
                     .foregroundStyle(fact.kind == .review ? Theme.warning : Theme.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let block = request.block, !block.text.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(block.title)
-                        .font(Theme.sans(11, weight: .medium))
+                        .font(sans(11, weight: .medium))
                         .foregroundStyle(Theme.textMuted)
                     Text(block.text)
                         .font(Theme.mono(11.5))
@@ -259,20 +330,29 @@ struct PermissionPanel: View {
                         .lineLimit(24)
                         .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(whiteAlpha(0.04), in: RoundedRectangle(cornerRadius: 10))
+                        .background(
+                            whiteAlpha(0.04),
+                            in: RoundedRectangle(
+                                cornerRadius: Theme.panelRadius, style: style == .embedded ? .continuous : .circular))
                 }
             }
         }
     }
 
     private func factRow(_ fact: PermissionRequest.Fact) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
+        // At an accessibility text size in a card, the label goes over its
+        // value: a 62pt column can't hold it.
+        let layout =
+            style == .embedded && typeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 2))
+            : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 10))
+        return layout {
             Text(fact.kind.rawValue)
-                .font(Theme.sans(11, weight: .medium))
+                .font(sans(11, weight: .medium))
                 .foregroundStyle(Theme.textMuted)
-                .frame(width: 62, alignment: .leading)
+                .frame(width: style == .embedded && typeSize.isAccessibilitySize ? nil : 62, alignment: .leading)
             Text(fact.value)
-                .font(fact.kind.monospace ? Theme.mono(12) : Theme.sans(13))
+                .font(fact.kind.monospace ? Theme.mono(12) : sans(13))
                 .foregroundStyle(Theme.text)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -340,5 +420,129 @@ struct PermissionPanel: View {
         case .deny: return Theme.elementHover
         case .stop: return .clear
         }
+    }
+}
+
+/// A permission prompt's options on one line in a card (needs.rs
+/// `folded_options`): the refusals at the left, the approvals at the right
+/// with the narrowest last, weighed as the panel weighs them. Where the
+/// labels don't fit, the refusals fold to icons, then the broader approvals
+/// from the broadest in; the narrowest approval keeps its label. Where not
+/// even that fits (a large text size), they stack.
+struct PermissionOptionRow: View {
+    let options: [String]
+    var enabled = true
+    let choose: (String) -> Void
+
+    @ScaledMetric(relativeTo: .subheadline) private var side: CGFloat = 34
+
+    private typealias Option = (index: Int, label: String, role: PermissionRequest.OptionRole)
+
+    var body: some View {
+        let roles = PermissionRequest.roles(options)
+        let all: [Option] = options.enumerated().map { ($0.offset, $0.element, roles[$0.offset]) }
+        let refusals = all.filter { $0.role == .deny || $0.role == .stop }
+        // The extension lists approvals from the narrowest out: the
+        // broadest stands first, the narrowest last.
+        let broader = Array(all.filter { $0.role == .secondary }.reversed())
+        let primary = all.filter { $0.role == .primary }
+        ViewThatFits(in: .horizontal) {
+            line(refusals, broader, primary, foldRefusals: false, foldBroader: 0)
+            line(refusals, broader, primary, foldRefusals: true, foldBroader: 0)
+            line(refusals, broader, primary, foldRefusals: true, foldBroader: 1)
+            line(refusals, broader, primary, foldRefusals: true, foldBroader: broader.count)
+            VStack(spacing: 8) {
+                ForEach(primary + broader.reversed() + refusals, id: \.index) { option in
+                    button(option, folded: false, fill: true)
+                }
+            }
+        }
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.45)
+    }
+
+    private func line(
+        _ refusals: [Option], _ broader: [Option], _ primary: [Option], foldRefusals: Bool, foldBroader: Int
+    ) -> some View {
+        HStack(spacing: 6) {
+            ForEach(refusals, id: \.index) { button($0, folded: foldRefusals) }
+            Spacer(minLength: 8)
+            ForEach(Array(broader.enumerated()), id: \.element.index) { ix, option in
+                button(option, folded: ix < foldBroader)
+            }
+            ForEach(primary, id: \.index) { button($0, folded: false) }
+        }
+    }
+
+    private func button(_ option: Option, folded: Bool, fill: Bool = false) -> some View {
+        Button {
+            choose(option.label)
+        } label: {
+            Group {
+                if folded {
+                    icon(option)
+                        .frame(width: side, height: side)
+                        .background(background(option.role), in: Circle())
+                        .overlay(Circle().strokeBorder(stroke(option.role), lineWidth: 1))
+                } else {
+                    Text(option.label)
+                        .font(
+                            Theme.sans(
+                                14, weight: option.role == .primary ? .semibold : .medium, relativeTo: .subheadline)
+                        )
+                        .foregroundStyle(foreground(option.role))
+                        .lineLimit(fill ? 2 : 1)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 14)
+                        .frame(maxWidth: fill ? .infinity : nil, minHeight: side)
+                        .background(background(option.role), in: Capsule())
+                        .overlay(Capsule().strokeBorder(stroke(option.role), lineWidth: 1))
+                }
+            }
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .fixedSize(horizontal: !fill, vertical: false)
+        .accessibilityLabel(option.label)
+        .accessibilityIdentifier("permission-option-\(option.index)")
+    }
+
+    /// A folded option's glyph: a cross for Deny, the stop square for Deny
+    /// and stop, what a broader approval lasts for.
+    @ViewBuilder
+    private func icon(_ option: Option) -> some View {
+        let symbol =
+            switch option.role {
+            case .deny: "xmark"
+            case .stop: "stop.fill"
+            default:
+                option.label.hasPrefix("Always")
+                    ? "checkmark.shield" : option.label.hasSuffix("this chat") ? "bubble.left" : "checkmark"
+            }
+        Image(systemName: symbol)
+            .font(.footnote.weight(.semibold))
+            .imageScale(option.role == .stop ? .small : .medium)
+            .foregroundStyle(foreground(option.role))
+    }
+
+    private func foreground(_ role: PermissionRequest.OptionRole) -> Color {
+        switch role {
+        case .primary: Theme.bg
+        case .secondary, .deny: Theme.text
+        case .stop: Theme.danger
+        }
+    }
+
+    private func background(_ role: PermissionRequest.OptionRole) -> Color {
+        switch role {
+        case .primary: Theme.text
+        case .secondary: .clear
+        case .deny: Theme.text.opacity(0.08)
+        case .stop: Theme.danger.opacity(0.1)
+        }
+    }
+
+    private func stroke(_ role: PermissionRequest.OptionRole) -> Color {
+        role == .secondary ? Theme.borderStrong : .clear
     }
 }

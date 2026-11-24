@@ -198,7 +198,9 @@ struct BotDecisionBar: View {
             }
             .font(Theme.sans(16, weight: .semibold, relativeTo: .body))
             .frame(maxWidth: .infinity)
-            .frame(height: 46)
+            // 46pt, or more for a label at a large text size.
+            .padding(.vertical, 8)
+            .frame(minHeight: 46)
             .foregroundStyle(foreground(decision))
             .background(background(decision), in: Capsule())
         }

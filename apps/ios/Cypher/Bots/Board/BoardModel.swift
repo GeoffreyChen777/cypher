@@ -78,6 +78,9 @@ struct BoardNeedRow: Identifiable, Equatable {
     var title: String
     var sub: String
     var at: Int64?
+    /// Where it comes from, for its card's head (needs.rs `NeedItem.source`):
+    /// the work an approval or a session belongs to, the routine, the peer.
+    var source = ""
 
     var id: String { item.id }
 }
@@ -502,30 +505,54 @@ extension WorkspaceData {
             let chat = chat(id: chatId)
             return BoardNeedRow(
                 item: item, symbol: "bubble.left", title: "\(singleLine(bot.name)) asked you something",
-                sub: chat?.lastMessagePreview.map(singleLine) ?? "In your conversation", at: chat?.lastMessageAt)
+                sub: chat?.lastMessagePreview.map(singleLine) ?? "In your conversation", at: chat?.lastMessageAt,
+                source: singleLine(bot.name))
         case .plan(let id):
             guard let work = work(id: id) else { return nil }
             let steps = work.steps.count
             return BoardNeedRow(
                 item: item, symbol: "checklist", title: singleLine(work.title),
-                sub: "Plan to approve · \(steps) step\(steps == 1 ? "" : "s")", at: work.createdAt)
+                sub: "Plan to approve · \(steps) step\(steps == 1 ? "" : "s")", at: work.createdAt,
+                source: "Plan to approve · \(steps) step\(steps == 1 ? "" : "s")")
         case .approval(let id):
             guard let approval = approval(id: id) else { return nil }
             return BoardNeedRow(
                 item: item, symbol: "checkmark.shield", title: singleLine(approval.action),
-                sub: singleLine(approval.reason), at: approval.createdAt)
+                sub: singleLine(approval.reason), at: approval.createdAt,
+                source: approval.workId.flatMap { work(id: $0) }.map { singleLine($0.title) } ?? singleLine(bot.name))
         case .asking(let chatId, _):
             guard let chat = chat(id: chatId) else { return nil }
             let project = chat.spaceId.flatMap { id in spaces.first { $0.id == id } }?.displayName
+            let title = singleLine(chat.displayTitle)
             return BoardNeedRow(
-                item: item, symbol: "questionmark.circle", title: singleLine(chat.displayTitle),
-                sub: project.map { "Asking · in \($0)" } ?? "Asking", at: chat.lastMessageAt)
+                item: item, symbol: "questionmark.circle", title: title,
+                sub: project.map { "Asking · in \($0)" } ?? "Asking", at: chat.lastMessageAt,
+                source: askingSource(chat, title: title, project: project))
         case .review(let id):
             guard let exchange = exchange(id: id) else { return nil }
             let peer = connection(id: exchange.connectionId)?.peer.name ?? "a connected workspace"
             return BoardNeedRow(
                 item: item, symbol: reviewSymbol, title: singleLine(exchange.question),
-                sub: "Review the answer to \(peer)", at: exchange.askedAt)
+                sub: "Review the answer to \(peer)", at: exchange.askedAt, source: "Answer to \(peer), to review")
+        }
+    }
+
+    /// An asking session's source (needs.rs `need_items`): the work or
+    /// routine it belongs to, then the session (a routine's own thread is
+    /// named like its routine: once is enough), else the session and its
+    /// project.
+    private func askingSource(_ chat: Chat, title: String, project: String?) -> String {
+        var owner = startedBy(chatId: chat.id).map { singleLine($0.work.title) }
+        switch chat.botThread {
+        case .routine(let id)?, .routineSession(let id)?:
+            owner = owner ?? routine(id: id).map { "\(singleLine($0.name)) · routine" }
+        default: break
+        }
+        switch (owner, project) {
+        case (let owner?, _) where chat.isBotChat: return owner
+        case (let owner?, _): return "\(owner) › \(title)"
+        case (nil, let project?): return "\(title) · \(project)"
+        case (nil, nil): return title
         }
     }
 
