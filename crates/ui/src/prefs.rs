@@ -198,12 +198,16 @@ impl AppearanceMode {
     pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
 }
 
+/// At most this many surface tabs are remembered per session (the first
+/// ones in the dock's order); the rest of a hand-edited list is dropped.
+pub const SAVED_SURFACES_CAP: usize = 16;
+
 /// One session's docks: sizes as fractions of its session area (so a tile
-/// keeps its proportions when the layout changes), open flags, and when it
-/// last changed. A `None` size has never been dragged and falls back to the
-/// legacy global pixel size ([`UiSettings::right_pane_width`] /
-/// [`UiSettings::terminal_height`]).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+/// keeps its proportions when the layout changes), open flags, the right
+/// dock's surface tabs, and when it last changed. A `None` size has never
+/// been dragged and falls back to the legacy global pixel size
+/// ([`UiSettings::right_pane_width`] / [`UiSettings::terminal_height`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SessionDock {
     /// Right dock width / session area width.
@@ -214,9 +218,88 @@ pub struct SessionDock {
     pub terminal: Option<f32>,
     pub right_open: bool,
     pub terminal_open: bool,
+    /// The right dock's surface tabs that can come back, in the dock's
+    /// order (side chats and pages don't: they are the chat's, or engine
+    /// objects). Loads leniently: a kind this build doesn't know (a newer
+    /// build's) is dropped on its own.
+    #[serde(
+        deserialize_with = "lenient_list",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub surfaces: Vec<SavedSurface>,
+    /// Which of [`Self::surfaces`] showed; `None` (or out of range): the
+    /// first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_surface: Option<usize>,
+    /// A workspace's own chat: the root its Files and Git showed
+    /// (`AppState::pick_file_root`); `None` when nothing was picked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_pick: Option<SavedRoot>,
     /// Unix milliseconds of the last change: picks the most recent entry
     /// (a new session's default sizes) and the entries the cap evicts.
     pub used_at: i64,
+}
+
+/// A workspace chat's root ([`crate::files::roots::RootId`]): a granted
+/// project's space id, `None` for the workspace's own folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedRoot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+}
+
+/// A right-dock surface tab as a session remembers it: what identifies its
+/// view, so a new slot (after a restart, or once the Workspaces view let it
+/// go) opens the same tab. What no longer resolves when it comes back (a
+/// deleted file, a root no longer granted, a branch gone) is dropped
+/// quietly by the surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SavedSurface {
+    /// A Files tab: the file it showed (relative to the root it showed,
+    /// `root` the root's space id: `None` for a session's checkout or the
+    /// workspace's own folder), and the caret's line while its source
+    /// showed.
+    #[serde(rename_all = "camelCase")]
+    Files {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        line: Option<usize>,
+    },
+    /// A Git tab on one of its scope menu's views; `base_ref` the branch
+    /// view's comparison branch.
+    #[serde(rename_all = "camelCase")]
+    Git {
+        scope: SavedGitScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_ref: Option<String>,
+    },
+    /// One commit's own diff (a History row's tab), in the root it was
+    /// opened in (a workspace's own chat; `None` elsewhere).
+    #[serde(rename_all = "camelCase")]
+    Commit {
+        commit: cypher_proto::GitHistoryCommit,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<SavedRoot>,
+    },
+    /// One round's diff (a changed-files card's tab). Saved without its
+    /// file list (the pane fetches the diff; the totals stay).
+    #[serde(rename_all = "camelCase")]
+    Turn { turn: cypher_proto::TurnChanges },
+}
+
+/// The Git tab's views that can be picked from its scope menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SavedGitScope {
+    WorkingTree,
+    Branch,
+    LatestTurn,
+    History,
 }
 
 impl SessionDock {
@@ -231,11 +314,24 @@ impl SessionDock {
     }
 
     /// Heal a loaded entry: fractions outside the sane range are clamped,
-    /// non-finite ones dropped (back to the legacy default).
+    /// non-finite ones dropped (back to the legacy default); the surface
+    /// list is bounded and its pick kept in range.
     pub fn clamped(mut self) -> Self {
         self.right = self.right.and_then(clamp_fraction);
         self.terminal = self.terminal.and_then(clamp_fraction);
+        self.surfaces.truncate(SAVED_SURFACES_CAP);
+        self.active_surface = self.active_surface.filter(|ix| *ix < self.surfaces.len());
         self
+    }
+
+    /// Whether `other` remembers the same docks (the change stamp aside):
+    /// an unchanged snapshot is not written again.
+    pub fn same_as(&self, other: &SessionDock) -> bool {
+        let stamp = |dock: &SessionDock| SessionDock {
+            used_at: 0,
+            ..dock.clone()
+        };
+        stamp(self) == stamp(other)
     }
 }
 
@@ -739,7 +835,7 @@ impl UiSettings {
             TERMINAL_DEFAULT_HEIGHT,
         );
         for dock in self.session_docks.values_mut() {
-            *dock = dock.clamped();
+            *dock = std::mem::take(dock).clamped();
         }
         self.cap_session_docks();
         self.sidebar_active_within_mins = sidebar_time::clamp(self.sidebar_active_within_mins);
@@ -748,7 +844,8 @@ impl UiSettings {
 
     /// Record `chat_id`'s docks (stamped `now_ms`), keeping at most
     /// [`SESSION_DOCKS_CAP`] entries.
-    pub fn remember_session_dock(&mut self, chat_id: &str, mut dock: SessionDock, now_ms: i64) {
+    pub fn remember_session_dock(&mut self, chat_id: &str, dock: SessionDock, now_ms: i64) {
+        let mut dock = dock.clamped();
         dock.used_at = now_ms;
         self.session_docks.insert(chat_id.to_string(), dock);
         self.cap_session_docks();
@@ -855,6 +952,37 @@ where
                     key = %key,
                     field = std::any::type_name::<T>(),
                     "ui-settings: dropping an unreadable entry"
+                );
+                None
+            }
+        })
+        .collect())
+}
+
+/// [`lenient`] per element of a list: an unreadable element (a kind this
+/// build doesn't know) is dropped, the rest survive; a non-list is empty.
+fn lenient_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let serde_json::Value::Array(items) = value else {
+        tracing::warn!(
+            field = std::any::type_name::<T>(),
+            "ui-settings: dropping an unreadable list"
+        );
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|item| match serde_json::from_value(item) {
+            Ok(item) => Some(item),
+            Err(err) => {
+                tracing::debug!(
+                    error = %err,
+                    field = std::any::type_name::<T>(),
+                    "ui-settings: dropping an unreadable element"
                 );
                 None
             }

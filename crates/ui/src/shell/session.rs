@@ -153,6 +153,10 @@ pub(super) struct SessionSlot {
     /// cards, one tab per page.
     pub(super) artifacts: std::collections::HashMap<u64, Entity<crate::artifacts::ArtifactPanel>>,
     pub(super) artifact_seq: u64,
+    /// Watches on the Files and Git surfaces' views: a change (a file
+    /// opened, a scope picked) updates the session's saved docks
+    /// ([`Shell::remember_slot_docks`]).
+    pub(super) surface_watches: std::collections::HashMap<DockSurface, Subscription>,
     /// Context observation, composer / transcript / find-field events.
     _subscriptions: Vec<Subscription>,
 }
@@ -172,6 +176,8 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // Restored Files tabs get their composer hookup on the first frame.
+        self.hook_files_surfaces(sid, window, cx);
         let Some(slot) = self.tiles.slots.get(&sid) else {
             return Empty.into_any_element();
         };
