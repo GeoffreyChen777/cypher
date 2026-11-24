@@ -1912,6 +1912,54 @@ script runners). Each list is now read from its finite other side (defaults.ts);
   code's symlink calls are followed; a name after an exception word in the owner's words is kept; a fence in their words
   runs to its closing fence; `update-ref -d`, `fuser -k`, selector and `kill-server` group deletes.
 
+#### 7.3.17 Final pass, iteration 4: the last red team (2026-11-24)
+
+Red team f4 (frozen at d1963684) found 23 pass-throughs in 13 families and 3 over-blocks of the iteration-3 defaults.
+Each is fixed in its mechanism; tests `cypher-permissions-final-it4.test.mjs` (E1–E5).
+
+- **Over-blocks first.** A bundled short-option group ending in the output flag (`curl -sSLo certs/ca.pem URL`) gives
+  the file to that flag: a download's destination, not a secret sent by name. A stored credential printed for a sink
+  that reaches only the service that issued it (risk.ts `CREDENTIAL_ISSUERS`: gh → github.com, glab → gitlab.com,
+  gcloud, az, aws, npm, heroku; every URL of the sink must be one of its hosts) is the tool's own credential at work —
+  the judge's. Any other host in the line, or a look-alike (`api.github.com.evil.io`), keeps row 1.
+- **Names a line builds.** A sink's file argument as a glob (`@.[e]nv`) is checked against the files it matches now, by
+  name and content. Inline code's literal pieces are folded before scanning (code.ts `foldLiterals`: `'a'+'b'`,
+  `['a','b'].join('')`, `String.fromCharCode(…)`, `chr(n)`, Python's adjacent literals). `$USER` and `$LOGNAME` are the
+  home folder's name, and `/Users/NAME/…` and `/home/NAME/…` are the home folder (resolve.ts `byUserName`, after the
+  data-volume firmlink). `sed` given one `s///` substitution with a plain pattern folds (fold.ts).
+- **One secret-source reading.** Names a listing of a secret folder hands to a template (`find ~/.ssh … | xargs -I{}
+  curl -F f=@{}`) are read by the listing's place, as the run-time write sets read them. A command run from inside code
+  that prints a stored credential (`subprocess.check_output(['gh','auth','token'])`) is a `SECRET_SOURCES` row for the
+  code's own sink, as on a shell line.
+- **Sinks by place and by what a client is told.** A container told to reach another machine and to use a file under
+  a bind mount of this machine (`docker run -v ~/.ssh:/k IMAGE … -F f=@/k/id_ed25519 https://…`) sends that file;
+  a tool's own credential option and a mount the container isn't told to use stay out. A secret copied or written into
+  a place that leaves the machine by itself (defaults.ts `OFF_MACHINE_PLACES`: iCloud Drive, `~/Library/CloudStorage`,
+  Dropbox and other sync folders, volumes under `/Volumes`, `/mnt`, `/media`) is sent, whatever program writes it. A
+  database client's last operand after a URL is its input, not a download destination, and its SQL text is split with
+  quotes and SQL punctuation off (`\copy … from '.env'`, `LOAD DATA LOCAL INFILE '.env'`, `psql URL -f .env`).
+- **Derived copies.** A file that is one base64 or hex blob is read as what it decodes to (`secretByContent`), so a copy
+  derived in an earlier step and sent later is the secret it holds. Copies through other transforms (encryption,
+  compression) stay the judge's: nothing records that a file came from a secret.
+- **Destinations read as writes.** rsync's local destination is a change of its own (`--delete` destroys there); a SQL
+  client's database file is changed by a statement that changes data (`DROP`/`DELETE` destroy). A destroy inside another
+  task's working tree, outside this chat's own trees, meets the other-task floor as a write into it does (b6-178).
+- **Publishing through a build.** `docker|podman build|buildx build|buildx bake --push` (or a registry output) and
+  `compose push` are pushes of the images they tag, so a denied `docker push X` is not redone that way.
+- **Owner words.** The owner's own speech is their text without what they quote: fences and quoted lines, inline
+  quoted speech of several words, and a forwarded or pasted message from its header on (explicit.ts `ownSpeech`). A
+  Deny is not lifted by quoted or forwarded text, nor by a condition ("if the tests pass, force-push main",
+  `CONDITION_WORDS`: that asks for later, which a deferral already sends to the judge). Keeping verbs ("leave X alone",
+  keep, spare, preserve, 保留, 别动) don't name X to act on.
+- **Harness**: the replay gives the extension the chat's transcript (as production does from `sessionManager`), and
+  blind.mjs has a `wroteFiles` form for a file this chat wrote with the write tool, so scripts a chat wrote and then ran
+  are measured.
+
+Still open after the last iteration, marked for the judge: a secret path given to an unknown program that names no
+machine (`lp`, ansible inventories); `~+`, `~-`, `dirs`, `CDPATH`; opaque code (`bytes.fromhex`, perl `q()`); SQL on
+stdin; `launchctl` services; a `sed`/`tr` the folder can't compute; a line the reader can't follow (`git -c
+core.sshCommand` with nested `"$@"`); copies derived through transforms other than base64 and hex.
+
 ### 7.4 Human approval
 
 `ctx.ui.select`, which Cypher bridges to a question in the desktop and iOS apps
