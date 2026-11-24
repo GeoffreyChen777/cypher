@@ -19,7 +19,7 @@ import type { CreationFacts, CreationPlan } from "./created.ts";
 import type { CatalogueFacts } from "./catalogue.ts";
 import { genericDestroyer, targetsOf } from "./catalogue.ts";
 import { readTool, remoteEffect } from "./tools.ts";
-import { entryCovers, Ledger, ledgerFile, ledgerKind, taintFile } from "./ledger.ts";
+import { entryCovers, Ledger, ledgerFile, ledgerKind, OTHER_TASK_FLOOR, taintFile } from "./ledger.ts";
 import type { LedgerEntity, LedgerEntry } from "./ledger.ts";
 import { Denials, denialsFile, forRecord } from "./denials.ts";
 import type { ActionClass, DenialRecord, DenialScope } from "./denials.ts";
@@ -1249,7 +1249,7 @@ export class Permissions {
         permissionSystemPath: file && request.capability === "write" ? request.classifications.map((item) => this.paths.isPermissionSystem(item.path) && item.path).find((path): path is string => typeof path === "string") : undefined,
         ownerRule: request.mode === "ask" && !request.held ? "this kind of request is set to Ask me" : undefined,
         ...(denied.active ? { ownerDenied: `you denied ${denied.active.denial.what} and haven't asked for it since` } : {}),
-        ...(request.held?.id === "other-task" ? { otherTask: request.held.detail } : {}),
+        ...(request.held?.id === "other-task" && !request.held.review ? { otherTask: request.held.detail } : {}),
       },
       "before",
     ) ?? (request.held?.review ? undefined : request.held);
@@ -1273,10 +1273,14 @@ export class Permissions {
       // The installed app's data (the owner's chats, journals, databases): evidence, and whether the owner's words name it.
       const data = file ? paths.filter((path) => this.installedApp(path) && !installedProgram(path)) : [];
       if (data.length) await this.refreshOwnerWords();
-      const denials = denied.similar.length ? { denials: denied.similar.map((denial) => describeDenial(denial)) } : {};
+      const denials = {
+        ...(denied.similar.length ? { denials: denied.similar.map((denial) => describeDenial(denial)) } : {}),
+        // Another chat's work in this working tree, held for review (`gate`, round 6 narrowing).
+        ...(request.held?.id === "other-task" && request.held.review ? { otherChats: [request.held.detail] } : {}),
+      };
       const evidence: JudgeEvidence | undefined = data.length
         ? { installedData: { paths: data.map((path) => displayPath(path, this.home)), finding: scanDataConsent(this.ownerWords, data) }, ...denials }
-        : denied.similar.length
+        : Object.keys(denials).length
           ? denials
           : undefined;
       const reviewed = await this.review(
@@ -2319,8 +2323,12 @@ export class Permissions {
       const actionClass = () => (classOfLine ??= this.lineClass(line, command, ctx.cwd, read));
       const denied = this.denials.any() ? await this.deniedLike(actionClass()) : { similar: [] };
       // Another task's work: a danger's read targets, and what any line destroys of another chat's, globs too (round 6, W3).
-      const foreign = (read ? await this.foreignTargets("targets" in read ? read.targets : (read.known ?? [])) : undefined) ?? (this.othersMade().length ? await this.otherTaskOf(actionClass()) : undefined);
-      this.gated?.push({ entry: "bash:escalate", ...(denied.active ? { held: "owner-denied" } : foreign ? { held: "other-task" } : {}) });
+      // Another chat's file or folder inside this chat's working tree, lineage unknown: the judge's, with it as evidence (round 6 narrowing).
+      const named = read ? await this.foreignTargets("targets" in read ? read.targets : (read.known ?? [])) : undefined;
+      const destroyed = named === undefined && this.othersMade().length ? await this.otherTaskOf(actionClass()) : undefined;
+      const foreign = named ?? destroyed?.floor;
+      const otherReview = foreign === undefined ? destroyed?.review : undefined;
+      this.gated?.push({ entry: "bash:escalate", ...(denied.active ? { held: "owner-denied" } : foreign ? { held: "other-task" } : otherReview ? { held: "other-task-review" } : {}) });
       const floor = this.alwaysAsk(line, {
         ...(denied.active ? { ownerDenied: `you denied \`${denied.active.denial.what}\` (${denied.active.denial.at.slice(0, 16).replace("T", " ")} UTC) and haven't asked for it since` } : {}),
         ...(foreign ? { otherTask: foreign } : {}),
@@ -2344,8 +2352,10 @@ export class Permissions {
         if (dangerous || installedRead) await this.refreshOwnerWords();
         const purpose = [proposal.label && `Purpose: ${proposal.label}`, proposal.reason && `Reason: ${proposal.reason}`].filter(Boolean).join("\n");
         // An approval is remembered for the commands' own categories, never for patterns the agent proposed; a danger's, never.
-        const memo = dangerous ? [] : patterns.filter((pattern) => !pattern.proposed);
-        const evidence = this.evidenceFor(targets, data, ctx, denied.similar, [line.kind, ...(line.assessments ?? []).map((assessment) => assessment.kind)], line);
+        // Nor one of another chat's work held for review: the next such line is reviewed again.
+        const memo = dangerous || otherReview ? [] : patterns.filter((pattern) => !pattern.proposed);
+        const found = this.evidenceFor(targets, data, ctx, denied.similar, [line.kind, ...(line.assessments ?? []).map((assessment) => assessment.kind)], line);
+        const evidence: JudgeEvidence | undefined = otherReview ? { ...found, otherChats: [otherReview] } : found;
         const reviewed = await this.review(
           {
             capability: "escalate",
@@ -2693,18 +2703,25 @@ export class Permissions {
    */
   async gate(entry: EntryPoint, cls: ActionClass, subject: FloorSubject = {}): Promise<FloorHit | undefined> {
     const denied = this.denials.any() ? await this.deniedLike(cls) : undefined;
-    const other = subject.otherTask ?? (await this.otherTaskOf(cls));
+    const other = subject.otherTask !== undefined ? { floor: subject.otherTask } : await this.otherTaskOf(cls);
     const hit = floorOf(
       {
         ...subject,
         ...(denied?.active ? { ownerDenied: `you denied \`${denied.active.denial.what}\` (${denied.active.denial.at.slice(0, 16).replace("T", " ")} UTC) and haven't asked for it since` } : {}),
-        ...(other ? { otherTask: other } : {}),
+        ...(other?.floor ? { otherTask: other.floor } : {}),
       },
       "before",
     );
     // Asked for since in words that also defer (denials.ts `deferredLift`): reviewed by the judge, not the floor.
-    const reviewed: FloorHit | undefined = !hit && denied?.review ? { id: "owner-denied", reason: "you denied a request like it in this chat", detail: `you denied \`${denied.review.denial.what}\`; since then you wrote "${denied.review.word.slice(0, 120)}"`, review: true } : undefined;
-    this.gated?.push({ entry, ...(hit ? { held: hit.id } : reviewed ? { held: "owner-denied-review" } : {}) });
+    // Another chat's file or folder inside this chat's working tree, lineage unknown (`otherTaskOf`): the same.
+    const reviewed: FloorHit | undefined = hit
+      ? undefined
+      : denied?.review
+        ? { id: "owner-denied", reason: "you denied a request like it in this chat", detail: `you denied \`${denied.review.denial.what}\`; since then you wrote "${denied.review.word.slice(0, 120)}"`, review: true }
+        : other?.review
+          ? { id: "other-task", reason: "it destroys what another chat made in this working tree", detail: other.review, review: true }
+          : undefined;
+    this.gated?.push({ entry, ...(hit ? { held: hit.id } : reviewed ? { held: `${reviewed.id}-review` } : {}) });
     return hit ?? reviewed;
   }
 
@@ -2851,8 +2868,14 @@ export class Permissions {
    * request could match — and that this chat's own ledger doesn't hold, its task (`taskId`) isn't the other
    * chat's, and the owner's words don't name. Only destroying effects (`DenialUnit.destroys`: delete, erase,
    * move away, stop); a change of a file's contents is no destruction.
+   *
+   * `review` instead of `floor` (round 6 narrowing): when the lineage is unknown (this chat or the other chat's
+   * entry has no task id), a kind round 6 first brought under the floor that has a place in the file system
+   * (ledger.ts `OTHER_TASK_FLOOR`: `since: 6`, `located`), destroyed inside this chat's own working tree
+   * (`inWorkingTree`), is the judge's to decide, with "another chat made it" as evidence. Elsewhere (/tmp, another
+   * worktree), with both task ids known and different, and for every kind the floor held before, it floors.
    */
-  private async otherTaskOf(cls: ActionClass): Promise<string | undefined> {
+  private async otherTaskOf(cls: ActionClass): Promise<{ floor?: string; review?: string } | undefined> {
     const units = cls.units.filter((unit) => unit.destroys);
     if (!units.length) return undefined;
     const others = this.othersMade()
@@ -2862,14 +2885,28 @@ export class Permissions {
       })
       .filter((entry) => !(this.taskId && entry.task === this.taskId));
     if (!others.length) return undefined;
-    const found = (): { what: string; why: string }[] => {
-      const out: { what: string; why: string }[] = [];
-      const seen = new Set<string>();
-      const note = (entry: LedgerEntry, how: string) => {
+    // Held for review, not the floor: lineage unknown, a kind new to the floor in round 6 with a place, and what is
+    // destroyed (the entity, or the folder holding it that the request names) inside this chat's working tree.
+    const reviewed = (entry: LedgerEntry, destroyed: string): boolean => {
+      const row = OTHER_TASK_FLOOR[entry.kind];
+      return row?.since === 6 && row.located && !(this.taskId && entry.task) && this.inWorkingTree(entry.name) && this.inWorkingTree(destroyed);
+    };
+    const found = (): { what: string; why: string; review: boolean }[] => {
+      const out: { what: string; why: string; review: boolean }[] = [];
+      const seen = new Map<string, { review: boolean }>();
+      const note = (entry: LedgerEntry, how: string, destroyed: string) => {
         const what = `${entry.kind} ${entry.name}`;
-        if (seen.has(what) || this.ownerNames([entry.name, basename(entry.name)]) !== undefined) return;
-        seen.add(what);
-        out.push({ what, why: `another chat (${entry.chatId ?? "unknown"}) ${entry.action === "start" ? "started" : "made"} it${how}` });
+        const review = reviewed(entry, destroyed);
+        const before = seen.get(what);
+        // The same entity reached two ways: the floor's way wins.
+        if (before) {
+          if (before.review && !review) before.review = false;
+          return;
+        }
+        if (this.ownerNames([entry.name, basename(entry.name)]) !== undefined) return;
+        const item = { what, why: `another chat (${entry.chatId ?? "unknown"}) ${entry.action === "start" ? "started" : "made"} it${how}`, review };
+        seen.set(what, item);
+        out.push(item);
       };
       for (const unit of units) {
         for (const scope of unit.scopes) {
@@ -2881,24 +2918,25 @@ export class Permissions {
           if (this.created.ledger.covers(target)) continue;
           for (const entry of others) {
             const made = { ...entry, repo: undefined, remote: undefined };
-            if (entryCovers(made, target)) note(entry, "");
-            else if ((kind === "path" || kind === "worktree") && (made.kind === "path" || made.kind === "worktree") && isUnder(made.name, target.name)) note(entry, `, inside ${scope.name}`);
+            if (entryCovers(made, target)) note(entry, "", target.name);
+            else if ((kind === "path" || kind === "worktree") && (made.kind === "path" || made.kind === "worktree") && isUnder(made.name, target.name)) note(entry, `, inside ${scope.name}`, target.name);
           }
         }
         // Operands known only when it runs (flow.ts): another chat's entity of a kind they take, passing every producer test.
         for (const operand of unit.runtime ?? []) {
           for (const entry of others) {
-            // Files by their globs (above); a worktree by what lists it (`git worktree list | awk …`), as a named entity.
-            if (entry.kind === "path" || !operand.kinds.includes(entry.kind)) continue;
+            // Files by their globs (above); a worktree by what lists it (`git worktree list | awk …`), as a named entity,
+            // unless the unit has globs (a listing's roots, its own patterns: round 6 narrowing): then by those, as a file.
+            if (entry.kind === "path" || (entry.kind === "worktree" && unit.globs?.length) || !operand.kinds.includes(entry.kind)) continue;
             if (this.created.ledger.covers({ kind: entry.kind, name: entry.name })) continue;
-            if (operand.tests.every((test) => passes(test, entry.kind, entry.name))) note(entry, `, which \`${operand.by}\` could be handed`);
+            if (operand.tests.every((test) => passes(test, entry.kind, entry.name))) note(entry, `, which \`${operand.by}\` could be handed`, entry.name);
           }
         }
         for (const glob of unit.globs ?? []) {
           for (const entry of others) {
             if (entry.kind !== "path" && entry.kind !== "worktree") continue;
             if (this.created.ledger.covers({ kind: entry.kind, name: entry.name })) continue;
-            if (globsIntersect(glob, entry.name) || globsIntersect(`${glob.replace(/\/+$/, "")}/**`, entry.name)) note(entry, `, which ${glob} matches`);
+            if (globsIntersect(glob, entry.name) || globsIntersect(`${glob.replace(/\/+$/, "")}/**`, entry.name)) note(entry, `, which ${glob} matches`, entry.name);
           }
         }
       }
@@ -2909,7 +2947,18 @@ export class Permissions {
       await this.refreshOwnerWords();
       hits = found();
     }
-    return hits.length ? hits.map((item) => `${item.what} (${item.why})`).join("; ") : undefined;
+    if (!hits.length) return undefined;
+    const floored = hits.filter((item) => !item.review);
+    const words = (items: typeof hits) => items.map((item) => `${item.what} (${item.why})`).join("; ");
+    return floored.length ? { floor: words(floored) } : { review: words(hits) };
+  }
+
+  /**
+   * Whether `path` lies inside this chat's own working tree (its cwd's git worktree, or the cwd without git;
+   * `baseRoots`), and is not the tree itself.
+   */
+  private inWorkingTree(path: string): boolean {
+    return this.baseRoots.some((root) => path !== root && isUnder(path, root));
   }
 
   /** The owner's denials of `cls` (denials.ts), checked against their words as of now. */

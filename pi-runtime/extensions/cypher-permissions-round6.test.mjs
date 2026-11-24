@@ -392,6 +392,86 @@ test("W3: a destroying effect on another chat's entity of any kind is the other-
   }
 });
 
+test("W3 narrowing: another chat's file or folder inside this chat's working tree, lineage unknown, is the judge's; outside it, with task ids that differ, and round-5 kinds stay on the floor", async () => {
+  for (const seed of SEEDS) {
+    const r = prng(seed);
+    const name = `run-${r.word()}`;
+    const tools = join(workspace, "target", "agent-tools");
+    const dir = join(tools, name);
+    const file = join(tools, `${name}.log`);
+    mkdirSync(dir, { recursive: true });
+    put(join(dir, "out.json"), "{}");
+    put(file, "x");
+    const outside = join(scratch, `tmp-n-${seed}`, name);
+    mkdirSync(outside, { recursive: true });
+    const sibling = `sibling-${seed}`;
+    const kind = r.pick([...Object.keys(KIND_ALIASES).filter((alias) => ledgerKind(alias) === "path"), "path"]);
+    const ledger = (task) => otherLedger(sibling, [
+      { kind, name: dir, ...(task ? { task } : {}) },
+      { kind: "path", name: file, ...(task ? { task } : {}) },
+      { kind: "path", name: outside, ...(task ? { task } : {}) },
+      { kind: "branch", name: `sib-${name}`, ...(task ? { task } : {}) },
+      { kind: "worktree", name: join(workspace, "wt", `tree-${seed}`), ...(task ? { task } : {}) },
+    ]);
+    ledger(undefined);
+    // Two chats sharing one worktree, no task ids: rm, find -delete, a glob, xargs, a parent folder, relative and absolute.
+    const inside = [
+      `rm -rf target/agent-tools/${name}`,
+      `rm -rf ${dir}`,
+      `rm -f ${file}`,
+      `find target/agent-tools -name '${name}*' -delete`,
+      `rm -rf target/agent-tools/${name}*`,
+      `ls -d target/agent-tools/${name}* | xargs rm -rf`,
+      `find ${tools} -name '${name}*' -print0 | xargs -0 rm -rf`,
+      `rm -rf target/agent-tools`,
+    ];
+    for (const command of inside) {
+      for (const entry of ["bash:sandbox", "bash:outside"]) {
+        const held = await engine().gateLine(entry, command, workspace);
+        assert.equal(held?.id, "other-task", `${seed} ${kind} ${entry}: ${command}`);
+        assert.equal(held?.review, true, `${seed} ${kind} ${entry}: ${command} is reviewed, not floored: ${held?.detail}`);
+        assert.match(held.detail, /another chat \(sibling-/);
+      }
+    }
+    // Through review: the judge decides with it as evidence; the owner only if the judge asks.
+    for (const [answer, ok, asked] of [[APPROVE, true, 0], [ASK, false, 1]]) {
+      const permissions = engine();
+      const c = judged(answer);
+      assert.equal((await permissions.requestEscalation(r.pick(inside), { label: "clean up" }, c)).ok, ok);
+      assert.deepEqual([c.asked.length, c.prompts.length], [asked, 1], `${seed}: reviewed (${answer.decision})`);
+      assert.match(c.prompts[0], /another chat's work in this chat's working tree: .*Which task that chat belongs to is unknown/);
+      assert.ok(permissions.gated.some((item) => item.held === "other-task-review"));
+    }
+    // A tool whose name destroys (MCP), on the sibling's folder: reviewed too.
+    const tool = await engine().gateTool("tool:setting", "mcp__fs__delete_file", { path: dir });
+    assert.deepEqual([tool?.id, tool?.review], ["other-task", true], `${seed}: tool delete`);
+    // Outside this chat's working tree, the working tree itself, and round-5 kinds: the floor, no judge.
+    const floored = [`rm -rf ${outside}`, `rm -rf ${dirname(outside)}/${name}*`, `rm -rf ${workspace}`, `git branch -D sib-${name}`, `git worktree remove --force ${join(workspace, "wt", `tree-${seed}`)}`];
+    for (const command of floored) {
+      const held = await engine().gateLine("bash:sandbox", command, workspace);
+      assert.equal(held?.id, "other-task", `${seed}: ${command}`);
+      assert.equal(held?.review, undefined, `${seed}: ${command} stays on the floor`);
+    }
+    const permissions = engine();
+    const c = judged(APPROVE);
+    assert.equal((await permissions.requestEscalation(`rm -rf ${outside}`, { label: "clean" }, c)).ok, false);
+    assert.deepEqual([c.asked.length, c.prompts.length], [1, 0], `${seed}: /tmp floored`);
+    // Only one side's task known: lineage unknown, still reviewed.
+    assert.equal((await engine({ taskId: `task-${seed}` }).gateLine("bash:sandbox", `rm -rf ${dir}`, workspace))?.review, true, "this chat's task only");
+    // Both task ids known: the ids decide. Equal never floors, different floors anywhere.
+    ledger(`task-${seed}`);
+    for (const command of [...inside, ...floored]) assert.equal(await engine({ taskId: `task-${seed}` }).gateLine("bash:sandbox", command, workspace), undefined, `${seed} same task: ${command}`);
+    for (const command of [...inside, ...floored]) {
+      const held = await engine({ taskId: `task-other-${seed}` }).gateLine("bash:sandbox", command, workspace);
+      assert.deepEqual([held?.id, held?.review], ["other-task", undefined], `${seed} other task: ${command}`);
+    }
+    // The other chat's task only: lineage unknown on this side, reviewed.
+    assert.equal((await engine().gateLine("bash:sandbox", `rm -rf ${dir}`, workspace))?.review, true, "the other chat's task only");
+    rmSync(join(agentDir, "cypher-permissions", "ledger", `${sibling}.jsonl`));
+    rmSync(join(workspace, "target"), { recursive: true, force: true });
+  }
+});
+
 test("W3: what this chat makes of every kind is recorded with its task, and kind spellings read as the ledger's kinds", () => {
   for (const [alias, kind] of Object.entries(KIND_ALIASES)) assert.equal(ledgerKind(alias), kind);
   assert.equal(ledgerKind("no-such-kind"), undefined);

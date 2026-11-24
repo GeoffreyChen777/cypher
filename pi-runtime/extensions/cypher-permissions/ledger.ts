@@ -109,6 +109,40 @@ export const MATCHING: Readonly<Record<LedgerKind, Match>> = {
   project: "caseless",
 };
 
+/**
+ * How the other-task floor came to hold each kind (round 6 narrowing, core.ts `otherTaskOf`). `since`: 4 for a kind
+ * the floor held before round 6 (a danger line's named target, `notThisTask`, from round 4 on: branches, pull
+ * requests, worktrees, processes, …); 6 for one round 6 (W3) first brought under it, on any destroy: a file or
+ * folder (before, held only when a danger line named it), and the kinds round 6 added. `located`: its name is a
+ * place in the file system, so it can lie inside a chat's working tree.
+ *
+ * A destroy of another chat's entity of a kind with `since: 6` and `located`, inside this chat's own working tree,
+ * when neither chat's task is known, is held for the judge's review, not the floor: parallel sessions of one plan
+ * share a worktree, and without a task id a sibling's scratch folder reads as another task's.
+ */
+export const OTHER_TASK_FLOOR: Readonly<Record<LedgerKind, { since: 4 | 6; located: boolean }>> = {
+  repo: { since: 4, located: false },
+  remote: { since: 4, located: false },
+  branch: { since: 4, located: false },
+  pr: { since: 4, located: false },
+  tag: { since: 4, located: false },
+  release: { since: 4, located: false },
+  path: { since: 6, located: true },
+  worktree: { since: 4, located: true },
+  process: { since: 4, located: false },
+  simulator: { since: 4, located: false },
+  host: { since: 4, located: false },
+  package: { since: 4, located: false },
+  container: { since: 4, located: false },
+  image: { since: 4, located: false },
+  resource: { since: 4, located: false },
+  namespace: { since: 6, located: false },
+  context: { since: 6, located: false },
+  cluster: { since: 6, located: false },
+  bucket: { since: 6, located: false },
+  project: { since: 6, located: false },
+};
+
 /** Bounds on one chat's ledger (the file and the memory). */
 const MAX_ENTRIES = 2000;
 const MAX_LINE = 4000;
