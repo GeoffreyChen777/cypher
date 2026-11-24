@@ -2570,11 +2570,7 @@ export class Permissions {
         if (scope && unit && !unit.scopes.includes(scope)) unit.scopes.push(scope);
       };
       // What destroys (round 6, W3: the other-task floor): a delete, erase or stop by the program tables, a move away.
-      const inner = unwrapped(item.words);
-      const removal = remoteEffect(inner);
-      const row = readTool(inner);
-      const operation = targetsOf(item, this.catalogueFacts())?.op;
-      if ((removal && /^(delete|erase|destroy|stop)$/.test(removal.action)) || (row && "row" in row && /^(delete|erase|destroy|stop)$/.test(row.row.action)) || basename(inner[0] ?? "") === "mv" || inner.includes("-delete") || operation === "destroy" || operation === "stop") unit.destroys = true;
+      if (this.destroys(item)) unit.destroys = true;
       // The globs it is given, canonical (resolve.ts): what they could match is what it acts on.
       for (const pattern of item.patterns ?? []) {
         if (pattern === undefined || !/[*?[]/.test(pattern)) continue;
@@ -2684,6 +2680,18 @@ export class Permissions {
     return { tool: name, actions: [`tool:${name}`], scopes, units: [{ effects: [`tool:${name}` as EffectClass], scopes }], tokens: words };
   }
 
+  /** Whether a command destroys what it names (round 6, W3): a delete, erase or stop by the program tables or the catalogue, a move away. */
+  private destroys(item: LineCommand): boolean {
+    const inner = unwrapped(item.words);
+    const removal = remoteEffect(inner);
+    if (removal && /^(delete|erase|destroy|stop)$/.test(removal.action)) return true;
+    const row = readTool(inner);
+    if (row && "row" in row && /^(delete|erase|destroy|stop)$/.test(row.row.action)) return true;
+    if (basename(inner[0] ?? "") === "mv" || inner.includes("-delete")) return true;
+    const operation = targetsOf(item, this.catalogueFacts())?.op;
+    return operation === "destroy" || operation === "stop";
+  }
+
   /** A bash line as an action class (`lineClass`), for `gate`. */
   lineClassOf(command: string, cwd: string): ActionClass {
     const line = this.assess(command, cwd);
@@ -2699,11 +2707,13 @@ export class Permissions {
   async gateLine(entry: "bash:outside" | "bash:sandbox" | "bash:escalate", command: string, cwd: string): Promise<FloorHit | undefined> {
     const line = entry === "bash:outside" ? this.assess(command, cwd) : undefined;
     const own = line ? this.alwaysAsk(line) : undefined;
-    if (!own && !this.denials.any() && !this.othersMade().length) {
+    // Cheap first: with no denial, only a line that destroys something can meet another chat's work.
+    const read = line ?? (this.denials.any() || this.othersMade().length ? this.assess(command, cwd) : undefined);
+    if (!own && !this.denials.any() && (!read || !this.othersMade().length || !read.commands.some((item) => this.destroys(item)))) {
       this.gated?.push({ entry });
       return undefined;
     }
-    const cls = this.lineClass(line ?? this.assess(command, cwd), command, cwd, undefined);
+    const cls = this.lineClass(read ?? this.assess(command, cwd), command, cwd, undefined);
     const hit = await this.gate(entry, cls);
     return own ?? hit;
   }
