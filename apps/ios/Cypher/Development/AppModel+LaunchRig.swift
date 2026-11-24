@@ -63,7 +63,7 @@ extension AppModel {
                     let store = demo.sessionStore(for: chatId)
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        store.demoResponder?("Show me the streamed reply path.", false)
+                        store.demoResponder?("Show me the streamed reply path.", false, [])
                     }
                 }
             } else if spec.hasPrefix("space:") {

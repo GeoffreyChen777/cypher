@@ -125,7 +125,8 @@ final class SessionStore {
     /// Demo mode: no room, entries driven externally.
     private let offline: Bool
     /// Demo hook: invoked instead of the command plane when offline.
-    @ObservationIgnored var demoResponder: ((String, Bool) -> Void)?
+    /// Offline demo turns: the prompt, whether it steers, and the comments it carries.
+    @ObservationIgnored var demoResponder: ((String, Bool, [MessageComment]) -> Void)?
     /// For a transcript that isn't a synced doc (a side chat, fed through
     /// `setEntries`): sends, stops and answers go straight to the host
     /// instead of the doc's command ledger. Returns whether it was accepted.
@@ -812,6 +813,7 @@ final class SessionStore {
             deviceId: m["deviceId"]?.stringValue ?? "",
             status: m["status"]?.stringValue.flatMap(MessageStatus.init(rawValue:)),
             continuationOf: m["continuationOf"]?.stringValue,
+            comments: MessageComment.list(fromJSON: m["comments"]?.jsonObject),
             models: (m["models"]?.listValue ?? []).compactMap { value -> AnsweredModel? in
                 guard let model = value.mapValue?["model"]?.stringValue, !model.isEmpty else { return nil }
                 return AnsweredModel(model: model, requested: value.mapValue?["requested"]?.stringValue)
@@ -1062,7 +1064,7 @@ final class SessionStore {
         guard !CommentPrompt.blocksSlash(prompt, hasComments: agentPrompt != nil) else { return false }
         if let directTransport { return sendDirect(prompt, isSteer: false, via: directTransport) }
         if offline {
-            demoResponder?(prompt, false)
+            demoResponder?(prompt, false, MessageComment.fromAgentPrompt(agentPrompt ?? ""))
             return true
         }
         let messageId = UUID().uuidString.lowercased()
@@ -1082,7 +1084,10 @@ final class SessionStore {
         ]
         if let agentPrompt { payload["agentPrompt"] = agentPrompt }
         guard queueCommand(kind: "run", payload: payload) != nil else { return false }
-        pendingSends.append(PendingSend(messageId: messageId, text: prompt, at: nowMs()))
+        pendingSends.append(
+            PendingSend(
+                messageId: messageId, text: prompt, at: nowMs(),
+                comments: MessageComment.fromAgentPrompt(agentPrompt ?? "")))
         revision &+= 1
         return true
     }
@@ -1092,7 +1097,7 @@ final class SessionStore {
         guard !CommentPrompt.blocksSlash(prompt, hasComments: agentPrompt != nil) else { return false }
         if let directTransport { return sendDirect(prompt, isSteer: true, via: directTransport) }
         if offline {
-            demoResponder?(prompt, true)
+            demoResponder?(prompt, true, MessageComment.fromAgentPrompt(agentPrompt ?? ""))
             return true
         }
         let messageId = UUID().uuidString.lowercased()
@@ -1103,7 +1108,10 @@ final class SessionStore {
         ]
         if let agentPrompt { payload["agentPrompt"] = agentPrompt }
         guard queueCommand(kind: "steer", payload: payload) != nil else { return false }
-        pendingSends.append(PendingSend(messageId: messageId, text: prompt, at: nowMs(), isSteer: true))
+        pendingSends.append(
+            PendingSend(
+                messageId: messageId, text: prompt, at: nowMs(), isSteer: true,
+                comments: MessageComment.fromAgentPrompt(agentPrompt ?? "")))
         revision &+= 1
         return true
     }

@@ -108,7 +108,7 @@ final class ContextRecoveryTests: XCTestCase {
         XCTAssertNil(entries[1].recovery)
 
         let rows = buildRows(entries)
-        guard case .user(_, false, let captioned) = rows[0].kind else { return XCTFail("Missing bubble") }
+        guard case .user(_, false, let captioned, _) = rows[0].kind else { return XCTFail("Missing bubble") }
         XCTAssertEqual(captioned, record)
         var plain = entries[0]
         plain.recovery = nil

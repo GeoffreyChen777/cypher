@@ -11,8 +11,12 @@ import Foundation
 
 enum RowKind {
     /// `recovery`: sent again by the host after a failed turn, with
-    /// supplementary context: captioned above the bubble.
-    case user(text: String, isSteer: Bool = false, recovery: ContextRecovery? = nil)
+    /// supplementary context: captioned above the bubble. `comments`: the
+    /// comments the prompt carried, drawn over the bubble (rows.rs
+    /// `RowKind::User`); a comments-only prompt has no bubble text.
+    case user(
+        text: String, isSteer: Bool = false, recovery: ContextRecovery? = nil,
+        comments: [MessageComment] = [])
     /// Consecutive prose blocks of one part (paragraphs, headings, plain
     /// lists) as one selectable text, so a selection can cross them.
     case prose(blocks: [MDBlock], streaming: Bool)
@@ -351,9 +355,9 @@ enum TranscriptRowBuilder {
             rows.append(
                 TranscriptRow(
                     id: pending.messageId,
-                    version: userVersion(pending.text, isSteer: pending.isSteer) | 1,
+                    version: userVersion(pending.text, isSteer: pending.isSteer, comments: pending.comments) | 1,
                     turnStart: true,
-                    kind: .user(text: pending.text, isSteer: pending.isSteer),
+                    kind: .user(text: pending.text, isSteer: pending.isSteer, comments: pending.comments),
                     entryId: pending.messageId,
                     timestamp: nil,
                     partKey: nil,
@@ -384,7 +388,7 @@ enum TranscriptRowBuilder {
         if isFirst { return firstGap }
         // Separate exchanges without pulling a user's prompt away from its
         // reply. Pending sends follow this same path as confirmed messages.
-        if case .user(_, let isSteer, _) = row.kind {
+        if case .user(_, let isSteer, _, _) = row.kind {
             return isSteer ? TranscriptView.gapTurn : TranscriptView.gapExchange
         }
         if row.turnStart { return TranscriptView.gapTurn }
@@ -448,10 +452,16 @@ enum TranscriptRowBuilder {
                 if case .text(_, let t, _) = part { return t }
                 return nil
             }.joined(separator: "\n")
-            guard !text.isEmpty else { return }
+            // A comments-only prompt still shows its comments (render.rs
+            // `render_user_row`: the bubble is what an empty text drops).
+            guard !text.isEmpty || !entry.comments.isEmpty else { return }
             var row = TranscriptRow(
-                id: entry.id, version: userVersion(text, isSteer: entry.isSteer, recovery: entry.recovery),
-                turnStart: true, kind: .user(text: text, isSteer: entry.isSteer, recovery: entry.recovery),
+                id: entry.id,
+                version: userVersion(
+                    text, isSteer: entry.isSteer, recovery: entry.recovery, comments: entry.comments),
+                turnStart: true,
+                kind: .user(
+                    text: text, isSteer: entry.isSteer, recovery: entry.recovery, comments: entry.comments),
                 entryId: entry.id, timestamp: entry.createdAt,
                 partKey: nil)
             row.copyable = !parseUserMessageImages(text).text
@@ -957,11 +967,18 @@ enum TranscriptRowBuilder {
         return runs
     }
 
-    private static func userVersion(_ text: String, isSteer: Bool, recovery: ContextRecovery? = nil) -> UInt64 {
+    private static func userVersion(
+        _ text: String, isSteer: Bool, recovery: ContextRecovery? = nil, comments: [MessageComment] = []
+    ) -> UInt64 {
         // rows.rs `user_row`: a record is fixed when the entry is written;
         // keyed anyway so a malformed one dropping out still re-renders.
         let recoveryKey = recovery.map { fnv1a($0.context) ^ (UInt64($0.attempt) << 7) } ?? 0
-        return fnv1a(text) ^ recoveryKey ^ (isSteer ? UInt64(1) << 63 : 0)
+        // Comments are fixed at send too, but the echo and the host's entry
+        // must agree on them; uncommented prompts keep the plain key.
+        let commentsKey =
+            comments.isEmpty
+            ? 0 : fnv1a(comments.map { "\(fnv1a($0.quote)):\(fnv1a($0.comment))" }.joined(separator: ";"))
+        return fnv1a(text) ^ recoveryKey ^ commentsKey ^ (isSteer ? UInt64(1) << 63 : 0)
     }
 
     private static func parse(
