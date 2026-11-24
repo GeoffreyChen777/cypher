@@ -71,6 +71,11 @@ pub mod methods {
     /// process outlives the turn it was started for, so its environment
     /// lacks what the owner wrote since.
     pub const OWNER_WORDS: &str = "OwnerWords";
+    /// The permission level a run on this device is held to now, for its
+    /// permission extension (unary, host-local): `{chatId}` → `{level}`, a
+    /// `SandboxLevel` wire name or null. The extension asks when the chat's
+    /// level file changes, before it takes a higher level than it runs at.
+    pub const PERMISSION_LEVEL: &str = "PermissionLevel";
     /// The permission extension's settings on the target device
     /// (`permissions.json`) and whether the device can sandbox.
     pub const GET_PI_PERMISSION_SETTINGS: &str = "GetPiPermissionSettings";
@@ -640,6 +645,7 @@ pub mod methods {
         MethodSpec::unary(REDEEM_BOT_INVITE).forwardable(),
         MethodSpec::unary(BOT_TOOL),
         MethodSpec::unary(OWNER_WORDS),
+        MethodSpec::unary(PERMISSION_LEVEL),
         MethodSpec::unary(MEMORY_TOOL),
         MethodSpec::stream(WATCH_MEMORY),
         MethodSpec::unary(EDIT_MEMORY),

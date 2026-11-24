@@ -2298,6 +2298,10 @@ fn a_cut_plans_page_shows_the_preview_until_its_body_arrives(cx: &mut gpui::Test
         coordinator_choice: Default::default(),
         body_rev: rev,
         result_rev: None,
+        level: None,
+        proposed_level: None,
+        level_quote: None,
+        applied_level: None,
     };
     state.update(vcx, |s, cx| {
         s.connection = ConnectionStatus::Ready;
@@ -2510,6 +2514,10 @@ fn needs_you_counts_records_and_worker_questions_across_bots() {
         coordinator_choice: Default::default(),
         body_rev: None,
         result_rev: None,
+        level: None,
+        proposed_level: None,
+        level_quote: None,
+        applied_level: None,
     };
     let records = cypher_proto::BotRecords {
         work: vec![

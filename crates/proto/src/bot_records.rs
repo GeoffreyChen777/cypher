@@ -19,8 +19,8 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::BotScope;
 use crate::plan_body::REV_MAX;
+use crate::{BotScope, SandboxLevel};
 
 /// Registry row kinds.
 pub const KIND_BOT_WORK: &str = "botWork";
@@ -314,6 +314,11 @@ pub struct PlanSettings {
     /// Sessions one plan may start (default 8).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sessions_max: Option<u32>,
+    /// The permission level a new plan runs at, its sessions and its
+    /// coordinating session (default workspace-write, "Edit project").
+    /// The owner changes a plan's own on its card ([`BotWork::level`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<SandboxLevel>,
 }
 
 impl PlanSettings {
@@ -338,6 +343,11 @@ impl PlanSettings {
         self.sessions_max.map_or(MAX_SESSIONS_PER_WORK, |n| {
             n.clamp(1, SESSIONS_PER_WORK_CAP) as usize
         })
+    }
+
+    /// The level a new plan is proposed at.
+    pub fn level(&self) -> SandboxLevel {
+        self.level.unwrap_or(SandboxLevel::WorkspaceWrite)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -487,12 +497,48 @@ pub struct BotWork {
     /// [`PlanResult`](crate::PlanResult)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_rev: Option<String>,
+    /// Owner-written: the permission level the owner chose for the plan, on
+    /// its card when approving or at any time while it runs (Mutate
+    /// `setBotWorkLevel`). Absent: [`Self::proposed_level`] stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<SandboxLevel>,
+    /// Host-written when proposed: the level the card offers, the
+    /// workspace's default ([`PlanSettings::level`]) unless the owner's own
+    /// words asked for another ([`Self::level_quote`]). Rows from before it
+    /// run at workspace-write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_level: Option<SandboxLevel>,
+    /// Host-written: the owner's words, verbatim, a proposal cited for a
+    /// level above the workspace's default (the card shows them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level_quote: Option<String>,
+    /// Host-written: the level last given to the plan's sessions and its
+    /// coordinating session. Absent on a running row from before levels:
+    /// workspace-write, what its sessions were started with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_level: Option<SandboxLevel>,
 }
+
+/// The most of the owner's words a proposal's level cites.
+pub const LEVEL_QUOTE_MAX: usize = LINE_MAX;
 
 impl BotWork {
     /// The fields only an owner device writes.
     pub const OWNER_FIELDS: &'static [&'static str] =
-        &["decision", "stopRequestedAt", "timeAddedMinutes"];
+        &["decision", "stopRequestedAt", "timeAddedMinutes", "level"];
+
+    /// The level the plan runs at: the owner's choice, else what it was
+    /// proposed at, else (rows from before levels) workspace-write.
+    pub fn effective_level(&self) -> SandboxLevel {
+        self.level
+            .or(self.proposed_level)
+            .unwrap_or(SandboxLevel::WorkspaceWrite)
+    }
+
+    /// The level its sessions were last given ([`Self::applied_level`]).
+    pub fn level_in_effect(&self) -> SandboxLevel {
+        self.applied_level.unwrap_or(SandboxLevel::WorkspaceWrite)
+    }
 
     /// Its whole time limit in minutes: its own (else `fallback`, the
     /// workspace's) plus what the owner added.
@@ -516,6 +562,7 @@ impl BotWork {
     /// body when that happens.
     pub fn clamp(&mut self) {
         self.coordinator_choice.clamp();
+        self.level_quote = clip_opt(&self.level_quote, LEVEL_QUOTE_MAX);
         self.body_rev = clip_opt(&self.body_rev, REV_MAX);
         self.result_rev = clip_opt(&self.result_rev, REV_MAX);
         self.title = clip(&self.title, TITLE_MAX);
@@ -1372,6 +1419,9 @@ pub enum ActivityKind {
     PeerAnswered,
     ConnectionAdded,
     ConnectionRevoked,
+    /// The owner changed a plan's permission level (its host gave it to the
+    /// plan's sessions).
+    PlanLevelChanged,
     #[serde(other)]
     Other,
 }
@@ -1386,7 +1436,8 @@ impl ActivityKind {
             | Self::WorkFinished
             | Self::WorkFailed
             | Self::WorkStopped
-            | Self::ApprovalAsked => ActivityGroup::Plans,
+            | Self::ApprovalAsked
+            | Self::PlanLevelChanged => ActivityGroup::Plans,
             Self::SessionStarted
             | Self::SessionSteered
             | Self::SessionAnswered
@@ -1912,6 +1963,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         work.clamp();
         let units = serde_json::to_string(&work).unwrap().encode_utf16().count();
@@ -1936,6 +1991,10 @@ mod tests {
         work.time_limit_minutes = Some(PLAN_TIME_LIMIT_MAX_MINUTES);
         work.time_added_minutes = Some(PLAN_TIME_ADDED_MAX_MINUTES);
         work.warned_at = Some(1_794_465_204_971);
+        work.level = Some(crate::SandboxLevel::DangerFullAccess);
+        work.proposed_level = Some(crate::SandboxLevel::DangerFullAccess);
+        work.applied_level = Some(crate::SandboxLevel::DangerFullAccess);
+        work.level_quote = Some("\"".repeat(LEVEL_QUOTE_MAX));
         let steps = work.steps.len();
         for (index, step) in work.steps.iter_mut().enumerate() {
             step.detail = Some("\"".repeat(PLAN_DETAILS_MAX));
@@ -2015,6 +2074,60 @@ mod tests {
     }
 
     #[test]
+    fn plan_levels_read_old_rows_and_round_trip() {
+        use crate::SandboxLevel;
+        // A row and settings from before levels: workspace-write, nothing
+        // applied beyond it, and nothing new written back.
+        let old: BotWork = serde_json::from_value(serde_json::json!({
+            "id": "w", "botId": "b", "title": "t", "state": "running",
+            "chatId": "c", "createdAt": 0,
+        }))
+        .unwrap();
+        assert_eq!(old.effective_level(), SandboxLevel::WorkspaceWrite);
+        assert_eq!(old.level_in_effect(), SandboxLevel::WorkspaceWrite);
+        let json = serde_json::to_value(&old).unwrap();
+        for key in ["level", "proposedLevel", "levelQuote", "appliedLevel"] {
+            assert!(json.get(key).is_none(), "{key} left out");
+        }
+        let settings: PlanSettings =
+            serde_json::from_value(serde_json::json!({ "timeLimitMinutes": 60 })).unwrap();
+        assert_eq!(settings.level(), SandboxLevel::WorkspaceWrite);
+
+        // The owner's choice wins over the proposal; both over the default.
+        let mut work = old.clone();
+        work.proposed_level = Some(SandboxLevel::ReadOnly);
+        assert_eq!(work.effective_level(), SandboxLevel::ReadOnly);
+        work.level = Some(SandboxLevel::DangerFullAccess);
+        assert_eq!(work.effective_level(), SandboxLevel::DangerFullAccess);
+        work.level_quote = Some("q".repeat(LEVEL_QUOTE_MAX * 2));
+        work.applied_level = Some(SandboxLevel::DangerFullAccess);
+        work.clamp();
+        assert_eq!(
+            work.level_quote.as_deref().map(|q| q.chars().count()),
+            Some(LEVEL_QUOTE_MAX)
+        );
+        let json = serde_json::to_value(&work).unwrap();
+        assert_eq!(json["level"], "danger-full-access");
+        assert_eq!(json["proposedLevel"], "read-only");
+        assert_eq!(json["appliedLevel"], "danger-full-access");
+        assert_eq!(serde_json::from_value::<BotWork>(json).unwrap(), work);
+        // Only an owner device writes the choice.
+        assert!(BotWork::OWNER_FIELDS.contains(&"level"));
+        for host in ["proposedLevel", "levelQuote", "appliedLevel"] {
+            assert!(!BotWork::OWNER_FIELDS.contains(&host), "{host}");
+        }
+        // An activity line from a newer engine still reads.
+        let kind: ActivityKind = serde_json::from_value("planLevelChanged".into()).unwrap();
+        assert_eq!(kind.group(), ActivityGroup::Plans);
+        assert_eq!(
+            SandboxLevel::parse("full-access"),
+            Some(SandboxLevel::DangerFullAccess)
+        );
+        assert!(SandboxLevel::DangerFullAccess.above(SandboxLevel::WorkspaceWrite));
+        assert!(!SandboxLevel::ReadOnly.above(SandboxLevel::ReadOnly));
+    }
+
+    #[test]
     fn plan_settings_default_and_stay_in_bounds() {
         let plans = PlanSettings::default();
         assert_eq!(plans.time_limit_minutes(), 240);
@@ -2025,6 +2138,7 @@ mod tests {
             time_limit_minutes: Some(1),
             running_max: Some(0),
             sessions_max: Some(99),
+            level: None,
         };
         assert!(wild.validate().is_err());
         assert_eq!(wild.time_limit_minutes(), PLAN_TIME_LIMIT_MIN_MINUTES);
@@ -2037,6 +2151,15 @@ mod tests {
             })
             .unwrap(),
             serde_json::json!({ "timeLimitMinutes": 480 })
+        );
+        assert_eq!(plans.level(), crate::SandboxLevel::WorkspaceWrite);
+        assert_eq!(
+            serde_json::to_value(PlanSettings {
+                level: Some(crate::SandboxLevel::DangerFullAccess),
+                ..Default::default()
+            })
+            .unwrap(),
+            serde_json::json!({ "level": "danger-full-access" })
         );
         assert_eq!(describe_minutes(240), "4 hours");
         assert_eq!(describe_minutes(90), "1 hour 30 minutes");
@@ -2112,6 +2235,10 @@ mod tests {
             coordinator_choice: choice.clone(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         // The proposal as the engine stores it: nothing has run yet.
         let proposed = |detail: &str| {
@@ -2216,6 +2343,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         let before = work.clone();
         work.clamp();
@@ -2265,6 +2396,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         let states = |w: &BotWork| w.steps.iter().map(|s| s.state).collect::<Vec<_>>();
         use StepState::{Asking, Done, Failed, Pending, Running, Skipped};
@@ -2332,6 +2467,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         records.work = vec![
             work("plan", WorkState::Proposed, vec![]),

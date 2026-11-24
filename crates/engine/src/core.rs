@@ -305,6 +305,8 @@ impl EngineCore {
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         bots.start_indexer();
         bots.start_hosts();
+        // A level changed while a run is live reaches its process at once.
+        sessions.start_live_levels();
         memory.start();
         Ok(Self {
             sessions,

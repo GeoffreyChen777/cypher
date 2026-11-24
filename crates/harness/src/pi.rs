@@ -320,6 +320,21 @@ impl Harness for PiHarness {
     fn id(&self) -> HarnessId {
         HarnessId::Pi
     }
+    /// Pi's permission extension re-reads the chat's level file before each
+    /// decision ([`spawn::level_file`]); without an agent directory of its
+    /// own there is no file it reads.
+    fn apply_level(&self, chat_id: &str, level: SandboxLevel) -> bool {
+        let Some(agent_dir) = self.agent_dir.as_deref() else {
+            return false;
+        };
+        match spawn::write_level_file(agent_dir, chat_id, level) {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(chat = %chat_id, error = %err, "could not write the live level file");
+                false
+            }
+        }
+    }
     fn display_name(&self) -> &str {
         "Pi"
     }

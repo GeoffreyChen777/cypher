@@ -947,6 +947,10 @@ async fn owner_turns_learn_where_their_plans_stand() {
         coordinator_choice: Default::default(),
         body_rev: None,
         result_rev: None,
+        level: None,
+        proposed_level: None,
+        level_quote: None,
+        applied_level: None,
     };
     core.workspace
         .put_record(
