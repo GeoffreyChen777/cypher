@@ -73,8 +73,24 @@ const MAX_LINKS = 40;
  * (`readlink`), as a write through it would create the target (round 5 step 2): the path is where the
  * link points, not the link.
  */
+/**
+ * macOS's data volume spells every user path a second way (`/System/Volumes/Data/Users/…`, a firmlink realpath keeps):
+ * the same file as `/Users/…` (iteration 2). Folded when the path without the prefix is one of the system's own roots.
+ */
+const DATA_VOLUME = "/System/Volumes/Data";
+function unfirmlinked(path: string): string {
+  if (!path.startsWith(`${DATA_VOLUME}/`)) return path;
+  const rest = path.slice(DATA_VOLUME.length);
+  const root = `/${rest.split("/")[1] ?? ""}`;
+  try {
+    return root !== "/" && lstatSync(root) ? rest : path;
+  } catch {
+    return path;
+  }
+}
+
 export function canonicalize(path: string, cwd: string, home = homedir(), links = 0): string {
-  const absolute = resolve(cwd, expandHome(path.startsWith("@") ? path.slice(1) : path, home));
+  const absolute = unfirmlinked(resolve(cwd, expandHome(path.startsWith("@") ? path.slice(1) : path, home)));
   const tail: string[] = [];
   let current = absolute;
   for (;;) {
