@@ -1686,6 +1686,106 @@ export function unresolvedWrites(command: RiskCommand, facts: RiskFacts): string
   return out;
 }
 
+/**
+ * Writes whose target is known only when the line runs, by their POSSIBLE SET (round 6, W5): a consumer that
+ * writes what a pipe hands it (`… | xargs -I{} sh -c 'echo x >> {}'`, `… | xargs tee -a`, `… | xargs sed -i …`)
+ * can write only what the producer could print. When the producer is a listing (`LISTERS`: its operands, globs
+ * and all; `find`'s roots and everything under them) seen through filters that only pick lines of it
+ * (`SUBSET_FILTERS`), that set is known: the floor's `permission-system` row applies when it could hold the
+ * permission system's files. Any other producer (a download, a program's output) leaves the set unknown,
+ * and an unknown-target write asks nothing more than before (the judge sees it as usual).
+ */
+export const LISTERS: Readonly<Record<string, "operands" | "subtree">> = { ls: "operands", echo: "operands", printf: "operands", realpath: "operands", readlink: "operands", find: "subtree", fd: "subtree", du: "subtree", tree: "subtree" };
+export const SUBSET_FILTERS: ReadonlySet<string> = new Set(["head", "tail", "sort", "uniq", "grep", "egrep", "fgrep", "rg", "shuf", "tac", "cat", "tr"]);
+/** Programs that write the operands xargs appends (or the token it substitutes) when they run. */
+export const OPERAND_WRITERS: ReadonlySet<string> = new Set(["tee", "truncate", "rm", "shred", "unlink", "cp", "mv", "ln", "install", "chmod", "chown", "touch", "dd", "rsync"]);
+
+function escapeText(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The xargs consumer's writes of what it is handed: whether the wrapped words write the token (or the appended operands). */
+function consumerWrites(words: readonly string[]): boolean {
+  let i = 1;
+  let token: string | undefined;
+  for (; i < words.length; i++) {
+    const word = words[i];
+    if (word === "-I" || word === "-i" || word === "--replace") token = words[++i] ?? "{}";
+    else if (/^-I./.test(word)) token = word.slice(2);
+    else if (/^--replace=/.test(word)) token = word.slice("--replace=".length);
+    else if (/^-(n|L|P|s|d|E|a)$/.test(word)) i++;
+    else if (!word.startsWith("-")) break;
+  }
+  const run = words.slice(i).filter((word) => word !== UNKNOWN);
+  if (!run.length) return false;
+  const program = basename(run[0]);
+  const inPlace = /^(sed|perl|gsed)$/.test(program) && run.some((word) => /^-[A-Za-z]*i/.test(word) || word.startsWith("--in-place"));
+  if (token === undefined) return OPERAND_WRITERS.has(program) || inPlace;
+  const t = escapeText(token);
+  const text = run.join(" ");
+  // `> T`, `>> T`, `tee [-a] T`, a writer or an in-place edit given T.
+  return new RegExp(`(?:>>?|>\\|)\\s*['"]?${t}`).test(text) || ((OPERAND_WRITERS.has(program) || inPlace) && run.slice(1).some((word) => word.includes(token!))) || new RegExp(`\\b(?:tee|truncate|rm|cp|mv|dd|install)\\b[^|;&]*${t}`).test(text) || new RegExp(`\\bsed\\s+-[A-Za-z]*i[^|;&]*${t}`).test(text);
+}
+
+/** What a listing pipe could print, as globs (`LISTERS`, `SUBSET_FILTERS`); undefined when that isn't known. */
+export function listingSet(pipe: readonly RiskCommand[]): { pattern: string; cwd: string | undefined; subtree: boolean }[] | undefined {
+  const [first, ...rest] = pipe;
+  if (!first || !rest.every((command) => SUBSET_FILTERS.has(basename(command.words[0] ?? "")) && !command.words.slice(1).some((word) => word === UNKNOWN))) return undefined;
+  const program = basename(first.words[0] ?? "");
+  const mode = LISTERS[program];
+  if (!mode) return undefined;
+  const view = viewOf(first.words);
+  const out: { pattern: string; cwd: string | undefined; subtree: boolean }[] = [];
+  const globbed = new Map(patternWords(first).map((item) => [item.word, item.pattern]));
+  for (const [index, word] of first.words.entries()) {
+    if (index === 0) continue;
+    const pattern = word === UNKNOWN ? globbed.get(index) : word;
+    if (pattern === undefined) {
+      if (word === UNKNOWN) return undefined;
+      continue;
+    }
+    if (pattern.startsWith("-")) {
+      if (mode === "subtree") break;
+      continue;
+    }
+    out.push({ pattern, cwd: operandDir(first, view), subtree: mode === "subtree" });
+  }
+  if (!out.length) out.push({ pattern: ".", cwd: operandDir(first, view), subtree: mode === "subtree" });
+  // `find ROOT -name P`: only what matches its name tests (`-name`, `-iname`; `-path` is a whole path).
+  if (program === "find" || program === "fd") {
+    const names: string[] = [];
+    const paths: string[] = [];
+    for (let i = 1; i < first.words.length - 1; i++) {
+      const value = first.words[i + 1] === UNKNOWN ? globbed.get(i + 1) : first.words[i + 1];
+      if (value === undefined) continue;
+      if (/^-i?name$/.test(first.words[i])) names.push(value);
+      if (/^-i?(path|wholename)$/.test(first.words[i])) paths.push(value);
+    }
+    if (paths.length) return paths.map((pattern) => ({ pattern, cwd: operandDir(first, view), subtree: false }));
+    if (names.length) return out.flatMap((root) => names.map((name) => ({ pattern: `${root.pattern.replace(/\/+$/, "")}/**/${name}`, cwd: root.cwd, subtree: false })));
+  }
+  return out;
+}
+
+/** The floor's findings for writes known only by their possible set (`listingSet`): each that could be the permission system. */
+export function runtimeWriteSets(commands: readonly (RiskCommand & { joint?: string })[], facts: RiskFacts): string[] {
+  if (!facts.couldBe) return [];
+  const out: string[] = [];
+  for (const [index, command] of commands.entries()) {
+    if (basename(command.words[0] ?? "") !== "xargs" || commands[index - 1]?.joint !== "|") continue;
+    if (!consumerWrites(command.words)) continue;
+    let start = index - 1;
+    while (start > 0 && commands[start - 1]?.joint === "|") start--;
+    const set = listingSet(commands.slice(start, index));
+    if (!set) continue;
+    for (const item of set) {
+      const found = facts.couldBe(item.pattern, item.cwd, { subtree: item.subtree });
+      if (found.permissionSystem) out.push(`\`xargs\` writes what \`${basename(commands[start].words[0] ?? "")}\` lists, which could be the permission system's own files (${found.permissionSystem})`);
+    }
+  }
+  return out;
+}
+
 /** A glob from the shell reader in words, for the dialog (markers spelled out). */
 export function shownPattern(pattern: string): string {
   return pattern.replaceAll(ANY, "…").replace(new RegExp(`${ENV_OPEN}([^${ENV_CLOSE}]*)${ENV_CLOSE}`, "g"), "$$$1").replace(/\\(.)/g, "$1");
@@ -1857,8 +1957,41 @@ const TOUCHES_ONLY: ReadonlySet<string> = new Set([...NAME_ONLY, "chmod", "chown
 /** A socat address that is a file it reads (round 5 step 2). */
 const SOCAT_FILE = /^(?:FILE|OPEN|GOPEN|READ):([^,]+)/i;
 
-/** Options whose value is a key or certificate a connection is made with: used, not read out. */
-const USES_KEY = /^(-i|-E|--identity|--key|--cert|--cacert|--capath|--client-cert|--pubkey|--proxy-cert|--proxy-key|--proxy-cacert)$/;
+/**
+ * Options whose value is a key or certificate a connection is made with: used, not read out (round 6, W4a:
+ * per program, as data). Any other option's value, and every positional, `@file` or `< file`, is a file the
+ * command reads (`fileWords`): `base64 -i KEY`, `openssl enc -in KEY`, `gpg --input=KEY` read it, whatever the
+ * flag; only these programs' own key options, and the programs that only stat or list (`TOUCHES_ONLY`), don't.
+ */
+export const KEY_OPTIONS: Readonly<Record<string, readonly string[]>> = {
+  ssh: ["-i", "-F"],
+  scp: ["-i", "-F"],
+  sftp: ["-i", "-F"],
+  autossh: ["-i", "-F"],
+  mosh: ["-i"],
+  "ssh-copy-id": ["-i"],
+  rsync: ["-e"],
+  sshfs: ["-o"],
+  curl: ["-E", "--cert", "--key", "--cacert", "--capath", "--pubkey", "--proxy-cert", "--proxy-key", "--proxy-cacert", "--crlfile"],
+  wget: ["--certificate", "--private-key", "--ca-certificate", "--ca-directory"],
+  http: ["--cert", "--cert-key", "--verify"],
+  https: ["--cert", "--cert-key", "--verify"],
+  xh: ["--cert", "--cert-key", "--verify"],
+  git: ["-i"],
+  psql: ["--sslcert", "--sslkey", "--sslrootcert"],
+  mysql: ["--ssl-cert", "--ssl-key", "--ssl-ca"],
+  kubectl: ["--client-certificate", "--client-key", "--certificate-authority", "--kubeconfig"],
+  docker: ["--tlscert", "--tlskey", "--tlscacert"],
+  gcloud: ["--key-file"],
+  aws: ["--ca-bundle"],
+  openvpn: ["--key", "--cert", "--ca"],
+};
+
+/** Whether `option` (with `=value` read off) is a key option of `program` (`KEY_OPTIONS`). */
+export function usesKey(program: string, option: string): boolean {
+  const name = option.replace(/=.*$/, "");
+  return /IdentityFile/i.test(option) || (KEY_OPTIONS[basename(program)] ?? []).includes(name);
+}
 
 /** Options of the downloaders whose value is a file they write. */
 const WRITES_OUTPUT = /^(-o|-O|--output|--output-document|--output-file|--output-dir|-D|--dump-header|-c|--cookie-jar|--trace|--trace-ascii|--stderr|-P|--directory-prefix|-a|--append-output)$/;
@@ -1918,7 +2051,7 @@ function fileWords(command: RiskCommand, view: CommandView, patterns: string[] =
   const written = last !== undefined && last !== UNKNOWN && !url(last) && view.positionals.slice(0, -1).some((word) => word !== UNKNOWN && url(word)) ? view.args.lastIndexOf(last) : -1;
   for (const [at, word] of view.args.entries()) {
     const before = view.args[at - 1] ?? "";
-    if (USES_KEY.test(before) || /IdentityFile/i.test(before)) continue;
+    if (usesKey(view.program, before)) continue;
     if (DOWNLOADERS.has(view.program) && WRITES_OUTPUT.test(before)) continue;
     if (at === written && !before.startsWith("-")) continue;
     if (word === UNKNOWN) {
@@ -1932,6 +2065,11 @@ function fileWords(command: RiskCommand, view: CommandView, patterns: string[] =
     // `--post-file=f`, `--upload-file=f`: an option's attached file (round 5 step 2).
     const attached = /^(--[\w-]+)=(.+)$/.exec(word);
     if (attached && DOWNLOADERS.has(view.program) && TAKES_FILE.test(attached[1]) && !WRITES_OUTPUT.test(attached[1])) {
+      out.push(attached[2]);
+      continue;
+    }
+    // Any other program's `--input=FILE`, `-in=FILE`: the value is a file it reads, unless it is a key option (W4a).
+    if (attached && !DOWNLOADERS.has(view.program) && !usesKey(view.program, attached[1]) && /[/~.]/.test(attached[2]) && !/^[a-z][\w+.-]*:\/\//i.test(attached[2])) {
       out.push(attached[2]);
       continue;
     }
@@ -2342,7 +2480,7 @@ export function assessOpaque(line: string, facts: RiskFacts, remote = false, cwd
   const sender = remote ? undefined : all.find((word) => SINK_PROGRAMS.has(basename(word)));
   if (sender) {
     const file = all.find((word, at) => {
-      if (word === UNKNOWN || word.startsWith("-") || USES_KEY.test(all[at - 1] ?? "") || /IdentityFile/i.test(all[at - 1] ?? "")) return false;
+      if (word === UNKNOWN || word.startsWith("-") || (sender !== undefined && usesKey(sender, all[at - 1] ?? ""))) return false;
       // The word, or the file a sender reads it as (`@.env`, `key=@file`), from where the line runs.
       const names = [word, word.replace(/^[^=@]*=?@/, "")].filter((name, index, list) => name && list.indexOf(name) === index);
       return names.some((name) => {

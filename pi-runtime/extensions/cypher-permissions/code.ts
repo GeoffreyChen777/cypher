@@ -348,6 +348,88 @@ export const CAPABILITIES: readonly { capability: Capability; languages: readonl
   { capability: "dynamic", languages: ["swift"], names: ["dlopen", "dlsym", "NSClassFromString", "base64Encoded"] },
 ];
 
+/**
+ * The home folder in any syntax, across shells and languages (round 6, W4b): one table of forms, not a name per
+ * language. A literal that starts with one (`"$ENV{HOME}/.pypirc"`, `f"{Path.home()}/.netrc"`,
+ * `` `${process.env.HOME}/.npmrc` ``, `"#{Dir.home}/.aws"`) is read as `~/…`, and code that uses any of them
+ * finds the home folder (its other literals may be home-relative).
+ */
+export const HOME_FORMS: readonly RegExp[] = [
+  /\$\{?HOME\}?(?![\w])/,
+  /\$\{?(?:env:)?(?:HOME|USERPROFILE)\}?/i,
+  /\$ENV\s*\{\s*['"]?HOME['"]?\s*\}/,
+  /%(?:HOME|USERPROFILE)%/i,
+  /\bENV\s*\[\s*['"]HOME['"]\s*\]/,
+  /\bENV\s*\.fetch\s*\(\s*['"]HOME['"]/,
+  /\bENVIRON\s*\[\s*['"]HOME['"]\s*\]/,
+  /\b(?:os\.)?environ(?:\.get)?\s*[[(]\s*['"]HOME['"]\s*[\])]/,
+  /\b(?:os\.|Sys\.|_?w?)?getenv\s*\(\s*['"]HOME['"]\s*\)/i,
+  /\b(?:process|Bun)\.env(?:\.HOME\b|\s*\[\s*['"]HOME['"]\s*\])/,
+  /\bDeno\.env\.get\s*\(\s*['"]HOME['"]\s*\)/,
+  /\b(?:os\.)?homedir\s*\(\s*\)/,
+  /\bPath\.home\s*\(\s*\)/,
+  /\bexpanduser\s*\(\s*['"]~['"]\s*\)/,
+  /\bDir\.home\b/,
+  /\bNSHomeDirectory\s*\(\s*\)/,
+  /\bFileManager\.default\.homeDirectoryForCurrentUser\b/,
+  /\$_SERVER\s*\[\s*['"]HOME['"]\s*\]/,
+  /\[Environment\]::GetFolderPath\(\s*['"]?UserProfile['"]?\s*\)/i,
+  /\bSystem\.getProperty\s*\(\s*['"]user\.home['"]\s*\)/,
+  /\bstd::env::home_dir\s*\(\s*\)|\bdirs::home_dir\s*\(\s*\)|\bos\.UserHomeDir\s*\(\s*\)/,
+];
+
+/** An interpolation around a home form inside a literal: `#{…}`, `${…}`, `{…}` (f-strings), `$(…)`. */
+const HOME_AT_START = new RegExp(`^(?:#\\{|\\$\\{|\\{|\\$\\()?\\s*(?:${HOME_FORMS.map((form) => form.source).join("|")})\\s*[})]?`);
+
+/** A literal's text with a leading home form read as `~` (`"$ENV{HOME}/.pypirc"` → `~/.pypirc`); else as it is. */
+export function homeRelative(text: string): string {
+  const match = HOME_AT_START.exec(text);
+  if (!match || match[0].length === 0) return text;
+  const rest = text.slice(match[0].length);
+  return rest === "" || rest.startsWith("/") || rest.startsWith("\\") ? `~${rest.replace(/^\\/, "/")}` : text;
+}
+
+/** A home form joined to what follows it (`os.environ['HOME'] + '/.pypirc'`, `path.join(os.homedir(), '.npmrc')`, `Path.home() / '.netrc'`). */
+const HOME_JOINED = new RegExp(`(?:${HOME_FORMS.map((form) => form.source).join("|")})\\s*(?:\\+|\\.\\.|\\.|,|/|&|\\.\\s*)\\s*$`);
+
+/** The literals of code that follow a home form they are joined to, as `~/…`. */
+export function homeJoined(code: string, literals: readonly Literal[]): string[] {
+  const out: string[] = [];
+  for (const literal of literals) {
+    const before = code.slice(Math.max(0, literal.at - 120), literal.at);
+    if (HOME_JOINED.test(before) && literal.text && !/^[a-z][\w+.-]*:\/\//i.test(literal.text)) out.push(`~/${literal.text.replace(/^[/\\]+/, "")}`);
+  }
+  return out;
+}
+
+/** Whether code finds the home folder by any form (`HOME_FORMS`). */
+export function usesHome(code: string): boolean {
+  return HOME_FORMS.some((form) => form.test(code));
+}
+
+/**
+ * Network capability by category, in any language (round 6, W4c): raw sockets, socket devices, HTTP
+ * clients, DNS lookups, and host:port literals of another machine. With the names of `CAPABILITIES`, not
+ * instead of them: a library the table doesn't name still opens a socket, speaks HTTP or resolves a name.
+ */
+export const NETWORK_CATEGORIES: readonly { category: string; form: RegExp }[] = [
+  { category: "a raw socket", form: /\b(?:socket\s*\(|socket\.socket|Socket(?:::|\.|\s*\()|TCPSocket|UDPSocket|TcpClient|UdpClient|TCPServer|SOCK_STREAM|SOCK_DGRAM|AF_INET6?|NWConnection|net\.Dial|DatagramSocket|SocketChannel|ServerSocket|fsockopen|stream_socket_client|IO::Socket)/ },
+  { category: "a socket device", form: /\/dev\/(?:tcp|udp)\// },
+  { category: "an HTTP client", form: /\b(?:Http(?:s)?(?:Client|Connection|Request|URLConnection)|HTTPS?Connection|WebClient|WebRequest|URLSession|urlopen|curl_easy|libcurl|reqwest|ureq|http\.(?:Get|Post|NewRequest)|[Hh]ttps?\.(?:get|post|put|request)\s*\()/ },
+  { category: "a DNS lookup", form: /\b(?:gethostbyname|getaddrinfo|dns\.(?:lookup|resolve\w*)|Resolv(?:::DNS)?|Net::DNS|InetAddress\.getByName|LookupHost|res_query)\b/ },
+];
+
+/** A host:port literal naming another machine (not this one): `"198.51.100.23:9001"`, `"exfil.example.com:443"`. */
+const HOST_PORT = /^(?:(?:\d{1,3}\.){3}\d{1,3}|(?:[a-z0-9-]+\.)+[a-z]{2,}|\[[0-9a-f:]+\]):\d{2,5}$/i;
+const THIS_MACHINE = /^(?:127\.|0\.0\.0\.0|localhost|\[::1\]|::1)/i;
+
+/** The network categories code uses (`NETWORK_CATEGORIES`, host:port literals). */
+export function networkCategories(code: string, literals: readonly { text: string }[]): string[] {
+  const out = NETWORK_CATEGORIES.filter((row) => row.form.test(code)).map((row) => row.category);
+  if (literals.some((literal) => HOST_PORT.test(literal.text.trim()) && !THIS_MACHINE.test(literal.text.trim()))) out.push("a host:port of another machine");
+  return out;
+}
+
 function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -528,6 +610,7 @@ export function scanCode(code: string, language: Language, secretName: (name: st
   for (const regex of forms?.runs ?? []) for (const match of code.matchAll(regex)) if (match[1]?.trim()) scan.commands.push(match[1].trim());
   for (const item of forms?.opaque ?? []) if (item.form.test(code)) scan.opaque.push(item.why);
   scan.network = capabilityNames(code, language, "network");
+  if (language !== "sed") for (const category of networkCategories(code, literals)) if (!scan.network.includes(category)) scan.network.push(category);
   scan.spawn = capabilityNames(code, language, "spawn");
   if (scan.commands.length && !scan.spawn.length) scan.spawn.push("a command form");
   scan.reads = capabilityNames(code, language, "read").length > 0;
@@ -552,9 +635,9 @@ export function scanCode(code: string, language: Language, secretName: (name: st
     }
   }
   // Paths its literals may name: as written, joined, and from home when it finds the home folder.
-  const home = capabilityNames(code, language, "home").length > 0;
+  const home = capabilityNames(code, language, "home").length > 0 || usesHome(code);
   const bare = BARE_PATHS.has(language) ? [...code.matchAll(/(?<=^|[\s=(,])(?:~|\.{1,2})?\/?[\w.-]*[./][\w.-]+(?:\/[\w.-]+)*/g)].map((match) => match[0]).filter((word) => !/^[\w-]+\.[A-Z]/.test(word)) : [];
-  for (const text of [...literals.map((literal) => literal.text), ...joinedPaths(code, literals), ...bare]) {
+  for (const text of [...literals.map((literal) => literal.text), ...joinedPaths(code, literals), ...bare].map(homeRelative).concat(homeJoined(code, literals))) {
     if (/^[a-z][\w+.-]*:\/\//i.test(text)) {
       scan.urls.push(text);
       continue;

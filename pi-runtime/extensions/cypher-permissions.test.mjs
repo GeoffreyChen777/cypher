@@ -1837,7 +1837,8 @@ test("review: commands inside other commands are read", () => {
   };
   for (const line of ["ssh -p 2222 web 'sudo reboot'", "ssh -o StrictHostKeyChecking=no web 'sudo reboot'", "ssh -i ~/.ssh/deploy web 'sudo reboot'"]) danger(line, /on web: runs as the administrator/);
   for (const line of ["exec npm publish", "command npm publish", "env -S 'npm publish'", "{ npm publish; }", "if true; then npm publish; fi"]) danger(line, /publishes a package/);
-  danger("find / | xargs rm -rf", /deletes files/);
+  // Round 6 (W5): what `find /` lists holds the permission system, so the floor's row names it.
+  danger("find / | xargs rm -rf", /deletes files|permission system/);
   danger("script -q /dev/null npm publish", /publishes/);
   assert.notEqual(permissions.assess("command -v git", workspace).tier, "danger");
   assert.notEqual(permissions.assess("xargs -n1 echo", workspace).tier, "danger");
