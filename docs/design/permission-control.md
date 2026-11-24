@@ -1694,7 +1694,13 @@ Five mechanisms (tests: `cypher-permissions-round6.test.mjs`), none fitted to th
   `otherTaskOf`: any destroying effect (delete, erase, stop, move away — by the program tables,
   `DenialUnit.destroys`; a content write is none) on another chat's entity — the same, one inside
   the target, or one the line's globs could match — is the `other-task` floor, for every line, not
-  only dangers, unless the owner's words name it.
+  only dangers, unless the owner's words name it. Narrowed (2026-11-24): while the lineage is
+  unknown (no task id on this chat or on the other chat's entry; the engine doesn't set
+  `CYPHER_TASK_ID` yet), a kind the floor first held in round 6 that has a place (ledger.ts
+  `OTHER_TASK_FLOOR`: `path`) destroyed inside this chat's own working tree (its cwd's git worktree)
+  is held for the judge's review with "another chat made it" as evidence, not the floor, so a plan's
+  parallel sessions in one worktree don't put each other's scratch to the owner; outside the tree,
+  with differing task ids, and for the kinds held before (branches, PRs, worktrees, …) the floor stays.
 - **Code as categories (W4).** A secret given to any command is read by it whatever the flag
   (`-i`, `--input=`, `-in`, positional, `@`, `<`), except a program's own key options (risk.ts
   `KEY_OPTIONS`: `ssh -i`, `curl --cert`, …) and stat-only programs. code.ts `HOME_FORMS`: the home
