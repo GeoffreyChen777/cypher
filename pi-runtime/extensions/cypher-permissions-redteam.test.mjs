@@ -247,7 +247,7 @@ test("redteam 5: a dangling symlink and a hard link to the permission system are
   put(join(workspace, "docs", "a.md"), "a");
   linkSync(join(workspace, "docs", "a.md"), join(workspace, "docs", "b.md"));
   assert.equal(permissions.paths.isPermissionSystem(permissions.paths.canonical(join(workspace, "docs", "b.md"), workspace)), undefined);
-  assert.notEqual(floorOf(permissions, "ln -s ../README.md docs/readme.md"), "permission-system");
+  assert.notEqual(floorOf(permissions, "ln -s ../README.md notes/readme-link.md"), "permission-system");
   symlinkSync(join(workspace, "missing-target.txt"), join(workspace, "docs", "dangling.txt"));
   assert.equal(permissions.paths.isPermissionSystem(permissions.paths.canonical(join(workspace, "docs", "dangling.txt"), workspace)), undefined);
 });
