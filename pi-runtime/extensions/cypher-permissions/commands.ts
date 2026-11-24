@@ -562,6 +562,16 @@ export function unwrap(words: readonly string[]): Unwrapped | undefined {
         if (!/^\d+(\.\d+)?[smhd]?$/.test(rest[i] ?? "")) return undefined;
         i++;
         break;
+      // `script [-aeFkqr] [-t SECS] FILE CMD…` (BSD, macOS): runs CMD with its output kept in FILE (iteration 2). The Linux
+      // form takes `-c 'CMD'`, a string: no wrapper of the next words then.
+      case "script":
+        for (; i < rest.length && rest[i].startsWith("-"); i++) {
+          if (rest[i] === "-t" || rest[i] === "-T") i++;
+          else if (!/^-[aeFkqrp]+$/.test(rest[i])) return undefined;
+        }
+        if (rest[i] === undefined || rest[i + 1] === undefined) return undefined;
+        i++;
+        break;
       case "caffeinate":
         for (; i < rest.length && rest[i].startsWith("-"); i++) {
           if (rest[i] === "-t" || rest[i] === "-w") i++;

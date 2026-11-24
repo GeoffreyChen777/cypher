@@ -1274,6 +1274,10 @@ function read(
         const apart = chained || blocks.length > 0;
         const loop = blocks.includes("loop");
         for (const command of commands) out.push({ ...command, scoped: command.scoped || apart, loop: command.loop || loop });
+        // `( … ) | cmd` (iteration 2): the group's output is the next command's input, as its last command's is.
+        const after = /^\s*\|(?!\|)/.test(source.slice(close + 1));
+        const last = out.at(-1);
+        if (after && commands.length && last && last.joint === undefined && options.evaluate) last.joint = "|";
         afterSubshell = true;
         i = close;
         break;

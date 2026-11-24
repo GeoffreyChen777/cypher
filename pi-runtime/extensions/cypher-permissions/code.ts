@@ -294,7 +294,8 @@ export const CAPABILITIES: readonly { capability: Capability; languages: readonl
   { capability: "spawn", languages: ["ruby"], names: ["system(", "exec(", "spawn(", "Open3", "IO.popen", "Kernel.exec", "Kernel.system", "%x", "`", "Process.spawn", "PTY.spawn"] },
   { capability: "spawn", languages: ["perl"], names: ["system(", "system ", "exec(", "exec ", "qx", "`", "open3", "IPC::Open3", "IPC::Run", "Capture::Tiny"] },
   { capability: "spawn", languages: ["php"], names: ["shell_exec", "exec(", "system(", "passthru", "proc_open", "popen(", "`", "pcntl_exec"] },
-  { capability: "spawn", languages: ["applescript"], names: ["do shell script", "doShellScript", "NSTask", "Application('Terminal')"] },
+  // JXA's form too (iteration 2: `app.doShellScript("…")`, a member call).
+  { capability: "spawn", languages: ["applescript"], names: ["do shell script", "doShellScript", ".doShellScript(", "NSTask", "Application('Terminal')"] },
   { capability: "spawn", languages: ["lua"], names: ["os.execute", "io.popen"] },
   { capability: "spawn", languages: ["r"], names: ["system(", "system2(", "shell(", "processx"] },
   { capability: "spawn", languages: ["tcl"], names: ["exec", "open |", "spawn"] },
@@ -458,6 +459,8 @@ export function usesHome(code: string): boolean {
 export const NETWORK_CATEGORIES: readonly { category: string; form: RegExp }[] = [
   { category: "a raw socket", form: /\b(?:socket\s*\(|socket\.socket|Socket(?:::|\.|\s*\()|TCPSocket|UDPSocket|TcpClient|UdpClient|TCPServer|SOCK_STREAM|SOCK_DGRAM|AF_INET6?|NWConnection|net\.Dial|DatagramSocket|SocketChannel|ServerSocket|fsockopen|stream_socket_client|IO::Socket)/ },
   { category: "a socket device", form: /\/dev\/(?:tcp|udp)\// },
+  // Iteration 2: an app driven to send what it is given (Mail, Messages, Outlook), by AppleScript or JXA.
+  { category: "an app that sends mail or messages", form: /tell\s+application\s+"(?:Mail|Messages|Microsoft Outlook|Outlook|Spark|Airmail)"[\s\S]*\bsend\b|Application\(\s*['"](?:Mail|Messages|Microsoft Outlook)['"]\s*\)[\s\S]*\.send\s*\(/ },
   { category: "an HTTP client", form: /\b(?:Http(?:s)?(?:Client|Connection|Request|URLConnection)|HTTPS?Connection|WebClient|WebRequest|URLSession|urlopen|curl_easy|libcurl|reqwest|ureq|http\.(?:Get|Post|NewRequest)|[Hh]ttps?\.(?:get|post|put|request)\s*\()/ },
   { category: "a DNS lookup", form: /\b(?:gethostbyname|getaddrinfo|dns\.(?:lookup|resolve\w*)|Resolv(?:::DNS)?|Net::DNS|InetAddress\.getByName|LookupHost|res_query)\b/ },
 ];
