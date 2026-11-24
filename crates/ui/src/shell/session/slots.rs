@@ -232,12 +232,13 @@ impl Shell {
                 }
             }),
         ];
-        // This session's remembered docks, else the most recently used sizes.
+        // This session's remembered docks (sizes, open flags, surface
+        // tabs), else the most recently used sizes.
         let docks = {
             let settings = self.live_settings(cx);
             chat_id
                 .as_ref()
-                .and_then(|id| settings.session_docks.get(id).copied())
+                .and_then(|id| settings.session_docks.get(id).cloned())
                 .unwrap_or_else(|| SessionDock::seeded_from(settings.latest_session_dock()))
         };
         let mut dock = Dock::new();
@@ -307,9 +308,11 @@ impl Shell {
                 side_chat_seq: 0,
                 artifacts: std::collections::HashMap::new(),
                 artifact_seq: 0,
+                surface_watches: std::collections::HashMap::new(),
                 _subscriptions: subscriptions,
             },
         );
+        self.restore_dock_surfaces(sid, &docks, cx);
         sid
     }
 
@@ -318,6 +321,7 @@ impl Shell {
     /// comment state before the entities go, and park its terminals (their
     /// PTYs outlive the tab) — or close them when the chat is gone.
     pub(in crate::shell) fn dispose_slot(&mut self, sid: SlotId, cx: &mut Context<Self>) {
+        self.remember_slot_surfaces(sid, cx);
         let Some(slot) = self.tiles.slots.remove(&sid) else {
             return;
         };
@@ -363,6 +367,28 @@ impl Shell {
         }
     }
 
+    /// A slot leaving the screen but staying alive (a kept Workspaces
+    /// conversation): what floats over it goes — its transcript's comment
+    /// pill and selection, its diffs' and terminal's selections, the shared
+    /// comment popup, its `+` menu.
+    pub(in crate::shell) fn hide_slot(&mut self, sid: SlotId, cx: &mut Context<Self>) {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
+            return;
+        };
+        slot.transcript
+            .update(cx, |t, cx| t.dismiss_comment_ui_and_selection(cx));
+        for changes in slot.diffs.values() {
+            changes.update(cx, |changes, cx| changes.detach(cx));
+        }
+        if let Some(terminal) = &slot.terminal {
+            terminal.update(cx, |terminal, cx| terminal.detach_comment_selection(cx));
+        }
+        if self.menus.right_plus.get() == Some(&sid) {
+            self.close_right_plus(cx);
+        }
+        self.dismiss_comment_popup(cx);
+    }
+
     /// Make the slot set match the workspace: drop the slots of closed
     /// tabs, create one for every visible tab (and the focused one) that has
     /// none yet — background tabs and the tiles hidden behind a zoom get
@@ -371,12 +397,11 @@ impl Shell {
     /// `Shell::sync_board`, `Shell::sync_panel_session`).
     pub(in crate::shell) fn sync_slots(&mut self, cx: &mut Context<Self>) {
         let tabs: std::collections::HashSet<TabKey> = self.workspace.tabs().cloned().collect();
-        let board = [self.board.slot, self.board.session_slot];
         let stale: Vec<SlotId> = self
             .tiles
             .slots
             .iter()
-            .filter(|(sid, slot)| !board.contains(&Some(**sid)) && !tabs.contains(&slot.tab))
+            .filter(|(sid, slot)| !self.board.holds(**sid) && !tabs.contains(&slot.tab))
             .map(|(sid, _)| *sid)
             .collect();
         for sid in stale {
@@ -396,8 +421,10 @@ impl Shell {
         }
     }
 
-    /// Persist a slot's docks under its session (sizes + open flags; a
-    /// canvas has no session to key them by yet).
+    /// Persist a slot's docks under its session (sizes, open flags and
+    /// surface tabs, [`Self::slot_docks`]; a canvas has no session to key
+    /// them by yet). Written only when
+    /// they changed: the surfaces' views call this on every notify.
     pub(in crate::shell) fn remember_slot_docks(&mut self, sid: SlotId, cx: &mut Context<Self>) {
         let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
@@ -405,17 +432,36 @@ impl Shell {
         let Some(chat_id) = slot.tab.chat_id().map(str::to_string) else {
             return;
         };
-        let docks = SessionDock {
-            right: slot.right_fraction,
-            terminal: slot.terminal_fraction,
-            right_open: slot.dock.open,
-            terminal_open: slot.terminal_open,
-            used_at: 0,
-        };
+        let docks = self.slot_docks(slot, cx).clamped();
+        if self
+            .live_settings(cx)
+            .session_docks
+            .get(&chat_id)
+            .is_some_and(|saved| saved.same_as(&docks))
+        {
+            return;
+        }
         let now = Utc::now().timestamp_millis();
         self.persist_settings(cx, move |settings| {
-            settings.remember_session_dock(&chat_id, docks, now);
+            settings.remember_session_dock(&chat_id, docks.clone(), now);
         });
+    }
+
+    /// A slot leaving: its surface tabs as they are now (a caret moved
+    /// since their last change) are what a new slot brings back. Only a
+    /// live chat's, and only with tabs to remember (a dock never used adds
+    /// no entry).
+    pub(in crate::shell) fn remember_slot_surfaces(&mut self, sid: SlotId, cx: &mut Context<Self>) {
+        let remember = self.tiles.slots.get(&sid).is_some_and(|slot| {
+            !slot.dock.surfaces.is_empty()
+                && slot
+                    .tab
+                    .chat_id()
+                    .is_some_and(|id| self.state.read(cx).chats.iter().any(|c| c.id == id))
+        });
+        if remember {
+            self.remember_slot_docks(sid, cx);
+        }
     }
 
     /// Persist the workspace layout (every mutation lands here through
@@ -557,8 +603,12 @@ impl Shell {
                 slot_state.update(cx, |s, cx| s.select_chat(Some(bound), cx));
             }
             // The Botboard's conversation went (its bot was deleted): the
-            // board moves to another bot.
+            // board moves to another bot. A kept one is let go.
             (TabKey::Session(_), None) if self.board.slot == Some(sid) => self.sync_board(cx),
+            (TabKey::Session(_), None) if self.board.kept.holds(sid) => {
+                self.board.kept.forget(sid);
+                self.dispose_slot(sid, cx);
+            }
             // The session the Botboard's panel shows went: the panel shuts.
             (TabKey::Session(_), None) if self.board.session_slot == Some(sid) => {
                 self.close_panel(cx)

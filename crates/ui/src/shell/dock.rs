@@ -11,7 +11,7 @@ use super::*;
 /// the chat's checkout ([`FilesPanel`]), a temporary Side Chat, or a page
 /// from the chat ([`crate::artifacts::ArtifactPanel`]). `Picker` is the
 /// empty state ("Open a surface").
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DockSurface {
     #[default]
     Picker,
@@ -634,6 +634,7 @@ impl Shell {
         if let Some(slot) = self.tiles.slots.get_mut(&sid)
             && reorder_dock_column(&mut slot.dock.surfaces, &column, from, to)
         {
+            self.remember_slot_docks(sid, cx);
             cx.notify();
         }
     }
@@ -706,6 +707,7 @@ impl Shell {
             }
             DockSurface::SideChat(_) | DockSurface::Artifact(_) | DockSurface::Picker => {}
         }
+        self.remember_slot_docks(sid, cx);
         cx.notify();
     }
 
@@ -769,33 +771,76 @@ impl Shell {
     /// The picker's Files card / the `+` menu's Files row: a fresh file
     /// browser tab over the session's checkout.
     fn add_files_surface(&mut self, sid: SlotId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
+        let Some(state) = self.tiles.slots.get(&sid).map(|slot| slot.state.clone()) else {
             return;
         };
+        let panel = cx.new(|cx| FilesPanel::new(state, cx));
+        let Some(id) = self.insert_files_surface(sid, panel, cx) else {
+            return;
+        };
+        self.hook_files_surfaces(sid, window, cx);
+        self.set_dock_active(sid, DockSurface::Files(id), cx);
+    }
+
+    /// Add a Files tab (last in the dock's order, not shown yet) and watch
+    /// its view for the saved docks. Its "Mention in Chat" needs the window:
+    /// [`Self::hook_files_surfaces`] connects it.
+    fn insert_files_surface(
+        &mut self,
+        sid: SlotId,
+        panel: Entity<FilesPanel>,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
+        let watch = cx.observe(&panel, move |this: &mut Self, _, cx| {
+            this.remember_slot_docks(sid, cx)
+        });
+        let slot = self.tiles.slots.get_mut(&sid)?;
         slot.files_seq += 1;
         let id = slot.files_seq;
-        let state = slot.state.clone();
-        let panel = cx.new(|cx| FilesPanel::new(state, cx));
-        let sub = cx.subscribe_in(
-            &panel,
-            window,
-            move |this: &mut Self, _, event, window, cx| match event {
-                crate::files::FilesEvent::Mention { path, is_dir } => {
-                    if let Some(composer) = this.tiles.slots.get(&sid).map(|s| s.composer.clone()) {
-                        composer.update(cx, |composer, cx| {
-                            composer.insert_file_mention(path, *is_dir, window, cx)
-                        });
-                    }
-                }
-            },
-        );
-        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
+        slot.files.insert(id, panel);
+        slot.dock.surfaces.push(DockSurface::Files(id));
+        slot.surface_watches.insert(DockSurface::Files(id), watch);
+        Some(id)
+    }
+
+    /// Connect the slot's Files tabs that aren't yet to the composer ("Mention
+    /// in Chat"): a new tab at once, a restored one on its slot's first
+    /// frame ([`Self::render_session`]), since that takes the window.
+    pub(super) fn hook_files_surfaces(
+        &mut self,
+        sid: SlotId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.tiles.slots.get(&sid) else {
             return;
         };
-        slot.files.insert(id, panel);
-        slot.files_subs.insert(id, sub);
-        slot.dock.surfaces.push(DockSurface::Files(id));
-        self.set_dock_active(sid, DockSurface::Files(id), cx);
+        let unhooked: Vec<(u64, Entity<FilesPanel>)> = slot
+            .files
+            .iter()
+            .filter(|(id, _)| !slot.files_subs.contains_key(id))
+            .map(|(id, panel)| (*id, panel.clone()))
+            .collect();
+        for (id, panel) in unhooked {
+            let sub = cx.subscribe_in(
+                &panel,
+                window,
+                move |this: &mut Self, _, event, window, cx| match event {
+                    crate::files::FilesEvent::Mention { path, is_dir } => {
+                        if let Some(composer) =
+                            this.tiles.slots.get(&sid).map(|s| s.composer.clone())
+                        {
+                            composer.update(cx, |composer, cx| {
+                                composer.insert_file_mention(path, *is_dir, window, cx)
+                            });
+                        }
+                    }
+                },
+            );
+            if let Some(slot) = self.tiles.slots.get_mut(&sid) {
+                slot.files_subs.insert(id, sub);
+            }
+        }
     }
 
     /// The picker's Git card / the `+` menu's Git row: every click opens a
@@ -1022,20 +1067,149 @@ impl Shell {
         changes: Entity<Changes>,
         cx: &mut Context<Self>,
     ) {
+        if let Some(id) = self.insert_diff_surface(sid, changes, cx) {
+            self.set_dock_active(sid, DockSurface::Diff(id), cx);
+        }
+    }
+
+    /// Add a Git tab (last in the dock's order, not shown yet), with its
+    /// History rows opening commit tabs and its view watched for the saved
+    /// docks.
+    fn insert_diff_surface(
+        &mut self,
+        sid: SlotId,
+        changes: Entity<Changes>,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
         let sub = cx.subscribe(&changes, move |this: &mut Self, _, event, cx| match event {
             ChangesEvent::OpenCommit(commit) => {
                 this.add_commit_diff_surface(sid, commit.clone(), cx);
             }
         });
-        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
-            return;
-        };
+        let watch = cx.observe(&changes, move |this: &mut Self, _, cx| {
+            this.remember_slot_docks(sid, cx)
+        });
+        let slot = self.tiles.slots.get_mut(&sid)?;
         slot.diff_seq += 1;
         let id = slot.diff_seq;
         slot.diffs.insert(id, changes);
         slot.diff_subs.insert(id, sub);
         slot.dock.surfaces.push(DockSurface::Diff(id));
-        self.set_dock_active(sid, DockSurface::Diff(id), cx);
+        slot.surface_watches.insert(DockSurface::Diff(id), watch);
+        Some(id)
+    }
+
+    /// A new slot's saved surface tabs come back
+    /// ([`crate::prefs::SessionDock::surfaces`]): the root its Files and Git
+    /// showed, then each Files and Git tab in its order, on the view it
+    /// showed, the saved pick in front. What no longer resolves drops
+    /// quietly: a file gone or on another root ([`FilesPanel::restore`]), a
+    /// branch gone (the default base), a root no longer granted (the
+    /// fallback root).
+    pub(super) fn restore_dock_surfaces(
+        &mut self,
+        sid: SlotId,
+        docks: &crate::prefs::SessionDock,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::prefs::SavedSurface;
+        let Some(slot) = self.tiles.slots.get(&sid) else {
+            return;
+        };
+        if slot.tab.chat_id().is_none() || (docks.surfaces.is_empty() && docks.root_pick.is_none())
+        {
+            return;
+        }
+        let state = slot.state.clone();
+        if let Some(root) = &docks.root_pick {
+            let root = root.space_id.clone();
+            state.update(cx, |state, cx| state.pick_file_root(root, cx));
+        }
+        let mut restored = Vec::new();
+        for saved in &docks.surfaces {
+            let surface = match saved {
+                SavedSurface::Files { root, file, line } => {
+                    let panel = cx.new(|cx| FilesPanel::new(state.clone(), cx));
+                    panel.update(cx, |panel, cx| {
+                        panel.restore(root.clone(), file.clone(), *line, cx)
+                    });
+                    self.insert_files_surface(sid, panel, cx)
+                        .map(DockSurface::Files)
+                }
+                diff => {
+                    let popup = self.comments.popup.clone().downgrade();
+                    let fallback = (state.clone(), popup.clone());
+                    let changes = cx.new(|cx| {
+                        Changes::from_saved(state.clone(), popup, diff, cx)
+                            .unwrap_or_else(|| Changes::new(fallback.0, fallback.1, cx))
+                    });
+                    self.insert_diff_surface(sid, changes, cx)
+                        .map(DockSurface::Diff)
+                }
+            };
+            restored.extend(surface);
+        }
+        let active = docks
+            .active_surface
+            .and_then(|ix| restored.get(ix))
+            .or(restored.first())
+            .copied()
+            .unwrap_or_default();
+        let Some(slot) = self.tiles.slots.get_mut(&sid) else {
+            return;
+        };
+        slot.dock.active = active;
+        if slot.dock.open {
+            match active {
+                DockSurface::Diff(id) => {
+                    if let Some(changes) = slot.diffs.get(&id).cloned() {
+                        changes.update(cx, |changes, cx| changes.ensure_content(cx));
+                    }
+                }
+                DockSurface::Files(id) => {
+                    if let Some(panel) = slot.files.get(&id).cloned() {
+                        panel.update(cx, |panel, cx| panel.ensure_content(cx));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// What the session's saved docks hold for `slot` now: its sizes, open
+    /// flags, root pick, and the Files and Git tabs' views in the dock's
+    /// order (side chats and pages are left out), with the one in front.
+    pub(super) fn slot_docks(&self, slot: &SessionSlot, cx: &App) -> crate::prefs::SessionDock {
+        let shown = self.resolved_dock_active(slot, cx);
+        let mut surfaces = Vec::new();
+        let mut active_surface = None;
+        for surface in &slot.dock.surfaces {
+            let saved = match surface {
+                DockSurface::Files(id) => slot.files.get(id).map(|p| p.read(cx).saved_view(cx)),
+                DockSurface::Diff(id) => slot.diffs.get(id).and_then(|c| c.read(cx).saved_view()),
+                DockSurface::SideChat(_) | DockSurface::Artifact(_) | DockSurface::Picker => None,
+            };
+            if let Some(saved) = saved {
+                if *surface == shown {
+                    active_surface = Some(surfaces.len());
+                }
+                surfaces.push(saved);
+            }
+        }
+        crate::prefs::SessionDock {
+            right: slot.right_fraction,
+            terminal: slot.terminal_fraction,
+            right_open: slot.dock.open,
+            terminal_open: slot.terminal_open,
+            surfaces,
+            active_surface,
+            root_pick: slot.state.read(cx).file_root_pick().map(|space_id| {
+                crate::prefs::SavedRoot {
+                    space_id: space_id.clone(),
+                }
+            }),
+            used_at: 0,
+        }
     }
 
     /// A surface tab's ✕. The active fallback happens naturally through
@@ -1076,10 +1250,12 @@ impl Shell {
             }
             DockSurface::SideChat(_) | DockSurface::Picker => {}
         }
+        slot.surface_watches.remove(&surface);
         if slot.dock.active == surface {
             slot.dock.active = DockSurface::Picker;
         }
         self.close_emptied_dock(sid, cx);
+        self.remember_slot_docks(sid, cx);
         cx.notify();
     }
 

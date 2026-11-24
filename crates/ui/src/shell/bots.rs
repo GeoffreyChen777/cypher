@@ -21,6 +21,7 @@ mod choice;
 mod column;
 mod dialog;
 mod items;
+mod kept;
 pub(super) mod memory;
 mod needs;
 mod network;
@@ -35,6 +36,8 @@ mod work;
 
 pub(super) use column::BoardSide;
 pub(super) use dialog::BotDialog;
+#[cfg(test)]
+pub(super) use kept::KEPT_BOARD_SLOTS;
 pub(super) use panel::PanelItem;
 
 /// Hosts older than this answer `CreateBot` with an unknown-method error, so
@@ -50,6 +53,9 @@ pub(super) struct BoardUi {
     /// so the tile tree neither renders nor disposes it. Created on the
     /// first visit and kept through Projects mode.
     pub(super) slot: Option<SlotId>,
+    /// The slots of the workspaces shown before, hidden but alive, so
+    /// switching back finds each as it was left ([`kept`]).
+    pub(super) kept: kept::KeptSlots,
     /// What the detail panel shows; `None` while it is shut.
     pub(super) panel: Option<PanelItem>,
     /// What it showed as it slides shut (rendered until the tween ends).
@@ -143,6 +149,14 @@ pub(super) struct BoardUi {
     /// check back into Copy.
     copied: Option<String>,
     copied_reset: Option<Task<()>>,
+}
+
+impl BoardUi {
+    /// Whether `sid` is one of the Botboard's slots (shown or kept), which
+    /// the tabs' bookkeeping leaves alone.
+    pub(super) fn holds(&self, sid: SlotId) -> bool {
+        self.slot == Some(sid) || self.session_slot == Some(sid) || self.kept.holds(sid)
+    }
 }
 
 /// One item on a bot's **Needs you** card: its conversation waiting on an
@@ -327,12 +341,14 @@ impl Shell {
     /// conversation. A deleted current bot hands over to the oldest one (or
     /// the empty state); nothing moves before the first bots frame, nor
     /// while a just-created bot's row is still on its way. The slot is
-    /// created on the Botboard only, and replaced when the conversation
-    /// changes. Runs on every main-state change.
+    /// created on the Botboard only; when the conversation changes the
+    /// outgoing one is kept hidden ([`kept`]) and a kept one comes back.
+    /// Runs on every main-state change.
     pub(super) fn sync_board(&mut self, cx: &mut Context<Self>) {
         if self.is_project_window() {
             return;
         }
+        self.prune_kept_board_slots(cx);
         // The slot of a bot created moments ago, whose rows may trail.
         let pending = self
             .board_chat()
@@ -375,14 +391,85 @@ impl Shell {
             return;
         }
         if let Some(sid) = self.board.slot.take() {
-            self.dispose_slot(sid, cx);
+            self.stash_board_slot(sid, cx);
         }
         if let Some(chat_id) = chat.filter(|_| self.botboard()) {
-            self.board.slot = Some(self.create_slot(TabKey::Session(chat_id), cx));
-            self.tiles.focus_pending = true;
+            self.show_board_slot(chat_id, cx);
         }
         self.sync_follow(cx);
         cx.notify();
+    }
+
+    /// The board's slot leaves the screen: kept hidden while its workspace
+    /// and chat live and its context still shows that chat (the oldest kept
+    /// one past the cap goes), else disposed.
+    fn stash_board_slot(&mut self, sid: SlotId, cx: &mut Context<Self>) {
+        let keep = self.tiles.slots.get(&sid).and_then(|slot| {
+            let chat = slot.tab.chat_id()?;
+            let state = self.state.read(cx);
+            let live = state.bots.iter().any(|b| b.chat_id == chat)
+                && state.chats.iter().any(|c| c.id == chat);
+            let shows = slot.state.read(cx).selected_chat.as_deref() == Some(chat);
+            (live && shows).then(|| chat.to_string())
+        });
+        let Some(chat_id) = keep else {
+            return self.dispose_slot(sid, cx);
+        };
+        self.remember_slot_surfaces(sid, cx);
+        self.hide_slot(sid, cx);
+        for gone in self.board.kept.keep(&chat_id, sid, self.board.side) {
+            self.dispose_slot(gone, cx);
+        }
+    }
+
+    /// Show `chat_id` on the board: its kept slot as it was left (and what
+    /// its right side showed last), else a new one (its saved docks come
+    /// back from prefs). The right side shows one thing: a dock that comes
+    /// back open shuts the detail panel.
+    fn show_board_slot(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        let kept = self
+            .board
+            .kept
+            .take(&chat_id)
+            .filter(|(sid, _)| self.tiles.slots.contains_key(sid));
+        let sid = match kept {
+            Some((sid, side)) => {
+                self.board.side = side;
+                sid
+            }
+            None => self.create_slot(TabKey::Session(chat_id), cx),
+        };
+        self.board.slot = Some(sid);
+        if self
+            .tiles
+            .slots
+            .get(&sid)
+            .is_some_and(|slot| slot.dock.open)
+        {
+            self.board.side = BoardSide::Dock;
+            if self.board.panel.is_some() {
+                self.close_panel_now(cx);
+            }
+        }
+        self.tiles.focus_pending = true;
+    }
+
+    /// Let go of kept slots whose workspace or chat is gone (deleted while
+    /// hidden). Nothing goes before the first bots frame.
+    fn prune_kept_board_slots(&mut self, cx: &mut Context<Self>) {
+        let gone = {
+            let state = self.state.read(cx);
+            if !state.bots_synced {
+                return;
+            }
+            self.board.kept.retain(|chat| {
+                state.bots.iter().any(|b| b.chat_id == chat)
+                    && state.chats.iter().any(|c| c.id == chat)
+            })
+        };
+        for sid in gone {
+            self.dispose_slot(sid, cx);
+        }
     }
 
     /// A bot palette that just created `bot`: show it on the Botboard (its
@@ -392,11 +479,10 @@ impl Shell {
         self.settings.botboard_bot = Some(bot.id.clone());
         self.close_panel_now(cx);
         if let Some(sid) = self.board.slot.take() {
-            self.dispose_slot(sid, cx);
+            self.stash_board_slot(sid, cx);
         }
-        self.board.slot = Some(self.create_slot(TabKey::Session(bot.chat_id), cx));
+        self.show_board_slot(bot.chat_id, cx);
         if self.botboard() {
-            self.tiles.focus_pending = true;
             self.schedule_save(cx);
             self.workspace_changed(cx);
         } else {

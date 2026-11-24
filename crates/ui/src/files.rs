@@ -250,6 +250,38 @@ impl LinkContexts {
     }
 }
 
+/// Where a file's source opens once its text is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoTo {
+    /// A chat link's lines (first, last), selected.
+    Lines(usize, usize),
+    /// A restored tab's caret line.
+    Caret(usize),
+}
+
+impl GoTo {
+    fn apply(self, editor: &mut CodeEditor, cx: &mut Context<CodeEditor>) {
+        match self {
+            Self::Lines(first, last) => editor.go_to_lines(first, last, cx),
+            Self::Caret(line) => editor.go_to_caret_line(line, cx),
+        }
+    }
+
+    fn line(self) -> usize {
+        match self {
+            Self::Lines(first, _) | Self::Caret(first) => first,
+        }
+    }
+}
+
+/// A saved Files tab on its way back ([`FilesPanel::restore`]).
+#[derive(Debug, Clone)]
+struct Restore {
+    root: Option<String>,
+    file: String,
+    line: Option<usize>,
+}
+
 #[derive(Debug, Default)]
 struct DirState {
     entries: Vec<WorkspaceFileEntry>,
@@ -372,8 +404,13 @@ pub struct FilesPanel {
     reveal_pending: Option<String>,
     /// Focus the shown file's editor once it has loaded.
     focus_editor_pending: bool,
-    /// Go to this line of this file once it has loaded (a chat link).
-    line_pending: Option<(String, (usize, usize))>,
+    /// Go to this line of this file once it has loaded (a chat link, or
+    /// a restored tab's caret).
+    line_pending: Option<(String, GoTo)>,
+    /// A saved tab coming back ([`Self::restore`]): its file opens once the
+    /// context it was saved in is back and the file is still there.
+    restore_pending: Option<Restore>,
+    restore_task: Option<Task<()>>,
     filter: Filter,
     /// Decoded images, oldest first (bounded by [`MAX_IMAGES`]).
     image_order: Vec<String>,
@@ -443,6 +480,8 @@ impl FilesPanel {
             reveal_pending: None,
             focus_editor_pending: false,
             line_pending: None,
+            restore_pending: None,
+            restore_task: None,
             filter: Filter {
                 input,
                 query: String::new(),
@@ -530,6 +569,7 @@ impl FilesPanel {
                 }
                 self.ensure_watch(cx);
                 self.apply_diffs(cx);
+                self.apply_restore(cx);
             }
             Err(message) => {
                 if self.context.is_some() || self.context_error.is_none() {
@@ -773,18 +813,119 @@ impl FilesPanel {
             return;
         }
         self.open_file(path.clone(), false, None, cx);
-        let Some((first, last)) = lines else {
-            return;
-        };
+        if let Some((first, last)) = lines {
+            self.go_to(path, GoTo::Lines(first, last), cx);
+        }
+    }
+
+    /// Show `path`'s source at `go` (now, or once its text is in).
+    fn go_to(&mut self, path: String, go: GoTo, cx: &mut Context<Self>) {
         let Some(file) = self.open_files.get_mut(&path) else {
             return;
         };
         file.preview = false;
         if file.clean.is_some() && !file.loading {
-            file.editor
-                .update(cx, |editor, cx| editor.go_to_lines(first, last, cx));
+            file.editor.update(cx, |editor, cx| go.apply(editor, cx));
         } else {
-            self.line_pending = Some((path, (first, last)));
+            self.line_pending = Some((path, go));
+        }
+    }
+
+    /// Bring a saved tab back ([`crate::prefs::SavedSurface::Files`]): `file`
+    /// (relative to root `root`) opens, its source at `line` when given,
+    /// once this tab's context is in — and only if that context is still on
+    /// the same root and the file still exists; otherwise the tab stays on
+    /// its tree, quietly.
+    pub fn restore(
+        &mut self,
+        root: Option<String>,
+        file: Option<String>,
+        line: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        self.restore_pending =
+            file.filter(|file| !file.is_empty())
+                .map(|file| Restore { root, file, line });
+        self.sync(cx);
+    }
+
+    fn apply_restore(&mut self, cx: &mut Context<Self>) {
+        if self.restore_task.is_some() {
+            return;
+        }
+        let (Some(context), Some(restore)) = (self.context.clone(), self.restore_pending.as_ref())
+        else {
+            return;
+        };
+        if restore.root != context.root_space_id || self.selected.is_some() {
+            // Another root shows now (its grant went, or the pick fell
+            // back), or the owner opened a file meanwhile.
+            self.restore_pending = None;
+            return;
+        }
+        let file = restore.file.clone();
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            // Nothing to ask (no engine yet): open it as a link would.
+            return self.open_restored(cx);
+        };
+        self.restore_task = Some(cx.spawn(async move |this, cx| {
+            let exists = entry_exists(&engine, &context, &file, cx).await;
+            this.update(cx, |this, cx| {
+                this.restore_task = None;
+                if this.context.as_ref() != Some(&context) {
+                    // The context moved on while we asked: judge again.
+                    return this.apply_restore(cx);
+                }
+                if exists && this.selected.is_none() {
+                    this.open_restored(cx);
+                } else {
+                    this.restore_pending = None;
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn open_restored(&mut self, cx: &mut Context<Self>) {
+        let Some(Restore { file, line, .. }) = self.restore_pending.take() else {
+            return;
+        };
+        self.reveal_in_tree(file.clone(), cx);
+        self.open_file(file.clone(), false, None, cx);
+        if let Some(line) = line {
+            self.go_to(file, GoTo::Caret(line), cx);
+        }
+    }
+
+    /// What identifies this tab's view, for the session's saved docks: the
+    /// file it shows, in the root it shows, and the caret's line while its
+    /// source shows (a tab still coming back reports what it will show).
+    pub fn saved_view(&self, cx: &App) -> crate::prefs::SavedSurface {
+        if let Some(restore) = &self.restore_pending {
+            return crate::prefs::SavedSurface::Files {
+                root: restore.root.clone(),
+                file: Some(restore.file.clone()),
+                line: restore.line,
+            };
+        }
+        let file = self.selected.clone();
+        let line = file.as_ref().and_then(|path| {
+            if let Some((pending, go)) = &self.line_pending
+                && pending == path
+            {
+                return Some(go.line());
+            }
+            let open = self.open_files.get(path)?;
+            (!open.preview && open.clean.is_some()).then(|| open.editor.read(cx).caret_position().0)
+        });
+        crate::prefs::SavedSurface::Files {
+            root: self
+                .context
+                .as_ref()
+                .and_then(|context| context.root_space_id.clone()),
+            file,
+            line: line.filter(|line| *line > 1),
         }
     }
 
@@ -963,13 +1104,11 @@ impl FilesPanel {
                     }
                 }
                 // A chat link's line lands once the text is in.
-                if let Some((_, (first, last))) =
-                    this.line_pending.take_if(|(path, _)| *path == task_path)
+                if let Some((_, go)) = this.line_pending.take_if(|(path, _)| *path == task_path)
                     && let Some(file) = this.open_files.get(&task_path)
                     && file.clean.is_some()
                 {
-                    file.editor
-                        .update(cx, |editor, cx| editor.go_to_lines(first, last, cx));
+                    file.editor.update(cx, |editor, cx| go.apply(editor, cx));
                 }
                 cx.notify();
             })
