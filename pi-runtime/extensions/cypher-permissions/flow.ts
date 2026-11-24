@@ -43,13 +43,15 @@ export interface RuntimeOperand {
  * always; `options`: more kinds with an option (`-v` the volumes, `--rmi` the images); `project`: how the group's
  * name is found (compose: `-p`, else the compose file's folder, else the folder it runs in).
  */
-export const GROUP_DESTROYERS: readonly { program: readonly string[]; sub: readonly string[]; option?: RegExp; kinds: readonly EntityKind[]; options?: readonly { option: RegExp; kinds: readonly EntityKind[] }[]; project?: "compose"; group?: "root" }[] = [
+export const GROUP_DESTROYERS: readonly { program: readonly string[]; sub: readonly string[]; option?: RegExp; kinds: readonly EntityKind[]; options?: readonly { option: RegExp; kinds: readonly EntityKind[] }[]; project?: "compose"; group?: "root"; typed?: boolean }[] = [
   // Its networks are `resource`s as its volumes are (schema.ts): only `-v` reaches that kind, so a denied volume isn't met by a plain `down`.
   { program: ["docker", "podman"], sub: ["compose", "down"], kinds: ["container"], options: [{ option: /^(-v|--volumes)$/, kinds: ["resource"] }, { option: /^--rmi(=.*)?$/, kinds: ["image"] }], project: "compose" },
   { program: ["docker-compose", "podman-compose"], sub: ["down"], kinds: ["container"], options: [{ option: /^(-v|--volumes)$/, kinds: ["resource"] }, { option: /^--rmi(=.*)?$/, kinds: ["image"] }], project: "compose" },
   { program: ["docker", "podman"], sub: ["compose", "rm"], kinds: ["container"], options: [{ option: /^(-v|--volumes)$/, kinds: ["resource"] }], project: "compose" },
   { program: ["docker-compose", "podman-compose"], sub: ["rm"], kinds: ["container"], options: [{ option: /^(-v|--volumes)$/, kinds: ["resource"] }], project: "compose" },
   { program: ["kubectl", "oc"], sub: ["delete"], option: /^(-f|--filename|-k|--kustomize)(=.*)?$/, kinds: ["namespace", "resource"] },
+  // Iteration 3: a delete by selector or of all (`kubectl delete ns -l preview=true`, `--all`): every entity of the type.
+  { program: ["kubectl", "oc"], sub: ["delete"], option: /^(-l|--selector|--all|--field-selector)(=.*)?$/, kinds: ["resource"], typed: true },
   { program: ["terraform", "tofu"], sub: ["destroy"], kinds: ["resource"], group: "root" },
   // Final pass: the flag form of the same destroy (`terraform apply -destroy`, `plan -destroy` only plans).
   { program: ["terraform", "tofu"], sub: ["apply"], option: /^-?-destroy$/, kinds: ["resource"], group: "root" },
@@ -76,6 +78,11 @@ export function groupOperand(inner: readonly string[], cwd: string | undefined):
   const row = GROUP_DESTROYERS.find((candidate) => candidate.program.includes(program) && candidate.sub.every((word, at) => positionals[at] === word) && (!candidate.option || inner.some((word) => candidate.option!.test(word))));
   if (!row) return undefined;
   const kinds = new Set<EntityKind>(row.kinds);
+  // A typed delete's resource type word (`ns`, `namespace`): its own kind (schema.ts `KUBE_TYPES`).
+  if (row.typed && /^(ns|namespace|namespaces)$/.test(positionals[1] ?? "")) {
+    kinds.clear();
+    kinds.add("namespace");
+  }
   for (const extra of row.options ?? []) if (inner.some((word) => extra.option.test(word))) for (const kind of extra.kinds) kinds.add(kind);
   const tests: NameTest[] = [];
   if (row.project === "compose") {
@@ -100,6 +107,8 @@ export const RUNTIME_OPERANDS: readonly { program: string; sub?: readonly string
   { program: "git", sub: ["push"], option: /^(-d|--delete)$/, kinds: ["branch", "tag"] },
   // Final pass: a refspec with an empty source deletes its destination (`git push origin :refs/tags/{}`), whatever
   // spells it; `word`: the runtime operand's word. The ref's prefix says its kind.
+  // Iteration 3: `update-ref -d` deletes the ref it is handed (`… | xargs -n1 git update-ref -d`).
+  { program: "git", sub: ["update-ref"], option: /^(-d|--delete)$/, kinds: ["branch", "tag"] },
   { program: "git", sub: ["push"], word: /^\+?:refs\/tags\//, kinds: ["tag"] },
   { program: "git", sub: ["push"], word: /^\+?:refs\/heads\//, kinds: ["branch"] },
   { program: "git", sub: ["push"], word: /^\+?:(?!refs\/)/, kinds: ["branch", "tag"] },
@@ -122,6 +131,7 @@ export const RUNTIME_OPERANDS: readonly { program: string; sub?: readonly string
  * `sub`: the subcommand words in order among the positionals; `all`: a positional that must be there.
  */
 export const QUANTIFIED: readonly { program: string; sub: readonly string[]; all?: string; kinds: readonly EntityKind[] }[] = [
+  { program: "tmux", sub: ["kill-server"], kinds: ["resource"] },
   { program: "docker", sub: ["container", "prune"], kinds: ["container"] },
   { program: "docker", sub: ["image", "prune"], kinds: ["image"] },
   { program: "docker", sub: ["volume", "prune"], kinds: ["resource"] },
@@ -339,14 +349,17 @@ export function runtimeOperand(commands: readonly FlowCommand[], index: number, 
   const piped = commands[index - 1]?.joint === "|";
   const tests: NameTest[] = [];
   let kinds: EntityKind[];
+  let stops = false;
   const positionals = inner.slice(1).filter((word) => !word.startsWith("-"));
   const quantified = QUANTIFIED.find((row) => row.program === program && row.sub.every((word, at) => positionals[at] === word) && (!row.all || positionals.slice(row.sub.length).includes(row.all)));
   if (quantified) {
     kinds = [...quantified.kinds];
     tests.push(...testsOf(inner));
-  } else if (PATTERN_KILLERS.has(program)) {
+  } else if (PATTERN_KILLERS.has(program) || (program === "fuser" && inner.some((word) => /^-[a-zA-Z]*k/.test(word)))) {
+    // `pkill -f P`, `killall N`, and `fuser -k PORT/tcp` (iteration 3): what matches, or holds the port, is stopped.
     kinds = ["process"];
     tests.push(...testsOf(inner));
+    stops = true;
   } else {
     const consumer = consumerWords(inner, piped);
     if (!consumer) return undefined;
@@ -359,5 +372,5 @@ export function runtimeOperand(commands: readonly FlowCommand[], index: number, 
     if (before.joint !== undefined && before.joint !== "|") break;
     tests.push(...testsOf(before.words));
   }
-  return { kinds, tests, by: inner.slice(0, 3).join(" ") };
+  return { kinds, tests, by: inner.slice(0, 3).join(" "), ...(stops ? { effects: ["stop"] as EffectClass[] } : {}) };
 }

@@ -123,6 +123,12 @@ const makeRecipe: Reader = (words, cwd, read) => {
 
 /** Package managers' lifecycle words that run a script of that name without `run`. */
 const LIFECYCLE = new Set(["test", "start", "stop", "restart", "t", "tst"]);
+/**
+ * The scripts an install runs (iteration 3: npm/pnpm/yarn/bun `install`, `i`, `ci`, `add` with no package run the
+ * project's own lifecycle scripts): `preinstall`, `install`, `postinstall`, `prepare` (npm's order).
+ */
+const INSTALL_WORDS = new Set(["install", "i", "ci", "add", "isntall"]);
+const INSTALL_SCRIPTS = ["preinstall", "install", "postinstall", "prepublish", "preprepare", "prepare", "postprepare"];
 
 /** A package manager's script (`npm run X`, `npm test`, `pnpm X`, `yarn X`, `bun run X`) with its pre/post scripts. */
 const packageScript: Reader = (words, cwd, read) => {
@@ -136,6 +142,16 @@ const packageScript: Reader = (words, cwd, read) => {
     else if (!word.startsWith("-")) positionals.push(word);
   }
   let name: string | undefined;
+  // An install of the project itself (no package named): its lifecycle scripts.
+  if (INSTALL_WORDS.has(positionals[0] ?? "") && positionals.length === 1 && !words.includes("--ignore-scripts")) {
+    const text = read(join(dir, "package.json"));
+    let scripts: Record<string, unknown> = {};
+    try {
+      scripts = text === undefined ? {} : ((JSON.parse(text) as { scripts?: Record<string, unknown> }).scripts ?? {});
+    } catch {}
+    const lines = INSTALL_SCRIPTS.map((key) => scripts[key]).filter((value): value is string => typeof value === "string");
+    return lines.length ? [{ by: `${program} ${positionals[0]}`, lines, cwd: dir, file: join(dir, "package.json") }] : undefined;
+  }
   if (positionals[0] === "run" || positionals[0] === "run-script") name = positionals[1];
   else if (positionals[0] && (LIFECYCLE.has(positionals[0]) || program !== "npm")) name = positionals[0] === "t" || positionals[0] === "tst" ? "test" : positionals[0];
   if (!name) return undefined;
@@ -175,6 +191,73 @@ const justRecipe: Reader = (words, cwd, read) => {
   return lines?.length ? [{ by: `just ${name}`, lines: lines.slice(0, MAX_LINES), cwd }] : undefined;
 };
 
+/** `deno task NAME`: deno.json(c)'s `tasks.NAME` (a string). */
+const denoTask: Reader = (words, cwd, read) => {
+  const positionals = words.slice(1).filter((word) => !word.startsWith("-"));
+  if (positionals[0] !== "task" || !positionals[1]) return undefined;
+  for (const file of ["deno.json", "deno.jsonc"]) {
+    const text = read(join(cwd, file));
+    if (text === undefined) continue;
+    try {
+      const tasks = (JSON.parse(text.replace(/^\s*\/\/.*$/gm, "")) as { tasks?: Record<string, unknown> }).tasks ?? {};
+      const task = tasks[positionals[1]];
+      const line = typeof task === "string" ? task : task && typeof task === "object" && typeof (task as { command?: unknown }).command === "string" ? (task as { command: string }).command : undefined;
+      if (line) return [{ by: `deno task ${positionals[1]}`, lines: [line], cwd, file: join(cwd, file) }];
+    } catch {}
+  }
+  return undefined;
+};
+
+/** A YAML list item or scalar under a key, by indentation (enough for task runners' files): its text. */
+function yamlLines(text: string, path: readonly string[]): string[] {
+  const lines = text.split("\n");
+  let depth = -1;
+  let index = 0;
+  let at = 0;
+  for (; at < lines.length && index < path.length; at++) {
+    const match = /^(\s*)([\w.:-]+):\s*(.*)$/.exec(lines[at]);
+    if (match && match[1].length > depth && match[2] === path[index]) {
+      depth = match[1].length;
+      index++;
+      if (index === path.length && match[3].trim() && !/^[|>]/.test(match[3].trim())) return [match[3].trim().replace(/^["']|["']$/g, "")];
+    } else if (match && match[1].length <= depth && index < path.length) return [];
+  }
+  if (index < path.length) return [];
+  const out: string[] = [];
+  for (; at < lines.length; at++) {
+    const line = lines[at];
+    if (!line.trim()) continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent <= depth) break;
+    const item = /^\s*-\s*(?:cmd:\s*)?(.+)$/.exec(line);
+    if (item) out.push(item[1].trim().replace(/^["']|["']$/g, ""));
+    else if (/^\s*cmd:\s*(.+)$/.test(line)) out.push(/^\s*cmd:\s*(.+)$/.exec(line)![1].trim());
+    else if (!/:\s*$/.test(line) && !/^\s*[\w-]+:/.test(line)) out.push(line.trim());
+  }
+  return out.slice(0, MAX_LINES);
+}
+
+/** go-task `task NAME` (Taskfile.yml `tasks.NAME.cmds`). */
+const goTask: Reader = (words, cwd, read) => {
+  const name = words.slice(1).find((word) => !word.startsWith("-")) ?? "default";
+  for (const file of ["Taskfile.yml", "Taskfile.yaml", "taskfile.yml"]) {
+    const text = read(join(cwd, file));
+    if (text === undefined) continue;
+    const lines = yamlLines(text, ["tasks", name, "cmds"]);
+    if (lines.length) return [{ by: `task ${name}`, lines, cwd, file: join(cwd, file) }];
+  }
+  return undefined;
+};
+
+/** `pre-commit run`: the local hooks' `entry` lines (.pre-commit-config.yaml, `repo: local`). */
+const preCommit: Reader = (words, cwd, read) => {
+  if (!words.slice(1).some((word) => word === "run")) return undefined;
+  const text = read(join(cwd, ".pre-commit-config.yaml"));
+  if (text === undefined || !/repo:\s*local/.test(text)) return undefined;
+  const lines = [...text.matchAll(/^\s*entry:\s*(.+)$/gm)].map((match) => match[1].trim().replace(/^["']|["']$/g, ""));
+  return lines.length ? [{ by: "pre-commit run", lines: lines.slice(0, MAX_LINES), cwd, file: join(cwd, ".pre-commit-config.yaml") }] : undefined;
+};
+
 /** A file run by its path (`./scripts/clean.sh`, `tools/reset`) whose first line names a shell. */
 const pathScript: Reader = (words, cwd, read) => {
   const program = words[0] ?? "";
@@ -191,6 +274,10 @@ export const SCRIPT_RUNNERS: readonly { programs: readonly string[]; read: Reade
   { programs: ["make", "gmake"], read: makeRecipe },
   { programs: ["npm", "pnpm", "yarn", "bun"], read: packageScript },
   { programs: ["just"], read: justRecipe },
+  // Iteration 3: task runners and hook runners that read a project manifest's commands.
+  { programs: ["deno"], read: denoTask },
+  { programs: ["task", "go-task"], read: goTask },
+  { programs: ["pre-commit"], read: preCommit },
 ];
 
 /** The project scripts a command (unwrapped words, its folder) runs, read from disk; empty when it runs none. */

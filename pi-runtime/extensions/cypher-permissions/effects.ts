@@ -273,6 +273,14 @@ export function commandEffects(words: readonly string[], options: { sink?: (word
       if (remote && !refspecs.length && options.current) out.targets.push({ kind: "branch", name: options.current, remote });
       return out;
     }
+    // A ref deleted by any of git's forms (`GIT_REF_WRITERS`: `branch -D`, `update-ref -d`, `symbolic-ref -d`): a change
+    // of that branch (iteration 3), so a denial of one meets the others.
+    const written = refsWritten(viewOf(inner));
+    if (written?.verb !== "deletes" && GIT_REF_WRITERS.some((row) => row.sub === sub && row.verb === "deletes" && (!row.options || args.some((word) => row.options!.test(word))))) effect("change");
+    if (written?.verb === "deletes") {
+      effect("change");
+      for (const ref of written.refs) if (ref !== UNKNOWN) out.targets.push(ref.startsWith("refs/tags/") ? { kind: "tag", name: ref.slice("refs/tags/".length) } : { kind: "branch", name: ref.replace(/^refs\/heads\//, "") });
+    }
     const row = GIT_OPERANDS.find((candidate) => candidate.subs.includes(sub ?? ""));
     const dashes = args.indexOf("--");
     const before = dashes < 0 ? args : args.slice(0, dashes);
@@ -338,6 +346,8 @@ export const GIT_REF_WRITERS: readonly { sub: string; options?: RegExp; verb: st
   { sub: "branch", options: /^(-[A-Za-z]*f|--force)$/, verb: "resets", refs: "first" },
   { sub: "checkout", options: /^-[A-Za-z]*B$/, verb: "resets", refs: "value" },
   { sub: "switch", options: /^(-[A-Za-z]*C|--force-create)$/, verb: "resets", refs: "value" },
+  // Iteration 3: `update-ref -d REF` deletes it, as `branch -D` does.
+  { sub: "update-ref", options: /^(-d|--delete)$/, verb: "deletes", refs: "first" },
   { sub: "update-ref", verb: "rewrites", refs: "first" },
   { sub: "symbolic-ref", options: /^(-d|--delete)$/, verb: "deletes", refs: "first" },
 ];

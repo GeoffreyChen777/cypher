@@ -387,6 +387,9 @@ export const FOLDER_PUBLISHERS: readonly { programs: readonly string[]; sub: rea
   { programs: ["yarn"], sub: ["publish"], manifest: "package.json", name: /"name"\s*:\s*"([^"]+)"/ },
   { programs: ["yarn"], sub: ["npm", "publish"], manifest: "package.json", name: /"name"\s*:\s*"([^"]+)"/ },
   { programs: ["cargo"], sub: ["publish"], manifest: "Cargo.toml", name: /^\s*name\s*=\s*"([^"]+)"/m },
+  // Release tools that publish the folder's package (iteration 3).
+  { programs: ["np", "release-it"], sub: [], manifest: "package.json", name: /"name"\s*:\s*"([^"]+)"/ },
+  { programs: ["changeset", "changesets"], sub: ["publish"], manifest: "package.json", name: /"name"\s*:\s*"([^"]+)"/ },
   { programs: ["poetry"], sub: ["publish"], manifest: "pyproject.toml", name: /^\s*name\s*=\s*"([^"]+)"/m },
   { programs: ["flit"], sub: ["publish"], manifest: "pyproject.toml", name: /^\s*name\s*=\s*"([^"]+)"/m },
   { programs: ["hatch"], sub: ["publish"], manifest: "pyproject.toml", name: /^\s*name\s*=\s*"([^"]+)"/m },
