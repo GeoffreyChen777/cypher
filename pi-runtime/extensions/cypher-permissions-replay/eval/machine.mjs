@@ -52,6 +52,7 @@ function processFacts(item) {
 /** Load `<extensions>/cypher-permissions/{core,shell}.ts` and build the fake machine for `cases`. */
 export async function createMachine({ extensions, cases, ownerWords = "full", judgeTimeoutMs }) {
   const { Permissions } = await import(pathToFileURL(join(extensions, "cypher-permissions", "core.ts")).href);
+  const denialsModule = await import(pathToFileURL(join(extensions, "cypher-permissions", "denials.ts")).href).catch(() => ({}));
   // The fake machine's read-only directories, on any host (an extension older than the hook reads the real disk).
   const commandsModule = await import(pathToFileURL(join(extensions, "cypher-permissions", "commands.ts")).href);
   commandsModule.setSystemDirectory?.((path) => /^\/(Applications|Library|System|usr|opt\/local)\//.test(path));
@@ -92,7 +93,9 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
       const at = expand(file);
       if (!at.startsWith(scratch)) continue;
       mkdirSync(dirname(at), { recursive: true });
-      if (!existsSync(at)) writeFileSync(at, "fixture\n");
+      const content = item.fake?.contents?.[file];
+      if (content !== undefined) writeFileSync(at, expand(content));
+      else if (!existsSync(at)) writeFileSync(at, "fixture\n");
     }
     for (const ref of item.fake?.refs ?? []) {
       const at = expand(item.cwd);
@@ -181,6 +184,14 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
     }
     // The chat's own workspace branch (production reads it from git at the chat's folders; the fake repos are on main).
     if (item.workspaceBranch) permissions.workspaceBranches = () => [item.workspaceBranch];
+    // Final pass: what another chat's process is known by on the fake machine (production: `ps`, `lsof`): the command
+    // that started it (blind.mjs `by`) and its `ports`. Nothing else runs here.
+    if ("processForms" in permissions) {
+      permissions.processForms = (pid) => {
+        const entry = (item.otherChats ?? []).find((other) => other.kind === "process" && String(other.name) === String(pid));
+        return entry ? [...(entry.by ? [entry.by] : []), ...(entry.ports ?? []).map((port) => `:${port}`)] : [];
+      };
+    }
     const processes = processFacts(item);
     permissions.ownsProcesses = processes.owns;
     permissions.processFacts = processes.facts;
@@ -221,8 +232,8 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
         complete: async () => JSON.stringify({ decision: "ask-user", reason: "an earlier prompt the owner answered", concern: "not-owner" }),
       };
       const recordedBefore = permissions.denials?.any?.() ? 1 : 0;
+      const line = denied.command !== undefined ? expand(denied.command) : undefined;
       try {
-        const line = denied.command !== undefined ? expand(denied.command) : undefined;
         if ((denied.capability ?? "escalate") === "escalate" && line !== undefined) await permissions.requestEscalation(line, { label: "replay" }, earlierCtx);
         else if (denied.tool === "request_permission") await permissions.requestPermission({ capability: denied.capability, paths: denied.paths.map(expand) }, earlierCtx);
         else await permissions.authorize(denied.paths.map((path) => ({ capability: denied.capability ?? "read", path: expand(path) })), { tool: denied.tool }, earlierCtx);
@@ -231,8 +242,21 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
         permissions.ownerWords = fullWords;
         continue;
       }
+      // Final pass: a Deny of a request this code never shows (a default-allowed read or edit) is the case's premise:
+      // recorded as a Deny of that request records it (`injected`), so what the code does with such a denial is measured.
+      let injected = false;
+      if (!shown.length && denied.choice === "deny" && permissions.denials?.record && !(permissions.denials.any() && !recordedBefore)) {
+        try {
+          const cls =
+            line !== undefined && (denied.capability ?? "escalate") === "escalate"
+              ? (denialsModule.forRecord ?? ((x) => x))(permissions.lineClassOf(line, cwd))
+              : permissions.fileClass(denied.tool, denied.capability ?? "read", (denied.paths ?? []).map((path) => permissions.classify?.(expand(path), cwd)?.path ?? expand(path)));
+          permissions.denials.record(cls, line ?? (denied.paths ?? []).map(expand).join(" "), permissions.ownerWords);
+          injected = true;
+        } catch {}
+      }
       permissions.ownerWords = fullWords;
-      earlier.push({ choice: denied.choice, prompted: shown.length > 0, denialRecorded: Boolean(permissions.denials?.any?.()) && !recordedBefore });
+      earlier.push({ choice: denied.choice, prompted: shown.length > 0, denialRecorded: Boolean(permissions.denials?.any?.()) && !recordedBefore, ...(injected ? { injected: true } : {}) });
     }
     const judged = [];
     const answers = [];
@@ -261,7 +285,7 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
     const command = item.command !== undefined ? expand(item.command) : undefined;
     if (item.capability === "escalate") result = await permissions.requestEscalation(command, proposal ?? item.proposal ?? { label: "replay" }, ctx);
     else if (item.tool === "request_permission") result = await permissions.requestPermission({ capability: item.capability, paths: item.paths.map(expand) }, ctx);
-    else result = await permissions.authorize(item.paths.map((path) => ({ capability: item.capability, path: expand(path) })), { tool: item.tool }, ctx);
+    else result = await permissions.authorize(item.paths.map((path, index) => ({ capability: item.capability, path: expand(path), ...(item.ops?.[index] ? { op: item.ops[index] } : {}) })), { tool: item.tool }, ctx);
     // The case's own record (not one of an earlier prompt's, `deniedEarlier`).
     const audit = records.slice(mark).at(-1) ?? {};
     const remembered = permissions.grants.all().filter((grant) => grant.scope !== "once").length > before;

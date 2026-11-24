@@ -49,6 +49,10 @@
 //   fake machine can make, noted).
 // - `otherChats` kinds `file` (a path), `namespace`, and `container` named `image:X` / `volume:X` (the mutation sets' form
 //   for a docker image / volume: the ledger's `image` / `resource`).
+// - Final pass: an `otherChats` name that starts with a kind word (`container X`) is of that kind; a process note's
+//   backticked command is the ledger's `by` (what started it) and its command line on the fake machine; an
+//   apply_patch case whose words say it deletes is a `*** Delete File:` (`ops`); files the `foreign` prose names
+//   (`.env`, `*.pem`, …) and secret-named files the line reads from the case's folder exist (the case assumes them).
 // - `deniedEarlier` of a file tool (read/edit/write): its `paths`, capability `write` for edit/write.
 // - `mergedBranches` → a read, `git branch -r --merged origin/<default>` listing them (the harness's git facts don't
 //   consult it; the conversation now says it).
@@ -125,6 +129,8 @@ export function convert(blind) {
     const at = absolute(path, cwd);
     if (at.startsWith("@HOME@/") || at.startsWith("/tmp/")) (at.endsWith("/") ? fake.dirs : fake.files).push(at.replace(/\/$/, ""));
     else notes.push(`file ${path}: outside the fake machine (not made)`);
+    // Final pass: a file's stated contents are kept (a script, a Makefile, a package.json the line runs: scripts.ts reads them).
+    if (!Array.isArray(setup.files) && typeof setup.files[path] === "string" && !at.endsWith("/")) (fake.contents ??= {})[at] = setup.files[path];
   }
   // "T was tagged on X's tip, which is not on origin/main": the tag is made on X, a branch one commit ahead.
   const tagBase = {};
@@ -243,6 +249,12 @@ export function convert(blind) {
     // A docker image or volume written as a container named `image:X` / `volume:X`.
     const prefixed = kind === "container" ? /^(image|volume):(.+)$/.exec(entryName) : null;
     if (prefixed) [kind, entryName] = [prefixed[1] === "image" ? "image" : "resource", prefixed[2]];
+    // Final pass: a name that starts with a kind word (`container atlas-e2e-runner` under kind `process`) is of that kind.
+    const named = /^([a-z]+)[ :](\S.*)$/.exec(entryName);
+    if (named && KIND_OF[named[1]] && !prefixed) [kind, entryName] = [KIND_OF[named[1]], named[2]];
+    // A started process's command, quoted in the note (another chat's `cargo watch -x test`): what the ledger
+    // records as `by` when a chat starts one (production), and its command line on the fake machine.
+    const startedBy = kind === "process" ? /`([^`]+)`/.exec(entry.note ?? "")?.[1] : undefined;
     if (!kind) {
       unexpressible.push(`otherChats kind ${entry.kind} has no ledger form`);
       continue;
@@ -260,7 +272,8 @@ export function convert(blind) {
       otherChats.push({ kind: "branch", name });
       fake.refs.push({ kind: "branch", name });
     } else {
-      otherChats.push({ kind, name: kind === "pr" ? name.replace(/^#/, "") : name, ...(kind === "process" ? { action: "start" } : {}) });
+      otherChats.push({ kind, name: kind === "pr" ? name.replace(/^#/, "") : name, ...(kind === "process" ? { action: "start", ...(startedBy ? { by: startedBy } : {}) } : {}) });
+      if (startedBy) notes.push(`otherChats: process ${name} started by \`${startedBy}\` (the ledger's \`by\`, its command line)`);
       if (kind === "branch" || kind === "tag") fake.refs.push({ kind, name });
     }
     notes.push(`otherChats: ${entry.kind} ${name} in another chat's ledger${entry.note ? ` (note, not a fact: ${entry.note})` : ""}`);
@@ -277,6 +290,26 @@ export function convert(blind) {
     }
     deniedEarlier.push({ tool: entry.tool ?? "bash", capability: entry.capability ?? ((entry.tool ?? "bash") === "bash" ? "escalate" : "read"), ...(entry.command !== undefined ? { command: entry.command } : { paths: entry.paths }), choice: entry.choice, ...(typeof entry.at === "number" ? { at: entry.at } : {}) });
     notes.push(`deniedEarlier: ${entry.choice} on ${entry.command ?? entry.paths.join(" ")}, replayed first`);
+  }
+
+  // Final pass: an apply_patch case is a patch; its file operation is the case's words when it has no patch text
+  // ("apply_patch deleting …" is a `*** Delete File:`), as production reads the patch (core.ts `patchOps`).
+  const patchOp = blind.tool === "apply_patch" && blind.paths?.length && /\b(delet|remov)/i.test(`${blind.why ?? ""} ${blind.class ?? ""}`) ? "delete" : undefined;
+  if (patchOp) notes.push("apply_patch: a `*** Delete File:` of its paths (the case's words)");
+  // Final pass: files a case's prose says are there (`foreign`: "The project root holds .env and .env.production"),
+  // and secret-named files a line reads from the case's folder, exist on the fake machine, as the case assumes.
+  for (const name of new Set([...foreignText.matchAll(/(?:^|[\s(`'"])(\.[\w.-]+|[\w-]+\.(?:pem|key|p12|pfx|jks|env))(?=[\s,.)`'"]*(?:\s|$))/g)].map((m) => m[1].replace(/\.$/, "")))) {
+    const at = absolute(name, cwd);
+    if (!fake.files.includes(at)) fake.files.push(at);
+    notes.push(`file ${name}: in the case's folder, as its prose says`);
+  }
+  for (const word of String(blind.command ?? "").split(/[\s;&|<>()'"=]+/)) {
+    if (!/^(?:\.\/)?\.env(?:\.[\w-]+)?$|^[\w.-]+\.(?:pem|key|p12|pfx)$/.test(word)) continue;
+    const at = absolute(word.replace(/^\.\//, ""), cwd);
+    if (!fake.files.includes(at)) {
+      fake.files.push(at);
+      notes.push(`file ${word}: a secret the line reads from the case's folder, there`);
+    }
   }
 
   // What the line deletes exists (unless one of the chat's commands makes it).
@@ -354,6 +387,7 @@ export function convert(blind) {
     cwd,
     ...(blind.command !== undefined ? { command: blind.command } : {}),
     ...(blind.paths ? { paths: blind.paths } : {}),
+    ...(patchOp ? { ops: blind.paths.map(() => patchOp) } : {}),
     owner: { messages: words, agentWritten: false, source: "blind" },
     // The whole conversation is in `branch` (machine.mjs puts `user` ahead of it).
     user: [],
