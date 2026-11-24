@@ -103,7 +103,10 @@ test("flow: a run-time operand takes the kinds its consumer's position declares,
   assert.equal(consumerWords(["git", "branch", "-D", "x"], false), undefined);
   // Every RUNTIME_OPERANDS row reads a run-time operand.
   for (const row of RUNTIME_OPERANDS) {
-    const words = [row.program, ...(row.sub ?? []), ...(row.option ? [String(row.option.source.match(/-[A-Za-z]|--[a-z]+/)?.[0] ?? "")] : []), RUNTIME];
+    // A `word` row reads the runtime operand inside a word of that shape (a delete refspec: `:refs/tags/{}`).
+    const operand = row.word ? `${row.word.source.includes("tags") ? ":refs/tags/" : row.word.source.includes("heads") ? ":refs/heads/" : ":"}${RUNTIME}` : RUNTIME;
+    assert.ok(!row.word || row.word.test(operand), `${row.word} reads ${operand}`);
+    const words = [row.program, ...(row.sub ?? []), ...(row.option ? [String(row.option.source.match(/-[A-Za-z]|--[a-z]+/)?.[0] ?? "")] : []), operand];
     for (const kind of row.kinds) assert.ok(runtimeKinds(words).includes(kind), `${words.join(" ")} → ${kind}`);
   }
 });
