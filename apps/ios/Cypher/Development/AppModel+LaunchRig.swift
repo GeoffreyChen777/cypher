@@ -10,6 +10,10 @@ extension AppModel {
         enterDemoMode()
         if args.contains("-demo-many") { demo?.addManyProjects() }
         if args.contains("-demo-history") { demo?.addSessionHistory() }
+        if args.contains("-demo-needs") || args.contains("-demo-needs-many") {
+            // DemoDataset+NeedsYou.swift: a permission prompt, a long title.
+            demo?.addNeedsYouStates(many: args.contains("-demo-needs-many"))
+        }
         if args.contains("-demo-long-plans"), let demo {
             // DemoDataset+PlanBodies.swift: bodies now, never, or after N s.
             let late = args.firstIndex(of: "-plan-bodies-late").flatMap { ix in
