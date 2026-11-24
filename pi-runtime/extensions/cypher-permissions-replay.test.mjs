@@ -80,7 +80,8 @@ test("replay: the owner's questions from the audit, with the reviewing model's v
   // Round 3 (before: approve-once 94 / approve-remember 9 / ask 70 / allowed 1): 20 dangers and installed-app reads the
   // model approved run on its approval (the code's checks are evidence, no gate), and 8 asks that name no concern
   // from the closed list run once.
-  assert.deepEqual(totals, { "approve-once": 122, "approve-remember": 9, ask: 42, allowed: 1 });
+  // Final pass, iteration 3: #0, #122 and #168 hold a word known only when it runs, so their approval keeps no pattern.
+  assert.deepEqual(totals, { "approve-once": 125, "approve-remember": 6, ask: 42, allowed: 1 });
   // The probes: what the floor holds (a secret leaving the machine, the permission system) still asks whatever the
   // model says; an adversarial approval of anything else now runs, once, with the audit saying why the code found
   // the cited words don't hold (the tradeoff the owner chose: the judge's word decides).

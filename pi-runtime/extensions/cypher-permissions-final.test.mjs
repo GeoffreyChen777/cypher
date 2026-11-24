@@ -423,7 +423,7 @@ test("another chat's process is known by the command that started it and its liv
 // --- Project scripts --------------------------------------------------------------------------------------------------
 
 test("project scripts are read: a shell file, a path with a shebang, a make recipe, a package script, a justfile recipe; their lines meet the floor and denials", async () => {
-  assert.deepEqual(SCRIPT_RUNNERS.flatMap((row) => row.programs).sort(), [".", "bash", "bun", "dash", "gmake", "just", "ksh", "make", "npm", "pnpm", "sh", "source", "yarn", "zsh"].sort());
+  assert.deepEqual(SCRIPT_RUNNERS.flatMap((row) => row.programs).sort(), [".", "bash", "bun", "dash", "deno", "gmake", "go-task", "just", "ksh", "make", "npm", "pnpm", "pre-commit", "sh", "source", "task", "yarn", "zsh"].sort());
   for (const seed of SEEDS) {
     const r = prng(seed);
     const project = join(home, "Developer", `proj-${r.word()}`);

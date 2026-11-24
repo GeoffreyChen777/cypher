@@ -23,9 +23,9 @@
     "source": "recorded: the model approved; the old bar asked the user"
    },
    "expect": {
-    "outcome": "approve-remember",
+    "outcome": "approve-once",
     "tier": "local",
-    "why": "the line is read now (a group, a case): the model's approval is remembered for its commands' categories"
+    "why": "approved once: the line holds a word known only when it runs, so no pattern is kept (final pass, iteration 3)"
    }
   },
   {
@@ -3880,9 +3880,9 @@
     "source": "recorded: the model approved; the old bar asked the user"
    },
    "expect": {
-    "outcome": "approve-remember",
+    "outcome": "approve-once",
     "tier": "local",
-    "why": "the line is read now (a group, a case): the model's approval is remembered for its commands' categories"
+    "why": "approved once: the line holds a word known only when it runs, so no pattern is kept (final pass, iteration 3)"
    }
   },
   {
@@ -5654,9 +5654,9 @@
     "source": "recorded: the model approved; the old bar asked the user"
    },
    "expect": {
-    "outcome": "approve-remember",
+    "outcome": "approve-once",
     "tier": "local",
-    "why": "the model approves it and remembers its category for the chat"
+    "why": "approved once: the line holds a word known only when it runs, so no pattern is kept (final pass, iteration 3)"
    }
   },
   {
