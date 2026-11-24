@@ -6,9 +6,9 @@
 // Kept apart from harness.mjs on purpose: the harness imports the worktree's
 // extension statically, and the eval must not depend on (or be edited with)
 // the code it measures.
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
@@ -87,6 +87,13 @@ export async function createMachine({ extensions, cases, ownerWords = "full", ju
   // before the chat's own commands, and not made by them: directories, local tags and branches.
   for (const item of cases) {
     for (const dir of item.fake?.dirs ?? []) mkdirSync(expand(dir), { recursive: true });
+    // `files` (round 6): files that exist, inside the fake machine only.
+    for (const file of item.fake?.files ?? []) {
+      const at = expand(file);
+      if (!at.startsWith(scratch)) continue;
+      mkdirSync(dirname(at), { recursive: true });
+      if (!existsSync(at)) writeFileSync(at, "fixture\n");
+    }
     for (const ref of item.fake?.refs ?? []) {
       const at = expand(item.cwd);
       spawnSync("git", ["-C", at, ref.kind === "tag" ? "tag" : "branch", ref.name], { stdio: "ignore" });

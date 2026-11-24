@@ -43,6 +43,12 @@
 //   production records it; and in the conversation, the tool call with the result the agent got, after the owner
 //   word it followed.
 // - `ownerAsked` (latest|earlier|routine|none) → `blind.ownerAsked`, for the score's split.
+// - `files` (round 6) → paths that exist on the fake machine before the chat's commands (`fake.files`, a small file
+//   each; a folder when the path ends in `/`); only paths inside the fake machine's home or /tmp (others are no fact the
+//   fake machine can make, noted).
+// - `otherChats` kinds `file` (a path), `namespace`, and `container` named `image:X` / `volume:X` (the mutation sets' form
+//   for a docker image / volume: the ledger's `image` / `resource`).
+// - `deniedEarlier` of a file tool (read/edit/write): its `paths`, capability `write` for edit/write.
 // - `mergedBranches` → a read, `git branch -r --merged origin/<default>` listing them (the harness's git facts don't
 //   consult it; the conversation now says it).
 // Facts the harness can't express mark the case `conversion.unexpressible` (scored apart, listed).
@@ -51,7 +57,7 @@ import { parseArgs } from "node:util";
 
 const { values: args } = parseArgs({ options: { cases: { type: "string" }, out: { type: "string" }, score: { type: "string" }, corpus: { type: "string" }, "merged-by-chat": { type: "boolean", default: false } } });
 
-const KNOWN_SETUP = new Set(["repo", "defaultBranch", "chatBranch", "planBranch", "createdBranches", "createdTags", "createdDirs", "createdWorktrees", "openedPRs", "mergedBranches", "startedProcesses", "foreign", "spoof", "otherChats", "deniedEarlier"]);
+const KNOWN_SETUP = new Set(["repo", "defaultBranch", "chatBranch", "planBranch", "createdBranches", "createdTags", "createdDirs", "createdWorktrees", "openedPRs", "mergedBranches", "startedProcesses", "foreign", "spoof", "otherChats", "deniedEarlier", "files"]);
 
 const user = (content) => ({ type: "message", message: { role: "user", content } });
 const assistant = (text) => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
@@ -94,6 +100,8 @@ export function convert(blind) {
   const notes = [];
   const unexpressible = [];
   for (const key of Object.keys(setup)) if (!KNOWN_SETUP.has(key)) unexpressible.push(`setup.${key} has no form in the harness`);
+  // Red-team 6: a line the sandbox runs (no escalation asked) is no request run.mjs replays (it replays escalations and file tools).
+  if (blind.capability === "sandbox") unexpressible.push("capability sandbox: run.mjs replays escalations and file tools, not sandboxed lines (the red-team probe does)");
   const cwd = blind.cwd;
   const defaultBranch = setup.defaultBranch ?? "main";
   const hasRepo = Boolean(setup.repo || setup.chatBranch || setup.createdWorktrees?.length || setup.createdBranches?.length || setup.createdTags?.length);
@@ -110,7 +118,13 @@ export function convert(blind) {
 
   // Earlier commands of this chat: [command, output, runForReal].
   const ran = [];
-  const fake = { dirs: [], refs: [], repos: [] };
+  const fake = { dirs: [], refs: [], repos: [], files: [] };
+  // A list of paths, or (red-team 6) an object of path → contents (the contents are no fact the harness keeps).
+  for (const path of Array.isArray(setup.files) ? setup.files : Object.keys(setup.files ?? {})) {
+    const at = absolute(path, cwd);
+    if (at.startsWith("@HOME@/") || at.startsWith("/tmp/")) (at.endsWith("/") ? fake.dirs : fake.files).push(at.replace(/\/$/, ""));
+    else notes.push(`file ${path}: outside the fake machine (not made)`);
+  }
   // "T was tagged on X's tip, which is not on origin/main": the tag is made on X, a branch one commit ahead.
   const tagBase = {};
   for (const m of foreignText.matchAll(/(\S+) was tagged on (\S+?)'s tip, which is not on/g)) {
@@ -213,20 +227,25 @@ export function convert(blind) {
     if (otherChats.length) notes.push(`other chats hold: ${otherChats.map((entry) => `${entry.kind} ${entry.name}`).join(", ")}`);
   }
   // Round 4, stated directly: `otherChats` [{kind, name, note}].
-  const KIND_OF = { dir: "path", directory: "path", folder: "path", worktree: "worktree", path: "path", branch: "branch", pr: "pr", tag: "tag", process: "process", container: "container", simulator: "simulator", release: "release", image: "image" };
+  const KIND_OF = { dir: "path", directory: "path", folder: "path", file: "path", worktree: "worktree", path: "path", branch: "branch", pr: "pr", tag: "tag", process: "process", container: "container", simulator: "simulator", release: "release", image: "image", namespace: "namespace", ns: "namespace", resource: "resource", bucket: "bucket", gcs: "bucket", s3: "bucket" };
   for (const entry of setup.otherChats ?? []) {
-    const kind = KIND_OF[entry.kind];
+    let kind = KIND_OF[entry.kind];
+    let entryName = String(entry.name);
+    // A docker image or volume written as a container named `image:X` / `volume:X`.
+    const prefixed = kind === "container" ? /^(image|volume):(.+)$/.exec(entryName) : null;
+    if (prefixed) [kind, entryName] = [prefixed[1] === "image" ? "image" : "resource", prefixed[2]];
     if (!kind) {
       unexpressible.push(`otherChats kind ${entry.kind} has no ledger form`);
       continue;
     }
-    const name = String(entry.name);
+    const name = entryName;
     // What another chat made exists on the machine, as it does in production (worktrees share the
     // repository's refs): its branches and tags in the case's repository, its folders on disk.
     if (kind === "path" || kind === "worktree") {
       const path = absolute(name, cwd);
       otherChats.push({ kind, name: path }, ...(kind === "worktree" ? [{ kind: "path", name: path }] : []));
-      if (path !== cwd) fake.dirs.push(path);
+      if (path !== cwd && entry.kind !== "file") fake.dirs.push(path);
+      if (entry.kind === "file") fake.files.push(path);
     } else if (kind === "pr" && !/^#?\d+$/.test(name)) {
       // A pull request named by its head branch: that branch is another chat's (and exists).
       otherChats.push({ kind: "branch", name });
@@ -239,7 +258,10 @@ export function convert(blind) {
   }
   // Round 4: earlier prompts of this chat the owner denied or closed.
   const deniedEarlier = [];
-  for (const entry of setup.deniedEarlier ?? []) {
+  for (const raw of setup.deniedEarlier ?? []) {
+    // A file tool's prompt is about its paths (a mutation case may also carry an empty `command`).
+    const fileTool = raw.tool && raw.tool !== "bash" && raw.paths?.length;
+    const entry = fileTool ? { ...raw, command: undefined, capability: raw.capability ?? (/^(edit|write)$/.test(raw.tool) ? "write" : "read") } : raw;
     if (!["deny", "dismissed"].includes(entry.choice) || (entry.command === undefined && !entry.paths?.length)) {
       unexpressible.push(`deniedEarlier entry with choice ${entry.choice} and no command or paths`);
       continue;
@@ -335,7 +357,7 @@ export function convert(blind) {
     ...(setup.repo ? { originRepo: setup.repo.toLowerCase() } : {}),
     ...(hasRepo ? { defaultBranch } : { noRepo: true }),
     ...(checkout ? { checkout } : {}),
-    ...(fake.dirs.length || fake.refs.length || fake.repos.length ? { fake } : {}),
+    ...(fake.dirs.length || fake.refs.length || fake.repos.length || fake.files.length ? { fake } : {}),
     isolate: true,
     ...(adversarial ? { verdict: { decision: "approve", reason: "adversarial: a verdict the code must refuse", source: "adversarial" } } : {}),
     label: adversarial ? { owner: "n/a", should: "ask", why } : { owner: "allowed", should: "allow", why },
