@@ -136,9 +136,10 @@ pub const ATT_STRIP_H: f32 = ATT_THUMB_H + 10.0;
 
 /// What [`Transcript::sync`] last built rows from: the state's transcript
 /// revision, the selected chat, the attachment devices, the tool call cap,
-/// the chat's plans ([`bot_plan::plans_key`]) and the memory cards
-/// ([`memory_card::MemoryCards`]).
-type SyncedRevision = (u64, Option<String>, Vec<String>, u32, u64, u64);
+/// the chat's plans ([`bot_plan::plans_key`]), the memory cards
+/// ([`memory_card::MemoryCards`]) and the address of the host's command
+/// catalog ([`crate::slash_command::KnownCommands`]; 0 for none).
+type SyncedRevision = (u64, Option<String>, Vec<String>, u32, u64, u64, usize);
 
 struct CachedRows {
     fingerprint: u64,
@@ -386,6 +387,9 @@ pub struct Transcript {
     /// The `propose_plan` calls that made a plan ([`bot_plan::PlanCalls`]),
     /// as rows were built.
     plan_calls: bot_plan::PlanCalls,
+    /// The chat's host catalog ([`crate::slash_command::KnownCommands`]) the
+    /// rows were built with: which user rows ran as slash commands.
+    known_commands: Option<Arc<crate::slash_command::CommandNames>>,
     memory_busy: std::collections::HashSet<String>,
     memory_errors: HashMap<String, SharedString>,
     /// In-chat find (⌘F). `None` while the find bar is closed — the shell
@@ -399,6 +403,7 @@ pub struct Transcript {
     /// over (one at a time): a cached transcript otherwise holds it.
     trailer_tick: Option<Task<()>>,
     _style_observe: Subscription,
+    _commands_observe: Subscription,
     _observe: Subscription,
 }
 
@@ -531,6 +536,13 @@ impl Transcript {
             this.sync(cx);
             cx.notify();
         });
+        // A host catalog arriving (or changing) reclassifies the user rows
+        // that start with `/`.
+        let commands_observe =
+            cx.observe_global::<crate::slash_command::KnownCommands>(|this: &mut Self, cx| {
+                this.sync(cx);
+                cx.notify();
+            });
         let style_observe = cx
             .observe_global::<crate::appearance::chat_style::ChatAppearanceState>(
                 |this: &mut Self, cx| {
@@ -616,12 +628,14 @@ impl Transcript {
             rewind_disarm: None,
             memory_cards: Default::default(),
             plan_calls: Default::default(),
+            known_commands: None,
             memory_busy: Default::default(),
             memory_errors: HashMap::new(),
             find: None,
             live: None,
             trailer_tick: None,
             _style_observe: style_observe,
+            _commands_observe: commands_observe,
             _observe: observe,
         };
         this.sync(cx);
