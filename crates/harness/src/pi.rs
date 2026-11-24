@@ -321,12 +321,19 @@ impl Harness for PiHarness {
         HarnessId::Pi
     }
     /// Pi's permission extension re-reads the chat's level file before each
-    /// decision ([`spawn::level_file`]); without an agent directory of its
-    /// own there is no file it reads.
+    /// decision ([`spawn::level_file`]). Only a Runtime whose extension does
+    /// ([`spawn::follows_live_levels`]), with an agent directory of its own:
+    /// otherwise nothing reads the file, and the engine ends a parked
+    /// process at the old level before its next turn, as before.
     fn apply_level(&self, chat_id: &str, level: SandboxLevel) -> bool {
-        let Some(agent_dir) = self.agent_dir.as_deref() else {
+        let (Some(agent_dir), Some(package_dir)) =
+            (self.agent_dir.as_deref(), self.package_dir.as_deref())
+        else {
             return false;
         };
+        if !spawn::follows_live_levels(package_dir) {
+            return false;
+        }
         match spawn::write_level_file(agent_dir, chat_id, level) {
             Ok(()) => true,
             Err(err) => {

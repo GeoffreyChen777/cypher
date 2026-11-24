@@ -335,6 +335,20 @@ pub fn level_file(agent_dir: &std::path::Path, chat_id: &str) -> PathBuf {
         .join(format!("{safe}.json"))
 }
 
+/// Whether the Runtime whose Pi package is `package_dir` (`<runtime>/pi`)
+/// ships a permission extension that follows [`level_file`]: its
+/// `extensions/cypher-permissions/level.ts`. An older Runtime's never reads
+/// the file.
+pub fn follows_live_levels(package_dir: &std::path::Path) -> bool {
+    package_dir.parent().is_some_and(|runtime| {
+        runtime
+            .join("extensions")
+            .join("cypher-permissions")
+            .join("level.ts")
+            .is_file()
+    })
+}
+
 /// Write `level` as `chat_id`'s live level ([`level_file`]), whole or not
 /// at all (a temporary file renamed over it).
 pub fn write_level_file(
@@ -587,8 +601,14 @@ mod level_tests {
             level_file(&agent, "chat/../x y"),
             agent.join("cypher-permissions/levels/chat_.._x_y.json")
         );
+        let runtime = root.path().join("runtime");
         let harness = PiHarness::new(root.path().join("sessions"))
-            .with_runtime_environment(&agent, root.path().join("pkg"));
+            .with_runtime_environment(&agent, runtime.join("pi"));
+        // A Runtime whose extension doesn't follow the file: nothing to tell.
+        assert!(!harness.apply_level("c-1", SandboxLevel::DangerFullAccess));
+        assert!(!level_file(&agent, "c-1").exists());
+        std::fs::create_dir_all(runtime.join("extensions/cypher-permissions")).unwrap();
+        std::fs::write(runtime.join("extensions/cypher-permissions/level.ts"), "").unwrap();
         assert!(harness.apply_level("c-1", SandboxLevel::DangerFullAccess));
         let read = |chat: &str| -> serde_json::Value {
             serde_json::from_slice(&std::fs::read(level_file(&agent, chat)).unwrap()).unwrap()
