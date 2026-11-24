@@ -1618,6 +1618,83 @@ const SYSTEM_FILE =
  * session files an approval is restored from. The always-ask floor: no rule,
  * grant or reviewing model ever approves one. Reading them is ordinary work.
  */
+/** Programs that copy or move their sources into a destination (the last operand; `-t DIR` for some): data. */
+const INTO_FOLDER: Readonly<Record<string, { target?: RegExp; recursive?: RegExp }>> = {
+  cp: { target: /^(-t|--target-directory)(=|$)/, recursive: /^(-[a-zA-Z]*[rRa][a-zA-Z]*|--recursive|--archive)$/ },
+  gcp: { target: /^(-t|--target-directory)(=|$)/, recursive: /^(-[a-zA-Z]*[rRa][a-zA-Z]*|--recursive|--archive)$/ },
+  mv: { target: /^(-t|--target-directory)(=|$)/ },
+  install: { target: /^(-t|--target-directory)(=|$)/ },
+  ln: { target: /^(-t|--target-directory)(=|$)/ },
+  ditto: {},
+  rsync: { recursive: /^(-[a-zA-Z]*[ra][a-zA-Z]*|--recursive|--archive)$/ },
+};
+
+/** git subcommands that write their work tree (a checkout of files, a reset, a clean): data. */
+const GIT_TREE_WRITERS = /^(checkout|restore|reset|clean|stash|pull|merge|rebase|switch|apply|am|cherry-pick|revert|read-tree|checkout-index)$/;
+
+/**
+ * What a command writes into a folder that holds the permission system (iteration 2): a copier's or mover's sources
+ * into a destination folder (`mv x.json AGENT/`, `cp -f p.json AGENT`: the source's name there), a recursive copy or a
+ * sync of a tree into it (`rsync -a backup/ AGENT/`: any name), or git writing the work tree it runs on (`git -C AGENT
+ * checkout -- .`). The permission system's own patterns decide (`couldBe`).
+ */
+function intoFolder(command: RiskCommand, view: CommandView, dir: string | undefined, facts: RiskFacts): string | undefined {
+  if (!facts.couldBe || !facts.permissionSystem) return undefined;
+  // A whole tree written (any name) counts only inside a folder of the permission system itself (the agent folder, a
+  // project's `.pi`: `permissionPlaces`), not into a folder that merely holds one deep down (`rsync -a h:dots/ ~/`).
+  const places = facts.permissionPlaces?.() ?? [];
+  const could = (path: string) => places.some((place) => path === place || path.startsWith(`${place.replace(/\/+$/, "")}/`) || place.startsWith(`${path.replace(/\/+$/, "")}/`) && place.slice(path.replace(/\/+$/, "").length + 1).split("/").length <= 1);
+  if (view.program === "git") {
+    const sub = view.positionals.find((word) => word !== UNKNOWN);
+    const at = command.words.indexOf("-C");
+    const tree = at > 0 ? command.words[at + 1] : undefined;
+    const where = tree === undefined ? command.cwd : tree === UNKNOWN ? undefined : facts.classify(tree, command.cwd)?.path;
+    if (sub && GIT_TREE_WRITERS.test(sub) && where !== undefined && could(where)) return `${where}, a work tree git writes`;
+    return undefined;
+  }
+  const row = INTO_FOLDER[view.program];
+  if (!row) return undefined;
+  const args = view.args;
+  let target: string | undefined;
+  const operands: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i];
+    if (word === UNKNOWN) return undefined;
+    if (row.target?.test(word)) {
+      target = word.includes("=") ? word.slice(word.indexOf("=") + 1) : args[++i];
+      continue;
+    }
+    if (!word.startsWith("-") || word === "-") operands.push(word);
+  }
+  const destination = target ?? operands.at(-1);
+  const sources = target ? operands : operands.slice(0, -1);
+  if (destination === undefined || !sources.length || /^[^/]*:/.test(destination)) return undefined;
+  const at = facts.classify(destination, dir)?.path;
+  if (at === undefined) return undefined;
+  let isDir = target !== undefined || destination.endsWith("/") || sources.length > 1;
+  try {
+    isDir ||= statSync(at).isDirectory();
+  } catch {}
+  if (!isDir) return undefined;
+  const recursive = row.recursive ? args.some((word) => row.recursive!.test(word)) : view.program === "mv" || view.program === "ditto";
+  for (const source of sources) {
+    // `rsync src/` copies what src holds: any name inside the destination.
+    if (view.program === "rsync" || view.program === "ditto" ? (source.endsWith("/") || view.program === "ditto") && recursive : false) {
+      if (could(at)) return `${destination}, which holds it`;
+      continue;
+    }
+    const placed = `${at.replace(/\/+$/, "")}/${basename(source.replace(/\/+$/, ""))}`;
+    if (facts.permissionSystem(placed)) return `${destination}${destination.endsWith("/") ? "" : "/"}${basename(source.replace(/\/+$/, ""))}`;
+    // A folder copied or moved in: what it holds lands under its name there (the permission system's patterns decide).
+    let folder = false;
+    try {
+      folder = statSync(facts.classify(source, dir)?.path ?? source).isDirectory();
+    } catch {}
+    if (recursive && folder && facts.couldBe(escapeGlob(placed), undefined, { subtree: true }).permissionSystem) return `${placed}, which holds it`;
+  }
+  return undefined;
+}
+
 function permissionSystemRisk(command: RiskCommand, view: CommandView, facts: RiskFacts): Assessment | undefined {
   const system = facts.permissionSystem;
   if (!system) return undefined;
@@ -1653,6 +1730,9 @@ function permissionSystemRisk(command: RiskCommand, view: CommandView, facts: Ri
     // A folder that holds the permission system, deleted or moved whole (`rm -rf ~/.cypher/pi-runtime/agent`).
     if (subtree && operands.has(candidate) && !command.writes.includes(candidate) && !destinationOnly(view, candidate) && facts.couldBe?.(escapeGlob(classification.path), undefined, { subtree: true }).permissionSystem) return floor(`${candidate}, which holds it`);
   }
+  // Iteration 2: a destination folder, and writes of a whole tree (`intoFolder`).
+  const into = intoFolder(command, view, dir, facts);
+  if (into) return floor(into);
   // Words known only when it runs: every path they may stand for (resolve.ts). A glob under the
   // permission system, or one whose start is known only when it runs, could be it.
   const unknown = [
@@ -1844,10 +1924,30 @@ export function runtimeWriteSets(commands: readonly (RiskCommand & { joint?: str
         if (!later.loop) break;
         const view = viewOf(later.words);
         const writesUnknown = later.writes.includes(UNKNOWN) || (later.words.length > 1 && pathEffect(later, view, UNKNOWN) === "write" && later.words.slice(1).includes(UNKNOWN));
+        // The loop variable inside a longer path (`"$d/permissions.json"`, iteration 2): each listed name in its place.
+        const writer = OPERAND_WRITERS.has(view.program) || /^(cp|mv|install|ln|tee|truncate|touch|rsync|ditto)$/.test(view.program);
+        const templates = [...later.writes.map((path, at) => (path === UNKNOWN ? later.writePatterns?.[at] : undefined)), ...(writer ? (later.patterns ?? []) : [])].filter((pattern): pattern is string => typeof pattern === "string" && pattern.startsWith(ANY) && pattern.length > ANY.length);
+        if (templates.length) {
+          for (const item of set ?? []) for (const template of templates) {
+            const pattern = `${item.pattern.replace(/\/+$/, "")}/${template.slice(ANY.length).replace(/^\/+/, "")}`;
+            const found = facts.couldBe(pattern, item.cwd, {});
+            if (found.permissionSystem) out.push(`\`while read\` writes ${shownPattern(pattern)} for each name \`${basename(commands[start].words[0] ?? "")}\` lists, which could be the permission system's own files (${found.permissionSystem})`);
+          }
+        }
         if (writesUnknown) {
           check(set, `while read`, basename(commands[start].words[0] ?? ""));
           break;
         }
+      }
+    }
+    // A feeder given its names on its input (`xargs … <<< PATH`, a heredoc; iteration 2): those names are its set.
+    if (FEEDERS.has(program) && !piped && typeof command.input === "string") {
+      const names = command.input.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 64);
+      const words = program === "xargs" ? command.words : ["xargs", "-I", "{}", ...command.words.slice(1).filter((word) => !word.startsWith("-"))];
+      if (consumerWrites(words)) check(names.map((name) => ({ pattern: escapeGlob(name), cwd: command.cwd, subtree: false })), program, "its input");
+      for (const template of feederWriteTemplates(command.words)) for (const name of names) {
+        const pattern = template.replaceAll("*", escapeGlob(name));
+        if (facts.couldBe(pattern, command.cwd, {}).permissionSystem) out.push(`\`${program}\` writes ${shownPattern(pattern)} for a name on its input, which is the permission system's own file`);
       }
     }
   }
@@ -1890,6 +1990,11 @@ export const NETWORK_SINKS: readonly { id: string; programs: readonly string[]; 
   // An interpreter's standard module run as a program (`python3 -m webbrowser URL`, `-m smtplib`).
   { id: "module", programs: ["python", "python3", "pypy3"], module: /^(webbrowser|smtplib|ftplib|telnetlib|http\.client|urllib\.request)$/ },
   { id: "cloud-cli", programs: ["aws", "gcloud", "az", "op", "vault", "doppler", "heroku", "fly", "flyctl", "vercel", "netlify", "wrangler", "railway", "firebase", "supabase"] },
+  // Iteration 2: peer-to-peer and relay transfers (a code word, a tailnet peer), and writes into a cluster (a secret made
+  // from a file, a file copied into a pod). Sinks for row 1 only: a secret has to flow into them.
+  { id: "relay", programs: ["croc", "wormhole", "magic-wormhole", "sendme", "ffsend", "portal", "transfer.sh"], verbs: /^(send|upload|share|ul)$/ },
+  { id: "tailnet", programs: ["tailscale"], verbs: /^file$/ },
+  { id: "cluster", programs: ["kubectl", "oc"], verbs: /^(create|cp)$/ },
 ];
 
 /** bash's (and zsh's, ksh's) network redirections: a write or read of one is a connection (round 5 step 2). */
