@@ -57,7 +57,7 @@ export const TEXT_OPTIONS = /^(-m|--message|-t|--title|-b|--body|--description|-
 export const OWN_CREDENTIAL = /^--?(key|keyfile|key-file|private-key|identity|identity-file|identity_file|cert|cert-key|cacert|ca-file|password|passwd|pass|password-file|password-stdin|with-token|token|token-file|secret|secret-file|credentials|credential|credentials-file|auth|auth-file|kubeconfig|config|env-file|netrc-file|ssh-key|service-account|sa-key)(=.*)?$/i;
 
 /** Options whose value is a file the program writes (what it receives, not what it sends). */
-export const OUTPUT_OPTIONS = /^(-o|-O|--output|--output-document|--output-file|--out|--outfile|--output-dir|-D|--dump-header|-c|--cookie-jar|--log-file|--trace|--trace-ascii|-P|--directory-prefix|--save|--dest|--destination|--to|--download|--downloads)(=.*)?$/;
+export const OUTPUT_OPTIONS = /^(-o|--output|--output-document|--output-file|--out|--outfile|--output-dir|--dump-header|--cookie-jar|--log-file|--trace|--trace-ascii|--directory-prefix|--save|--dest|--destination|--to|--download|--downloads)(=.*)?$/;
 
 /** A host another machine has: not this one. */
 export function remoteHost(host: string): boolean {

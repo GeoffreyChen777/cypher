@@ -2286,7 +2286,9 @@ export class Permissions {
           // What it writes is no part of what it sends (`curl URL -o ca.pem`).
           if (OUTPUT_OPTIONS.test(words[at - 1] ?? "") || /^(-o|--output)=?/.test(word) && OUTPUT_OPTIONS.test(word)) continue;
           // A listed sink's named secrets are the data-flow floor's (`exfiltrates`); here, what only the content tells.
-          const listedOnly = !remote || Boolean(sinkOf(view));
+          // (Only when the data-flow floor reads the command as that sink itself: through a wrapper it doesn't follow,
+          // `stdbuf -oL curl …`, the name is checked here: one reading.)
+          const listedOnly = !remote || Boolean(sinkOf(viewOf(item.words)));
           // A download's destination (the last operand after a remote one: `aws s3 cp s3://b/k.pem /tmp/k.pem`) is written.
           const positionals = words.slice(1).filter((w) => !w.startsWith("-"));
           if (raw === positionals.at(-1) && positionals.length >= 2 && positionals.slice(0, -1).some((w) => /^[a-z][\w+.-]*:\/\/|^[\w.-]+@?[\w.-]*:[^/]/i.test(w))) continue;
