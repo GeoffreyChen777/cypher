@@ -19,13 +19,14 @@ import type { CreationFacts, CreationPlan } from "./created.ts";
 import type { CatalogueFacts } from "./catalogue.ts";
 import { genericDestroyer, targetsOf } from "./catalogue.ts";
 import { readTool, remoteEffect } from "./tools.ts";
-import { entryCovers, Ledger, ledgerFile, ledgerKind, OTHER_TASK_FLOOR, taintFile } from "./ledger.ts";
+import { entryCovers, Ledger, ledgerFile, ledgerKind, OTHER_TASK_FLOOR, taintFile, taskRelation } from "./ledger.ts";
 import type { LedgerEntity, LedgerEntry } from "./ledger.ts";
 import { Denials, denialsFile, forRecord } from "./denials.ts";
 import type { ActionClass, DenialRecord, DenialScope } from "./denials.ts";
 import { commandEffects, unwrapped } from "./effects.ts";
-import { passes, runtimeOperand } from "./flow.ts";
-import { apiDestroys } from "./schema.ts";
+import { groupOperand, passes, runtimeOperand } from "./flow.ts";
+import { projectScripts } from "./scripts.ts";
+import { apiDestroys, withEnvOptions } from "./schema.ts";
 import type { RuntimeOperand } from "./flow.ts";
 import type { EffectClass } from "./effects.ts";
 import type { LifecycleFacts } from "./lifecycle.ts";
@@ -135,6 +136,12 @@ export interface AccessRequest {
   path: string;
   /** The change, for writes the judge should see. */
   diff?: string;
+  /**
+   * What the write does to the file when it is more than a change of its contents (final pass; `patchOps`): a
+   * patch's `*** Delete File:` deletes it, an `*** Update File:` with `*** Move to:` moves it away. Both destroy
+   * the file at this path (the other-task floor, denials of a delete).
+   */
+  op?: "delete" | "move";
 }
 
 export interface CallInfo {
@@ -422,6 +429,29 @@ function processPlace(pid: number): { program?: string; cwd?: string } {
   }
   program ??= run("ps", ["-o", "comm=", "-p", String(pid)])?.trim();
   return { program: program && isAbsolute(program) ? program : undefined, cwd };
+}
+
+/**
+ * What a live process is known by, besides its pid (final pass): its command line and the ports it listens on, as
+ * the producers that hand pids print or test them (`pgrep -f P` reads the command line, `lsof -t -i :PORT` the
+ * ports). Empty when it can't be read or the process is gone (a gone process can't be stopped).
+ */
+export function processDescription(pid: number): string[] {
+  if (!Number.isInteger(pid) || pid <= 0) return [];
+  const run = (program: string, args: string[]) => {
+    const result = spawnSync(program, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 });
+    return result.status === 0 ? result.stdout : undefined;
+  };
+  const out: string[] = [];
+  const command = run("ps", ["-o", "command=", "-p", String(pid)])?.trim();
+  if (!command) return out;
+  out.push(command);
+  // `lsof -Fn` prints `n<address>` per socket: `*:5174`, `127.0.0.1:5174`, `[::1]:5174`.
+  for (const line of (run("lsof", ["-a", "-p", String(pid), "-i", "-P", "-n", "-Fn"]) ?? "").split("\n")) {
+    const port = /^n.*:(\d{1,5})(?:->|$)/.exec(line)?.[1];
+    if (port) out.push(`:${port}`);
+  }
+  return out;
 }
 
 /** How often the reviewing model is asked before its silence or failure goes to the user: once, and one retry. */
@@ -914,7 +944,7 @@ export class Permissions {
       const canonical = classification.path;
       const verdict = this.verdict(request.capability, classification);
       // Every allow below consults the owner's denials and the floor first (round 6, W1, `gate`): held, it is reviewed.
-      const held = verdict.kind === "deny" ? undefined : await this.gate(verdict.kind === "allow" ? "file:policy" : this.fileGrant(request.capability, canonical) ? "file:grant" : "file:rule", this.fileClass(call.tool, request.capability, [canonical]), { permissionSystemPath: request.capability === "write" && this.paths.isPermissionSystem(canonical) !== undefined ? canonical : undefined });
+      const held = verdict.kind === "deny" ? undefined : await this.gate(verdict.kind === "allow" ? "file:policy" : this.fileGrant(request.capability, canonical) ? "file:grant" : "file:rule", this.fileClass(call.tool, request.capability, [canonical], request.op), { permissionSystemPath: request.capability === "write" && this.paths.isPermissionSystem(canonical) !== undefined ? canonical : undefined });
       if (verdict.kind === "allow" && !held) continue;
       if (verdict.kind === "deny") {
         this.audit.write({ tool: call.tool, capability: request.capability, zone: classification.zone, guard: classification.guard, paths: [canonical], decision: "deny", decidedBy: "policy", reason: verdict.reason });
@@ -1307,7 +1337,8 @@ export class Permissions {
       Object.assign(base, verdict.audit);
       if (verdict.decision === "approve") {
         // Remembered for the chat, so the same access is not reviewed again; a secret, a danger, the installed app's data, or an approval of this call alone, only once.
-        const scope = sensitive || verdict.once || tier === "danger" || data.length > 0 ? "once" : "chat";
+        // Held for review (another chat's work, a deferred lift; `gate`): once, as the bash path runs it.
+        const scope = sensitive || verdict.once || tier === "danger" || data.length > 0 || request.held?.review ? "once" : "chat";
         finish({ decision: "allow", decidedBy: "judge", reason: verdict.reason, scope, prompted: false });
         return { allowed: true, scope, by: "judge" };
       }
@@ -2539,6 +2570,10 @@ export class Permissions {
     if (targets) {
       const notOurs = this.notThisTask("targets" in targets ? targets.targets : (targets.known ?? []));
       if (notOurs.length) evidence.notThisTask = notOurs.map((item) => `${item.what}: ${item.why}${item.named ? ` (the owner's words name it: "${item.named.length > 100 ? `${item.named.slice(0, 100)}…` : item.named}")` : ""}`);
+      // Final pass: what it deletes or stops that no ledger on this machine accounts for — not this chat's, not another
+      // chat's known one. Who made it is then known to no code here: the judge reads it as unknown, not as this task's.
+      const unknown = this.originUnknown("targets" in targets ? targets.targets : (targets.known ?? []), notOurs.map((item) => item.what));
+      if (unknown.length) evidence.originUnknown = unknown;
     }
     return Object.keys(evidence).length ? evidence : undefined;
   }
@@ -2552,6 +2587,33 @@ export class Permissions {
    * names nothing.
    */
   private lineClass(line: LineAssessment, command: string, cwd: string, read: LineTargets | undefined): ActionClass {
+    const cls = this.lineClassOwn(line, command, cwd, read);
+    // What the project scripts it runs do (final pass, scripts.ts): their lines' units, read as lines of their own.
+    if (this.scriptDepth >= 2) return cls;
+    const extra: ActionClass["units"][number][] = [];
+    for (const item of line.commands) {
+      for (const script of projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd))) {
+        this.scriptDepth++;
+        try {
+          for (const text of script.lines) {
+            const inner = this.lineClass(this.assess(text, script.cwd), text, script.cwd, undefined);
+            for (const unit of inner.units) if (unit.destroys || unit.effects.some((effect) => effect !== "read" && effect !== "run")) extra.push({ ...unit, ...(unit.runtime ? { runtime: unit.runtime.map((operand) => ({ ...operand, by: `${script.by}: ${operand.by}` })) } : {}) });
+          }
+        } finally {
+          this.scriptDepth--;
+        }
+      }
+    }
+    return extra.length ? { ...cls, units: [...cls.units, ...extra], scopes: [...cls.scopes, ...extra.flatMap((unit) => unit.scopes.filter((scope) => scope.kind !== "line"))] } : cls;
+  }
+  private scriptDepth = 0;
+
+  /** Whether a command runs a project script whose lines can destroy something (scripts.ts), for the cheap check of `gateLine`. */
+  private runsScript(item: LineCommand): boolean {
+    return projectScripts(unwrapped(item.words), item.cwd === undefined ? undefined : this.paths.canonical(item.cwd, this.cwd)).length > 0;
+  }
+
+  private lineClassOwn(line: LineAssessment, command: string, cwd: string, read: LineTargets | undefined): ActionClass {
     const actions = new Set<string>();
     const all: DenialScope[] = [];
     const units: { effects: EffectClass[]; scopes: DenialScope[]; destroys?: boolean; globs?: string[]; runtime?: RuntimeOperand[] }[] = [];
@@ -2598,6 +2660,7 @@ export class Permissions {
       const runtime = this.runtimeOf(line.commands, index, cwd);
       if (runtime) {
         unit.destroys = true;
+        for (const effect of runtime.operand.effects ?? []) if (!unit.effects.includes(effect)) unit.effects.push(effect);
         if (runtime.operand.kinds.some((kind) => kind !== "path")) (unit.runtime ??= []).push(runtime.operand);
         if (runtime.globs.length) (unit.globs ??= []).push(...runtime.globs);
       }
@@ -2621,7 +2684,8 @@ export class Permissions {
       const program = basename(item.words[0] ?? "");
       const tool = readTool(item.words);
       actions.add(tool && "row" in tool ? [program, ...tool.row.sub].join(" ") : program);
-      const found = commandEffects(item.words, {
+      // `GH_REPO=o/r gh …` is `gh … --repo o/r` (schema.ts `ENV_OPTIONS`): the same request in either spelling.
+      const found = commandEffects(withEnvOptions(item.words, envPrefixOf(item)), {
         sink: (words) => sinkOf(viewOf(words)),
         current: program === "git" ? this.gitAt(item.cwd ?? cwd)?.current : undefined,
       });
@@ -2687,10 +2751,13 @@ export class Permissions {
       tool: "bash",
       actions: [...actions],
       ...(concern ? { concern } : {}),
-      tokens: line.commands.flatMap((item) => item.words.slice(1).filter((word) => word !== UNKNOWN && !word.startsWith("-"))),
+      // With the options an environment prefix stands for (`GH_REPO=o/r` is `--repo o/r`; schema.ts `ENV_OPTIONS`).
+      tokens: line.commands.flatMap((item) => withEnvOptions(item.words, envPrefixOf(item)).slice(1).flatMap((word) => (word === UNKNOWN ? [] : /^--[^=]+=./.test(word) ? [word.slice(word.indexOf("=") + 1)] : word.startsWith("-") ? [] : [word]))),
+      argv: line.commands.flatMap((item) => withEnvOptions(item.words, envPrefixOf(item)).slice(1).flatMap((word) => (word === UNKNOWN ? [] : /^--[^=]+=./.test(word) ? [word.slice(0, word.indexOf("=")), word.slice(word.indexOf("=") + 1)] : [word]))),
       scopes: all.length ? all : [lineScope()],
       units: named.length
-        ? named.map((item) => ({ effects: item.effects.length ? item.effects : ["run"], scopes: item.scopes, ...(item.destroys ? { destroys: true } : {}), ...(item.globs?.length ? { globs: item.globs } : {}), ...(item.runtime?.length ? { runtime: item.runtime } : {}) }))
+        ? // A unit known only by its possible set (no named scope) is also its line, so the same line asked again meets it (final pass).
+          named.map((item) => ({ effects: item.effects.length ? item.effects : ["run"], scopes: item.scopes.length ? item.scopes : [lineScope()], ...(item.destroys ? { destroys: true } : {}), ...(item.globs?.length ? { globs: item.globs } : {}), ...(item.runtime?.length ? { runtime: item.runtime } : {}) }))
         : [{ effects: effects.length ? effects : ["run"], scopes: [lineScope()], ...(units.some((item) => item.destroys) ? { destroys: true } : {}), ...(units.some((item) => item.globs?.length) ? { globs: units.flatMap((item) => item.globs ?? []) } : {}), ...(units.some((item) => item.runtime?.length) ? { runtime: units.flatMap((item) => item.runtime ?? []) } : {}) }],
     };
   }
@@ -2726,9 +2793,11 @@ export class Permissions {
   }
 
   /** A file tool's (or a tool's) request as an action class: its effect and its paths (denials.ts), as `elevate` reads one. */
-  fileClass(tool: string, capability: Capability, paths: readonly string[]): ActionClass {
+  fileClass(tool: string, capability: Capability, paths: readonly string[], op?: AccessRequest["op"]): ActionClass {
     const scopes: DenialScope[] = paths.map((path) => ({ kind: "path" as const, name: path, says: [displayPath(path, this.home)] }));
-    return { tool, actions: [capability], scopes, units: [{ effects: [capability === "write" ? "change" : "read"], scopes }], tokens: paths };
+    // A delete or a move away destroys the file (a patch's operation; `AccessRequest.op`), as `rm`/`mv` of it do.
+    const destroys = capability === "write" && op !== undefined;
+    return { tool, actions: destroys ? [capability, op] : [capability], scopes, units: [{ effects: [capability === "write" ? "change" : "read"], scopes, ...(destroys ? { destroys: true } : {}) }], tokens: paths };
   }
 
   /** A tool's (MCP, extension) request as an action class: its own effect, its input as the line, and the input's words for the safety net. */
@@ -2767,6 +2836,9 @@ export class Permissions {
       const roots = operands.length ? operands.map((word) => this.classify(word, at).path ?? word) : [at];
       return { operand: { kinds: ["path"], tests: [], by: inner.slice(0, 2).join(" ") }, globs: roots.map((root) => `${root.replace(/\/+$/, "")}/**`) };
     }
+    // A project's resources destroyed as a group (flow.ts `GROUP_DESTROYERS`: `docker compose down -v`).
+    const group = groupOperand(inner, item.cwd === undefined ? undefined : at);
+    if (group) return { operand: group, globs: [] };
     const operand = runtimeOperand(commands, index, inner);
     if (!operand) return undefined;
     const globs: string[] = [];
@@ -2816,7 +2888,7 @@ export class Permissions {
     const own = line ? this.alwaysAsk(line) : undefined;
     // Cheap first: with no denial, only a line that destroys something can meet another chat's work.
     const read = line ?? (this.denials.any() || this.othersMade().length ? this.assess(command, cwd) : undefined);
-    if (!own && !this.denials.any() && (!read || !this.othersMade().length || !read.commands.some((item, index) => this.destroys(item) || this.runtimeOf(read.commands, index, cwd) !== undefined))) {
+    if (!own && !this.denials.any() && (!read || !this.othersMade().length || !read.commands.some((item, index) => this.destroys(item) || this.runtimeOf(read.commands, index, cwd) !== undefined || this.runsScript(item)))) {
       this.gated?.push({ entry });
       return undefined;
     }
@@ -2832,7 +2904,7 @@ export class Permissions {
     const typed = cls.units.slice(1);
     const changes = typed.filter((unit) => unit.effects.includes("change"));
     const system = changes.flatMap((unit) => unit.scopes).find((scope) => this.riskFacts().permissionSystem?.(scope.name));
-    if (!this.denials.any() && !system && !(typed.some((unit) => unit.destroys) && this.othersMade().length)) {
+    if (!this.denials.any() && !system && !((typed.some((unit) => unit.destroys) || changes.length) && this.othersMade().length)) {
       this.gated?.push({ entry });
       return undefined;
     }
@@ -2877,19 +2949,24 @@ export class Permissions {
    */
   private async otherTaskOf(cls: ActionClass): Promise<{ floor?: string; review?: string } | undefined> {
     const units = cls.units.filter((unit) => unit.destroys);
-    if (!units.length) return undefined;
+    // Content writes (final pass): a change of a file inside a working tree another task made, outside this chat's own.
+    const writes = cls.units
+      .filter((unit) => !unit.destroys && unit.effects.includes("change"))
+      .flatMap((unit) => unit.scopes.filter((scope) => scope.kind === "path" && !scope.glob).map((scope) => scope.name))
+      .filter((path) => !this.inOwnTrees(path));
+    if (!units.length && !writes.length) return undefined;
     const others = this.othersMade()
       .map((entry) => {
         const kind = ledgerKind(entry.kind) ?? entry.kind;
         return { ...entry, kind, name: kind === "path" || kind === "worktree" ? this.paths.canonical(entry.name, this.cwd) : entry.name };
       })
-      .filter((entry) => !(this.taskId && entry.task === this.taskId));
+      .filter((entry) => taskRelation(this.taskId, entry.task) !== "same");
     if (!others.length) return undefined;
     // Held for review, not the floor: lineage unknown, a kind new to the floor in round 6 with a place, and what is
     // destroyed (the entity, or the folder holding it that the request names) inside this chat's working tree.
     const reviewed = (entry: LedgerEntry, destroyed: string): boolean => {
       const row = OTHER_TASK_FLOOR[entry.kind];
-      return row?.since === 6 && row.located && !(this.taskId && entry.task) && this.inWorkingTree(entry.name) && this.inWorkingTree(destroyed);
+      return row?.since === 6 && row.located && taskRelation(this.taskId, entry.task) === "unknown" && this.inWorkingTree(entry.name) && this.inWorkingTree(destroyed);
     };
     const found = (): { what: string; why: string; review: boolean }[] => {
       const out: { what: string; why: string; review: boolean }[] = [];
@@ -2908,6 +2985,14 @@ export class Permissions {
         seen.set(what, item);
         out.push(item);
       };
+      // Another task's working tree is its work in progress: a write into it is no less its resource than a delete.
+      for (const path of writes) {
+        if (this.created.ledger.covers({ kind: "path", name: path })) continue;
+        for (const entry of others) {
+          if (entry.kind !== "worktree" && !(entry.kind === "path" && isCheckout(entry.name))) continue;
+          if (path === entry.name || isUnder(path, entry.name)) note(entry, `; this writes ${displayPath(path, this.home)} in that working tree`, path);
+        }
+      }
       for (const unit of units) {
         for (const scope of unit.scopes) {
           // A glob's fixed folder is where it looks, not what it destroys: its globs say that (below).
@@ -2929,7 +3014,8 @@ export class Permissions {
             // unless the unit has globs (a listing's roots, its own patterns: round 6 narrowing): then by those, as a file.
             if (entry.kind === "path" || (entry.kind === "worktree" && unit.globs?.length) || !operand.kinds.includes(entry.kind)) continue;
             if (this.created.ledger.covers({ kind: entry.kind, name: entry.name })) continue;
-            if (operand.tests.every((test) => passes(test, entry.kind, entry.name))) note(entry, `, which \`${operand.by}\` could be handed`, entry.name);
+            const also = this.entityForms(entry);
+            if (operand.tests.every((test) => passes(test, entry.kind, entry.name, also))) note(entry, `, which \`${operand.by}\` could be handed`, entry.name);
           }
         }
         for (const glob of unit.globs ?? []) {
@@ -2959,6 +3045,27 @@ export class Permissions {
    */
   private inWorkingTree(path: string): boolean {
     return this.baseRoots.some((root) => path !== root && isUnder(path, root));
+  }
+
+  /**
+   * What else another chat's entity is known by, for the name tests of a runtime operand (final pass, flow.ts
+   * `passes`): a process by the command that started it (the ledger's `by`) and its live description
+   * (`processForms`: command line, listening ports). Other kinds by their names alone.
+   */
+  private entityForms(entry: LedgerEntry): string[] {
+    if (entry.kind !== "process") return [];
+    const pid = Number(entry.name);
+    return [...(entry.by ? [entry.by] : []), ...this.processForms(pid)];
+  }
+
+  /** A live process's description (`processDescription`); the eval's fake machine replaces it. */
+  processForms(pid: number): string[] {
+    return processDescription(pid);
+  }
+
+  /** Whether `path` is this chat's working tree or lies inside it, or inside a folder the owner added to the chat (`extraRoots`). */
+  private inOwnTrees(path: string): boolean {
+    return [...this.baseRoots, ...this.extraRoots].some((root) => path === root || isUnder(path, root));
   }
 
   /** The owner's denials of `cls` (denials.ts), checked against their words as of now. */
@@ -2995,7 +3102,7 @@ export class Permissions {
             const entry = JSON.parse(line) as LedgerEntry;
             const kind = entry && typeof entry.kind === "string" ? ledgerKind(entry.kind) : undefined;
             // One task's chats (a workspace and its threads, a plan's sessions) are no other task (round 6, W3).
-            if (kind && typeof entry.name === "string" && (entry.action ?? "create") !== "merge" && !(this.taskId && entry.task === this.taskId)) entries.push({ ...entry, kind, chatId: entry.chatId ?? name.replace(/\.jsonl$/, "") });
+            if (kind && typeof entry.name === "string" && (entry.action ?? "create") !== "merge" && taskRelation(this.taskId, entry.task) !== "same") entries.push({ ...entry, kind, chatId: entry.chatId ?? name.replace(/\.jsonl$/, "") });
           } catch {
             // A torn line: skipped.
           }
@@ -3038,6 +3145,27 @@ export class Permissions {
       if (!why) continue;
       const named = this.ownerNames([target.value, basename(target.value)]);
       out.push({ what: `${target.kind} ${target.value}`, why, ...(named ? { named } : {}) });
+    }
+    return out;
+  }
+
+  /**
+   * The entities a line deletes or stops (`DESTROYING_ACTIONS`) that this chat's ledger doesn't hold and no other chat's
+   * ledger names (`notThisTask` found none): their origin is unknown to the code (another task's, made before ledgers,
+   * or by hand). Files are left out (whether a file is the task's is the working tree's question), and processes (their
+   * facts tell whose they are).
+   */
+  private originUnknown(targets: readonly Target[], known: readonly string[]): string[] {
+    const out: string[] = [];
+    for (const target of targets) {
+      // Processes are told by their facts (whose marker, which program), not by a ledger.
+      if (!DESTROYING_ACTIONS.test(target.action) || target.kind === "path" || target.kind === "worktree" || target.kind === "process" || target.value === UNKNOWN) continue;
+      const kind = ledgerKind(target.entity?.kind ?? target.kind) ?? (target.kind as LedgerEntity["kind"]);
+      const what = `${kind} ${target.value}`;
+      if (known.includes(what) || known.includes(`${target.kind} ${target.value}`) || out.includes(what)) continue;
+      // `resource` is the kind of what no table types more narrowly: it may be this chat's entry of any kind by that name.
+      if (this.created.ledger.covers({ kind, name: target.value }) || this.created.ledger.all().some((entry) => entry.name === target.value && (entry.kind === kind || entry.kind === "resource" || kind === "resource"))) continue;
+      out.push(what);
     }
     return out;
   }
@@ -4058,12 +4186,53 @@ export function toolOverride(config: PermissionsConfig, name: string, server: st
   return config.tools.overrides[name] ?? (server ? config.tools.overrides[`mcp:${server}`] : undefined) ?? config.tools.mcp;
 }
 
+/** The variables assigned in front of a command (`NAME=value cmd`) whose values are known, by name. */
+function envPrefixOf(item: { env: readonly string[]; envValues?: readonly string[] }): { name: string; value: string }[] {
+  return (item.envValues ?? []).flatMap((value, at) => (item.env[at] !== undefined && value !== UNKNOWN ? [{ name: item.env[at], value }] : []));
+}
+
+/** A target's actions that delete or stop it (explicit.ts `Target.action`). */
+const DESTROYING_ACTIONS = /^(delete|destroy|erase|remove|stop|kill|close|uninstall|prune)$/;
+
+/** Whether a folder is a git working tree (a clone or a worktree: it holds `.git`). */
+function isCheckout(path: string): boolean {
+  try {
+    return existsSync(join(path, ".git"));
+  } catch {
+    return false;
+  }
+}
+
 /** Paths an apply_patch input touches (add, update, delete, move target). */
 export function patchPaths(patch: string): string[] {
-  const out: string[] = [];
+  return patchOps(patch).map((item) => item.path);
+}
+
+/**
+ * What an apply_patch input does to each path (final pass): the patch format's file operations as data
+ * (`PATCH_OPS`): an added or updated file changes, a deleted one is deleted, an updated one with a `*** Move to:`
+ * is moved away (its source destroyed) and the target changes.
+ */
+const PATCH_OPS: Readonly<Record<string, "change" | "delete" | "move-from" | "move-to">> = {
+  "Add File": "change",
+  "Update File": "change",
+  "Delete File": "delete",
+  "Move to": "move-to",
+};
+
+export function patchOps(patch: string): { path: string; op?: "delete" | "move" }[] {
+  const out: { path: string; op?: "delete" | "move" }[] = [];
   for (const line of patch.split(/\r?\n/)) {
-    const match = line.trim().match(/^\*\*\* (?:Add File|Delete File|Update File|Move to): (.+)$/);
-    if (match) out.push(match[1].trim());
+    const match = line.trim().match(/^\*\*\* (Add File|Delete File|Update File|Move to): (.+)$/);
+    if (!match) continue;
+    const kind = PATCH_OPS[match[1]];
+    const path = match[2].trim();
+    if (kind === "move-to") {
+      // The file the update named is moved away from where it was.
+      const source = out.at(-1);
+      if (source && source.op === undefined) source.op = "move";
+      out.push({ path });
+    } else out.push({ path, ...(kind === "delete" ? { op: "delete" as const } : {}) });
   }
   return out;
 }

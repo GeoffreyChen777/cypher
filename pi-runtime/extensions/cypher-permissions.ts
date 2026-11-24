@@ -42,7 +42,7 @@ import {
   checkedReaddir,
   checkedReadFile,
   checkedWriteFile,
-  patchPaths,
+  patchOps,
   PermissionDenied,
   Permissions,
   toolOverride,
@@ -622,7 +622,7 @@ export default function cypherPermissions(pi: ExtensionAPI): void {
     if (event.toolName === APPLY_PATCH) {
       const input = event.input as { input?: string; patch?: string };
       const patch = typeof input.input === "string" ? input.input : typeof input.patch === "string" ? input.patch : "";
-      const requests = patchPaths(patch).map((path) => ({ capability: "write" as const, path, diff: patch.slice(0, 4000) }));
+      const requests = patchOps(patch).map(({ path, op }) => ({ capability: "write" as const, path, diff: patch.slice(0, 4000), ...(op ? { op } : {}) }));
       const auth = await st.authorize(requests, { tool: APPLY_PATCH, toolCallId: event.toolCallId }, requestContext(ctx, undefined, event.toolCallId));
       if (!auth.ok) return { block: true, reason: auth.reason, terminate: auth.abort };
       st.inflight.set(inflightKey(event.toolCallId), auth.approved);

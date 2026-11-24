@@ -117,7 +117,7 @@ export const MATCHING: Readonly<Record<LedgerKind, Match>> = {
  * place in the file system, so it can lie inside a chat's working tree.
  *
  * A destroy of another chat's entity of a kind with `since: 6` and `located`, inside this chat's own working tree,
- * when neither chat's task is known, is held for the judge's review, not the floor: parallel sessions of one plan
+ * when the two chats' lineage is unknown (`taskRelation`), is held for the judge's review, not the floor: parallel sessions of one plan
  * share a worktree, and without a task id a sibling's scratch folder reads as another task's.
  */
 export const OTHER_TASK_FLOOR: Readonly<Record<LedgerKind, { since: 4 | 6; located: boolean }>> = {
@@ -142,6 +142,31 @@ export const OTHER_TASK_FLOOR: Readonly<Record<LedgerKind, { since: 4 | 6; locat
   bucket: { since: 6, located: false },
   project: { since: 6, located: false },
 };
+
+/**
+ * How two chats' tasks relate (final pass; design §7.3.13), from their task ids (`CYPHER_TASK_ID`, set by the
+ * engine: `workspace:<bot>` for a workspace's chat and threads, `workspace:<bot>/plan:<work>` for a plan's
+ * sessions and thread, `chat:<id>` for an owner's plain chat; a subagent takes its root chat's):
+ * - `same`: equal, or one is the other's prefix by whole `/` segments (a workspace's chat and its plans'
+ *   sessions; two sessions of one plan; a subagent and its parent);
+ * - `other`: both are tasks the engine knows the bounds of (`workspace:` ids) and neither contains the other
+ *   (two plans, two workspaces);
+ * - `unknown`: either id is missing (an entry an older Runtime wrote, a chat no engine named) or either is only
+ *   a chat's lineage (`chat:`): the owner may split one piece of work over two plain chats by hand, so two
+ *   lineages are no known other task. Unknown lineage is what the round-6 narrowing reads (core.ts `otherTaskOf`).
+ */
+export type TaskRelation = "same" | "other" | "unknown";
+
+export function taskRelation(a: string | undefined, b: string | undefined): TaskRelation {
+  if (!a || !b) return "unknown";
+  if (a === b) return "same";
+  const left = a.split("/");
+  const right = b.split("/");
+  const shared = Math.min(left.length, right.length);
+  if (left.slice(0, shared).every((segment, index) => segment === right[index])) return "same";
+  if (left[0].startsWith("chat:") || right[0].startsWith("chat:")) return "unknown";
+  return "other";
+}
 
 /** Bounds on one chat's ledger (the file and the memory). */
 const MAX_ENTRIES = 2000;
