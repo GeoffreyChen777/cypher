@@ -1795,6 +1795,44 @@ behaviour.
   one". This is where a resource known only by absence (another chat's namespace made before ledgers, or by hand)
   ends: the code can't decide it, and it is not approved by default.
 
+#### 7.3.14 Final pass, iteration 1: the red-team f1 classes (2026-11-24)
+
+Tests: `cypher-permissions-final-it1.test.mjs` (10, three seeds). Each class as a mechanism or a table:
+
+- *Text another program hands a shell* (shell.ts `INLINE_SCRIPTS`): `eval WORDS` at the top level, `watch [opts] CMD`
+  (not `-x`), `env -S 'CMD'` are read as their script, as `bash -c` is; `eval` whose script was read is inert itself.
+  In `assessOpaque` the permission-system check now comes before the installed-app check (a floor finding first).
+- *Deletes in code* (code.ts `DELETE_NAMES`): one table of delete calls per language, read both as writes (the
+  permission-system floor for code) and as destroys (`CODE_DELETES`); capability names match as member calls
+  (`fs.rmSync`, `shutil.rmtree`). A concatenated home path ends where the call's argument does (`homeJoined`: the
+  comma continues only a join's own arguments).
+- *Inline code's own effects* (core.ts `lineClass`, code.ts `SIGNAL_CALLS`): the commands it spawns are read as lines
+  of their own for denials and the other-task floor, and a literal pid it signals (`process.kill`, `os.kill`,
+  `Process.kill`, perl `kill`) is a stop of that process.
+- *Project scripts are the line's own* (core.ts `scriptFinding`): the lines of a script, make recipe, package script
+  or justfile recipe the line runs are read as shell lines for the floor too (a secret sent by `make deploy` is row 1),
+  the judge sees them ("project script: `make deploy` runs: …"), and an approval of such a line is never remembered
+  (the script may change). A script the same line writes first is read from what it wrote.
+- *Code set up to run later* (scripts.ts `HOOK_TRIGGERS`, `scheduledLines`, `UNREAD_FORMS`): a git hook the line (or
+  this task) wrote is read as what the git command that triggers it runs; crontab entries the line gives are read as
+  their commands. What can't be read — a crontab file, a launch agent, a systemd user unit, a hook written elsewhere,
+  a sourced file's variables where the line uses a word known only when it runs — reaches the judge marked "Cypher
+  couldn't read: …", and its approval runs once.
+- *A function's arguments* (shell.ts `call`): a call's words are its body's `$1`…`$9`, `$@`, `$*`.
+- *Path printers* (fold.ts `PATH_PRINTERS`): `realpath X`, `readlink -f X`, `basename`, `dirname` fold to the path, so
+  `$(realpath ~/.ssh/id)` is that file for row 1. *Directory moves* (core.ts `directoryMove`): `pushd DIR` (onto a
+  stack), `popd`, `cd -P/-L DIR` move the shell like `cd`.
+- *Bulk staging* (core.ts `bulkStagedSecret`): `git add .`/`-A`/a folder/`commit -a` followed by a push sends what git
+  would add: an untracked secret no ignore rule hides under the pathspecs, or any secret in the tree when the same
+  line first edits `.gitignore`/`info/exclude`/`core.excludesFile`.
+- *Denials across forms*: a denied destroy covers stopping the same entity (denials.ts `EFFECT_PARTS`; records keep
+  `destroys`); a publish with no operand publishes the folder's package, by its manifest's name (schema.ts
+  `FOLDER_PUBLISHERS`: npm/pnpm/yarn/bun, cargo, poetry, flit, hatch); `terraform apply -destroy` is the group destroy
+  of its configuration root (flow.ts `GROUP_DESTROYERS` `group: "root"`); a release addressed by its tag is that
+  release (`API_ROUTES`).
+- *Naming another chat's work to keep it* (core.ts `ownerNames`): the owner's words name it only in a clause that
+  doesn't negate, defer or ask about it ("clean up, but don't touch feat/x yet" keeps the floor).
+
 ### 7.4 Human approval
 
 `ctx.ui.select`, which Cypher bridges to a question in the desktop and iOS apps
