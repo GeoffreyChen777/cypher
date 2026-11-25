@@ -189,7 +189,12 @@ export class TrustRoom implements DurableObject {
   private async pushHead(onlyPending: boolean): Promise<void> {
     const registries = this.env.REGISTRY_ROOMS;
     if (!registries) return;
-    const length = (await this.chainState()).length;
+    let length: number;
+    try {
+      length = (await this.chainState()).length;
+    } catch {
+      return; // a corrupt log fails its reads loudly; nothing to announce
+    }
     const rooms = [
       ...this.ctx.storage.sql.exec(
         onlyPending ? "SELECT room FROM subscribers WHERE pending = 1" : "SELECT room FROM subscribers"
