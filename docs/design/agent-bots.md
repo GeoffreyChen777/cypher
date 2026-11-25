@@ -975,7 +975,7 @@ All routes sit behind bearer verification as one `ROOM_ROUTES` entry with prefix
 | Route | Caller | Does |
 |---|---|---|
 | `POST /bots/:id/publish` | owner | Claims the room on first use; sets `{name, ownerName, ownerAvatarUrl?, hostDeviceId, paused}`. A photo URL off the avatar hosts is dropped, not refused. A changed name, owner name or photo is sent to every connected room (`/peer/profile`), which updates its row and queues another `added` link for its host. |
-| `GET /bots/:id/inbox` | owner's host | `{entries: [frame…]}`: pending link changes, unacked questions, and the states and answers of its own questions (at most 100 of each). |
+| `GET /bots/:id/inbox` | owner's host | `{entries: [frame…], push: true}`: pending link changes, unacked questions, and the states and answers of its own questions (at most 100 of each). `push` says the room repeats unacknowledged nudges (§11.8), so the host may stop polling it every minute; Workers before it leave it out. |
 | `POST /bots/:id/invites` | owner | `{ttlMs?, maxUses?}` (defaults 7 days and 1; clamped to 10 min–30 days and 1–100) → `{inviteId, code, createdAt, expiresAt, maxUses}`, `code = <botRoomId>.<secret>` once. |
 | `DELETE /bots/:id/invites/:inviteId` | owner | Revokes an invite. |
 | `POST /bots/:id/connect` | owner of `:id` | `{code}` → `{connectionId, peer, createdAt}`: redeems a peer's invite on behalf of bot `:id`. |
@@ -1084,11 +1084,20 @@ connection.
   calls `connect`, and writes the `BotConnection` row (reply mode Auto, no narrowed scope)
   with a `ConnectionAdded` activity. The inviting host writes its own row from the
   `link added` entry and counts the invite's use.
-- **Loop.** One host task wakes on a nudge, on any bot record change (debounced 300 ms)
-  and every 60 s. Each pass acts on owner edits, then pulls a room when it was nudged,
-  at engine start, or when it has live connections or waiting questions and was last
-  pulled a minute ago. Pulls run one at a time, and every handler is idempotent, so a
-  replayed entry is harmless. Entries are acked only after their rows are written.
+- **Loop.** One host task wakes on a nudge, on any bot record change (debounced 300 ms),
+  on a DeviceRoom host join and every 60 s. Each pass acts on owner edits, then pulls a
+  room when it was nudged, at engine start, after the DeviceRoom host socket (re)joined,
+  or when it has live connections or waiting questions and was last pulled 15 minutes
+  ago (its last page said `push`) or a minute ago (it did not: an older Worker). Pulls
+  run one at a time, and every handler is idempotent, so a replayed entry is harmless.
+  Entries are acked only after their rows are written.
+- **Repeated nudges.** A room whose nudge the DeviceRoom handed to a host socket (which
+  may have died unseen), or whose nudge call failed, nudges again from its alarm while
+  anything stays unacknowledged: after 15 s, 30 s, then 60 s eleven times, then every
+  15 minutes, for about a day. A nudge queued for an offline host is left to the
+  DeviceRoom's replay on join; a refused one (no such device, someone else's) is not
+  repeated. The ack that empties the inbox ends it. Progress states (`delivered`,
+  `working`, `awaiting_review`) nudge the asking host too.
 - **A peer's question.** `ask` writes an Incoming `BotExchange` (Delivered) and is acked;
   then, unless replies are Off (declined at once, no run), the host posts `working`,
   creates the connection's peer thread on first use (a hidden chat with
@@ -1126,9 +1135,10 @@ duration bills while an object is awake (docs/operations/cloudflare-billing.md).
 - **No idle cost.** No per-bot socket or heartbeat: one exchange is about 6–10 billed
   requests and 15–25 rows written, and nothing bills between exchanges.
   As built, one deviation: besides the nudge, the host pulls each room with live
-  connections once a minute (§11.8), a safety net for a lost nudge that costs one
-  request per networked bot per minute while its host is online (about 1,440 a day).
-  Dropping it, or stretching it, leaves delivery to the durable nudge alone.
+  connections, a safety net for a lost nudge: every 15 minutes (about 96 requests a
+  day per networked bot) now that rooms repeat unacknowledged nudges, every minute
+  (about 1,440 a day) from a Worker that predates the repeats
+  (docs/design/do-cost.md B1).
 - **The real cost is the runs.** Every thread syncs through chat2 like any chat. A peer
   question costs about two agent turns; an orchestration costs its own turns plus its
   workers', the same as running those sessions by hand.

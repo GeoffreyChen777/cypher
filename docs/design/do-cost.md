@@ -256,6 +256,36 @@ marks ride the poll.
 | Effort | S–M: one room, one engine file, one wire field |
 | Measure after | M2 for BotRoom: `http` 3.8–4.9k a day → under 0.5k; `alarm` stays near 0 (a rising alarm count means nudges are being lost) |
 
+Built on branch `cypher/do-cost-cuts` (2026-11-25), as designed, with these choices:
+
+- Ladder: the first repeat 15 s after the nudge, then 30 s, then 60 s eleven times (the
+  "60 s, then every 60 s ten times"), then every 15 min; it gives up after 109 repeats
+  (about a day), so a room whose host never acknowledges (a bot moved off the device)
+  stops costing alarms. The next entry starts it over. State is two `meta` keys
+  (`renudge_at`, `renudge_step`).
+- Outcomes: `{queued: true}` ends the ladder (DeviceRoom replay); `{delivered: true}`, a
+  thrown call or a 5xx arms it; a 4xx (the DeviceRoom has no owner yet, or another
+  owner) ends it, since repeating cannot help and the host pulls everything when it first
+  joins.
+- The ack that leaves `pull()` empty clears the ladder and re-arms the alarm, so a nudge
+  that was acknowledged in time costs no alarm. The alarm is now set to the exact
+  earliest deadline (expiry or repeat) and deleted when there is none.
+- Progress: `/peer/state` nudges the asking host only when the state changed, which
+  includes the `delivered` mark the answering host's ack sends. Same `bots` nudge kind,
+  so old engines see nothing new.
+- Engine: the push flag is per room, from its last page. The rejoin pull needs a new
+  callback, `HostRelayConfig::with_on_join` (`crates/rpc/src/device_room/relay.rs`),
+  fired on every host connect; the next pass then pulls every room, like engine start.
+  The start pull now waits for a pass that has an Edge. The loop still wakes every 60 s
+  for owner edits; only the pull is gated by the 15 min safety.
+- Tests: six workerd cases drive a BotRoom with fake DeviceRoom answers and a mocked
+  clock (`apps/edge/test/workerd/bot-room.workerd.test.ts`, "BotRoom nudge repeats").
+  Engine cases use a scaled cadence (`Bots::set_pull_cadence`, 100 ms for the minute,
+  1 h for the safety) and a fake Edge that can drop nudges and answer with or without
+  `push` (`crates/engine/tests/it/bots/network.rs`, B1 section).
+- No iOS code pulls the bot inbox.
+- Not done: the staged check (needs a Worker deploy and two engines).
+
 ### C1: hedged HTTPS pull on connect
 
 Every registry and chat connect starts an HTTPS pull at the same instant as the WebSocket
