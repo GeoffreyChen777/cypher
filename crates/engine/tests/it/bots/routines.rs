@@ -1358,6 +1358,10 @@ async fn the_workspace_chat_runs_deletes_and_stops_what_the_owner_could() {
         coordinator_choice: Default::default(),
         body_rev: None,
         result_rev: None,
+        level: None,
+        proposed_level: None,
+        level_quote: None,
+        applied_level: None,
     };
     core.workspace
         .put_record(

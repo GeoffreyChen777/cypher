@@ -1,8 +1,9 @@
 //! The plan card (docs/design/agent-bots.md §13.1): a workspace agent's
 //! `propose_plan` call in its conversation, drawn from the plan's record
 //! rather than the call. The chat only announces the plan: its title, how
-//! many steps and where, a line of summary, and Details / Reject / Approve
-//! while it waits. Once decided the card says so and nothing more. The
+//! many steps and where, a line of summary, and Details / level / Reject /
+//! Approve while it waits (the level picker stays until the plan ends,
+//! [`crate::plan_level`]). Once decided the card says so and nothing more. The
 //! steps, the progress and the result live in the detail panel, which the
 //! card opens; a result notice ([`RowKind::BotPost`]) tells the chat when
 //! the plan ends. A routine the agent saved is announced the same way
@@ -645,13 +646,24 @@ impl Transcript {
                 .id(SharedString::from(format!("{row_id}-approve")))
                 .py(px(4.0))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.bot_mutate(
-                        serde_json::json!({
-                            "op": "resolveBotPlan", "workId": approve, "approve": true,
-                        }),
-                        cx,
-                    )
+                    // With the level picked on the card, if one was.
+                    let held = this.state.read(cx).plan_level_picks.get(&approve).copied();
+                    this.bot_mutate(crate::plan_level::approve_params(&approve, held), cx)
                 }));
+            let level_quote = crate::plan_level::quote(&work).map(|quote| {
+                div()
+                    .px(px(12.0))
+                    .pb(px(8.0))
+                    .text_size(px(12.0))
+                    .line_height(px(17.0))
+                    .text_color(theme.text_muted)
+                    .line_clamp(2)
+                    .child(SharedString::from(format!(
+                        "You asked: \u{201c}{}\u{201d}",
+                        single_line(quote)
+                    )))
+            });
+            let picker = self.plan_level_picker(row_id, &work, theme, cx);
             let reject_button =
                 crate::kit::popover::btn_ghost(theme, "Reject", format!("{row_id}-reject"))
                     .id(SharedString::from(format!("{row_id}-reject")))
@@ -676,6 +688,7 @@ impl Transcript {
                         .line_clamp(2)
                         .child(SharedString::from(summary))
                 }))
+                .children(level_quote)
                 .child(plan_rule())
                 .child(
                     div()
@@ -687,6 +700,7 @@ impl Transcript {
                         .gap(px(6.0))
                         .child(details)
                         .child(div().flex_1())
+                        .children(picker)
                         .child(reject_button)
                         .child(approve_button),
                 )
@@ -697,9 +711,12 @@ impl Transcript {
         } else {
             (crate::kit::icons::CROSS, theme.text_muted)
         };
+        // Until it ends its level can still change, here as on its page.
+        let picker = self.plan_level_picker(row_id, &work, theme, cx);
         notice_surface(theme)
             .child(
                 head.pr(px(8.0))
+                    .children(picker)
                     .child(notice_status(Some(glyph), word, color))
                     .child(details),
             )
@@ -859,6 +876,67 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// A plan card's permission level picker (`None` once the plan is past
+    /// changing it): held until Approve on a plan still to approve, sent at
+    /// once on one that runs ([`crate::plan_level`]).
+    fn plan_level_picker(
+        &mut self,
+        row_id: &SharedString,
+        work: &BotWork,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !crate::plan_level::pickable(work) {
+            return None;
+        }
+        let held = self.state.read(cx).plan_level_picks.get(&work.id).copied();
+        let level = crate::plan_level::shown(work, held);
+        let key = format!("{row_id}-level");
+        let (pressed, opened) = (row_id.clone(), row_id.clone());
+        let mut trigger = crate::plan_level::trigger(key.clone(), level, theme)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, _, _, _| {
+                    this.level_menu
+                        .note_trigger_press_matching(|open| *open == pressed)
+                }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.level_menu.take_press_was_open() {
+                    this.close_level_menu(cx);
+                } else {
+                    this.level_menu.open(opened.clone());
+                    cx.notify();
+                }
+            }));
+        if self.level_menu.get() == Some(row_id) {
+            let closing = self.level_menu.closing_since();
+            let work = work.clone();
+            trigger = trigger.child(crate::plan_level::menu(
+                &key,
+                level,
+                closing,
+                theme,
+                cx,
+                move |this: &mut Self, level, cx| {
+                    if let Some(params) = crate::plan_level::pick(&this.state, &work, level, cx) {
+                        this.bot_mutate(params, cx);
+                    }
+                    this.close_level_menu(cx);
+                },
+                |this: &mut Self, cx| this.close_level_menu(cx),
+            ));
+        }
+        Some(trigger.into_any_element())
+    }
+
+    fn close_level_menu(&mut self, cx: &mut Context<Self>) {
+        if self.level_menu.begin_close() {
+            crate::kit::popover::reap_popup(cx, |this: &mut Self| &mut this.level_menu);
+        }
+        cx.notify();
+    }
+
     /// Fire an owner op on a bot record; its row update redraws the card.
     fn bot_mutate(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -923,6 +1001,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         }
     }
 

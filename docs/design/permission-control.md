@@ -290,7 +290,7 @@ slash-command processes get none and use `defaultLevel`.
 |---|---|---|---|
 | `ReadOnly` (`read-only`) | Ask before edits | `read-only` | workspace `write: elevate` |
 | `WorkspaceWrite` (`workspace-write`) | Edit project (default) | `standard` | §4.1 |
-| `DangerFullAccess` (`danger-full-access`) | Full access | `full-access` | no checks: file tools and bash run unsandboxed and unchecked |
+| `DangerFullAccess` (`danger-full-access`) | Full access | `full-access` | nothing sandboxed, checked or reviewed; only the floor (§7.3.1) still asks |
 
 The level is picked with **`/permissions`** in the composer's `/` menu: a composer-local
 entry leading "Agent modes" for Pi chats, listed whatever Settings → Commands turns on
@@ -304,6 +304,37 @@ existing chat it is written to the row with `setChatConfig`. The engine runs a c
 its **row's** level whatever the request says (`execute_run` in
 `crates/engine/src/host/doc_host/commands.rs`): every client sends a fixed default, older
 iOS builds included. Title generation runs `ReadOnly`.
+
+### 5.3 Changing the level mid-run
+
+A run's process is told its level when it starts (`CYPHER_PERMISSION_LEVEL`) and follows a
+change at once, mid-turn: the chat's `/permissions`, or the level of the workspace plan it
+belongs to (agent-bots.md §6.6). The engine hosting a live run watches the rows a level
+comes from (`SessionsEngine::start_live_levels`: chat rows, bot rows and records, and a
+5-second tick for a signed launch record that lands after its row) and tells the run's
+harness (`Harness::apply_level`). Pi's is a file, `<agent dir>/cypher-permissions/levels/
+<chat>.json` (`{"level": "<wire name>", "at": ms}`, written whole by
+`crates/harness/src/pi/spawn.rs` `write_level_file`, also at each spawn), which the
+extension stats before each decision (`Permissions.syncLevel`, level.ts). The file is a
+doorbell, not the authority:
+
+- It is the permission system's own (`<agent dir>/cypher-permissions/**`): no sandbox may
+  write it, and a file tool or a command that would is on the floor at every level.
+- A stricter level is taken from the file alone. A higher one only as the engine confirms it
+  over the agent socket (`PermissionLevel {chatId}` → `{level}`: the live run's level as the
+  engine last set it), so a forged file never raises a run; an engine that can't be asked
+  raises nothing.
+
+A file rather than an RPC the extension polls: a stat per decision costs nothing, works
+while the engine is busy or restarting, and needs the RPC only when the file changed. The
+engine then holds the run to the new level (`RunHandle.launch`), so a parked process is no
+longer ended over it. A harness that can't apply a level live keeps the old behaviour: its
+parked process ends before the next turn.
+
+At Full access nothing is sandboxed or reviewed, but the floor's `before` rows still ask
+the owner, once (`fullAccessCommand`, `fullAccessFiles`, `fullAccessTool`): a secret leaving
+the machine, a change to the permission system, the owner's own rule or Deny, another
+task's work. Rows the floor would send for review run.
 
 ## 6. Enforcement
 
@@ -2392,7 +2423,9 @@ Decided (2026-10-11):
 - **D2.** MCP and extension tools are allowed by default; overrides tighten.
 - **D3.** Persistence paths (`.git/config`, hooks, shell startup files) are protected, not
   sensitive: writes go to the judge first.
-- **D4.** `full-access` runs everything unchecked and unsandboxed.
+- **D4.** `full-access` runs everything unsandboxed and without review; only the floor
+  (§7.3.1) still asks the owner (changed with the mid-run level, §5.3: the level file is
+  the permission system's own, and at Full access nothing else would keep it).
 - **D5.** On hosts where Landstrip cannot sandbox, the extension stands down and says so.
 - **D6.** The code lives in this repository as a Runtime extension; the npm
   `pi-permission-control` package is dropped.

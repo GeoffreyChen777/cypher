@@ -855,6 +855,9 @@ impl Shell {
         .tooltip(move |_, cx| cx.new(|_| tip.clone()).into());
 
         let mut controls: Vec<AnyElement> = Vec::new();
+        // The level its sessions run at, while it can still change: the
+        // header says it once, and a pick on a running plan applies at once.
+        controls.extend(self.level_picker("bot-work-level", work, theme, cx));
         if thread_listed {
             let thread = PanelItem::Thread(work.thread_chat_id.clone().unwrap_or_default());
             let tip = match super::choice::choice_words(&work.coordinator_choice, |id| {
@@ -934,12 +937,9 @@ impl Shell {
                     .flex_none()
                     .py(px(4.0))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.mutate(
-                            serde_json::json!({
-                                "op": "resolveBotPlan", "workId": approve, "approve": true,
-                            }),
-                            cx,
-                        )
+                        // With the level picked here or on the card.
+                        let held = this.state.read(cx).plan_level_picks.get(&approve).copied();
+                        this.mutate(crate::plan_level::approve_params(&approve, held), cx)
                     }))
                     .into_any_element(),
             );
@@ -1015,6 +1015,78 @@ impl Shell {
             place.map(IntoElement::into_any_element),
             theme,
         )
+    }
+
+    /// The plan's permission level picker ([`crate::plan_level`]) under
+    /// element id `key`; `None` once the plan is past changing it.
+    pub(super) fn level_picker(
+        &self,
+        key: &str,
+        work: &BotWork,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !crate::plan_level::pickable(work) {
+            return None;
+        }
+        let held = self.state.read(cx).plan_level_picks.get(&work.id).copied();
+        let level = crate::plan_level::shown(work, held);
+        let (pressed, opened) = (key.to_string(), key.to_string());
+        let tip = SharedString::from(match crate::plan_level::quote(work) {
+            Some(quote) => {
+                format!("Permissions for this plan's sessions. You asked: \u{201c}{quote}\u{201d}")
+            }
+            None => "Permissions for this plan's sessions".to_string(),
+        });
+        let selector = key.to_string();
+        let mut trigger = crate::plan_level::trigger(key.to_string(), level, theme)
+            .debug_selector(move || selector.clone())
+            .tooltip(move |_, cx| {
+                let tip = tip.clone();
+                cx.new(|_| super::super::session::FindTooltip(tip)).into()
+            })
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, _, _, _| {
+                    this.board
+                        .level_menu
+                        .note_trigger_press_matching(|open| *open == pressed)
+                }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.board.level_menu.take_press_was_open() {
+                    this.close_level_menu(cx);
+                } else {
+                    this.board.level_menu.open(opened.clone());
+                    cx.notify();
+                }
+            }));
+        if self.board.level_menu.get().is_some_and(|open| open == key) {
+            let closing = self.board.level_menu.closing_since();
+            let work = work.clone();
+            trigger = trigger.child(crate::plan_level::menu(
+                key,
+                level,
+                closing,
+                theme,
+                cx,
+                move |this: &mut Self, level, cx| {
+                    if let Some(params) = crate::plan_level::pick(&this.state, &work, level, cx) {
+                        this.mutate(params, cx);
+                    }
+                    this.close_level_menu(cx);
+                },
+                |this: &mut Self, cx| this.close_level_menu(cx),
+            ));
+        }
+        Some(trigger.into_any_element())
+    }
+
+    fn close_level_menu(&mut self, cx: &mut Context<Self>) {
+        if self.board.level_menu.begin_close() {
+            popover::reap_popup(cx, |this: &mut Self| &mut this.board.level_menu);
+        }
+        cx.notify();
     }
 
     /// A running plan's time: "+1h" adds an hour to its limit; near the end
@@ -1585,6 +1657,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         }
     }
 

@@ -150,6 +150,30 @@ struct WorkItemPage: View {
                     status: work.statusWord, title: work.title, details: work.times(), statusIdentifier: "work-status"
                 ) {
                     WorkMark(work: work)
+                } line: {
+                    // The level it runs at, while it may still change: a
+                    // change reaches its running sessions at once.
+                    if work.isLive {
+                        HStack(spacing: 8) {
+                            PlanLevelPicker(level: work.effectiveLevel, identifier: "work-level") { level in
+                                actions.run {
+                                    try await model.workspaceData().setWorkLevel(workId: work.id, level: level.sandbox)
+                                }
+                            }
+                            .disabled(actions.busy)
+                            if work.levelPending {
+                                Text("Applying…")
+                                    .font(Theme.sans(12.5, relativeTo: .footnote))
+                                    .foregroundStyle(Theme.textFaint)
+                                    .accessibilityIdentifier("work-level-pending")
+                            }
+                        }
+                        if phase.awaiting, let quote = nonEmpty(work.levelQuote) {
+                            Text("“\(quote)”")
+                                .lineLimit(3)
+                                .accessibilityIdentifier("work-level-quote")
+                        }
+                    }
                 }
                 if let shared {
                     NavigationLink(value: BotPage.project(shared.id)) {

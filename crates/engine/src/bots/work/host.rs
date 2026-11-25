@@ -195,6 +195,7 @@ impl Bots {
                     WorkState::Running => {
                         running += 1;
                         self.warn_before_deadline(bot, w, p::now_ms());
+                        self.apply_plan_level(bot, w);
                         self.follow_work(bot, w, &sessions)
                     }
                     // Ended work whose steps were left open (a row from an
@@ -432,6 +433,9 @@ impl Bots {
             w.state = WorkState::Running;
             w.thread_chat_id = Some(thread_id.clone());
             w.started_at = Some(now);
+            // Its sessions start at the level it runs at now; a later change
+            // is the owner's and reaches them ([`Self::apply_plan_level`]).
+            w.applied_level = Some(w.effective_level());
             true
         })?;
         if started != Some(true) {
@@ -441,7 +445,11 @@ impl Bots {
         self.log(
             &bot.id,
             ActivityKind::PlanApproved,
-            format!("Started the plan: {}", work.title),
+            format!(
+                "Started the plan at {}: {}",
+                work.effective_level().label(),
+                work.title
+            ),
             Some(&thread_id),
             Some(&work.id),
             None,
@@ -449,6 +457,59 @@ impl Bots {
         self.dispatch_brief(bot, &work.id, &thread)?;
         tracing::info!(bot = %bot.id, work = %work.id, thread = %thread_id, "orchestration started");
         Ok(())
+    }
+
+    /// The owner changed a running plan's level (Mutate `setBotWorkLevel`):
+    /// every session it started gets it, signed so a host under "Only
+    /// paired devices" runs it, and the change is logged. The coordinating
+    /// session reads the plan's level itself ([`super::run_sandbox`]), and
+    /// sessions it starts from now on start at it. Each change is applied
+    /// once: a session whose own level the owner changed since keeps it.
+    /// Live runs take the new level at once, on whichever device hosts them
+    /// (`SessionsEngine::start_live_levels`).
+    fn apply_plan_level(&self, bot: &Bot, work: &BotWork) {
+        let level = work.effective_level();
+        let from = work.level_in_effect();
+        if level == from {
+            return;
+        }
+        let ws = &self.inner.workspace;
+        for id in work.session_ids() {
+            let Some(mut config) = ws.chat_config(id) else {
+                continue;
+            };
+            if config.sandbox == level {
+                continue;
+            }
+            config.sandbox = level;
+            if let Err(err) = ws.set_chat_config(id, &config) {
+                tracing::warn!(session = %id, error = %err, "could not give a plan's session its level");
+                // Tried again on the next pass.
+                return;
+            }
+            self.inner
+                .doc_host
+                .record_chat_launch(id, false, true, false);
+        }
+        match self.edit_work(&work.id, |w| w.applied_level = Some(level)) {
+            Ok(Some(())) => self.log(
+                &bot.id,
+                ActivityKind::PlanLevelChanged,
+                format!(
+                    "Your owner changed the plan's permission level from {} to {}: {}",
+                    from.label(),
+                    level.label(),
+                    work.title
+                ),
+                work.thread_chat_id.as_deref(),
+                Some(&work.id),
+                None,
+            ),
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(work = %work.id, error = %err, "could not record a plan's level")
+            }
+        }
     }
 
     /// The hidden orchestration thread: an owner thread of the bot, in its
@@ -950,6 +1011,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         }
     }
 

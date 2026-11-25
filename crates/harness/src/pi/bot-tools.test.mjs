@@ -123,6 +123,12 @@ test("propose_plan's schema carries the engine's caps", () => {
   assert.equal(result.maxLength, PLAN_LIMITS.RESULT_BODY_MAX);
   assert.match(result.description, /^Concise: .*at most 30,000 characters$/);
   assert.match(limit.description, /15 to 4320 \(72 hours\)/);
+  // A level is one of the three the engine knows, and its quote has the engine's cap.
+  assert.deepEqual(
+    schema.properties.level.anyOf.map((option) => option.const),
+    ["read-only", "workspace-write", "danger-full-access"],
+  );
+  assert.equal(schema.properties.level_quote.maxLength, PLAN_LIMITS.LEVEL_QUOTE_MAX);
 });
 
 test("a routine's prompt and a shortcut's request carry their cap", () => {

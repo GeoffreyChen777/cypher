@@ -336,6 +336,26 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
   the workspace's, else the workspace chat's, field by field. Fast mode travels as
   `modelOptions.fast` and reaches cypher-fast-mode.ts as `CYPHER_FAST_MODE`, which
   applies a request once and then leaves the owner's own `/fast` alone.
+- **Permission level.** A plan runs at one level (`SandboxLevel`): its sessions and its
+  coordinating session. The workspace's settings hold the default for new plans
+  (`PlanSettings.level`, absent = workspace-write). Only the owner chooses it:
+  `propose_plan` may offer another (`level`), but one above the workspace's only with
+  `level_quote`, the owner's own words asking for it, which the engine finds word for
+  word in what they typed, replied or answered in the workspace chat
+  (`OwnerWords::quotes`); the card shows the level and the quote (`BotWork.proposedLevel`,
+  `levelQuote`), and approving confirms one (`Mutate resolveBotPlan` `level`, else the
+  proposal's, written to the owner field `BotWork.level`). While it is proposed or runs
+  the owner changes it with `Mutate setBotWorkLevel` — a Mutate, which the agent socket
+  doesn't serve, never a tool; a receive-only device may lower it only. The host gives
+  a change to every session the plan started (their rows and signed launch records),
+  once per change (`BotWork.appliedLevel`), and logs it (`planLevelChanged`); sessions
+  it starts next start at it, the coordinating session reads it from the row
+  (`run_sandbox`, when it works directly in local checkouts; read-only otherwise). Live
+  runs take it at once on whichever device hosts them (permission-control.md §5.3).
+  On the desktop the card and the plan's page carry one picker, named as `/permissions`
+  names levels (`crates/ui/src/plan_level.rs`): before approval a pick is held until
+  Approve sends it, from approval until the plan ends a pick is sent at once; the
+  workspace's settings pick the default under Plans.
 - Orchestration threads survive engine restarts like any chat: their transcript and the
   durable command queue carry the state.
 

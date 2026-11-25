@@ -57,6 +57,7 @@ import { floorOf } from "./floor.ts";
 import type { FloorHit, FloorSubject } from "./floor.ts";
 import { describeGrade, gradesOf, kindGrades } from "./grades.ts";
 import { isUnder, PathContext } from "./paths.ts";
+import { above, levelFile, levelName, levelStamp, readLevelFile } from "./level.ts";
 import type { Classification } from "./paths.ts";
 import { decide, describe } from "./policy.ts";
 import type { Verdict } from "./policy.ts";
@@ -155,6 +156,9 @@ export interface CallInfo {
   command?: string;
   justification?: string;
 }
+
+/** What the floor's question at Full access came to (`Permissions.fullAccessCommand`). */
+export type FullAccessOutcome = { ok: true } | { ok: false; reason: string; abort?: boolean };
 
 export type AuthResult =
   /** `record`: set when an access went past the defaults (asked, or a grant or rule). */
@@ -622,6 +626,8 @@ export interface PermissionsInit {
    * sessions (`CYPHER_TASK_ID`). Chats of one task are never each other's "other task".
    */
   taskId?: string;
+  /** The chat's live level file (level.ts); by default the one the engine writes for `chatId`. */
+  levelFile?: string;
 }
 
 /**
@@ -744,6 +750,16 @@ export class Permissions {
    * newer could be had, and the words at hand stand.
    */
   ownerWordsNow?: () => Promise<OwnerWords | undefined>;
+  /**
+   * Set by the extension: the level the engine holds this run to now (its `PermissionLevel` call), as a
+   * sandbox wire name. Undefined result: the engine couldn't be asked, and no higher level is taken.
+   */
+  levelNow?: () => Promise<string | undefined>;
+  /** The chat's live level file (level.ts), and its stamp when last read. */
+  readonly levelPath: string | undefined;
+  private levelSeen = "";
+  /** The level the run was moved to since it started; undefined while it is at the one it started with. */
+  private liveLevel: LevelName | undefined;
   private cwd: string;
   private extraRoots: string[] = [];
   private baseRoots: string[] = [];
@@ -775,6 +791,7 @@ export class Permissions {
     this.chatId = init.chatId;
     this.home = init.home ?? homedir();
     this.levelEnv = init.levelEnv;
+    this.levelPath = init.levelFile ?? levelFile(init.agentDir, init.chatId);
     this.ownerWords = init.ownerWords;
     this.cwd = init.cwd;
     this.audit = new AuditLog(init.agentDir, init.chatId);
@@ -792,6 +809,48 @@ export class Permissions {
   /** Whether the extension enforces anything on this host and level. */
   get enforcing(): boolean {
     return this.status.available && this.level !== "full-access";
+  }
+
+  /**
+   * Full access on a host that can sandbox: nothing is sandboxed, checked or reviewed, but the floor
+   * (floor.ts) still asks the owner (`fullAccessCommand`, `fullAccessFiles`, `fullAccessTool`).
+   */
+  get floorOnly(): boolean {
+    return this.status.available && this.level === "full-access";
+  }
+
+  /**
+   * Take the level the owner set since the run started (level.ts), before a decision: a stat when the
+   * chat's level file is unchanged. A stricter level is taken from the file; a higher one only as the
+   * engine confirms it (`levelNow`), whatever the file says. Returns the level when it changed.
+   */
+  async syncLevel(): Promise<LevelName | undefined> {
+    if (!this.levelPath) return undefined;
+    const stamp = levelStamp(this.levelPath);
+    if (stamp === this.levelSeen) return undefined;
+    this.levelSeen = stamp;
+    const written = readLevelFile(this.levelPath);
+    if (written === undefined || written === this.level) return undefined;
+    let next = above(written, this.level) ? this.level : written;
+    let confirmed: LevelName | undefined;
+    if (this.levelNow) {
+      try {
+        confirmed = levelName(await this.levelNow());
+      } catch {
+        // The engine couldn't be asked: only a stricter level is taken.
+      }
+    }
+    if (confirmed) next = confirmed;
+    // The engine says otherwise than the file (forged, or written a moment before the engine held the run to
+    // it): asked again at the next decision, not taken from the file.
+    if (confirmed !== written) this.levelSeen = "";
+    if (next === this.level) return undefined;
+    const from = this.level;
+    this.liveLevel = next;
+    this.level = next;
+    this.sensitiveCache = undefined;
+    this.audit.write({ tool: "level", decision: "allow", decidedBy: "user", reason: `the permission level changed from ${from} to ${next}` });
+    return next;
   }
 
   get roots(): readonly string[] {
@@ -826,7 +885,7 @@ export class Permissions {
     const loaded = loadConfig(this.agentDir, roots);
     this.config = loaded.config;
     this.warnings = loaded.warnings;
-    this.level = resolveLevel(this.levelEnv, this.config);
+    this.level = this.liveLevel ?? resolveLevel(this.levelEnv, this.config);
     this.paths = new PathContext({
       roots,
       sensitive: this.config.sensitive,
@@ -3714,6 +3773,88 @@ export class Permissions {
       return undefined;
     }
     return this.gate(entry, cls, system ? { permissionSystemPath: displayPath(system.name, this.home) } : {});
+  }
+
+  /**
+   * Full access (`floorOnly`): a bash line runs as written, outside the sandbox and without review, unless
+   * the floor holds it (floor.ts: a secret leaving this machine, a change to the permission system — this
+   * chat's level file among it —, the owner's own rule or Deny, another task's work). Then only the owner
+   * may run it, once. What the floor would send for review runs: there is no review at Full access.
+   */
+  async fullAccessCommand(command: string, cwd: string, ctx: RequestContext): Promise<FullAccessOutcome> {
+    this.refresh();
+    const held = await this.gateLine("bash:outside", command, cwd);
+    if (!held || held.review) return { ok: true };
+    return this.askAtFullAccess({ kind: "escalate", tool: "bash", command, lines: [fact("Command", command)], cls: () => this.lineClassOf(command, cwd), what: command }, held, ctx);
+  }
+
+  /** Full access (`floorOnly`): a file tool's writes the floor holds (the permission system, the owner's Deny, another task's work). */
+  async fullAccessFiles(requests: readonly AccessRequest[], call: CallInfo, ctx: RequestContext): Promise<FullAccessOutcome> {
+    this.refresh();
+    for (const request of requests) {
+      if (request.capability !== "write") continue;
+      const canonical = this.classify(request.path, ctx.cwd).path;
+      const cls = this.fileClass(call.tool, request.capability, [canonical], request.op);
+      const held = await this.gate("file:policy", cls, { permissionSystemPath: this.paths.isPermissionSystem(canonical) !== undefined ? canonical : undefined });
+      if (!held || held.review) continue;
+      const shown = displayPath(canonical, this.home);
+      const outcome = await this.askAtFullAccess({ kind: "access", tool: call.tool, paths: [canonical], lines: [fact("Path", shown), ...(request.diff ? [fact("Change", request.diff.slice(0, 2000))] : [])], cls: () => cls, what: `${call.tool} ${shown}` }, held, ctx);
+      if (!outcome.ok) return outcome;
+    }
+    return { ok: true };
+  }
+
+  /** Full access (`floorOnly`): an MCP or extension tool's call the floor holds (the files its input names). */
+  async fullAccessTool(name: string, input: unknown, ctx: RequestContext): Promise<FullAccessOutcome> {
+    this.refresh();
+    const held = await this.gateTool("tool:setting", name, input);
+    if (!held || held.review) return { ok: true };
+    return this.askAtFullAccess({ kind: "tool", tool: name, lines: [fact("Tool", name)], cls: () => this.toolClass(name, input), what: name }, held, ctx);
+  }
+
+  /** The owner decides a request the floor holds at Full access: once, or not at all. */
+  private async askAtFullAccess(
+    request: { kind: "escalate" | "access" | "tool"; tool: string; command?: string; paths?: string[]; lines: string[]; cls: () => ActionClass; what: string },
+    held: FloorHit,
+    ctx: RequestContext,
+  ): Promise<FullAccessOutcome> {
+    const started = Date.now();
+    const audit: AuditRecord = { tool: request.tool, ...(request.command ? { command: request.command } : {}), ...(request.paths ? { paths: request.paths } : {}), capability: request.kind === "escalate" ? "escalate" : "write", decision: "deny", decidedBy: "policy", kind: `full access, held by the floor: ${held.reason}` };
+    const finish = (record: Partial<AuditRecord>) => this.audit.write({ ...audit, latencyMs: Date.now() - started, ...record } as AuditRecord);
+    if (!ctx.hasUI) {
+      const reason = `Permission denied: ${held.reason} (${held.detail}). Even at Full access only the user can allow this, and no one is here to approve it.`;
+      finish({ reason, prompted: false });
+      return { ok: false, reason };
+    }
+    return this.serialized(async () => {
+      const lines = [fact("Note", `This always asks, at Full access too: ${homeRelative(held.detail, this.home)}.`), ...request.lines];
+      const question = request.kind === "escalate" ? "Run this command?" : request.kind === "access" ? "Allow this change?" : `Allow the ${request.tool} tool?`;
+      const title = `${question}\n\nContext:\n${lines.join("\n")}${promptLine(request.kind, ctx.toolCallId)}`;
+      const allow = request.kind === "escalate" ? RUN_ONCE : HUMAN.once;
+      const shown = Date.now();
+      const choice = await ctx.ui.select(title, [allow, HUMAN.deny, HUMAN.stop], { signal: ctx.signal, timeout: this.config.ask.timeoutMs ?? undefined });
+      const nobody = unanswered(choice, shown, this.config.ask.timeoutMs, ctx.signal);
+      const asked = { prompted: true, choice: nobody ?? choice, decidedBy: "user" as const };
+      switch (choice) {
+        case allow:
+          finish({ decision: "allow", scope: "once", ...asked });
+          return { ok: true };
+        case HUMAN.stop:
+          this.denials.record(forRecord(request.cls()), request.what, this.ownerWords);
+          finish({ decision: "abort", ...asked });
+          ctx.abort?.();
+          return { ok: false, reason: "The user denied this and stopped the turn.", abort: true };
+        case HUMAN.deny: {
+          this.denials.record(forRecord(request.cls()), request.what, this.ownerWords);
+          const reason = `The user denied this (${held.reason}).`;
+          finish({ ...asked, reason });
+          return { ok: false, reason: `${reason} Continue without it or ask the user.` };
+        }
+        default:
+          finish({ ...asked, decision: "dismissed", reason: `No answer (${nobody ?? "not one of the options"}).` });
+          return { ok: false, reason: UNANSWERED };
+      }
+    });
   }
 
   /**

@@ -1002,6 +1002,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         state.bot_records = BotRecords {
             work: vec![work],
@@ -1126,6 +1130,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         let records = BotRecords {
             work: vec![

@@ -67,6 +67,9 @@ protocol WorkspaceData: AnyObject {
 
     /// Approve or cancel a plan that still awaits approval.
     func resolvePlan(workId: String, approve: Bool) async throws
+    /// The owner's choice of a proposed or running plan's permission level
+    /// (`sandbox` values, PermissionLevel).
+    func setWorkLevel(workId: String, level: String) async throws
     /// Stop running work and every session it started.
     func stopWork(workId: String) async throws
     /// Give a running plan `minutes` more.

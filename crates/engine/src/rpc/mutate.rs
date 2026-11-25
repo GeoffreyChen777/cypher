@@ -4,7 +4,7 @@ use super::*;
 
 impl EngineRpc {
     /// This device is a receive-only member of its trust group.
-    fn local_receive_only(&self) -> bool {
+    pub(super) fn local_receive_only(&self) -> bool {
         self.trust
             .as_ref()
             .is_some_and(|trust| trust.member_is_receive_only(self.doc_host.device_id()))
@@ -324,6 +324,7 @@ impl EngineRpc {
                 Ok(())
             }
             record @ (MutateParams::ResolveBotPlan { .. }
+            | MutateParams::SetBotWorkLevel { .. }
             | MutateParams::StopBotWork { .. }
             | MutateParams::AddBotWorkTime { .. }
             | MutateParams::DeleteBotWork { .. }

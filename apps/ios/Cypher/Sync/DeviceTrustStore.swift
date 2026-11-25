@@ -230,6 +230,10 @@ final class DeviceTrustStore {
         return key.isValidSignature(signature, for: signingBytes)
     }
 
+    /// The group made this phone receive-only: it may lower a level,
+    /// never raise one.
+    var isReceiveOnly: Bool { chain.receiveOnly.contains(deviceId) }
+
     private func isPaired(in chain: TrustChain) -> Bool {
         chain.members[deviceId]?.dhPub == TrustHex.encode(keys.dh.publicKey.rawRepresentation)
     }

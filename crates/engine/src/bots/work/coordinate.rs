@@ -83,6 +83,13 @@ struct ProposePlan {
     /// The coordinating session's model, thinking and Fast mode.
     #[serde(default)]
     coordinator: Option<ChoiceArgs>,
+    /// The permission level its sessions run at; the workspace's when left
+    /// out. Above the workspace's only with [`Self::level_quote`].
+    #[serde(default)]
+    level: Option<String>,
+    /// The owner's own words asking for `level`, verbatim.
+    #[serde(default)]
+    level_quote: Option<String>,
     /// Set by the `BotTool` RPC from the Pi tool call.
     #[serde(default, rename = "_toolCallId")]
     tool_call_id: Option<String>,
@@ -772,6 +779,7 @@ impl Bots {
             .transpose()
             .map_err(|err| refuse(format!("The coordinator's choice: {err}")))?
             .unwrap_or_default();
+        let (proposed_level, level_quote) = self.proposed_level(chat, view, &args)?;
         let mut steps = Vec::with_capacity(args.steps.len());
         for (index, step) in args.steps.iter().enumerate() {
             if step.title.trim().is_empty() {
@@ -841,6 +849,10 @@ impl Bots {
             coordinator_choice,
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: Some(proposed_level),
+            level_quote,
+            applied_level: None,
         };
         // The row keeps previews; what they cut goes to the chat doc first
         // (docs/design/plan-body.md §4), so no device sees a row whose body
@@ -899,13 +911,75 @@ impl Bots {
         }
         Ok(format!(
             "The plan \"{}\" (work {}) is waiting for your owner's approval in a card in this \
-             chat. Once running it may take {}.{waiting} Stop here: end your turn with one line \
+             chat. Once running it may take {}, at the permission level {} unless your owner \
+             picks another.{waiting} Stop here: end your turn with one line \
              saying it awaits approval. Once approved, a background session carries it out and \
              you are told here when it ends; list_work and get_work show where it stands.",
             work.title,
             work.id,
-            p::describe_minutes(time_limit)
+            p::describe_minutes(time_limit),
+            proposed_level.label()
         ))
+    }
+
+    /// The level a proposal offers ([`BotWork::proposed_level`]): the
+    /// workspace's, or the one asked for. Only the owner chooses a level: one
+    /// above the workspace's needs their own words asking for it, quoted from
+    /// this chat ([`crate::host::doc_host::DocHost::owner_quoted`]); the card
+    /// shows the quote, and approving confirms it. A stricter one needs none.
+    fn proposed_level(
+        &self,
+        chat: &Chat,
+        view: &View,
+        args: &ProposePlan,
+    ) -> Result<(SandboxLevel, Option<String>), EngineError> {
+        let default = view.bot.plans.level();
+        let Some(asked) = args
+            .level
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+        else {
+            return Ok((default, None));
+        };
+        let level = SandboxLevel::parse(asked).ok_or_else(|| {
+            refuse(format!(
+                "level is read-only, workspace-write or danger-full-access, not \"{asked}\"."
+            ))
+        })?;
+        if !level.above(default) {
+            return Ok((level, None));
+        }
+        let quote = args
+            .level_quote
+            .as_deref()
+            .map(str::trim)
+            .filter(|q| !q.is_empty());
+        let Some(quote) = quote else {
+            return Err(refuse(format!(
+                "Only your owner chooses a plan's permission level. Propose it without level (it \
+                 runs at {}, the workspace's), or add level_quote: your owner's own words in this \
+                 chat asking for {}, copied exactly.",
+                default.label(),
+                level.label()
+            )));
+        };
+        if quote.chars().count() > p::LEVEL_QUOTE_MAX {
+            return Err(refuse(format!(
+                "Keep level_quote under {} characters: the words that ask for the level.",
+                p::LEVEL_QUOTE_MAX
+            )));
+        }
+        if !self.inner.doc_host.owner_quoted(&chat.id, quote) {
+            return Err(refuse(format!(
+                "\"{quote}\" isn't in what your owner wrote in this chat, word for word. Quote \
+                 the words where they ask for {}, or propose the plan without level (it runs at \
+                 {}).",
+                level.label(),
+                default.label()
+            )));
+        }
+        Ok((level, Some(quote.to_string())))
     }
 
     /// The owner's newest message in the bot chat: the instruction a plan
@@ -1047,6 +1121,10 @@ impl Bots {
             }
             _ => out.push(format!("Time limit {}", p::describe_minutes(limit))),
         }
+        out.push(format!(
+            "Permission level: {} (only your owner changes it)",
+            work.effective_level().label()
+        ));
         if !work.coordinator_choice.is_empty() {
             out.push(format!(
                 "Coordinating session: {}",
@@ -1500,8 +1578,13 @@ impl Bots {
         // This call's choice, else the step's, else the workspace's for
         // sessions, else the workspace chat's own config.
         let choice = choice.or(&step.session_choice).or(&view.bot.session_choice);
+        // The level the owner gave the plan as it is now (it may have changed
+        // since this call read the row); never one the agent asks for.
+        let level = ws
+            .record::<BotWork>(p::KIND_BOT_WORK, &work.id)
+            .map_or_else(|| work.effective_level(), |w| w.effective_level());
         let mut config = ChatConfig {
-            sandbox: SandboxLevel::WorkspaceWrite,
+            sandbox: level,
             ..bot_config
         };
         choice.apply(&mut config);
@@ -1513,6 +1596,11 @@ impl Bots {
             Some(config.clone()),
             Some(cwd.clone()),
         )?;
+        // Signed, so a host under "Only paired devices" runs it at the
+        // plan's level rather than the row's capped one.
+        self.inner
+            .doc_host
+            .record_chat_launch(&session_id, false, true, false);
         ws.rename_chat(&session_id, &title)?;
         // The session is this workspace's: listed there, not among the
         // owner's own sessions.

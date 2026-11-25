@@ -710,6 +710,10 @@ fn an_ended_plan_from_an_older_host_reads_with_its_steps_closed() {
         coordinator_choice: Default::default(),
         body_rev: None,
         result_rev: None,
+        level: None,
+        proposed_level: None,
+        level_quote: None,
+        applied_level: None,
     };
     let mut s = AppState::new();
     s.apply_bot_records(BotRecords {
