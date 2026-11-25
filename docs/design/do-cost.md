@@ -312,6 +312,62 @@ poll wake after 1.5 s instead of 0, the 20 s cadence while not joined unchanged.
 | Effort | S: two actors and the iOS lifecycle |
 | Measure after | M3: `/rows` and `/checkpoint` requests per hour on RegistryRoom and ChatRoom fall to about 5% of the upgrade count; M2: ChatRoom `http` per `clientDisconnected` session falls from about 2.3 to about 1.1 |
 
+Built on branch `cypher/do-cost-cuts` (2026-11-25), with these choices:
+
+- One small type, `crates/sync/src/hedge.rs` (`HEDGE_DELAY` 1.5 s), used by both actors.
+  A connect after the client's start or after a joined session dropped arms the hedge; the
+  next dial starts it; `state` cancels it. "Joined" is the `state` answer, so a chat
+  backfill that is still running on a live socket does not also pull.
+- Pull at once, unchanged or added: dial failure and timeout; a session that never got
+  `state`; a local write waiting (registry `pending_len`, chat outbox) at start or at the
+  drop; a nudge or a re-run request during the dial or backoff (each such pull stands in
+  for the hedge). Added beyond the design: **a cold start** (registry doc with no cursor and
+  generation 0, chat with cursor 0) pulls beside its first dial, so a never-synced copy shows
+  its first rows as fast as before; and **a reconnect after a stalled socket** (probe
+  deadline; for chat also push-ACK, row-repair and backfill deadlines and exhausted gap
+  repairs) pulls at once, since that socket was open but not delivering. Only the
+  start of a client that synced before and the reconnect after an ordinary drop hedge.
+- iOS: `RoomSocketLifecycle.start` sends a `.startPoll` wake at once, which pulls only for a
+  cold copy (registry `helloCursor() == nil`, chat `cursor() == 0`); the first `.poll`
+  comes after `Timing.firstPollNs` (1.5 s), then every 20 s while not joined, as before.
+  iOS has no reconnect pull to remove.
+- Tests: registry against the mock (a TCP port that never answers the upgrade, a new
+  `MockRegistryServer::set_state_delay`), `crates/sync/tests/registry_transport.rs`; chat
+  against channel pipes with paused time, `crates/sync/src/chat_client/tests/recovery.rs`
+  (C1 section); iOS `RegistryClientLifecycleTests` (hedged first poll).
+
+Cold-open measurement (`crates/sync/examples/cold_open.rs`, 20 opens per row, before =
+`5a9804e2`, after = this change). Method: the real `RegistryClient` and `ChatClient` against
+in-process servers (`MockRegistryServer`, a two-row chat frame server) on this Mac. The
+network is modelled: the socket goes through a proxy that holds a new connection for 2 RTT
+(TCP and TLS) and delays each chunk by RTT/2 each way; the HTTPS pull answers after 1 RTT
+(a warm connection). Time from opening the client to its first remote row, median in ms
+(p90 within 2% except where noted):
+
+| Copy | WebSocket | RTT | Registry before → after | Chat before → after |
+|---|---|---|---|---|
+| cold | works | 50 ms | 54 → 54 | 52 → 52 |
+| cold | works | 150 ms | 154 → 154 | 152 → 152 |
+| cold | stalled | 50 / 150 ms | 54 → 54 / 155 → 154 | 53 → 53 / 153 → 153 |
+| warm (new rows since) | works | 0 ms | 3 → 11 | 2 → 12 |
+| warm | works | 50 ms | 54 → 211 | 52 → 273 |
+| warm | works | 150 ms | 154 → 613 | 152 → 772 |
+| warm | stalled | 50 ms | 54 → 1,568 | 53 → 1,564 |
+| warm | stalled | 150 ms | 154 → 1,656 | 154 → 1,657 |
+| either | refused | 50 / 150 ms | unchanged (54, 154–159) | unchanged (52, 152–154) |
+
+Reading: a cold open is unchanged in every case (the cold rule). A blocked or stalled socket
+costs 1.5 s, as the design said. On a healthy network a warm copy now waits for the socket,
+which in this model is 3 RTT slower than the warm pull for the registry (TCP, TLS, upgrade,
+then `state`) and about 4.4 RTT for chat (plus the rows request): +0.16 s / +0.22 s at
+50 ms, +0.46 s / +0.62 s at 150 ms. The design's +0.1–0.2 s assumed the pull wins by one or
+two round trips; it holds here only up to about 50 ms RTT. The warm case only matters when
+rows changed while the client was away: its local copy is on screen at once. If that delay
+shows in use, the cheaper lever is a shorter hedge for warm starts, not dropping C1 (the
+saving comes from reconnects, where nobody waits).
+
+Not done: the staged check in a development instance (20 opens with the real Edge).
+
 ### D1: peer dial cooldown that follows presence
 
 A call to another device dials its DeviceRoom up to three times, 1.5 s and 3 s apart, then
@@ -340,6 +396,36 @@ host's own rejoin window (`crates/rpc/src/device_room/relay.rs:176-178`).
 | Old clients | Client-only |
 | Effort | S |
 | Measure after | M2 for DeviceRoom: `http` and the `clientDisconnected` count return to the Nov 17–20 level (about 300 a day) |
+
+Built on branch `cypher/do-cost-cuts` (2026-11-25), with these choices:
+
+- `LinkCacheConfig::cooldown_offline_max` (600 s). A dial whose last attempt met the
+  relay's own `host_offline` (the readiness probe's link closed with that code, or a sealed
+  link's handshake got it) counts as "offline" when the peer's presence is stale; the engine
+  installs the check with `LinkCache::set_presence_check`, pointing at
+  `WorkspaceHost::device_online` (presence or a relay status probe seen within 45 s).
+  Without a check, presence counts as stale.
+- After an offline failure the next sequence is one dial. **Deviation:** the second offline
+  failure in a row goes straight to 600 s rather than doubling up to it: a doubling ladder
+  from 5 s dials 3 + 6 times in the first 10 minutes, so the design's own test (≤ 4 dials in
+  10 min) needs the jump. The first failure keeps three attempts and 5 s whatever the
+  cause. Network errors and failures while presence is fresh keep today's 5 s → 60 s
+  ladder, three attempts each.
+- Reset, unchanged: `reset_cooldown` (the presence "came back" hook, which a relay status
+  probe answering alive also feeds through `presence_seen`), a system wake and a token
+  change clear the state. The failure streak now decays 10 min after its cooldown *ended*
+  (before: after the last failure), so waiting out the 600 s cooldown does not restart the
+  ladder at three attempts.
+- The engine's presence hook now holds the cache weakly (the cache holds the workspace for
+  the presence check).
+- Tests: `crates/rpc/tests/device_room.rs` ("D1" section) against the fake relay, scaled
+  1:100 in real time (the relay is real sockets and the cooldown uses `std::time::Instant`,
+  so paused time does not apply): 3 dials on the first failure and 4 in the offline cap;
+  presence return dials at once and reaches the host; fresh presence and network errors
+  keep the short cap (≥ 18 dials in 3 s).
+- iOS: `DeviceRelayClient.call` retries 3 times within one call and keeps no cooldown
+  across calls, so there is no ladder to change; a phone caller asking a dead peer pays 3
+  upgrades per call. Not changed (it needs a presence source on the phone too).
 
 ### N1: settle chats the Edge called hidden
 
