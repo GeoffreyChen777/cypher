@@ -33,6 +33,12 @@ enum RegistryEvent: Sendable {
     case presence(device: String, at: Int64)
     /// The connection dropped; unacked batches become pushable again.
     case disconnected
+    /// The room reported the user's trust chain length: in the join's
+    /// `state` (delivered after `.connected`) or pushed after an append. A
+    /// hint only — DeviceTrustStore still reads and verifies the chain. A
+    /// session that never sends this is on a Worker without chain-head
+    /// pushes (T1, docs/design/do-cost.md).
+    case trust(length: UInt64)
 }
 
 actor RegistryClient {
@@ -251,7 +257,7 @@ actor RegistryClient {
         life.noteProtocolFrame()
 
         switch frame {
-        case .state(let seq, let full, let gcFloor, let rows, let presence):
+        case .state(let seq, let full, let gcFloor, let rows, let presence, let trust):
             life.helloAnswered()
             let wasJoined = life.joined
             life.didJoin()
@@ -263,6 +269,7 @@ actor RegistryClient {
                 roomLog.info("registry: joined (seq=\(seq), full=\(full), rows=\(rows.count))")
                 await delegate.event(.connected)
             }
+            if let trust { await delegate.event(.trust(length: trust)) }
             // Anything pending (offline writes, reseeds) pushes now, and our
             // beat announces this device without waiting for the timer.
             await pushPending()
@@ -279,6 +286,9 @@ actor RegistryClient {
 
         case .probeOk:
             break  // liveness proven; clocks already advanced above
+
+        case .trust(let length):
+            await delegate.event(.trust(length: length))
 
         case .error(let code, let message):
             // Rejections are server-attributed per device; surface loudly —
@@ -310,16 +320,21 @@ private struct HelloFrame: Encodable {
     var t = "hello"
     var cursor: UInt64?
     var device: String
+    /// `trust`: this client understands the `trust` frame. The room sends it
+    /// only to sockets that declared the capability, because a client redials
+    /// on a frame type it does not know; an older room ignores the field.
+    var caps = ["trust"]
 
     // Explicit null for a nil cursor (synthesized Codable would omit the key;
     // the server treats both as "no cursor", but the wire doc says null).
-    private enum CodingKeys: String, CodingKey { case t, cursor, device }
+    private enum CodingKeys: String, CodingKey { case t, cursor, device, caps }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(t, forKey: .t)
         try c.encode(cursor, forKey: .cursor)
         try c.encode(device, forKey: .device)
+        try c.encode(caps, forKey: .caps)
     }
 }
 
@@ -377,16 +392,20 @@ private struct ProbeFrame: Encodable {
 }
 
 private enum ServerFrame: Decodable {
-    case state(seq: UInt64, full: Bool, gcFloor: UInt64, rows: [RegistryRow], presence: [String: Int64])
+    case state(
+        seq: UInt64, full: Bool, gcFloor: UInt64, rows: [RegistryRow], presence: [String: Int64], trust: UInt64?)
     case rows(seq: UInt64, rows: [RegistryRow])
     case ack(batch: String, seq: UInt64, applied: UInt64)
     case presence(device: String, at: Int64)
     case probeOk
     case error(code: String, message: String)
+    case trust(length: UInt64)
 
     private enum Keys: String, CodingKey {
-        case t, seq, full, gcFloor, rows, presence, batch, applied, device, at, code, message
+        case t, seq, full, gcFloor, rows, presence, batch, applied, device, at, code, message, trust, length
     }
+
+    private struct TrustHead: Decodable { let length: UInt64 }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -397,7 +416,10 @@ private enum ServerFrame: Decodable {
                 full: try c.decode(Bool.self, forKey: .full),
                 gcFloor: try c.decodeIfPresent(UInt64.self, forKey: .gcFloor) ?? 0,
                 rows: try c.decode([RegistryRow].self, forKey: .rows),
-                presence: try c.decodeIfPresent([String: Int64].self, forKey: .presence) ?? [:])
+                presence: try c.decodeIfPresent([String: Int64].self, forKey: .presence) ?? [:],
+                trust: try c.decodeIfPresent(TrustHead.self, forKey: .trust)?.length)
+        case "trust":
+            self = .trust(length: try c.decode(UInt64.self, forKey: .length))
         case "rows":
             self = .rows(
                 seq: try c.decode(UInt64.self, forKey: .seq),

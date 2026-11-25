@@ -131,6 +131,7 @@ final class WorkspaceStore: WorkspaceData {
         }
         client = nil
         connected = false
+        config.trust?.registryLeft()
     }
 
     // MARK: Server events (delivered in frame order — rows before ack)
@@ -155,6 +156,9 @@ final class WorkspaceStore: WorkspaceData {
             saver?.poke()
         case .connected:
             connected = true
+            config.trust?.registryJoined()
+        case .trust(let length):
+            config.trust?.registryHead(length)
         case .rows(let seq, let rows):
             let contiguous = doc.applyRows(seq: seq, rows: rows)
             project()
@@ -178,6 +182,7 @@ final class WorkspaceStore: WorkspaceData {
         case .disconnected:
             connected = false
             doc.markDisconnected()
+            config.trust?.registryLeft()
         }
     }
 

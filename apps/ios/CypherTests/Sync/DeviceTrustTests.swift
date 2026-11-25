@@ -23,7 +23,13 @@ private actor FakeTrustEdge: TrustEdge {
     var entries: [TrustEntry] = []
     var mailboxes: [String: Data] = [:]
 
-    func chain() async throws -> [TrustEntry] { entries }
+    /// Chain reads served.
+    var reads = 0
+
+    func chain() async throws -> [TrustEntry] {
+        reads += 1
+        return entries
+    }
     func put(mailbox: String, slot: String, body: Data) async throws { mailboxes["\(mailbox)/\(slot)"] = body }
     func get(mailbox: String, slot: String) async throws -> Data? { mailboxes["\(mailbox)/\(slot)"] }
     func delete(mailbox: String) async throws { mailboxes = mailboxes.filter { !$0.key.hasPrefix(mailbox) } }
@@ -189,6 +195,20 @@ final class DeviceTrustStoreTests: XCTestCase {
             desktop.sign(seq: chain.count, after: chain, kind: "requirePaired", device: desktop.record))
         await trust.sync()
         XCTAssertTrue(trust.requirePaired)
+    }
+
+    /// Chain-head pushes (T1): a head that differs from the phone's chain reads
+    /// the chain at once instead of on the next minute.
+    func testAMovedChainHeadReadsTheChainAtOnce() async throws {
+        let desktop = Desktop(id: "mac-1")
+        let edge = try await founded(by: desktop)
+        let trust = store(edge)
+        trust.start()
+        defer { trust.stop() }
+        try await waitUntil("the first read") { await edge.reads == 1 }
+        trust.registryJoined()
+        trust.registryHead(2)
+        try await waitUntil("the read for the moved head", timeout: .seconds(5)) { await edge.reads == 2 }
     }
 
     func testSharedCommandSigningVectors() throws {

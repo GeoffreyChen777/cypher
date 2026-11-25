@@ -187,4 +187,33 @@ final class RegistryClientLifecycleTests: XCTestCase {
         XCTAssertEqual(log.count("disconnected"), 0)
         XCTAssertNil(transport.sockets[1].closeCode)
     }
+
+    // MARK: Chain-head pushes (T1, docs/design/do-cost.md)
+
+    func testHelloDeclaresTheTrustCapability() async {
+        let socket = await open()
+        let hello = socket.sentStrings.first { $0.contains(#""t":"hello""#) } ?? ""
+        XCTAssertTrue(hello.contains(#""caps":["trust"]"#), hello)
+    }
+
+    func testStateTrustAndTrustFramesBecomeTrustEvents() async {
+        let socket = await open()
+        socket.deliver(.string(#"{"t":"state","seq":1,"full":true,"rows":[],"trust":{"length":3}}"#))
+        await eventually { log.events.contains("trust(length: 3)") }
+        let connected = log.events.firstIndex(of: "connected")
+        let head = log.events.firstIndex(of: "trust(length: 3)")
+        XCTAssertNotNil(connected)
+        XCTAssertLessThan(connected ?? .max, head ?? .min, "joined before the head")
+        socket.deliver(.string(#"{"t":"trust","length":4}"#))
+        await eventually { log.events.contains("trust(length: 4)") }
+        XCTAssertNil(socket.closeCode, "a known frame keeps the session")
+    }
+
+    func testAStateWithoutTrustReportsNoHead() async {
+        // An older Worker: no `state.trust`, so DeviceTrustStore keeps polling.
+        let socket = await open()
+        await join(socket)
+        await settle()
+        XCTAssertFalse(log.events.contains { $0.hasPrefix("trust") }, "\(log.events)")
+    }
 }
