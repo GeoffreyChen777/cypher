@@ -445,6 +445,9 @@ struct BotCardButton: View {
             .font(Theme.sans(14, weight: .semibold, relativeTo: .subheadline))
             .foregroundStyle(role == .primary ? Theme.bg : role == .destructive ? Theme.danger : Theme.text)
             .padding(.horizontal, 16)
+            // At a large text size the label outgrows the 34pt: keep room
+            // around it.
+            .padding(.vertical, 6)
             .frame(minHeight: 34)
             .background(role == .primary ? Theme.text : Theme.text.opacity(0.08), in: Capsule())
             .contentShape(Capsule())

@@ -28,6 +28,14 @@ enum Theme {
     static let sheetPanel = adaptive(light: .white, dark: grey(0x20))
     /// Inset-grouped list cells: one step off the shell surface.
     static let groupedRow = adaptive(light: .white, dark: grey(0x26))
+    /// An iOS grouped page (systemGroupedBackground's role): the shell
+    /// surface, so a page of cards matches the app's inset-grouped lists.
+    static let groupedBackground = surface
+    /// A card on a grouped page (secondarySystemGroupedBackground's role).
+    static let groupedCard = groupedRow
+    /// A plate inside a card — a command, a list of facts
+    /// (tertiarySystemGroupedBackground's role): one step off the card.
+    static let groupedInset = adaptive(light: neutral(0.952), dark: grey(0x33))
     /// Hover/pressed wash for interactive rows (ink at low alpha).
     static let elementHover = whiteAlpha(0.06)
     /// Active/selected wash.
@@ -101,6 +109,45 @@ enum Theme {
     static let codeScale: CGFloat = 0.86
     static let bubbleRadius: CGFloat = 16
     static let panelRadius: CGFloat = 10
+    /// A card on a grouped page, as iOS 26 rounds an inset-grouped list's
+    /// section (continuous corners).
+    static let cardRadius: CGFloat = 26
+    /// A card's inner padding.
+    static let cardPad: CGFloat = 16
+    /// A plate inside a card, concentric with it: the card's radius less
+    /// the padding that insets the plate.
+    static let cardInsetRadius: CGFloat = cardRadius - cardPad
+    /// Between cards on a page.
+    static let cardGap: CGFloat = 20
+    /// Every decision button's height, whatever its shape: a round glass
+    /// icon button's diameter, a capsule's height (Run once, Approve,
+    /// Reject, an answer to pick), a row's ✕ / ✓ — iOS's 44pt control,
+    /// its hit target too. It grows with the text size by its label's line
+    /// alone (`decisionLabelLine`, scaled as `.subheadline`), the same for
+    /// every shape, so the buttons stay one height at every size
+    /// (`DecisionHeight`).
+    static let decisionHeight: CGFloat = 44
+    /// The part of `decisionHeight` that is the label's line, at the
+    /// default text size: what scales with Dynamic Type.
+    static let decisionLabelLine: CGFloat = 20
+    /// How far a capsule's one-line title may shrink before it truncates.
+    static let decisionTitleMinScale: CGFloat = 0.8
+    /// A decision icon's symbol, at the default text size.
+    static let iconButtonSymbol: CGFloat = 17
+    /// What system glass adds around a regular-size button's label on
+    /// each side (measured); a label `decisionHeight` less twice this
+    /// makes the button `decisionHeight` tall.
+    static let glassButtonPadding: CGFloat = 7
+    /// An icon button with its name under it: the column it stands in (it
+    /// grows with the caption's text size), and the gap to the name.
+    static let iconOptionColumn: CGFloat = 60
+    static let iconOptionCaptionGap: CGFloat = 5
+    /// The largest text size an icon button's name follows (a tab bar's
+    /// rule): larger, a long press shows the option large instead.
+    static let iconCaptionLargestType = DynamicTypeSize.xxxLarge
+    /// Between two icon buttons, and between a row's last one and what
+    /// follows.
+    static let iconButtonGap: CGFloat = 8
 }
 
 // MARK: - Fonts

@@ -160,11 +160,42 @@ final class BoardModelTests: XCTestCase {
         XCTAssertEqual(rows[2].sub, "Plan to approve · 3 steps")
         XCTAssertEqual(rows[3].sub, "Review the answer to Ledger")
         XCTAssertEqual(rows.map(\.symbol), ["checkmark.shield", "questionmark.circle", "checklist", "paperplane"])
+        // Each card's head says where the item comes from (needs.rs
+        // `need_items`): an approval's work, a session's work › the
+        // session, the plan, the peer.
+        XCTAssertEqual(
+            rows.map(\.source),
+            [
+                "Stabilise the flaky sync tests", "Stabilise the flaky sync tests › Re-run the webapp e2e suite",
+                "Plan to approve · 3 steps", "Answer to Ledger, to review",
+            ])
 
         let chat = try XCTUnwrap(demo.boardNeedRow(.chat("chat-atlas"), bot: bot))
         XCTAssertEqual(chat.title, "Atlas asked you something")
+        XCTAssertEqual(chat.source, "Atlas")
         XCTAssertNil(BotPage.settling(chat.item), "its own question opens the chat")
         XCTAssertNil(demo.boardNeedRow(.plan("gone"), bot: bot), "a record that is gone is left out")
+    }
+
+    func testTheFullerNeedsYouDemoAddsAPermissionPromptAndALongTitle() throws {
+        let demo = DemoDataset.standard()
+        demo.addNeedsYouStates()
+        let bot = try XCTUnwrap(demo.bot(id: DemoDataset.atlasId))
+        let rows = demo.boardNeedRows(bot)
+        let asking = try XCTUnwrap(
+            rows.first {
+                $0.item == .asking(chatId: DemoDataset.needsPermissionChatId, workId: DemoDataset.needsPermissionWorkId)
+            })
+        XCTAssertEqual(asking.source, "Update the webapp's dependencies › Update the webapp's lockfile")
+        let request = try XCTUnwrap(demo.sessionStore(for: DemoDataset.needsPermissionChatId).openInputRequest)
+        let question = try XCTUnwrap(request.questions.first)
+        let permission = try XCTUnwrap(PermissionRequest(question), "the session asks a permission prompt")
+        XCTAssertEqual(permission.rows.map(\.kind), [.purpose, .command, .pattern, .reason])
+        XCTAssertTrue(rows.contains { $0.item == .approval("approval-long") && $0.title.count > 120 })
+
+        let many = DemoDataset.standard()
+        many.addNeedsYouStates(many: true)
+        XCTAssertEqual(many.boardNeedRows(try XCTUnwrap(many.bot(id: DemoDataset.atlasId))).count, rows.count + 6)
     }
 
     // MARK: Routines

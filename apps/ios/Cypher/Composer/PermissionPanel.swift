@@ -167,10 +167,96 @@ struct PermissionRequest: Equatable {
             }
         }
     }
+
+    /// How long a broader approval lasts, read off the extension's labels
+    /// (`core.ts` `HUMAN`, `TASK`, `DOMAIN_ONCE`, `ALWAYS_IN`).
+    enum Grant: Equatable {
+        /// This command, this task, this chat.
+        case scoped
+        /// Always, everywhere or in a project: kept as a rule.
+        case lasting
+
+        init(_ label: String) {
+            self = label.hasPrefix("Always") ? .lasting : .scoped
+        }
+    }
+
+    /// One option as a card shows it: the narrowest approval as the
+    /// prominent capsule, every other option as a round glass icon button
+    /// with a short name under it — none folded away.
+    struct ShownOption: Equatable {
+        /// Its place in the prompt's options (`permission-option-<index>`).
+        let index: Int
+        /// The label sent back, and what VoiceOver reads.
+        let label: String
+        let role: OptionRole
+        let symbol: String
+        /// The short name under the icon.
+        let caption: String
+
+        var prominent: Bool { role == .primary }
+        /// A refusal: a destructive button, painted red.
+        var destructive: Bool { role == .deny || role == .stop }
+
+        init(index: Int, label: String, role: OptionRole) {
+            self.index = index
+            self.label = label
+            self.role = role
+            switch role {
+            case .primary:
+                symbol = "checkmark"
+                caption = label
+            case .secondary:
+                symbol = Grant(label) == .lasting ? "checkmark.shield.fill" : "checkmark.shield"
+                caption = Self.caption(label)
+            case .deny:
+                symbol = "xmark"
+                caption = label
+            case .stop:
+                symbol = "stop.fill"
+                caption = "Stop"
+            }
+        }
+
+        /// A broader approval's name without what every approval says:
+        /// "Allow for this chat" is "This chat", "Always allow" "Always".
+        private static func caption(_ label: String) -> String {
+            for prefix in ["Allow for ", "Allow "] where label.hasPrefix(prefix) && label.count > prefix.count {
+                let rest = label.dropFirst(prefix.count)
+                return rest.prefix(1).uppercased() + rest.dropFirst()
+            }
+            if label.hasSuffix(" allow") { return String(label.dropLast(" allow".count)) }
+            return label
+        }
+    }
+
+    /// A card's options in the order it sets them, leading to trailing: the
+    /// prompt's own order read from the far end — Deny and stop, Deny, the
+    /// broadest approval … the narrowest — so the primary approval comes
+    /// last, the refusals lead and the broadest grant sits away from the
+    /// primary. Every option is there.
+    static func shownOptions(_ options: [String]) -> [ShownOption] {
+        let roles = roles(options)
+        let shown = options.enumerated().reversed().map {
+            ShownOption(index: $0.offset, label: $0.element, role: roles[$0.offset])
+        }
+        return shown.filter { !$0.prominent } + shown.filter(\.prominent)
+    }
 }
 
 /// The card: a shield header, the question, the facts, then the options.
+/// Embedded in a card of its own (a Needs you item's), it draws no frame,
+/// header or question (the card's head and title say them): the facts on
+/// plates concentric with the card, then every option on screen as system
+/// glass buttons (`PermissionOptionRow`; needs.rs `asking_content`).
 struct PermissionPanel: View {
+    enum Style {
+        /// Over the composer: its own card.
+        case panel
+        /// Inside a `NeedsYouCard`.
+        case embedded
+    }
+
     let requestId: String
     let question: UserInputQuestion
     let request: PermissionRequest
@@ -178,12 +264,60 @@ struct PermissionPanel: View {
     var canRespond = true
     /// Why this request is back after an answer.
     var notice: String?
+    var style = Style.panel
     let respond: (String, [UserInputAnswer]) -> Void
 
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var contentHeight: CGFloat = 240
     @State private var answered = false
 
     var body: some View {
+        switch style {
+        case .panel: panel
+        case .embedded: embedded
+        }
+    }
+
+    private var embedded: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            facts
+            NeedsCardActions {
+                VStack(alignment: .leading, spacing: 8) {
+                    PermissionOptionRow(
+                        options: question.options, enabled: canRespond && !answered, choose: choose)
+                    if let note = footnote {
+                        Text(note.text)
+                            .font(Theme.sans(12, relativeTo: .caption))
+                            .foregroundStyle(note.color)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("permission-panel")
+    }
+
+    private var footnote: (text: String, color: Color)? {
+        if let notice, canRespond { return (notice, Theme.danger) }
+        if !canRespond { return ("Reconnect to answer", Theme.textFaint) }
+        return nil
+    }
+
+    private func choose(_ option: String) {
+        guard canRespond, !answered else { return }
+        answered = true
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        respond(requestId, [UserInputAnswer(questionId: question.id, labels: [option])])
+    }
+
+    /// A size in the panel's type: fixed over the composer, following
+    /// Dynamic Type in a card.
+    private func sans(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        Theme.sans(size, weight: weight, relativeTo: style == .embedded ? .body : nil)
+    }
+
+    private var panel: some View {
         VStack(spacing: 0) {
             header
             Rectangle().fill(Theme.border).frame(height: 1)
@@ -231,48 +365,58 @@ struct PermissionPanel: View {
                 .foregroundStyle(Theme.text)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("permission-question")
+            facts
+        }
+    }
+
+    /// What it asks about: the facts as rows on a wash, the notes, the
+    /// change or input.
+    private var facts: some View {
+        VStack(alignment: .leading, spacing: 12) {
             if !request.rows.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(request.rows.enumerated()), id: \.offset) { _, fact in
                         factRow(fact)
                     }
                 }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.elementHover, in: RoundedRectangle(cornerRadius: 12))
+                .plate(style, padding: 12, panelRadius: 12, panelFill: Theme.elementHover)
             }
             ForEach(Array(request.sentences.enumerated()), id: \.offset) { _, fact in
                 Text(fact.value)
-                    .font(Theme.sans(12))
+                    .font(sans(12))
                     .foregroundStyle(fact.kind == .review ? Theme.warning : Theme.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let block = request.block, !block.text.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(block.title)
-                        .font(Theme.sans(11, weight: .medium))
+                        .font(sans(11, weight: .medium))
                         .foregroundStyle(Theme.textMuted)
                     Text(block.text)
                         .font(Theme.mono(11.5))
                         .foregroundStyle(Theme.text.opacity(0.9))
                         .textSelection(.enabled)
                         .lineLimit(24)
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(whiteAlpha(0.04), in: RoundedRectangle(cornerRadius: 10))
+                        .plate(style, padding: 10, panelRadius: Theme.panelRadius, panelFill: whiteAlpha(0.04))
                 }
             }
         }
     }
 
     private func factRow(_ fact: PermissionRequest.Fact) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
+        // At an accessibility text size in a card, the label goes over its
+        // value: a 62pt column can't hold it.
+        let layout =
+            style == .embedded && typeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 2))
+            : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 10))
+        return layout {
             Text(fact.kind.rawValue)
-                .font(Theme.sans(11, weight: .medium))
+                .font(sans(11, weight: .medium))
                 .foregroundStyle(Theme.textMuted)
-                .frame(width: 62, alignment: .leading)
+                .frame(width: style == .embedded && typeSize.isAccessibilitySize ? nil : 62, alignment: .leading)
             Text(fact.value)
-                .font(fact.kind.monospace ? Theme.mono(12) : Theme.sans(13))
+                .font(fact.kind.monospace ? Theme.mono(12) : sans(13))
                 .foregroundStyle(Theme.text)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -339,6 +483,77 @@ struct PermissionPanel: View {
         case .secondary: return .clear
         case .deny: return Theme.elementHover
         case .stop: return .clear
+        }
+    }
+}
+
+extension View {
+    /// A plate of the permission card: over the composer as it always was;
+    /// in a Needs you card, the card's own plate (concentric, continuous).
+    @ViewBuilder
+    fileprivate func plate(
+        _ style: PermissionPanel.Style, padding: CGFloat, panelRadius: CGFloat, panelFill: Color
+    ) -> some View {
+        switch style {
+        case .panel:
+            self.padding(padding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(panelFill, in: RoundedRectangle(cornerRadius: panelRadius))
+        case .embedded:
+            self.needsCardPlate(padding: padding)
+        }
+    }
+}
+
+/// A permission prompt's options in a card, all of them on screen: the
+/// refusals and the broader approvals as round glass icon buttons, each
+/// named under it, and the narrowest approval last as the prominent capsule
+/// filling the rest of the line (`PermissionRequest.shownOptions`). Where
+/// one line can't hold them (a narrow phone, a large text size), the icons
+/// spread evenly across the card, on as many lines as they need, and the
+/// capsule takes the line under them — nothing folds into a menu, nothing
+/// clips.
+struct PermissionOptionRow: View {
+    let options: [String]
+    var enabled = true
+    let choose: (String) -> Void
+
+    var body: some View {
+        let shown = PermissionRequest.shownOptions(options)
+        let icons = shown.filter { !$0.prominent }
+        let primary = shown.filter(\.prominent)
+        ViewThatFits(in: .horizontal) {
+            // The capsule level with the circles: the row lines up on the
+            // controls' centres, the names hang under the circles.
+            HStack(alignment: .decisionCentre, spacing: Theme.iconButtonGap) {
+                ForEach(icons, id: \.index) { icon($0) }
+                ForEach(primary, id: \.index) { capsule($0) }
+            }
+            VStack(alignment: .leading, spacing: NeedsCardMetrics.buttonGap) {
+                IconOptionGrid {
+                    ForEach(icons, id: \.index) { icon($0) }
+                }
+                ForEach(primary, id: \.index) { capsule($0) }
+            }
+        }
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.5)
+    }
+
+    private func icon(_ option: PermissionRequest.ShownOption) -> some View {
+        GlassIconOption(
+            symbol: option.symbol, label: option.label, caption: option.caption,
+            tone: option.destructive ? .destructive : .ink, identifier: "permission-option-\(option.index)"
+        ) {
+            choose(option.label)
+        }
+    }
+
+    /// The narrowest approval: a prominent glass capsule, the decision
+    /// buttons' one height, as wide as the line leaves it.
+    private func capsule(_ option: PermissionRequest.ShownOption) -> some View {
+        NeedsCardButton(title: option.label, kind: .primary, identifier: "permission-option-\(option.index)") {
+            choose(option.label)
         }
     }
 }

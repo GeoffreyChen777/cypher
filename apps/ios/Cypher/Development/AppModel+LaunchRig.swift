@@ -10,6 +10,10 @@ extension AppModel {
         enterDemoMode()
         if args.contains("-demo-many") { demo?.addManyProjects() }
         if args.contains("-demo-history") { demo?.addSessionHistory() }
+        if args.contains("-demo-needs") || args.contains("-demo-needs-many") {
+            // DemoDataset+NeedsYou.swift: a permission prompt, a long title.
+            demo?.addNeedsYouStates(many: args.contains("-demo-needs-many"))
+        }
         // DemoDataset+PlanAsks.swift: a plan's questions, every way one asks.
         if args.contains("-demo-plan-asks") { demo?.addPlanAsks() }
         // `-plan-asks-answer <chat id>`: that question answered elsewhere
