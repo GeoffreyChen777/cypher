@@ -2264,6 +2264,7 @@ fn a_cut_plans_page_shows_the_preview_until_its_body_arrives(cx: &mut gpui::Test
         0,
     );
     let plan = |id: &str, rev: Option<String>| BotWork {
+        steered: Vec::new(),
         id: id.into(),
         bot_id: "bob".into(),
         title: "Billing exports".into(),
@@ -2476,6 +2477,7 @@ fn needs_you_counts_records_and_worker_questions_across_bots() {
         test_chat("plain", false),
     ]);
     let work = |id: &str, bot: &str, state: WorkState, sessions: Vec<String>| BotWork {
+        steered: Vec::new(),
         id: id.into(),
         bot_id: bot.into(),
         title: id.into(),

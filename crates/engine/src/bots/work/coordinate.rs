@@ -772,6 +772,7 @@ impl Bots {
         let instruction_len = instruction.trim().chars().count();
         let now = p::now_ms();
         let mut work = BotWork {
+            steered: Vec::new(),
             id: new_id(),
             bot_id: view.bot.id.clone(),
             title: title.to_string(),
@@ -2018,6 +2019,7 @@ mod state_tests {
             recovery: None,
             progress: None,
             notice: None,
+            asking: None,
         }
     }
 

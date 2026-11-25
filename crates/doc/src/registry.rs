@@ -1318,6 +1318,13 @@ impl RegistryDoc {
                     None => Value::Null,
                 },
             ),
+            (
+                "asking",
+                match &session.asking {
+                    Some(asking) => serde_json::to_value(asking)?,
+                    None => Value::Null,
+                },
+            ),
         ]);
         if let Some(usage) = session.context_usage {
             set.insert("contextUsage".into(), serde_json::to_value(usage)?);

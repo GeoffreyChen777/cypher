@@ -313,6 +313,7 @@ mod tests {
             session_choice: Default::default(),
         };
         let work = BotWork {
+            steered: Vec::new(),
             id: "w1".into(),
             bot_id: "b".into(),
             title: "Fix rounding".into(),

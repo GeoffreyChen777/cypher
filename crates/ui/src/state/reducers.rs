@@ -57,6 +57,7 @@ impl AppState {
             recovery: None,
             progress: None,
             notice: None,
+            asking: None,
         };
         if let Some(existing) = self
             .sessions

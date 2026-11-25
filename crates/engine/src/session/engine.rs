@@ -1493,6 +1493,7 @@ impl Inner {
                     recovery: None,
                     progress: None,
                     notice: None,
+                    asking: None,
                 });
             if entry.context_usage == Some(usage) {
                 return;
@@ -1632,6 +1633,7 @@ impl Inner {
                     recovery: None,
                     progress: None,
                     notice: None,
+                    asking: None,
                 });
             entry.subagents = runs;
             entry.updated_at = now;
@@ -1737,6 +1739,7 @@ impl Inner {
                     recovery: None,
                     progress: None,
                     notice: None,
+                    asking: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always

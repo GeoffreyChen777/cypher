@@ -20,6 +20,7 @@ fn step(id: &str, detail: Option<&str>) -> WorkStep {
 
 fn work(instruction: &str, steps: Vec<WorkStep>) -> BotWork {
     BotWork {
+        steered: Vec::new(),
         id: "w1".into(),
         bot_id: "b".into(),
         title: "Ship it".into(),

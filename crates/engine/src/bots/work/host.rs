@@ -932,6 +932,7 @@ mod tests {
 
     fn work(id: &str, state: WorkState, at: i64) -> BotWork {
         BotWork {
+            steered: Vec::new(),
             id: id.into(),
             bot_id: "b".into(),
             title: id.into(),

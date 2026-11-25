@@ -243,3 +243,39 @@ Put the open question on the durable session row so every reader uses the same f
 
 Old hosts write no `asking`: clients fall back to today's rule for rows without the
 field, so mixed versions behave as now.
+
+## 6. Wire shape (step 2)
+
+The rule is in `crates/proto/src/view/plan_asks.rs`; every client and the Worker run
+`protocol/vectors/plan-asks-v1.json` (20 cases, one per row of §2 plus fallbacks and
+edges; Rust runner `crates/proto/tests/plan_asks_vectors.rs`).
+
+- **Session row** (registry `sessions`, times in epoch ms) gains `asking`, present only
+  while a question is open:
+  `{"requestId": "r1", "askedAt": 1795599980000, "permission": "escalate",
+  "askedBy": "reviewer", "fromChatId": "k1"}`. `requestId` is the doc's unresolved
+  `MessagePart::Input` id (a mirror's own id for a forwarded question), the newest one
+  when several are open; a new id is a new question (the Worker keys its notice on it).
+  `permission` (a `PermissionPromptKind`) only for a permission prompt; `askedBy` (the
+  subagent's name) and `fromChatId` (the child chat that asked) only on a root that
+  mirrors a child's question — the child's own row carries `asking` too, so a reader that
+  reports once per root skips rows whose question is mirrored (the root's `fromChatId`
+  names the child). `askedAt` is epoch ms here (not RFC 3339 like the typed
+  `updatedAt`), so the registry and the typed shape agree. Rows without it come from old
+  hosts.
+- **Work row** (`bot_work`) gains `steered: [chat id]`, the sessions `steer_session`
+  drove. Deviation from §5: it is a work-level list, not part of `session_ids()`, because
+  `session_ids()` is also the "started by this work" test that lets the plan answer,
+  steer and stop a session without the owner (`may_drive`) and the set a stopped plan
+  stops; a steered session must keep needing the owner's approval. `plan_chat_ids()` =
+  started then steered, each once; a steered session's question marks the *current*
+  step (the first Running/Asking one) Asking (`settled_steps`).
+- **The rule** (pure): `session_ask(row, now, hostOnline)` = `asking` present → Asking
+  (AskingOffline when the row's `deviceId` isn't online), else the old rule
+  (`awaitingInput` and `updatedAt` under 45 s). `effective_indicator` reads
+  `AwaitingInput` whenever `asking` is present, whatever the status or age.
+  `ChatTree::question(chat)` walks the chat, then its child chats (`child.parentChatId`)
+  level by level, 8 deep, children in id order; the first chat that asks is the answer
+  (`askingChatId`). An archived chat has ended: it asks nothing and hides its subtree.
+  Needs you lists each `plan_chat_ids()` chat whose `question` is some, also after the
+  work ended (as before).

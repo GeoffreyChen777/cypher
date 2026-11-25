@@ -17,11 +17,13 @@ use crate::{AuthState, Chat, ChatIndicator, Session, SessionStatus, Space, Works
 mod checkout;
 mod gate;
 mod grouping;
+mod plan_asks;
 mod tool_chips;
 
 pub use checkout::*;
 pub use gate::*;
 pub use grouping::*;
+pub use plan_asks::*;
 pub use tool_chips::*;
 
 // ---------------------------------------------------------------------------
@@ -50,11 +52,16 @@ pub enum Indicator {
 /// sessions well inside this window.
 pub const SESSION_STALE_MS: i64 = 45_000;
 
-/// Staleness-checked indicator for a session row. Pure.
+/// Staleness-checked indicator for a session row. Pure. An open question
+/// ([`Session::asking`]) never ages out: it is a fact of the chat's doc,
+/// not of a live run.
 pub fn effective_indicator(session: Option<&Session>, now: DateTime<Utc>) -> Indicator {
     let Some(session) = session else {
         return Indicator::None;
     };
+    if session.asking.is_some() {
+        return Indicator::AwaitingInput;
+    }
     match session.status {
         SessionStatus::Idle => Indicator::None,
         SessionStatus::Errored => Indicator::Errored,

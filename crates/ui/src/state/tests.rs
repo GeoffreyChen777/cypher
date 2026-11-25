@@ -686,6 +686,7 @@ fn an_ended_plan_from_an_older_host_reads_with_its_steps_closed() {
         session_choice: Default::default(),
     };
     let work = |id: &str, state: WorkState, ended_at: Option<i64>| BotWork {
+        steered: Vec::new(),
         id: id.into(),
         bot_id: "b".into(),
         title: id.into(),

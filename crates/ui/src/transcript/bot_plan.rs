@@ -899,6 +899,7 @@ mod tests {
 
     fn work(state: WorkState, steps: Vec<WorkStep>) -> BotWork {
         BotWork {
+            steered: Vec::new(),
             id: "w".into(),
             bot_id: "b".into(),
             title: "Fix invoice rounding".into(),
