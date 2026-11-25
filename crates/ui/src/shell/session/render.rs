@@ -332,6 +332,7 @@ impl Shell {
             .px(px(accessory_inset + if wide { 32.0 } else { 0.0 }))
             .text_size(px(11.0));
 
+        let mut expiring = Vec::new();
         let left: AnyElement = match state.selected_chat.as_deref() {
             None => Empty.into_any_element(),
             Some(chat_id) => {
@@ -348,6 +349,20 @@ impl Shell {
                     .max();
                 let _ = started;
                 let sending = composer.read(cx).is_sending();
+                // An extension's latest notice (a rate-limit warning): a
+                // quiet line where the strip would otherwise be empty.
+                let notice = state
+                    .shown_notice(chat_id, now)
+                    .map(|n| (n.display_text(), n.at));
+                let quiet = |notice: Option<(String, chrono::DateTime<Utc>)>| match notice {
+                    Some((text, _)) => {
+                        notice_line(text, chat_id.to_owned(), slot_state.clone(), &theme)
+                    }
+                    None => Empty.into_any_element(),
+                };
+                if let Some((_, at)) = &notice {
+                    expiring.push((chat_id.to_owned(), *at));
+                }
 
                 // Unused here since the Working loader moved into the transcript
                 // (its trailer computes its own elapsed).
@@ -355,11 +370,11 @@ impl Shell {
                     // The working loader lives in the TRANSCRIPT now, under the
                     // streaming reply (user request) — the strip stays empty
                     // (its reserved height still steadies the composer).
-                    Indicator::Working => Empty.into_any_element(),
+                    Indicator::Working => quiet(notice),
                     // No label: the QuestionPanel right below IS the
                     // awaiting-input surface — a strip caption above it was
                     // redundant (user request).
-                    Indicator::AwaitingInput => Empty.into_any_element(),
+                    Indicator::AwaitingInput => quiet(notice),
                     Indicator::Errored => div()
                         .text_color(theme.danger)
                         .child(SharedString::from("Run failed"))
@@ -379,10 +394,13 @@ impl Shell {
                                 .child(SharedString::from("Sending…")),
                         )
                         .into_any_element(),
-                    Indicator::None => Empty.into_any_element(),
+                    Indicator::None => quiet(notice),
                 }
             }
         };
+        for (chat_id, at) in expiring {
+            self.expire_notice_at(chat_id, at, cx);
+        }
 
         // Pending-comments indicator pinned to the strip's upper-left; the
         // session status sits centered; the Subagents trigger stays right.
@@ -400,6 +418,81 @@ impl Shell {
             .child(subagents)
             .into_any_element()
     }
+}
+
+impl Shell {
+    /// Re-render once `chat_id`'s notice (arrived `at`) expires, so the
+    /// strip drops it without waiting for other activity. One timer per
+    /// chat; a newer notice replaces it.
+    fn expire_notice_at(
+        &mut self,
+        chat_id: String,
+        at: chrono::DateTime<Utc>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .notice_timers
+            .get(&chat_id)
+            .is_some_and(|(t, _)| *t == at)
+        {
+            return;
+        }
+        let ttl = chrono::Duration::seconds(cypher_proto::NOTICE_TTL_SECS);
+        let left = (at + ttl - Utc::now())
+            .to_std()
+            .unwrap_or_default()
+            .saturating_add(Duration::from_millis(250));
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(left).await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        });
+        self.notice_timers.insert(chat_id, (at, task));
+    }
+}
+
+/// The status strip's notice line: an extension's side remark in faint,
+/// neutral ink, one line, with a small dismiss mark. Dismissing hides this
+/// notice in this tile; a newer one shows again.
+fn notice_line(
+    text: String,
+    chat_id: String,
+    state: Entity<AppState>,
+    theme: &Theme,
+) -> AnyElement {
+    let (faint, muted) = (theme.text_faint, theme.text_muted);
+    div()
+        .id("session-notice")
+        .debug_selector(|| "session-notice".into())
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .text_color(faint)
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .child(SharedString::from(text.clone())),
+        )
+        .child(
+            div()
+                .id("session-notice-dismiss")
+                .debug_selector(|| "session-notice-dismiss".into())
+                .role(gpui::Role::Button)
+                .aria_label("Dismiss")
+                .flex_none()
+                .cursor_pointer()
+                .opacity(0.7)
+                .hover(|s| s.opacity(1.0))
+                .child(icons::icon(icons::CLOSE).size(px(10.0)).text_color(muted))
+                .on_click(move |_, _, cx| {
+                    state.update(cx, |state, cx| {
+                        state.dismiss_notice(&chat_id);
+                        cx.notify();
+                    });
+                }),
+        )
+        .into_any_element()
 }
 
 /// A pill floating over the transcript above the composer: a LABELED
