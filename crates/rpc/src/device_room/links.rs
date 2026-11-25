@@ -20,8 +20,8 @@ use super::trust::{
     noise_payload, refusal_message,
 };
 use super::{
-    PING_INTERVAL, RELAY_KIND, RPC_KIND, SILENCE_LEASE, TokenSource, device_room_ws_url,
-    token_changed,
+    HOST_OFFLINE, PING_INTERVAL, RELAY_KIND, RPC_KIND, SILENCE_LEASE, TokenSource,
+    device_room_ws_url, token_changed,
 };
 use crate::{RpcClient, RpcError, lock};
 
@@ -307,6 +307,13 @@ pub struct LinkCacheConfig {
     /// redialed at full cadence; callers fail fast in between (zeron peers.ts behavior).
     pub cooldown_base: Duration,
     pub cooldown_max: Duration,
+    /// The cooldown once the relay itself answered `host_offline` twice in a
+    /// row while the peer's presence was stale (D1, `docs/design/do-cost.md`):
+    /// such a peer is dialed once per this interval, one attempt each time,
+    /// until something says it may be back (its presence beat via
+    /// [`LinkCache::reset_cooldown`], a system wake, a token change). A
+    /// network error never reaches it: it keeps [`Self::cooldown_max`].
+    pub cooldown_offline_max: Duration,
     /// Readiness probe budget: the relay accepts client joins even when the host is
     /// offline, so a `ListHarnesses` round-trip proves the path before caching.
     pub probe_timeout: Duration,
@@ -332,6 +339,7 @@ impl LinkCacheConfig {
             token,
             cooldown_base: Duration::from_secs(5),
             cooldown_max: Duration::from_secs(60),
+            cooldown_offline_max: Duration::from_secs(600),
             probe_timeout: Duration::from_secs(10),
             dial_retry_spacing: Duration::from_millis(1500),
             trust: Arc::new(NoTrust),
@@ -344,15 +352,41 @@ impl LinkCacheConfig {
     }
 }
 
-/// Consecutive failures older than this decay to zero — a blip an hour ago must
-/// not escalate today's first retry up the backoff curve.
+/// A failure streak whose cooldown ended this long ago with no new failure
+/// decays to zero — a blip an hour ago must not escalate today's first retry
+/// up the backoff curve. Counted from the cooldown's end, so a peer held for
+/// [`LinkCacheConfig::cooldown_offline_max`] does not decay by waiting it out.
 const FAILURE_DECAY: Duration = Duration::from_secs(600);
+
+/// Whether a peer's presence is fresh (the engine's workspace view). Without
+/// one, presence counts as stale and the relay's answer decides.
+pub type PresenceCheck = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 #[derive(Default)]
 struct DialState {
     failures: u32,
     last_failure: Option<Instant>,
     cooldown_until: Option<Instant>,
+    /// The last sequence ended on the relay's own `host_offline` while the
+    /// peer's presence was stale: the next sequence is one dial.
+    offline: bool,
+}
+
+/// Why one dial attempt failed.
+struct DialFailure {
+    error: RpcError,
+    /// The relay answered `host_offline`: the room has no host socket. Not a
+    /// network error, which says nothing about the peer.
+    host_offline: bool,
+}
+
+impl From<RpcError> for DialFailure {
+    fn from(error: RpcError) -> Self {
+        Self {
+            error,
+            host_offline: false,
+        }
+    }
 }
 
 /// Lazily-dialed, cached peer links keyed by device id — the Rust twin of zeron's
@@ -366,6 +400,7 @@ pub struct LinkCache {
     links: Mutex<HashMap<String, Arc<DeviceLink>>>,
     dial_state: Mutex<HashMap<String, DialState>>,
     dial_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    presence: Mutex<Option<PresenceCheck>>,
 }
 
 impl LinkCache {
@@ -383,6 +418,7 @@ impl LinkCache {
             links: Mutex::new(HashMap::new()),
             dial_state: Mutex::new(HashMap::new()),
             dial_locks: Mutex::new(HashMap::new()),
+            presence: Mutex::new(None),
         });
         // Wake = every cached link is half-open and every cooldown is moot
         // (the failures belonged to the pre-suspend network). Drop them so the
@@ -469,8 +505,16 @@ impl LinkCache {
         if let Some(message) = self.cooling(device_id) {
             return Err(RpcError::Transport(message));
         }
+        // A peer the relay last reported hostless, whose presence is still
+        // stale, gets one dial: the in-call retries exist to ride over the
+        // host's own rejoin window, and that window has long passed (D1).
+        let attempts = if self.known_offline(device_id) {
+            1
+        } else {
+            DIAL_ATTEMPTS
+        };
         let mut last_err = None;
-        for attempt in 0..DIAL_ATTEMPTS {
+        for attempt in 0..attempts {
             if attempt > 0 {
                 tokio::time::sleep(self.config.dial_retry_spacing * attempt).await;
             }
@@ -487,16 +531,38 @@ impl LinkCache {
                     tracing::info!(device = %device_id, "peer: connected via device room");
                     return Ok(link.client());
                 }
-                Err(err) => {
-                    tracing::debug!(device = %device_id, attempt, error = %err, "peer: dial attempt failed");
-                    last_err = Some(err);
+                Err(failure) => {
+                    tracing::debug!(device = %device_id, attempt, error = %failure.error, "peer: dial attempt failed");
+                    last_err = Some(failure);
                 }
             }
         }
         // Only the exhausted sequence counts as ONE failure on the cooldown
         // curve — the in-call retries must not escalate it by themselves.
-        self.note_failure(device_id);
-        Err(last_err.unwrap_or(RpcError::Closed))
+        let host_offline = last_err.as_ref().is_some_and(|f| f.host_offline);
+        self.note_failure(device_id, host_offline && !self.presence_fresh(device_id));
+        Err(last_err.map_or(RpcError::Closed, |f| f.error))
+    }
+
+    /// Tell the cache whether a peer's presence is fresh (D1). The engine
+    /// installs its workspace presence view; without one every peer counts
+    /// as stale, so only the relay's `host_offline` answer decides.
+    pub fn set_presence_check(&self, check: PresenceCheck) {
+        *lock(&self.presence) = Some(check);
+    }
+
+    fn presence_fresh(&self, device_id: &str) -> bool {
+        let check = lock(&self.presence).clone();
+        check.is_some_and(|fresh| fresh(device_id))
+    }
+
+    /// The last sequence ended on a relay `host_offline` with stale presence,
+    /// and presence is still stale.
+    fn known_offline(&self, device_id: &str) -> bool {
+        let offline = lock(&self.dial_state)
+            .get(device_id)
+            .is_some_and(|entry| entry.offline);
+        offline && !self.presence_fresh(device_id)
     }
 
     /// Drop a cached link after a failed RPC so the next call re-dials.
@@ -555,27 +621,39 @@ impl LinkCache {
         ))
     }
 
-    fn note_failure(&self, device_id: &str) {
+    /// Count one failed sequence. `offline`: the relay answered
+    /// `host_offline` and the peer's presence is stale.
+    fn note_failure(&self, device_id: &str, offline: bool) {
         let mut state = lock(&self.dial_state);
         let entry = state.entry(device_id.to_string()).or_default();
         // Stale streaks restart the curve rather than escalating it.
-        if entry
-            .last_failure
-            .is_some_and(|at| at.elapsed() > FAILURE_DECAY)
-        {
+        let decayed = entry
+            .cooldown_until
+            .or(entry.last_failure)
+            .is_some_and(|at| at.elapsed() > FAILURE_DECAY);
+        if decayed {
             entry.failures = 0;
+            entry.offline = false;
         }
         entry.last_failure = Some(Instant::now());
         entry.failures += 1;
-        let backoff = self
-            .config
-            .cooldown_base
-            .saturating_mul(1u32 << (entry.failures - 1).min(16))
-            .min(self.config.cooldown_max);
+        // The first failure keeps today's short cooldown whatever the cause:
+        // it covers the host's own rejoin and a restart. A second offline
+        // answer in a row means the device is away; hold it at the offline
+        // cap until its presence returns.
+        let backoff = if offline && entry.offline {
+            self.config.cooldown_offline_max
+        } else {
+            self.config
+                .cooldown_base
+                .saturating_mul(1u32 << (entry.failures - 1).min(16))
+                .min(self.config.cooldown_max)
+        };
+        entry.offline = offline;
         entry.cooldown_until = Some(Instant::now() + backoff);
     }
 
-    async fn dial(&self, device_id: &str) -> Result<Arc<DeviceLink>, RpcError> {
+    async fn dial(&self, device_id: &str) -> Result<Arc<DeviceLink>, DialFailure> {
         // Fresh token on every attempt — an expired one is never reused.
         let token = self
             .config
@@ -592,20 +670,42 @@ impl LinkCache {
             &token,
         );
         tracing::info!(device = %device_id, "peer: dialing via device room");
-        let link =
-            Arc::new(DeviceLink::connect_to(&url, device_id, self.config.trust.as_ref()).await?);
+        let link = match DeviceLink::connect_to(&url, device_id, self.config.trust.as_ref()).await {
+            Ok(link) => Arc::new(link),
+            // A sealed link meets the relay's answer during the handshake.
+            Err(RpcError::Transport(code)) if code == HOST_OFFLINE => {
+                return Err(DialFailure {
+                    error: RpcError::Transport(code),
+                    host_offline: true,
+                });
+            }
+            Err(err) => return Err(err.into()),
+        };
         // Readiness probe: prove the host answers before caching (an offline host bounces
         // host_offline, which closes the link and fails this call fast).
         let client = link.client();
         let probe = client.call(crate::methods::LIST_HARNESSES, serde_json::json!({}));
-        tokio::time::timeout(self.config.probe_timeout, probe)
+        let answer = tokio::time::timeout(self.config.probe_timeout, probe)
             .await
             .map_err(|_| {
                 RpcError::Transport(format!("peer {device_id}: readiness check timed out"))
-            })?
-            .map_err(|e| {
-                RpcError::Transport(format!("peer {device_id}: readiness check failed: {e}"))
             })?;
+        if let Err(e) = answer {
+            // An offline host bounces the probe with `host_offline`, which
+            // closes the link; the reason lands a moment after the call fails.
+            let mut closed = link.closed();
+            let reason =
+                tokio::time::timeout(Duration::from_millis(100), closed.wait_for(Option::is_some))
+                    .await
+                    .ok()
+                    .and_then(|reason| reason.ok().and_then(|reason| reason.clone()));
+            return Err(DialFailure {
+                error: RpcError::Transport(format!(
+                    "peer {device_id}: readiness check failed: {e}"
+                )),
+                host_offline: reason.as_deref() == Some(HOST_OFFLINE),
+            });
+        }
         Ok(link)
     }
 
