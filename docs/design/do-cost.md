@@ -118,6 +118,127 @@ size or 30 more always-on engines at the new per-engine cost.
 
 If pings are billed (M1), add about 1.0M to every "Billed" row and K1 removes it again.
 
+### Measured on the branch (2026-11-25)
+
+A local before/after run of the four built options (T1, B1, C1, D1): before = origin/main
+`13a396ec`, after = branch `cypher/do-cost-cuts` at `0b773f7b`. No live Cloudflare.
+
+Method:
+
+- Each side ran its own Edge from its own worktree under `wrangler dev` (local workerd,
+  `AUTH_MODE=dev`, its own port and `--persist-to` directory) and its own headless engines
+  built from the same worktree (`--features development`, mock harness). Nothing was shared.
+- Counting: a measurement-only wrangler config whose entry module re-exports the Edge and
+  wraps each Durable Object class so that `fetch` (split into WebSocket upgrade and plain
+  HTTP), `alarm` and `webSocketMessage` log one line each; the Worker itself is unchanged and
+  the wrapper is not in the repository. Billed = HTTP + upgrades + alarms + WebSocket
+  messages / 20, as in [Billing rules](#billing-rules). Auto-answered `ping`s never reach
+  `webSocketMessage`, so they are not counted, as assumed there.
+- Scenario, the same on both sides: two engines signed in as two users (`alice@org-a`,
+  `bob@org-b`), one bot on each and a live bot connection between them (the e2e-bots
+  setup), so both hosts have a connected bot room. Then (a) **idle 25 min**, in real time;
+  (b) **actions**: a chat run in a bot chat, a trust change ("Only paired devices" on, then
+  off: two chain appends), a bot question B → A answered by A's mock harness; (c) **a forced
+  reconnect**: a Worker reload, which drops every socket at once (2 registry, 5 chat and 2
+  DeviceRoom host sockets); (d) **a dead peer**: a second device of alice's joins once and
+  stops; a minute later alice's first engine calls it (`ListHarnesses` with
+  `targetDeviceId`), once, then 146 s later 18 more times 20 s apart.
+- No production constant was changed or compressed. The 15 min intervals were observed,
+  not simulated; with one 25 min window each side's count depends on where the safety
+  read falls, so the per-day lines below use the observed interval.
+
+Idle, 25 min, two engines, both with a connected bot room:
+
+| Class | Before: HTTP / upgrades / alarms / WS msgs | Before billed | After: HTTP / upgrades / alarms / WS msgs | After billed |
+|---|---|---:|---|---:|
+| RegistryRoom | 0 / 0 / 0 / 202 | 10.1 | 0 / 0 / 0 / 202 | 10.1 |
+| ChatRoom | 0 / 0 / 0 / 2 | 0.1 | 0 / 0 / 0 / 2 | 0.1 |
+| TrustRoom | 50 / 0 / 0 / 0 | 50 | 4 / 0 / 0 / 0 | 4 |
+| DeviceRoom | 0 | 0 | 0 | 0 |
+| BotRoom | 50 / 0 / 0 / 0 | 50 | 2 / 0 / 0 / 0 | 2 |
+| PushDevice | 0 | 0 | 0 | 0 |
+| **Total** | | **110.2** | | **16.2** |
+
+RegistryRoom's messages are presence beats (200: one per 15 s per engine) and two 900 s
+quiet probes; neither option touches them. After: the chain reads came 15:00 apart
+(14:25:15, 14:40:15 UTC) and the inbox pulls 15:05 apart (14:14:11 rejoin pull, 14:29:16),
+both engines together.
+
+Per engine-day, idle, extrapolated from the cadences:
+
+| Line | Before | After | Doc's model |
+|---|---:|---:|---|
+| TrustRoom chain reads | 1,440 | 96 | 1,440 → about 96 safety polls (T1) |
+| BotRoom inbox pulls, per connected bot room | 1,440 | 96 | 1,440 → about 96 (B1) |
+| RegistryRoom presence + probe messages | 5,856 (293 billed) | 5,856 (293 billed) | 172,800 beats, 8,640 billed a month: unchanged |
+| **Billed, one engine with one connected bot** | **about 3,180** | **about 490** | |
+
+Actions (chat run, two trust appends, one bot question; 2.7–2.8 min):
+
+| Class | Before billed | After billed | Difference |
+|---|---:|---:|---|
+| RegistryRoom | 2.1 | 4.2 | +2 HTTP `/trust-head` (TrustRoom → RegistryRoom, one per append) |
+| ChatRoom | 10.5 | 10.4 | same requests (3 upgrades, 3 `POST /rows`, 3 `GET /rows`, 1 `/checkpoint`) |
+| TrustRoom | 10 | 5 | 2 appends either way; before 8 minute-poll reads, after 3 reads (the one after the first append came in the same second as the append) |
+| DeviceRoom | 2 | 4 | +2 `/nudge`: B1 nudges progress states (`/peer/state`) |
+| BotRoom | 15 | 13 | the same exchange (ask, state, answer, acks); before 6 inbox pulls (polls), after 3 (nudged) |
+| **Total** | **39.6** | **36.6** | |
+
+Forced reconnect, the 20 s after the Worker reload (C1):
+
+| | Before | After |
+|---|---|---|
+| Upgrades | 9 | 9 |
+| `GET /rows` beside the dial | 2 registry + 5 chat | 0 |
+| BotRoom inbox pulls | 0 | 2 (B1's pull on a DeviceRoom rejoin, one per host) |
+| Other | 2 TrustRoom minute polls that fell in the window | none |
+| Billed | 18.7 | 11.7 |
+
+Every socket that dropped had a current copy, so every hedged pull was avoided: one HTTP
+request per reconnected socket, as the model counts. B1 adds one pull per push room per host
+rejoin, a cost the model did not list; it is small beside the 1,344 polls a day it removes.
+
+Dead peer (D1), DeviceRoom requests caused by the calls:
+
+| | Before (9.1 min) | After (8.4 min) |
+|---|---:|---:|
+| Dials (upgrades) | 27 | 4 |
+| Messages on them (the probe frame) | 27 | 4 |
+| Relay status probes (`GET /status`) | 4 | 0 |
+| Billed | 32.4 | 4.2 |
+| Steady state | 3 dials every 65 s (15:07:33, 15:08:38, 15:09:43, 15:10:47) | 3 dials, then 1, then the 600 s cooldown (next due after the run) |
+| Per day for one caller stuck on the dead peer | about 4,000 upgrades | 144 |
+
+The doc's 4,019 → 144 a day holds. Both sides' first call dialed three times; the
+after side's second sequence was one dial and its third would have come 600 s later.
+The after side was reloaded in the middle of its calls (two host upgrades, not counted
+above); that does not reset a dial cooldown.
+
+A pitfall this run hit: the before binary was first built from a copy of the after
+worktree's `target/`, and Cargo kept the after `cypher-rpc` and `cypher-proto` because the
+baseline sources were older than the copied artifacts. Its idle, action and reconnect
+numbers are valid (T1, B1 and C1 live in `cypher-sync` and `cypher-engine`, which were
+rebuilt from the baseline), but its first dead-peer run already had D1's 600 s cap. The
+D1 numbers above are from a rerun after touching the baseline sources and rebuilding; for
+the next such run, touch the sources of the changed crates after copying `target/`.
+
+What this run cannot show:
+
+- The real traffic mix: how many chats, phones and bots each user has, how often sockets
+  drop, and how often a caller asks for a dead peer. The per-day lines above are per engine
+  and per connected bot; the 30-day target in [Target](#target) still rests on the Nov 17–23
+  counts.
+- iOS: no phone or simulator joined; the iOS halves of T1 and C1 are covered by their unit
+  tests only.
+- The B1 nudge ladder never ran (0 alarms on both sides: every nudge was acknowledged), and
+  the T1 retry alarm never ran (every push reached its registry). Their unit and workerd
+  tests cover them.
+- Single-device trust groups only: a removal pushed to another device's engine, and the
+  60 s rule after a registry disconnect, were not driven here.
+- Production incidents (request storms, the Nov 6–11 kind), Cloudflare's sampling, and
+  whether text `ping` bills (M1): local workerd answers pings without an invocation, like
+  production, so they are absent from both columns.
+
 ### At 10× devices
 
 Billed requests per 30 days per unit:
