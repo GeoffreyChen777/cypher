@@ -1060,8 +1060,12 @@ final class SessionStore {
     // MARK: Command plane (ledger rule 1: append-only, own entries only)
 
     @discardableResult
-    func sendRun(prompt: String, chat: Chat, attachments: [String] = [], agentPrompt: String? = nil) -> Bool {
-        guard !CommentPrompt.blocksSlash(prompt, hasComments: agentPrompt != nil) else { return false }
+    func sendRun(
+        prompt: String, chat: Chat, attachments: [String] = [], agentPrompt: String? = nil,
+        knownCommands: Set<String>? = nil
+    ) -> Bool {
+        guard !CommentPrompt.blocksSlash(prompt, hasComments: agentPrompt != nil, known: knownCommands)
+        else { return false }
         if let directTransport { return sendDirect(prompt, isSteer: false, via: directTransport) }
         if offline {
             demoResponder?(prompt, false, MessageComment.fromAgentPrompt(agentPrompt ?? ""))
@@ -1093,8 +1097,9 @@ final class SessionStore {
     }
 
     @discardableResult
-    func sendSteer(prompt: String, agentPrompt: String? = nil) -> Bool {
-        guard !CommentPrompt.blocksSlash(prompt, hasComments: agentPrompt != nil) else { return false }
+    func sendSteer(prompt: String, agentPrompt: String? = nil, knownCommands: Set<String>? = nil) -> Bool {
+        guard !CommentPrompt.blocksSlash(prompt, hasComments: agentPrompt != nil, known: knownCommands)
+        else { return false }
         if let directTransport { return sendDirect(prompt, isSteer: true, via: directTransport) }
         if offline {
             demoResponder?(prompt, true, MessageComment.fromAgentPrompt(agentPrompt ?? ""))

@@ -2,6 +2,8 @@
 
 use super::*;
 
+use crate::slash_command::{CommandNames, KnownCommands};
+
 /// Runtime commands a bot chat refuses (`cypher_engine::bots::REFUSED_COMMANDS`).
 const BOT_REFUSED_COMMANDS: [&str; 3] = ["scripts", "orchestrate", "goal"];
 /// The ones the workspace's own chat with its owner runs after all
@@ -75,6 +77,9 @@ impl Composer {
                 if let Ok(value) = result
                     && let Ok(commands) = serde_json::from_value::<Vec<SlashCommand>>(value)
                 {
+                    if let Some(target) = &target {
+                        KnownCommands::record(cx, target, harness, &commands);
+                    }
                     composer.slash_cache.insert(harness, commands);
                     if composer.slash.token.is_some() {
                         composer.slash.loading = false;
@@ -85,6 +90,13 @@ impl Composer {
             })
             .ok();
         }));
+    }
+
+    /// The host catalog this composer's sends are read with (which of them
+    /// run as slash commands): its target device's, for the resolved harness.
+    pub(super) fn known_commands(&self, cx: &App) -> Option<Arc<CommandNames>> {
+        let harness = self.pickers.read(cx).resolved(cx).harness?;
+        KnownCommands::of(cx, &self.command_target(cx)?, harness)
     }
 
     /// Whether this composer offers `/permissions`: a Pi chat's own composer
@@ -356,6 +368,9 @@ impl Composer {
                 match result {
                     Ok(value) => match serde_json::from_value::<Vec<SlashCommand>>(value) {
                         Ok(commands) => {
+                            if let Some(target) = &target {
+                                KnownCommands::record(cx, target, harness, &commands);
+                            }
                             composer.slash_cache.insert(harness, commands);
                         }
                         Err(err) => tracing::warn!(%err, "slash command decode failed"),

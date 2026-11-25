@@ -112,7 +112,15 @@ impl CommandsPage {
                 }
                 page.commands = match result {
                     Ok(value) => match serde_json::from_value::<Vec<SlashCommand>>(value) {
-                        Ok(commands) => Loadable::Ready(commands),
+                        Ok(commands) => {
+                            crate::slash_command::KnownCommands::record(
+                                cx,
+                                &ticket.id,
+                                HarnessId::Pi,
+                                &commands,
+                            );
+                            Loadable::Ready(commands)
+                        }
                         Err(err) => Loadable::Error(err.to_string()),
                     },
                     Err(err) => Loadable::Error(format!("{}: {err}", ticket.label)),

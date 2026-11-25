@@ -19,6 +19,7 @@ mod quote_origin;
 mod settings;
 mod shell;
 mod side_chats;
+mod slash_command;
 mod state;
 mod subagents;
 mod terminal;

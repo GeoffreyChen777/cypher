@@ -33,8 +33,11 @@ enum CommentPrompt {
             .replacingOccurrences(of: "\u{a0}", with: " ")
     }
 
-    static func blocksSlash(_ text: String, hasComments: Bool) -> Bool {
-        hasComments && text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/")
+    /// Comments (and session references) ride a normal message only: a
+    /// slash command would be misrouted by the host's command interception.
+    /// `known`: the host's command names, when loaded (`SlashCommandText`).
+    static func blocksSlash(_ text: String, hasComments: Bool, known: Set<String>? = nil) -> Bool {
+        hasComments && SlashCommandText.isCommand(text, known: known)
     }
 
     static func hasSendContent(text: String, attachmentCount: Int, commentCount: Int) -> Bool {
