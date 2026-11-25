@@ -29,8 +29,9 @@ struct InlineImageBlock: View {
     /// has the path as its alt), unless the text around it said it.
     private var captionText: String? { alt.isEmpty || !caption ? nil : alt }
 
-    /// What names the image: its alt, else its file name.
-    private var name: String { alt.isEmpty ? ImageLoader.fileName(src) : alt }
+    /// What names the image: its alt, else (or when the alt is only the
+    /// path) its file name.
+    private var name: String { alt.isEmpty || alt == src ? ImageLoader.fileName(src) : alt }
 
     var body: some View {
         let current =

@@ -305,49 +305,69 @@ struct FileCardRow: View {
 // MARK: - Table
 
 /// A csv/tsv head: the header row on a fill, data rows striped, in the
-/// code face; wider than the card it scrolls sideways.
+/// code face. Each column is as wide as its widest shown cell; wider than
+/// the card, the table scrolls sideways.
 struct FileTableView: View {
     let table: FilePreview.Table
 
+    @ScaledMetric(relativeTo: .body) private var textSize: CGFloat = 12
+    private static let cellPadding: CGFloat = 10
+
     var body: some View {
+        let widths = columnWidths()
         ViewThatFits(in: .horizontal) {
-            grid(fill: true)
+            rows(widths, fill: true)
             ScrollView(.horizontal, showsIndicators: false) {
-                grid(fill: false)
+                rows(widths, fill: false)
             }
         }
         .background(Color(uiColor: .tertiarySystemBackground))
     }
 
-    private func grid(fill: Bool) -> some View {
-        Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
-            if let columns = table.columns {
-                row(columns, header: true, stripe: false)
-            }
-            ForEach(Array(table.rows.enumerated()), id: \.offset) { at, cells in
-                row(cells, header: false, stripe: at % 2 == 1)
+    /// Each column's width in points: its widest cell in the code face.
+    private func columnWidths() -> [CGFloat] {
+        let font = Theme.monoUI(textSize, weight: .semibold)
+        var widths = [CGFloat](repeating: 0, count: table.width)
+        for row in (table.columns.map { [$0] } ?? []) + table.rows {
+            for (column, cell) in row.enumerated() where column < widths.count {
+                let width = (cell as NSString).size(withAttributes: [.font: font]).width
+                widths[column] = max(widths[column], ceil(width))
             }
         }
-        .frame(maxWidth: fill ? .infinity : nil, alignment: .leading)
+        return widths.map { $0 + 2 * Self.cellPadding }
     }
 
-    private func row(_ cells: [String], header: Bool, stripe: Bool) -> some View {
-        GridRow {
-            ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
-                Text(cell.isEmpty ? " " : cell)
+    private func rows(_ widths: [CGFloat], fill: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let columns = table.columns {
+                row(columns, widths, header: true, stripe: false, fill: fill)
+            }
+            ForEach(Array(table.rows.enumerated()), id: \.offset) { at, cells in
+                row(cells, widths, header: false, stripe: at % 2 == 1, fill: fill)
+            }
+        }
+    }
+
+    private func row(
+        _ cells: [String], _ widths: [CGFloat], header: Bool, stripe: Bool, fill: Bool
+    ) -> some View {
+        HStack(spacing: 0) {
+            ForEach(Array(zip(cells, widths).enumerated()), id: \.offset) { _, pair in
+                Text(pair.0)
                     .font(Theme.mono(12, weight: header ? .semibold : .regular))
                     .foregroundStyle(header ? Theme.text : Theme.text.opacity(0.88))
                     .lineLimit(1)
-                    .fixedSize()
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        header
-                            ? Color(uiColor: .tertiarySystemFill)
-                            : stripe ? Color(uiColor: .quaternarySystemFill) : Color.clear)
+                    .padding(.horizontal, Self.cellPadding)
+                    .frame(width: pair.1, alignment: .leading)
             }
+            if fill { Spacer(minLength: 0) }
         }
+        .padding(.vertical, 5)
+        .background(
+            Rectangle().fill(
+                header
+                    ? Color(uiColor: .tertiarySystemFill)
+                    : stripe ? Color(uiColor: .quaternarySystemFill) : Color.clear))
     }
 }
 

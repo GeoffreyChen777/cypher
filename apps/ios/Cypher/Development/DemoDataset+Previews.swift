@@ -68,8 +68,8 @@ extension DemoDataset {
 
             `notes/old-run.csv`
 
-            The app icon ![the app icon](notes/icon.png) didn't change, so the sentence names it once. On its own \
-            it keeps its caption:
+            The ![app icon](notes/icon.png) didn't change, so the sentence says its name once. On its own an \
+            image keeps its caption:
 
             ![App icon, 96 px](notes/icon.png)
             """
