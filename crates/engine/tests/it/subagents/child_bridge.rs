@@ -1655,3 +1655,58 @@ async fn boot_recovery_resolves_dead_mirrors_and_keeps_own_questions() {
     assert_eq!(row.asking.map(|a| a.request_id).as_deref(), Some("own-1"));
     core.shutdown().await;
 }
+
+/// docs/design/plan-asks.md, case h: a second subagent asks while the
+/// parent already shows the first one's question. The status stays awaiting
+/// input, but the row's `asking` moves to the newest question (a real row
+/// write, so it is reported); answering it falls back to the older one, and
+/// the last answer clears it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_question_moves_the_row_to_the_newest() {
+    let rig = asking_rig();
+    let core = &rig.core;
+    core.doc_host
+        .queue_command(PARENT, pi_run("delegate it"))
+        .expect("parent run");
+    support::wait_for(
+        || support::status(core, PARENT) == Some(SessionStatus::Working),
+        "parent turn running",
+    )
+    .await;
+    let asking = || {
+        core.sessions
+            .session_status(PARENT)
+            .and_then(|s| s.asking)
+            .map(|a| (a.request_id, a.from_chat_id))
+    };
+    let first_child = start(core, "run-1", PARENT).await.expect("start ok");
+    let (first, _) = support::wait_for_some("first question", &asking).await;
+    let second_child = start(core, "run-2", PARENT).await.expect("start ok");
+    let (second, from) = support::wait_for_some("second question", || {
+        asking().filter(|(id, _)| *id != first)
+    })
+    .await;
+    assert_eq!(from.as_deref(), Some(second_child.as_str()));
+    assert_eq!(
+        support::status(core, PARENT),
+        Some(SessionStatus::AwaitingInput)
+    );
+
+    core.doc_host
+        .queue_command(PARENT, answer_to(second, "grid"))
+        .expect("answer the newest");
+    support::wait_for(
+        || asking() == Some((first.clone(), Some(first_child.clone()))),
+        "the row falls back to the older question",
+    )
+    .await;
+    core.doc_host
+        .queue_command(PARENT, answer_to(first, "list"))
+        .expect("answer the first");
+    support::wait_for(
+        || asking().is_none() && support::status(core, PARENT) == Some(SessionStatus::Working),
+        "no question left; the parent's own run shows again",
+    )
+    .await;
+    core.shutdown().await;
+}

@@ -319,3 +319,24 @@ edges; Rust runner `crates/proto/tests/plan_asks_vectors.rs`).
   no mirror), and says "Waiting for its device" in place of the time when the host is
   offline. The work row's ring and "Waiting on you" turn amber when any step asks, not
   only the first running one.
+
+### Step 2 evidence
+
+| Case | After step 2 | Verified by |
+|---|---|---|
+| (a) permission prompt, step session | Needs you, logo, Dock badge; step Asking, work "Waiting on you" | live (`needs-a-b.png`, `plan-step-asking.png`), vectors |
+| (b) `ask_user`, step session | same | live (`needs-a-b.png`), vectors |
+| (a/b) late heartbeat, other device | shown whatever the row's age | vectors, `plan_questions_outside_fresh_step_rows_are_needs_you` |
+| (c) sync subagent | shown under the step session (mirror; a child without a mirror is read directly) | vectors, `plan_questions_reach_needs_you_on_the_shared_rule`, `child_question_is_forwarded_to_the_parent_and_answered_there` |
+| (d′) subagent asks after the parent's run ended | the parent's row keeps `asking`; answered from the parent, the subagent gets it | `a_question_forwarded_into_an_ended_parent_stays_asking` (no longer ignored, < 1 s) |
+| (e1) own question across a crash | row Idle with `asking`; coordinator `Asking`; the answer runs as the next turn | `a_question_open_across_a_crash_is_still_asking_after_recovery`, `an_idle_row_with_an_open_question_is_asking`; live only the auto-resume variant (`e1-after-crash.png`: the resumed turn asks again and is answered from Needs you, `e1-answered.png`) |
+| (e2) dead forwarded question across a restart | mirror resolved, hold released, own question kept | `boot_recovery_resolves_dead_mirrors_and_keeps_own_questions`, vectors |
+| (f) host offline | shown, "Waiting for its device"; coordinator says the device is offline | vectors, `plan_questions_reach_needs_you_on_the_shared_rule`; not live (a local dev instance has no peers) |
+| (g) steered session | Needs you, current step Asking; steering again still needs the owner | vectors, `steered_sessions_are_plan_chats_but_not_started_ones`, `steered_sessions_are_recorded_once_and_bounded`; not live |
+| (h) second question | row's `asking` moves to the newest and back; reported as a new event | `a_second_question_moves_the_row_to_the_newest`, `a_new_question_is_reported_without_a_status_change` |
+
+Live: private dev instance `plan-asks-surface` (local mode, mock harness), shots in
+`~/.cypher-development/plan-asks-surface/shots/after/`. Answering from Needs you moved the
+step back to Running and finished the session (`plan-continues.png`). A graceful engine
+stop ends runs and their questions (and fails a running plan, as before); only a crash
+leaves a question open.
