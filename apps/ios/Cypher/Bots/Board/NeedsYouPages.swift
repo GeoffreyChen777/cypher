@@ -333,8 +333,7 @@ struct AskingCard: View {
                     NeedsCardNote(text: note(request))
                 }
             } actions: {
-                NeedsCardButton(title: "Answer in the session") { openChat?(chat.id) }
-                    .accessibilityIdentifier("asking-open")
+                NeedsCardButton(title: "Answer in the session", identifier: "asking-open") { openChat?(chat.id) }
             }
         }
     }
@@ -345,10 +344,9 @@ struct AskingCard: View {
         let options = Array(question.options.enumerated())
         return NeedsCardButtonRow {
             ForEach(options, id: \.offset) { ix, option in
-                NeedsCardButton(title: option) {
+                NeedsCardButton(title: option, identifier: "asking-option-\(ix)") {
                     respond(request.requestId, [UserInputAnswer(questionId: question.id, labels: [option])])
                 }
-                .accessibilityIdentifier("asking-option-\(ix)")
             }
         }
         .disabled(!canAnswer)

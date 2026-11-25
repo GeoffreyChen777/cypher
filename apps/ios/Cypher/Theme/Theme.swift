@@ -119,15 +119,25 @@ enum Theme {
     static let cardInsetRadius: CGFloat = cardRadius - cardPad
     /// Between cards on a page.
     static let cardGap: CGFloat = 20
-    /// A round glass icon button (a decision in a card or a row): the
-    /// glass circle's diameter, which is its hit target too (at least
-    /// 44pt), and its symbol's size.
-    static let iconButtonSize: CGFloat = 44
+    /// Every decision button's height, whatever its shape: a round glass
+    /// icon button's diameter, a capsule's height (Run once, Approve,
+    /// Reject, an answer to pick), a row's ✕ / ✓ — iOS's 44pt control,
+    /// its hit target too. It grows with the text size by its label's line
+    /// alone (`decisionLabelLine`, scaled as `.subheadline`), the same for
+    /// every shape, so the buttons stay one height at every size
+    /// (`DecisionHeight`).
+    static let decisionHeight: CGFloat = 44
+    /// The part of `decisionHeight` that is the label's line, at the
+    /// default text size: what scales with Dynamic Type.
+    static let decisionLabelLine: CGFloat = 20
+    /// How far a capsule's one-line title may shrink before it truncates.
+    static let decisionTitleMinScale: CGFloat = 0.8
+    /// A decision icon's symbol, at the default text size.
     static let iconButtonSymbol: CGFloat = 17
     /// What system glass adds around a regular-size button's label on
-    /// each side; a label `iconButtonSize` less twice this makes the
-    /// button `iconButtonSize` tall.
-    static let iconButtonGlassPadding: CGFloat = 7
+    /// each side (measured); a label `decisionHeight` less twice this
+    /// makes the button `decisionHeight` tall.
+    static let glassButtonPadding: CGFloat = 7
     /// An icon button with its name under it: the column it stands in (it
     /// grows with the caption's text size), and the gap to the name.
     static let iconOptionColumn: CGFloat = 60

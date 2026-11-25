@@ -1,11 +1,106 @@
-// A decision as a small round glass button: a symbol in a system glass
-// circle, named for VoiceOver by the option's full label — and, in a card,
-// a short name under it. Every option of a permission prompt and a Needs
-// you row's Decline / Approve stand on screen this way, side by side, so
-// none hides behind a long-press or a More menu. One size and spacing
-// everywhere (Theme's icon button tokens).
+// Every decision as one control: a system glass button of one height
+// (`Theme.decisionHeight`), round with a symbol or a capsule with a title.
+// A permission prompt's options, a card's Reject / Approve, an answer to
+// pick, a Needs you row's Decline / Approve and a page's decision bar all
+// go through `decisionControl` and `decisionButtonStyle` here, so none sets
+// a height or a padding of its own and they stand one height side by side
+// at every text size. A round button may carry its short name under it,
+// outside the control (`GlassIconOption`).
 
 import SwiftUI
+
+/// The one height of a decision button at the current text size: the
+/// token, its label's line scaled with Dynamic Type (`.subheadline`, the
+/// capsules' title style), the glass's inset fixed.
+struct DecisionHeight: DynamicProperty {
+    @ScaledMetric(relativeTo: .subheadline) private var line = Theme.decisionLabelLine
+
+    /// The control's height, and a round button's diameter.
+    var control: CGFloat { Self.control(line: line) }
+    /// The label's height inside the system glass.
+    var label: CGFloat { Self.label(line: line) }
+    /// A round button's symbol, grown as the line.
+    var symbol: CGFloat { Theme.iconButtonSymbol * line / Theme.decisionLabelLine }
+
+    /// The control's height for a label line `line` tall.
+    static func control(line: CGFloat) -> CGFloat {
+        Theme.decisionHeight - Theme.decisionLabelLine + line
+    }
+
+    /// The label inside the glass for a line `line` tall: the glass adds
+    /// `Theme.glassButtonPadding` on each side to make it `control(line:)`.
+    static func label(line: CGFloat) -> CGFloat {
+        control(line: line) - 2 * Theme.glassButtonPadding
+    }
+}
+
+/// A decision button's shape.
+enum DecisionShape {
+    /// A symbol in a glass circle.
+    case circle
+    /// A title in a glass capsule across the width it is given.
+    case capsule
+}
+
+extension VerticalAlignment {
+    private enum DecisionCentre: AlignmentID {
+        static func defaultValue(in context: ViewDimensions) -> CGFloat { context[VerticalAlignment.center] }
+    }
+
+    /// A decision control's centre: a row of decisions lines up on it, so a
+    /// capsule stands level with the circles, not with circle and caption.
+    static let decisionCentre = VerticalAlignment(DecisionCentre.self)
+}
+
+/// A decision button's label at the one height: a circle's square side, a
+/// capsule's height and width. A capsule's title stands on one line — it
+/// shrinks a little, then truncates, rather than wrap and make its button
+/// taller than the others; a row that can't hold its capsules side by side
+/// stacks them instead (`NeedsCardButtonRow`), each still the one height.
+private struct DecisionControl: ViewModifier {
+    let shape: DecisionShape
+    let height = DecisionHeight()
+
+    func body(content: Content) -> some View {
+        switch shape {
+        case .circle:
+            content
+                .frame(width: height.label, height: height.label)
+                .contentShape(Circle())
+        case .capsule:
+            content
+                .lineLimit(1)
+                .minimumScaleFactor(Theme.decisionTitleMinScale)
+                .frame(maxWidth: .infinity)
+                .frame(height: height.label)
+                .contentShape(Capsule())
+        }
+    }
+}
+
+extension View {
+    /// A decision button's label at the one control height
+    /// (`Theme.decisionHeight`), for `decisionButtonStyle` to wrap.
+    func decisionControl(_ shape: DecisionShape) -> some View {
+        modifier(DecisionControl(shape: shape))
+    }
+
+    /// A decision button's style: system glass (prominent for the main
+    /// decision), round or a capsule, the regular control size, the app's
+    /// ink. Its label is a `decisionControl` of the same shape.
+    func decisionButtonStyle(_ shape: DecisionShape, prominent: Bool) -> some View {
+        Group {
+            if prominent {
+                self.buttonStyle(.glassProminent)
+            } else {
+                self.buttonStyle(.glass)
+            }
+        }
+        .buttonBorderShape(shape == .circle ? .circle : .capsule)
+        .controlSize(.regular)
+        .tint(Theme.text)
+    }
+}
 
 /// What an icon button's symbol is painted in.
 enum GlassIconTone: Equatable {
@@ -17,7 +112,8 @@ enum GlassIconTone: Equatable {
     case prominent
 }
 
-/// A round system glass button holding one symbol.
+/// A round system glass button holding one symbol, as tall as every other
+/// decision button and growing with the text size as they do.
 struct GlassIconButton: View {
     let symbol: String
     /// The option's full name: what VoiceOver says.
@@ -25,22 +121,17 @@ struct GlassIconButton: View {
     var tone = GlassIconTone.ink
     let action: () -> Void
 
-    /// The label's side: the glass adds the regular control's padding
-    /// around it, which makes the circle `Theme.iconButtonSize`.
-    private static let labelSide = Theme.iconButtonSize - 2 * Theme.iconButtonGlassPadding
+    private let height = DecisionHeight()
 
     var body: some View {
         Button(role: tone == .destructive ? .destructive : nil, action: action) {
             Image(systemName: symbol)
-                .font(.system(size: Theme.iconButtonSymbol, weight: .semibold))
+                .font(.system(size: height.symbol, weight: .semibold))
                 .foregroundStyle(foreground)
-                .frame(width: Self.labelSide, height: Self.labelSide)
-                .contentShape(Circle())
+                .decisionControl(.circle)
         }
-        .glassIconButtonStyle(prominent: tone == .prominent)
+        .decisionButtonStyle(.circle, prominent: tone == .prominent)
         .accessibilityLabel(label)
-        // The circle keeps its size at every text size, as a bar button
-        // does; a long press at an accessibility size shows it large.
         .accessibilityShowsLargeContentViewer {
             Label(label, systemImage: symbol)
         }
@@ -55,41 +146,32 @@ struct GlassIconButton: View {
     }
 }
 
-extension View {
-    /// The icon buttons' style: system glass (prominent for the main
-    /// decision) in a circle, the regular control size, the app's ink.
-    func glassIconButtonStyle(prominent: Bool) -> some View {
-        Group {
-            if prominent {
-                self.buttonStyle(.glassProminent)
-            } else {
-                self.buttonStyle(.glass)
-            }
-        }
-        .buttonBorderShape(.circle)
-        .controlSize(.regular)
-        .tint(Theme.text)
-    }
-}
-
 /// An icon button with its short name under it, in a column of one width
 /// so a row of them reads as one control (as iOS sets the buttons of a
 /// call or a share sheet). The name is for the eye: VoiceOver reads the
 /// button's full label. Like a tab bar's, the name grows with the text
 /// size only up to `Theme.iconCaptionLargestType` — past it the buttons
 /// would stand one to a line — and a long press shows the option large.
+/// The name stands outside the control: a row lines up on the circle's
+/// centre (`.decisionCentre`).
 struct GlassIconOption: View {
     let symbol: String
     let label: String
     let caption: String
     var tone = GlassIconTone.ink
+    /// The button's own accessibility id: its frame is the control's,
+    /// without the name under it.
+    var identifier: String?
     let action: () -> Void
 
     @Environment(\.dynamicTypeSize) private var typeSize
+    private let height = DecisionHeight()
 
     var body: some View {
         VStack(spacing: Theme.iconOptionCaptionGap) {
             GlassIconButton(symbol: symbol, label: label, tone: tone, action: action)
+                .accessibilityIdentifier(identifier ?? "")
+                .alignmentGuide(.decisionCentre) { $0[VerticalAlignment.center] }
             Text(caption)
                 .font(Theme.sans(11, weight: .medium, relativeTo: .caption2))
                 .foregroundStyle(tone == .destructive ? Theme.danger : Theme.textMuted)
@@ -99,7 +181,7 @@ struct GlassIconOption: View {
                 .dynamicTypeSize(...Theme.iconCaptionLargestType)
                 .accessibilityHidden(true)
         }
-        .frame(width: max(column, Theme.iconButtonSize))
+        .frame(width: max(column, height.control))
     }
 
     /// The column grows with the name, up to the same text size.

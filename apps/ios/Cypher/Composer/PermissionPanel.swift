@@ -523,7 +523,9 @@ struct PermissionOptionRow: View {
         let icons = shown.filter { !$0.prominent }
         let primary = shown.filter(\.prominent)
         ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: Theme.iconButtonGap) {
+            // The capsule level with the circles: the row lines up on the
+            // controls' centres, the names hang under the circles.
+            HStack(alignment: .decisionCentre, spacing: Theme.iconButtonGap) {
                 ForEach(icons, id: \.index) { icon($0) }
                 ForEach(primary, id: \.index) { capsule($0) }
             }
@@ -541,27 +543,17 @@ struct PermissionOptionRow: View {
     private func icon(_ option: PermissionRequest.ShownOption) -> some View {
         GlassIconOption(
             symbol: option.symbol, label: option.label, caption: option.caption,
-            tone: option.destructive ? .destructive : .ink
+            tone: option.destructive ? .destructive : .ink, identifier: "permission-option-\(option.index)"
         ) {
             choose(option.label)
         }
-        .accessibilityIdentifier("permission-option-\(option.index)")
     }
 
-    /// The narrowest approval: a prominent glass capsule as tall as the
-    /// icons' circles, as wide as the line leaves it.
+    /// The narrowest approval: a prominent glass capsule, the decision
+    /// buttons' one height, as wide as the line leaves it.
     private func capsule(_ option: PermissionRequest.ShownOption) -> some View {
-        Button {
+        NeedsCardButton(title: option.label, kind: .primary, identifier: "permission-option-\(option.index)") {
             choose(option.label)
-        } label: {
-            NeedsCardButtonLabel(title: option.label, kind: .primary)
-                .lineLimit(1)
-                .frame(minHeight: Theme.iconButtonSize - 2 * Theme.iconButtonGlassPadding)
-                .padding(.horizontal, 6)
         }
-        .needsCardButtonStyle(prominent: true)
-        .frame(maxWidth: .infinity)
-        .accessibilityLabel(option.label)
-        .accessibilityIdentifier("permission-option-\(option.index)")
     }
 }

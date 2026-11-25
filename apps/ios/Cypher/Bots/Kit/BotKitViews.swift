@@ -164,6 +164,8 @@ struct BotDecisionBar: View {
     /// A decision is on its way: buttons disable and the primary spins.
     var busy = false
 
+    private var shown: [BotDecision] { Array(decisions.prefix(3)) }
+
     var body: some View {
         VStack(spacing: 10) {
             if let note {
@@ -173,10 +175,13 @@ struct BotDecisionBar: View {
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity)
             }
-            HStack(spacing: 10) {
-                ForEach(decisions.prefix(3)) { decision in
-                    button(decision)
-                }
+            // One line of equal buttons, or, where it can't hold them (a
+            // large text size), one under another with the primary first,
+            // as a card's: each the one height either way.
+            NeedsCardButtonRow {
+                ForEach(shown) { button($0) }
+            } stacked: {
+                ForEach(shown.reversed()) { button($0) }
             }
         }
         .padding(.horizontal, 16)
@@ -188,38 +193,21 @@ struct BotDecisionBar: View {
         }
     }
 
+    /// A system glass capsule of the decision buttons' one height, as a
+    /// card's (the primary prominent, a refusal red).
     private func button(_ decision: BotDecision) -> some View {
-        Button(action: decision.action) {
-            ZStack {
-                Text(decision.title).opacity(busy && decision.role == .primary ? 0 : 1)
-                if busy && decision.role == .primary {
-                    ProgressView().tint(Theme.bg)
-                }
+        let kind: NeedsCardButtonKind =
+            switch decision.role {
+            case .primary: .primary
+            case .secondary: .secondary
+            case .destructive: .destructive
             }
-            .font(Theme.sans(16, weight: .semibold, relativeTo: .body))
-            .frame(maxWidth: .infinity)
-            // 46pt, or more for a label at a large text size.
-            .padding(.vertical, 8)
-            .frame(minHeight: 46)
-            .foregroundStyle(foreground(decision))
-            .background(background(decision), in: Capsule())
+        return Button(role: decision.role == .destructive ? .destructive : nil, action: decision.action) {
+            NeedsCardButtonLabel(title: decision.title, kind: kind, busy: busy && decision.role == .primary)
         }
-        .buttonStyle(.plain)
+        .decisionButtonStyle(.capsule, prominent: decision.role == .primary)
         .disabled(busy || !decision.enabled)
-        .opacity(decision.enabled ? 1 : 0.5)
         .accessibilityIdentifier("decision-\(decision.title.lowercased())")
-    }
-
-    private func foreground(_ decision: BotDecision) -> Color {
-        switch decision.role {
-        case .primary: Theme.bg
-        case .secondary: Theme.text
-        case .destructive: Theme.danger
-        }
-    }
-
-    private func background(_ decision: BotDecision) -> Color {
-        decision.role == .primary ? Theme.text : Theme.text.opacity(0.08)
     }
 }
 

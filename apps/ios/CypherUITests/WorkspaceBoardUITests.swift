@@ -60,6 +60,65 @@ final class WorkspaceBoardUITests: XCTestCase {
         capture(app, "permission-options")
     }
 
+    /// The owner's view: a permission card's round buttons and its Run once
+    /// capsule over a plan card's Reject / Approve, and a row's ✓ on the
+    /// overview — every decision button one height, the capsule level with
+    /// the circles.
+    func testEveryDecisionButtonIsOneHeight() {
+        let app = XCUIApplication.launchDemo(["-demo-needs", "-route", "bot:bot-atlas", "-sheet", "board:needs"])
+        let runOnce = app.buttons["permission-option-0"]
+        XCTAssertTrue(runOnce.waitForExistence(timeout: Self.launch))
+        // The Needs you sheet's plan card (the chat under the sheet has a
+        // plan card of its own).
+        let reject = app.buttons.matching(identifier: "card-reject").element(boundBy: 1)
+        // Up to the plan card, then back until the permission card's
+        // buttons stand over it.
+        for _ in 0..<8 where !reject.isHittable {
+            app.swipeUp(velocity: .slow)
+        }
+        for _ in 0..<4 where !runOnce.isHittable {
+            app.swipeDown(velocity: .slow)
+        }
+        if !(runOnce.isHittable && reject.isHittable) {
+            print(
+                app.debugDescription.split(separator: "\n")
+                    .filter { $0.contains("card-") || $0.contains("permission-option") }
+                    .joined(separator: "\n"))
+        }
+        XCTAssertTrue(runOnce.isHittable, "Run once is on screen")
+        XCTAssertTrue(reject.isHittable, "so is the plan's Reject")
+        let circle = app.buttons["permission-option-1"].frame
+        let stop = app.buttons["permission-option-4"].frame
+        let capsule = runOnce.frame
+        let approve = app.buttons.matching(identifier: "card-approve").allElementsBoundByIndex
+            .first { $0.isHittable && abs($0.frame.midY - reject.frame.midY) < 1 }?.frame
+        let heights = [
+            ("Deny circle", circle.height), ("Stop circle", stop.height), ("Run once", capsule.height),
+            ("Reject", reject.frame.height), ("Approve", approve?.height ?? 0),
+        ]
+        print("decision heights: \(heights.map { "\($0.0)=\($0.1)" }.joined(separator: " "))")
+        print("decision midY: circle=\(circle.midY) run-once=\(capsule.midY)")
+        XCTAssertEqual(circle.width, circle.height, accuracy: 1, "the icon is a circle")
+        for (name, height) in heights {
+            XCTAssertEqual(height, circle.height, accuracy: 1, "\(name) is as tall as the circles")
+        }
+        XCTAssertEqual(capsule.midY, circle.midY, accuracy: 1, "Run once stands level with the circles")
+        capture(app, "decision-heights")
+        app.terminate()
+
+        let overview = board("overview")
+        let rowApprove = overview.buttons["row-approve-approval:approval-staging"]
+        XCTAssertTrue(rowApprove.waitForHittable(timeout: Self.launch))
+        // The board opens at the sheet's middle height, which iOS draws a
+        // little scaled down: measure it at full height.
+        overview.swipeUp(velocity: .slow)
+        XCTAssertTrue(rowApprove.waitForHittable(timeout: 5))
+        let rowDecline = overview.buttons["row-decline-approval:approval-staging"]
+        print("decision heights: row-approve=\(rowApprove.frame.height) row-decline=\(rowDecline.frame.height)")
+        XCTAssertEqual(rowApprove.frame.height, circle.height, accuracy: 1, "a row's ✓ is as tall")
+        XCTAssertEqual(rowDecline.frame.height, circle.height, accuracy: 1, "so is its ✕")
+    }
+
     func testReviewingAnAnswerEditsAndSendsIt() {
         let app = board("exchange:ex-review")
         let answer = app.textViews["exchange-answer"]

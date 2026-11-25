@@ -37,21 +37,6 @@ extension View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.groupedInset, in: .rect(cornerRadius: Theme.cardInsetRadius, style: .continuous))
     }
-
-    /// A card's system button: glass (prominent for the main decision),
-    /// a capsule, the cards' one control size, in the app's ink.
-    func needsCardButtonStyle(prominent: Bool) -> some View {
-        Group {
-            if prominent {
-                self.buttonStyle(.glassProminent)
-            } else {
-                self.buttonStyle(.glass)
-            }
-        }
-        .buttonBorderShape(.capsule)
-        .controlSize(.regular)
-        .tint(Theme.text)
-    }
 }
 
 /// A page of cards (the Needs you page, an approval's, a session's
@@ -243,7 +228,8 @@ enum NeedsCardButtonKind {
 }
 
 /// A card button's label: the title in the card's button type, filling
-/// what the row gives it, a spinner in its place while busy.
+/// what the row gives it at the decision buttons' one height
+/// (`decisionControl`), a spinner in its place while busy.
 struct NeedsCardButtonLabel: View {
     let title: String
     var kind = NeedsCardButtonKind.secondary
@@ -260,23 +246,26 @@ struct NeedsCardButtonLabel: View {
         }
         .font(Theme.sans(15, weight: .semibold, relativeTo: .subheadline))
         .foregroundStyle(kind.foreground)
-        .frame(maxWidth: .infinity)
+        .decisionControl(.capsule)
     }
 }
 
-/// A card's button (a decision, an answer to pick): a system glass button.
+/// A card's button (a decision, an answer to pick): a system glass
+/// capsule of the decision buttons' one height.
 struct NeedsCardButton: View {
     let title: String
     var kind = NeedsCardButtonKind.secondary
     var busy = false
+    /// Its accessibility id; "card-<title>" by default.
+    var identifier: String?
     let action: () -> Void
 
     var body: some View {
         Button(role: kind == .destructive ? .destructive : nil, action: action) {
             NeedsCardButtonLabel(title: title, kind: kind, busy: busy)
         }
-        .needsCardButtonStyle(prominent: kind == .primary)
-        .accessibilityIdentifier("card-\(title.lowercased().replacingOccurrences(of: " ", with: "-"))")
+        .decisionButtonStyle(.capsule, prominent: kind == .primary)
+        .accessibilityIdentifier(identifier ?? "card-\(title.lowercased().replacingOccurrences(of: " ", with: "-"))")
     }
 }
 
@@ -375,7 +364,7 @@ struct NeedsCardLinkButton: View {
         NavigationLink(value: page) {
             NeedsCardButtonLabel(title: title)
         }
-        .needsCardButtonStyle(prominent: false)
+        .decisionButtonStyle(.capsule, prominent: false)
         .accessibilityIdentifier("card-\(title.lowercased().replacingOccurrences(of: " ", with: "-"))")
     }
 }
