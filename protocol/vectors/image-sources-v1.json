@@ -849,5 +849,232 @@
       "line": "",
       "src": null
     }
-  ]
+  ],
+  "sizing": {
+    "description": "How big every visual preview in a chat reply is (Markdown and inline images, image file references, SVG, a PDF's pages, a video's frame), shared by the desktop (crates/ui/src/markdown/preview_size.rs) and iOS; the same section is in image-sources-v1.json and file-previews-v1.json. Not covered: tool-row thumbnails, csv/tsv tables and the html page card (a full-width row). All lengths are logical points (no pixel scale); expected values are exact up to 4 decimals: compare within 0.01 (a platform may snap to its pixel grid when drawing). `previewSize(column, natural)`: `column` is the reply column's width, `natural` the content's natural size (only its aspect matters). The preview is always `column` wide (a small image or an SVG is upscaled). `contentHeight` = column * natural.height / natural.width, the height the whole content draws at. When contentHeight <= column * caps.crop.height / caps.crop.width (landscape, square, up to exactly 4:5) the preview shows it whole: height = contentHeight, cropped = false. Taller: height = column * crop.height / crop.width and cropped = true: the content still draws column wide and contentHeight tall, its top edge at the preview's top (horizontally it fills the width, so it is centred), and the part below the preview is cut off; a click still opens the whole thing. A natural or column size that is not positive shows nothing (all zero). PDF: its pages stack at full width, each `column` wide and `contentHeight` of its own size tall, never cropped. `pdf` cases: `pdfPages(pages)` -> `shown` = min(pages, caps.pdfPages) pages, `more` = the rest, and when more > 0 a row below them reading `label` (\"1 more page\", else \"N more pages\") that opens the file; `label` is null when more = 0.",
+    "caps": {
+      "crop": {
+        "width": 4,
+        "height": 5
+      },
+      "pdfPages": 3
+    },
+    "cases": [
+      {
+        "name": "wide 2:1 fills the width at its aspect",
+        "column": 600,
+        "natural": {
+          "width": 2000,
+          "height": 1000
+        },
+        "expect": {
+          "width": 600,
+          "height": 300.0,
+          "cropped": false,
+          "contentHeight": 300.0
+        }
+      },
+      {
+        "name": "square fills the width, as tall as wide",
+        "column": 600,
+        "natural": {
+          "width": 500,
+          "height": 500
+        },
+        "expect": {
+          "width": 600,
+          "height": 600.0,
+          "cropped": false,
+          "contentHeight": 600.0
+        }
+      },
+      {
+        "name": "portrait 1:2 is cropped to 4:5, the top kept",
+        "column": 600,
+        "natural": {
+          "width": 400,
+          "height": 800
+        },
+        "expect": {
+          "width": 600,
+          "height": 750.0,
+          "cropped": true,
+          "contentHeight": 1200.0
+        }
+      },
+      {
+        "name": "a tiny 16x16 icon is upscaled to the column",
+        "column": 600,
+        "natural": {
+          "width": 16,
+          "height": 16
+        },
+        "expect": {
+          "width": 600,
+          "height": 600.0,
+          "cropped": false,
+          "contentHeight": 600.0
+        }
+      },
+      {
+        "name": "very wide 10:1 stays a thin strip",
+        "column": 600,
+        "natural": {
+          "width": 3000,
+          "height": 300
+        },
+        "expect": {
+          "width": 600,
+          "height": 60.0,
+          "cropped": false,
+          "contentHeight": 60.0
+        }
+      },
+      {
+        "name": "exactly 4:5 shows whole",
+        "column": 600,
+        "natural": {
+          "width": 800,
+          "height": 1000
+        },
+        "expect": {
+          "width": 600,
+          "height": 750.0,
+          "cropped": false,
+          "contentHeight": 750.0
+        }
+      },
+      {
+        "name": "slightly taller than 4:5 is cropped",
+        "column": 600,
+        "natural": {
+          "width": 800,
+          "height": 1001
+        },
+        "expect": {
+          "width": 600,
+          "height": 750.0,
+          "cropped": true,
+          "contentHeight": 750.75
+        }
+      },
+      {
+        "name": "a phone screenshot in a phone column",
+        "column": 343,
+        "natural": {
+          "width": 1170,
+          "height": 2532
+        },
+        "expect": {
+          "width": 343,
+          "height": 428.75,
+          "cropped": true,
+          "contentHeight": 742.2872
+        }
+      },
+      {
+        "name": "a small landscape image in a phone column",
+        "column": 343,
+        "natural": {
+          "width": 32,
+          "height": 16
+        },
+        "expect": {
+          "width": 343,
+          "height": 171.5,
+          "cropped": false,
+          "contentHeight": 171.5
+        }
+      },
+      {
+        "name": "a US Letter PDF page (portrait, but pages are never cropped: use contentHeight)",
+        "column": 600,
+        "natural": {
+          "width": 612,
+          "height": 792
+        },
+        "expect": {
+          "width": 600,
+          "height": 750.0,
+          "cropped": true,
+          "contentHeight": 776.4706
+        }
+      },
+      {
+        "name": "no natural size shows nothing",
+        "column": 600,
+        "natural": {
+          "width": 0,
+          "height": 100
+        },
+        "expect": {
+          "width": 0,
+          "height": 0,
+          "cropped": false,
+          "contentHeight": 0
+        }
+      },
+      {
+        "name": "no column shows nothing",
+        "column": 0,
+        "natural": {
+          "width": 100,
+          "height": 100
+        },
+        "expect": {
+          "width": 0,
+          "height": 0,
+          "cropped": false,
+          "contentHeight": 0
+        }
+      }
+    ],
+    "pdf": [
+      {
+        "name": "0 pages",
+        "pages": 0,
+        "expect": {
+          "shown": 0,
+          "more": 0,
+          "label": null
+        }
+      },
+      {
+        "name": "1 page",
+        "pages": 1,
+        "expect": {
+          "shown": 1,
+          "more": 0,
+          "label": null
+        }
+      },
+      {
+        "name": "3 pages",
+        "pages": 3,
+        "expect": {
+          "shown": 3,
+          "more": 0,
+          "label": null
+        }
+      },
+      {
+        "name": "4 pages",
+        "pages": 4,
+        "expect": {
+          "shown": 3,
+          "more": 1,
+          "label": "1 more page"
+        }
+      },
+      {
+        "name": "7 pages",
+        "pages": 7,
+        "expect": {
+          "shown": 3,
+          "more": 4,
+          "label": "4 more pages"
+        }
+      }
+    ]
+  }
 }

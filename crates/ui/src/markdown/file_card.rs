@@ -1,9 +1,10 @@
 //! File preview blocks in chat replies ([`Block::FilePreview`]): a paragraph
 //! that is only a path to a csv/tsv, pdf, video or html file
 //! ([`super::file_preview`]). A table shows its first rows, a PDF its first
-//! page and a video a poster frame (macOS), an html page a card that opens
-//! it in the artifact viewer. Anything that can't show reads as a neutral
-//! chip saying why.
+//! pages and a video a poster frame (macOS), each the column's full width
+//! ([`super::preview_size`]), an html page a full-width card that opens it
+//! in the artifact viewer. Anything that can't show reads as a neutral chip
+//! saying why.
 //!
 //! Loaded previews live in a store keyed like images (chat, source); the
 //! surface loads them ([`request`]) and rendering only looks up.
@@ -27,23 +28,32 @@ use crate::kit::icons::{self, icon};
 use crate::kit::theme::{MonoStyled as _, hairline, ink};
 
 const RADIUS: f32 = 8.0;
-/// The tallest a page or frame thumbnail shows.
-pub const THUMB_MAX_HEIGHT: f32 = 240.0;
-const THUMB_MAX_WIDTH: f32 = 360.0;
+/// Space between a PDF's stacked pages.
+const PAGE_GAP: f32 = 8.0;
 /// Pixel width a cell's character takes in the table's monospace face.
 const CHAR_W: f32 = 7.0;
 const MAX_READY: usize = 32;
 const RETRY_AFTER: Duration = Duration::from_secs(20);
 
+/// A drawn page or frame and its pixel size (only its aspect matters: it
+/// shows column wide).
+#[derive(Clone)]
+pub struct Picture {
+    pub image: Arc<Image>,
+    pub width: f32,
+    pub height: f32,
+}
+
 /// What a loaded preview shows.
 #[derive(Clone)]
 pub enum Body {
     Table(Arc<Table>),
-    /// A PDF's first page or a video's frame, with its size in points.
-    Thumb {
-        image: Arc<Image>,
-        width: f32,
-        height: f32,
+    /// A video's frame, sized like an image (a tall one cropped).
+    Frame(Picture),
+    /// A PDF's first pages, stacked uncropped, and how many it has.
+    Pages {
+        pages: Vec<Picture>,
+        count: usize,
     },
     /// An html page: its `<title>` and source (for the artifact viewer).
     Page {
@@ -65,6 +75,9 @@ pub struct Loaded {
     pub open: String,
     /// The file itself, when the chat is on this device.
     pub local: Option<std::path::PathBuf>,
+    /// The widest column (points) its pictures are drawn sharp for; a wider
+    /// one draws them again ([`request`]). `f32::INFINITY` without any.
+    pub sharp_to: f32,
 }
 
 #[derive(Clone)]
@@ -79,6 +92,8 @@ type Waiter = Box<dyn FnOnce(&mut App)>;
 enum State {
     Pending(Vec<(EntityId, Waiter)>),
     Ready(Loaded),
+    /// Shown as it is while it draws again for a wider column.
+    Sharpening(Loaded, Vec<(EntityId, Waiter)>),
     Failed(SharedString, Instant),
 }
 
@@ -108,7 +123,9 @@ pub fn lookup(key: &Key) -> Shown {
                 entry.used = now;
                 match &entry.state {
                     State::Pending(_) => Shown::Pending,
-                    State::Ready(loaded) => Shown::Ready(loaded.clone()),
+                    State::Ready(loaded) | State::Sharpening(loaded, _) => {
+                        Shown::Ready(loaded.clone())
+                    }
                     State::Failed(reason, _) => Shown::Failed(reason.clone()),
                 }
             }
@@ -118,9 +135,12 @@ pub fn lookup(key: &Key) -> Shown {
 }
 
 /// Load `key` with `load` unless it is loaded, loading, or failed moments
-/// ago; `on_ready` runs once per asking entity when it lands.
+/// ago; one drawn for a narrower column than `width` (points, see
+/// [`Loaded::sharp_to`]) loads again, showing meanwhile. `on_ready` runs
+/// once per asking entity when it lands.
 pub fn request<T: 'static>(
     key: Key,
+    width: f32,
     cx: &mut Context<T>,
     load: impl FnOnce(&mut Context<T>) -> Task<Result<Loaded, SharedString>>,
     on_ready: impl FnOnce(&mut T, &mut Context<T>) + 'static,
@@ -138,11 +158,15 @@ pub fn request<T: 'static>(
             Some(entry) => {
                 entry.used = now;
                 match &mut entry.state {
-                    State::Pending(waiters) => {
+                    State::Pending(waiters) | State::Sharpening(_, waiters) => {
                         if !waiters.iter().any(|(id, _)| *id == entity) {
                             waiters.push((entity, waiter));
                         }
                         false
+                    }
+                    State::Ready(loaded) if loaded.sharp_to < width => {
+                        entry.state = State::Sharpening(loaded.clone(), vec![(entity, waiter)]);
+                        true
                     }
                     State::Failed(_, at) if at.elapsed() > RETRY_AFTER => {
                         entry.state = State::Pending(vec![(entity, waiter)]);
@@ -177,15 +201,19 @@ pub fn request<T: 'static>(
 fn land(key: Key, loaded: Result<Loaded, SharedString>, cx: &mut App) {
     let waiters = STORE.with(|store| {
         let mut store = store.borrow_mut();
-        let state = match loaded {
-            Ok(loaded) => State::Ready(loaded),
-            Err(reason) => State::Failed(reason, Instant::now()),
-        };
         let waiters = match store.entries.get_mut(&key) {
-            Some(entry) => match std::mem::replace(&mut entry.state, state) {
-                State::Pending(waiters) => waiters,
-                _ => Vec::new(),
-            },
+            Some(entry) => {
+                let state = match (loaded, &entry.state) {
+                    (Ok(loaded), _) => State::Ready(loaded),
+                    // A failed redraw keeps what showed.
+                    (Err(_), State::Sharpening(shown, _)) => State::Ready(shown.clone()),
+                    (Err(reason), _) => State::Failed(reason, Instant::now()),
+                };
+                match std::mem::replace(&mut entry.state, state) {
+                    State::Pending(waiters) | State::Sharpening(_, waiters) => waiters,
+                    _ => Vec::new(),
+                }
+            }
             None => Vec::new(),
         };
         let ready: Vec<u64> = store
@@ -282,15 +310,7 @@ pub fn render(src: &str, kind: Kind, ctx: BlockCtx) -> AnyElement {
             Body::Table(table) => {
                 clickable(table_block(table, &loaded, theme).id(id)).into_any_element()
             }
-            Body::Thumb {
-                image,
-                width,
-                height,
-            } => {
-                let scale = (THUMB_MAX_WIDTH / width)
-                    .min(THUMB_MAX_HEIGHT / height)
-                    .min(1.0);
-                let (w, h) = (width * scale, height * scale);
+            Body::Frame(frame) => {
                 let play = (loaded.kind == Kind::Video).then(|| {
                     div()
                         .absolute()
@@ -316,18 +336,68 @@ pub fn render(src: &str, kind: Kind, ctx: BlockCtx) -> AnyElement {
                         .flex_col()
                         .gap(px(6.0))
                         .child(
+                            super::image::fill_frame(
+                                frame.width,
+                                frame.height,
+                                img(frame.image.clone()).size_full().into_any_element(),
+                            )
+                            .border_1()
+                            .border_color(hairline(0.11))
+                            .bg(gpui::black())
+                            .children(play),
+                        )
+                        .child(caption(&loaded, theme)),
+                )
+                .into_any_element()
+            }
+            Body::Pages { pages, count } => {
+                let (_, more) = super::preview_size::pdf_pages(*count);
+                let more = super::preview_size::more_pages_label(more).map(|label| {
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(6.0))
+                        .px(px(10.0))
+                        .py(px(7.0))
+                        .rounded(px(RADIUS))
+                        .border_1()
+                        .border_color(hairline(0.11))
+                        .bg(ink(0.02))
+                        .text_size(px(12.0))
+                        .line_height(px(16.0))
+                        .text_color(theme.text_muted)
+                        .child(
+                            icon(icons::DOCUMENT)
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from(label))
+                });
+                clickable(
+                    div()
+                        .id(id)
+                        .flex()
+                        .flex_col()
+                        .gap(px(PAGE_GAP))
+                        .children(pages.iter().map(|page| {
+                            // A page shows whole: column wide at its aspect.
+                            let size =
+                                super::preview_size::preview_size(1.0, page.width, page.height);
                             div()
-                                .relative()
-                                .w(px(w))
-                                .h(px(h))
+                                .w_full()
+                                .aspect_ratio(size.content_aspect())
                                 .rounded(px(RADIUS))
                                 .overflow_hidden()
                                 .border_1()
                                 .border_color(hairline(0.11))
                                 .bg(gpui::white())
-                                .child(img(image.clone()).size_full())
-                                .children(play),
-                        )
+                                .child(img(page.image.clone()).size_full())
+                        }))
+                        .children(more)
                         .child(caption(&loaded, theme)),
                 )
                 .into_any_element()
@@ -383,7 +453,7 @@ fn card_frame() -> gpui::Div {
         .gap(px(10.0))
         .px(px(12.0))
         .py(px(8.0))
-        .max_w(px(420.0))
+        .w_full()
         .rounded(px(RADIUS))
         .border_1()
         .border_color(hairline(0.11))

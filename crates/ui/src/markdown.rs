@@ -30,6 +30,7 @@ pub mod math;
 pub mod mend;
 pub mod mermaid;
 pub mod parser;
+pub mod preview_size;
 pub mod render;
 #[cfg(test)]
 mod run_font_size_tests;

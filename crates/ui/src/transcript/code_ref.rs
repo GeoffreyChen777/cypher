@@ -1310,8 +1310,9 @@ impl Transcript {
         let src = path.to_owned();
         image::request(
             key.clone(),
+            0.0,
             cx,
-            |cx| self.load_image(&src, cx),
+            |cx| self.load_image(&src, 0.0, cx),
             |_: &mut Self, cx| cx.notify(),
         );
         let lines = |h: f32| h / theme.markdown.code_line_height;

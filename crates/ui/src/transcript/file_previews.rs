@@ -20,12 +20,13 @@ use gpui::{App, Context, Image, ImageFormat, SharedString, Task, Window};
 
 use crate::files::FilesContext;
 use crate::markdown::artifact::{self, ArtifactOpen};
-use crate::markdown::file_card::{self, Body, FilePreviewUi, Loaded, Shown};
+use crate::markdown::file_card::{self, Body, FilePreviewUi, Loaded, Picture, Shown};
 use crate::markdown::file_preview::{self, Kind};
 use crate::markdown::file_thumb;
 use crate::markdown::image::Key;
 use crate::markdown::image_source;
 use crate::markdown::parser::{ArtifactKind, Block};
+use crate::markdown::preview_size::PDF_PAGES;
 
 use super::Transcript;
 
@@ -115,11 +116,13 @@ impl Transcript {
 
     /// Start loading the file preview `block` is, if it is one; its row
     /// remeasures when it lands. The streaming tail of a live reply waits.
+    /// Pages and frames draw for the column at the window's `scale` factor.
     pub(super) fn request_file_previews(
         &mut self,
         block: &Block,
         row_id: &SharedString,
         streaming_tail: bool,
+        scale: f32,
         cx: &mut Context<Self>,
     ) {
         if streaming_tail {
@@ -131,6 +134,7 @@ impl Transcript {
             return;
         }
         let scope = self.image_scope(cx);
+        let width = self.preview_width(cx);
         for (src, kind) in previews {
             let key = Key {
                 scope: scope.clone(),
@@ -139,8 +143,9 @@ impl Transcript {
             let row = row_id.clone();
             file_card::request(
                 key,
+                width,
                 cx,
-                |cx| self.load_file_preview(src, kind, cx),
+                |cx| self.load_file_preview(src, kind, width, scale, cx),
                 move |this: &mut Self, cx| this.remeasure_row(&row, cx),
             );
         }
@@ -150,8 +155,11 @@ impl Transcript {
         &self,
         src: &str,
         kind: Kind,
+        width: f32,
+        scale: f32,
         cx: &mut Context<Self>,
     ) -> Task<Result<Loaded, SharedString>> {
+        let pixels = f64::from(width * scale.max(1.0));
         let state = self.state.read(cx);
         let contexts = crate::files::link_contexts(state);
         let engine = state.engine().cloned();
@@ -235,8 +243,12 @@ impl Transcript {
                 let local = place.local.clone();
                 let body = cx
                     .background_executor()
-                    .spawn(async move { body(kind, bytes, size, local.as_deref()) })
+                    .spawn(async move { body(kind, bytes, size, local.as_deref(), pixels) })
                     .await;
+                let sharp_to = match body {
+                    Body::Frame(_) | Body::Pages { .. } => width,
+                    _ => f32::INFINITY,
+                };
                 return Ok(Loaded {
                     kind,
                     name,
@@ -244,6 +256,7 @@ impl Transcript {
                     body,
                     open: place.open,
                     local: place.local,
+                    sharp_to,
                 });
             }
             Err(reason)
@@ -262,8 +275,15 @@ fn sources<'a>(block: &'a Block, out: &mut Vec<(&'a str, Kind)>) {
 }
 
 /// What a read file shows (off the UI thread): `bytes` is what was read of
-/// it, `size` its whole size, `local` the file on this device.
-fn body(kind: Kind, bytes: Vec<u8>, size: u64, local: Option<&std::path::Path>) -> Body {
+/// it, `size` its whole size, `local` the file on this device; pages and
+/// frames draw `pixels` wide.
+fn body(
+    kind: Kind,
+    bytes: Vec<u8>,
+    size: u64,
+    local: Option<&std::path::Path>,
+    pixels: f64,
+) -> Body {
     match kind {
         Kind::Csv | Kind::Tsv => {
             let delimiter = kind.delimiter().unwrap_or(',');
@@ -273,8 +293,23 @@ fn body(kind: Kind, bytes: Vec<u8>, size: u64, local: Option<&std::path::Path>) 
                 &text, delimiter, complete,
             )))
         }
-        Kind::Pdf => thumb(file_thumb::pdf_first_page(&bytes)),
-        Kind::Video => thumb(local.and_then(file_thumb::video_frame)),
+        Kind::Pdf => {
+            let Some(drawn) = file_thumb::pdf_pages(&bytes, PDF_PAGES, pixels) else {
+                return Body::Plain;
+            };
+            let pages: Vec<Picture> = drawn.pages.into_iter().map_while(picture).collect();
+            if pages.is_empty() {
+                return Body::Plain;
+            }
+            Body::Pages {
+                pages,
+                count: drawn.count,
+            }
+        }
+        Kind::Video => local
+            .and_then(|path| file_thumb::video_frame(path, pixels))
+            .and_then(picture)
+            .map_or(Body::Plain, Body::Frame),
         Kind::Html | Kind::Svg => {
             let code = String::from_utf8_lossy(&bytes).into_owned();
             Body::Page {
@@ -285,23 +320,17 @@ fn body(kind: Kind, bytes: Vec<u8>, size: u64, local: Option<&std::path::Path>) 
     }
 }
 
-/// A thumbnail from PNG bytes, or only the name and size without one.
-fn thumb(png: Option<Vec<u8>>) -> Body {
-    let Some(png) = png else {
-        return Body::Plain;
-    };
-    let Some((width, height)) = crate::files::preview::image_dims(&png) else {
-        return Body::Plain;
-    };
+/// A drawn page or frame from PNG bytes (`None`: not a PNG).
+fn picture(png: Vec<u8>) -> Option<Picture> {
+    let (width, height) = crate::files::preview::image_dims(&png)?;
     if width == 0 || height == 0 {
-        return Body::Plain;
+        return None;
     }
-    // Drawn at half its pixels: the thumbnail is rendered at twice its size.
-    Body::Thumb {
+    Some(Picture {
         image: Arc::new(Image::from_bytes(ImageFormat::Png, png)),
-        width: width as f32 / 2.0,
-        height: height as f32 / 2.0,
-    }
+        width: width as f32,
+        height: height as f32,
+    })
 }
 
 fn too_large(kind: Kind) -> SharedString {
@@ -320,6 +349,7 @@ mod tests {
             body,
             open: "out/f".into(),
             local: local.map(PathBuf::from),
+            sharp_to: f32::INFINITY,
         }
     }
 
@@ -350,12 +380,14 @@ mod tests {
 
     #[test]
     fn a_table_counts_its_rows_as_read() {
-        let Body::Table(table) = body(Kind::Csv, b"a,b\n1,2\n3,4\n".to_vec(), 12, None) else {
+        let Body::Table(table) = body(Kind::Csv, b"a,b\n1,2\n3,4\n".to_vec(), 12, None, 600.0)
+        else {
             panic!("a table");
         };
         assert_eq!(table.count_label(), "2 rows");
         // Only the head was read: the last record may be cut, so it goes.
-        let Body::Table(table) = body(Kind::Tsv, b"a\tb\n1\t2\n3\t".to_vec(), 4096, None) else {
+        let Body::Table(table) = body(Kind::Tsv, b"a\tb\n1\t2\n3\t".to_vec(), 4096, None, 600.0)
+        else {
             panic!("a table");
         };
         assert_eq!(table.count_label(), "1+ rows");
@@ -364,7 +396,7 @@ mod tests {
     #[test]
     fn pages_carry_their_title_and_source() {
         let html = b"<html><title>Q3 report</title><body>hi</body></html>".to_vec();
-        let Body::Page { title, code } = body(Kind::Html, html, 52, None) else {
+        let Body::Page { title, code } = body(Kind::Html, html, 52, None, 600.0) else {
             panic!("a page");
         };
         assert_eq!(title.as_deref(), Some("Q3 report"));
@@ -372,10 +404,16 @@ mod tests {
     }
 
     #[test]
-    fn no_thumbnail_reads_as_plain() {
-        assert!(matches!(thumb(None), Body::Plain));
-        assert!(matches!(thumb(Some(b"not a png".to_vec())), Body::Plain));
-        assert!(matches!(body(Kind::Video, vec![0], 10, None), Body::Plain));
+    fn no_picture_reads_as_plain() {
+        assert!(picture(b"not a png".to_vec()).is_none());
+        assert!(matches!(
+            body(Kind::Video, vec![0], 10, None, 600.0),
+            Body::Plain
+        ));
+        assert!(matches!(
+            body(Kind::Pdf, b"not a pdf".to_vec(), 9, None, 600.0),
+            Body::Plain
+        ));
     }
 
     #[test]

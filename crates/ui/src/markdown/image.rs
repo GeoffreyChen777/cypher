@@ -1,6 +1,7 @@
-//! Image blocks in chat replies ([`Block::Image`]): the preview, fitted to
-//! the column (at most [`MAX_HEIGHT`] tall, never past its natural size)
-//! with its alt text as a caption, and the store of loaded images.
+//! Image blocks in chat replies ([`Block::Image`]): the preview, the
+//! column's full width ([`super::preview_size`]: a tall one cropped to 4:5,
+//! its top kept) with its alt text as a caption, and the store of loaded
+//! images.
 //!
 //! The store follows the diagram store ([`super::mermaid`]): a surface asks
 //! for every image a block shows before rendering it ([`request`]), with the
@@ -24,11 +25,8 @@ use super::render::BlockCtx;
 use crate::kit::icons::{self, icon};
 use crate::kit::theme::{hairline, ink};
 
-/// The tallest an image block gets.
-pub const MAX_HEIGHT: f32 = 360.0;
 /// The neutral box an image holds while it loads.
 pub const PLACEHOLDER_HEIGHT: f32 = 120.0;
-const PLACEHOLDER_WIDTH: f32 = 320.0;
 const RADIUS: f32 = 8.0;
 /// Loaded images kept; older ones load again when shown.
 const MAX_READY: usize = 64;
@@ -60,6 +58,10 @@ pub struct Loaded {
     pub width: f32,
     pub height: f32,
     pub origin: Origin,
+    /// The widest (points) it stays sharp at: an SVG is rasterized for the
+    /// column it was loaded for and loads again for a wider one; a bitmap
+    /// is as sharp as it gets (`f32::INFINITY`).
+    pub sharp_to: f32,
 }
 
 /// What [`lookup`] finds.
@@ -75,6 +77,8 @@ type Waiter = Box<dyn FnOnce(&mut App)>;
 enum State {
     Pending(Vec<(EntityId, Waiter)>),
     Ready(Loaded),
+    /// Shown as it is while it loads again for a wider column.
+    Sharpening(Loaded, Vec<(EntityId, Waiter)>),
     Failed(SharedString, Instant),
 }
 
@@ -104,7 +108,9 @@ pub fn lookup(key: &Key) -> Shown {
                 entry.used = now;
                 match &entry.state {
                     State::Pending(_) => Shown::Pending,
-                    State::Ready(loaded) => Shown::Ready(loaded.clone()),
+                    State::Ready(loaded) | State::Sharpening(loaded, _) => {
+                        Shown::Ready(loaded.clone())
+                    }
                     State::Failed(reason, _) => Shown::Failed(reason.clone()),
                 }
             }
@@ -114,10 +120,13 @@ pub fn lookup(key: &Key) -> Shown {
 }
 
 /// Load `key` with `load` unless it is loaded, loading, or failed only
-/// moments ago. `on_ready` runs on the asking entity when it lands — once
-/// per entity, however often it asks meanwhile.
+/// moments ago; one loaded for a narrower column than `width` (points,
+/// see [`Loaded::sharp_to`]) loads again, showing meanwhile. `on_ready`
+/// runs on the asking entity when it lands — once per entity, however often
+/// it asks meanwhile.
 pub fn request<T: 'static>(
     key: Key,
+    width: f32,
     cx: &mut Context<T>,
     load: impl FnOnce(&mut Context<T>) -> Task<Result<Loaded, SharedString>>,
     on_ready: impl FnOnce(&mut T, &mut Context<T>) + 'static,
@@ -135,11 +144,15 @@ pub fn request<T: 'static>(
             Some(entry) => {
                 entry.used = now;
                 match &mut entry.state {
-                    State::Pending(waiters) => {
+                    State::Pending(waiters) | State::Sharpening(_, waiters) => {
                         if !waiters.iter().any(|(id, _)| *id == entity) {
                             waiters.push((entity, waiter));
                         }
                         false
+                    }
+                    State::Ready(loaded) if loaded.sharp_to < width => {
+                        entry.state = State::Sharpening(loaded.clone(), vec![(entity, waiter)]);
+                        true
                     }
                     State::Failed(_, at) if at.elapsed() > RETRY_AFTER => {
                         entry.state = State::Pending(vec![(entity, waiter)]);
@@ -174,15 +187,19 @@ pub fn request<T: 'static>(
 fn land(key: Key, loaded: Result<Loaded, SharedString>, cx: &mut App) {
     let waiters = STORE.with(|store| {
         let mut store = store.borrow_mut();
-        let state = match loaded {
-            Ok(loaded) => State::Ready(loaded),
-            Err(reason) => State::Failed(reason, Instant::now()),
-        };
         let waiters = match store.entries.get_mut(&key) {
-            Some(entry) => match std::mem::replace(&mut entry.state, state) {
-                State::Pending(waiters) => waiters,
-                _ => Vec::new(),
-            },
+            Some(entry) => {
+                let state = match (loaded, &entry.state) {
+                    (Ok(loaded), _) => State::Ready(loaded),
+                    // A failed sharpening keeps what showed.
+                    (Err(_), State::Sharpening(shown, _)) => State::Ready(shown.clone()),
+                    (Err(reason), _) => State::Failed(reason, Instant::now()),
+                };
+                match std::mem::replace(&mut entry.state, state) {
+                    State::Pending(waiters) | State::Sharpening(_, waiters) => waiters,
+                    _ => Vec::new(),
+                }
+            }
             None => Vec::new(),
         };
         let ready = store
@@ -225,21 +242,28 @@ pub fn sources(block: &Block) -> Vec<(&str, &str)> {
     out
 }
 
-/// The size an image shows at in a column: as wide as the column allows,
-/// at most [`MAX_HEIGHT`] tall, never larger than its natural size.
-pub fn fitted(width: f32, height: f32, column: f32) -> (f32, f32) {
-    if width <= 0.0 || height <= 0.0 {
-        return (0.0, 0.0);
-    }
-    let scale = (column / width).min(MAX_HEIGHT / height).min(1.0);
-    (width * scale, height * scale)
-}
-
-/// The widest an image may be before its height caps it (or its natural
-/// width, when smaller): the block's `max_w`, its height following from
-/// the aspect ratio.
-fn max_width(width: f32, height: f32) -> f32 {
-    fitted(width, height, f32::INFINITY).0
+/// Content of natural size `width` × `height` filling the column by
+/// [`super::preview_size`]: the frame is the column wide at the preview's
+/// aspect, the content inside it column wide at its own, its top at the
+/// frame's top (a tall one runs past the frame's bottom and is cut off
+/// there). The frame clips and rounds; style it further (click, border).
+pub fn fill_frame(width: f32, height: f32, content: AnyElement) -> gpui::Div {
+    let size = super::preview_size::preview_size(1.0, width, height);
+    div()
+        .relative()
+        .w_full()
+        .aspect_ratio(size.aspect())
+        .rounded(px(RADIUS))
+        .overflow_hidden()
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_full()
+                .aspect_ratio(size.content_aspect())
+                .child(content),
+        )
 }
 
 /// Opens the viewer for a clicked image.
@@ -295,7 +319,6 @@ pub fn render(src: &str, alt: &str, caption: bool, ctx: BlockCtx) -> AnyElement 
     let body: AnyElement = match lookup(&key) {
         Shown::Pending => div()
             .w_full()
-            .max_w(px(PLACEHOLDER_WIDTH))
             .h(px(PLACEHOLDER_HEIGHT))
             .rounded(px(RADIUS))
             .bg(ink(0.035))
@@ -331,17 +354,15 @@ pub fn render(src: &str, alt: &str, caption: bool, ctx: BlockCtx) -> AnyElement 
         Shown::Ready(loaded) => {
             let on_open = ui.on_open.clone();
             let alt: SharedString = alt.trim().to_owned().into();
-            div()
-                .id(id)
-                .w_full()
-                .max_w(px(max_width(loaded.width, loaded.height)))
-                .aspect_ratio(loaded.width / loaded.height)
-                .rounded(px(RADIUS))
-                .overflow_hidden()
-                .cursor_pointer()
-                .on_click(move |_, window, cx| on_open(key.clone(), alt.clone(), window, cx))
-                .child(img(loaded.image.clone()).size_full().rounded(px(RADIUS)))
-                .into_any_element()
+            fill_frame(
+                loaded.width,
+                loaded.height,
+                img(loaded.image.clone()).size_full().into_any_element(),
+            )
+            .id(id)
+            .cursor_pointer()
+            .on_click(move |_, window, cx| on_open(key.clone(), alt.clone(), window, cx))
+            .into_any_element()
         }
     };
     div()
@@ -356,19 +377,6 @@ pub fn render(src: &str, alt: &str, caption: bool, ctx: BlockCtx) -> AnyElement 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn images_fit_the_column_and_the_height_cap_without_upscaling() {
-        // Wide: the column decides.
-        assert_eq!(fitted(2000.0, 1000.0, 600.0), (600.0, 300.0));
-        // Tall: the height cap decides.
-        assert_eq!(fitted(400.0, 1600.0, 600.0), (90.0, 360.0));
-        // Small: natural size.
-        assert_eq!(fitted(64.0, 32.0, 600.0), (64.0, 32.0));
-        assert_eq!(max_width(2000.0, 1000.0), 720.0);
-        assert_eq!(max_width(64.0, 32.0), 64.0);
-        assert_eq!(fitted(0.0, 10.0, 600.0), (0.0, 0.0));
-    }
 
     #[test]
     fn errors_name_the_image() {

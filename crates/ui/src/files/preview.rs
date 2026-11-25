@@ -247,6 +247,15 @@ pub(super) fn hex_per_row(width: f32) -> usize {
 pub(crate) const SVG_PREVIEW_MIN: f32 = 256.0;
 
 pub(crate) fn svg_preview_bytes(source: &str) -> (Vec<u8>, Option<(f32, f32)>) {
+    svg_scaled_bytes(source, |w, h| (SVG_PREVIEW_MIN / w.max(h)).min(16.0))
+}
+
+/// [`svg_preview_bytes`] with the enlargement chosen by `scale` from the
+/// declared width and height (at most 1 leaves the source as it is).
+pub(crate) fn svg_scaled_bytes(
+    source: &str,
+    scale: impl FnOnce(f32, f32) -> f32,
+) -> (Vec<u8>, Option<(f32, f32)>) {
     let unchanged = || (source.as_bytes().to_vec(), None);
     let Some(open) = source.find("<svg") else {
         return unchanged();
@@ -301,7 +310,7 @@ pub(crate) fn svg_preview_bytes(source: &str) -> (Vec<u8>, Option<(f32, f32)>) {
         return unchanged();
     };
     let declared = Some((w, h));
-    let scale = (SVG_PREVIEW_MIN / w.max(h)).min(16.0);
+    let scale = scale(w, h);
     if scale <= 1.0 {
         return (source.as_bytes().to_vec(), declared);
     }

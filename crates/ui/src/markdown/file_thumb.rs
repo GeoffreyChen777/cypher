@@ -1,40 +1,58 @@
-//! Thumbnails the system draws for file previews ([`super::file_card`]): a
-//! PDF's first page (PDFKit) and a video's poster frame (AVFoundation), as
-//! PNG bytes. macOS only; elsewhere every call returns `None` and the
-//! preview shows a plain chip.
+//! Pictures the system draws for file previews ([`super::file_card`]): a
+//! PDF's first pages (PDFKit) and a video's poster frame (AVFoundation), as
+//! PNG bytes `pixels` wide — the column they fill times the window's scale
+//! factor, so they are sharp there. macOS only; elsewhere every call returns
+//! `None` and the preview shows a plain chip.
 //!
 //! Both run off the UI thread inside their own autorelease pool.
 
-/// Pixels on the long side of a thumbnail: twice the preview's size so it is
-/// sharp on a Retina display.
-pub const THUMB_PIXELS: f64 = 720.0;
+/// The most pixels one drawn page or frame has (a very tall page draws
+/// narrower than asked rather than past this).
+pub const MAX_PIXELS: f64 = 16.0 * 1024.0 * 1024.0;
 
-/// The first page of a PDF, as a PNG at most [`THUMB_PIXELS`] on its long
-/// side.
-pub fn pdf_first_page(bytes: &[u8]) -> Option<Vec<u8>> {
+/// A PDF's first pages as PNGs.
+pub struct PdfPages {
+    /// The first `max` pages (fewer when it has fewer), in order.
+    pub pages: Vec<Vec<u8>>,
+    /// Pages the document has.
+    pub count: usize,
+}
+
+/// The first `max` pages of a PDF, each a PNG `pixels` wide.
+pub fn pdf_pages(bytes: &[u8], max: usize, pixels: f64) -> Option<PdfPages> {
     #[cfg(target_os = "macos")]
     {
-        mac::pdf_first_page(bytes)
+        mac::pdf_pages(bytes, max, pixels)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = bytes;
+        let _ = (bytes, max, pixels);
         None
     }
 }
 
 /// A frame about a second into the video at `path` (or its first), as a
-/// PNG at most [`THUMB_PIXELS`] on its long side.
-pub fn video_frame(path: &std::path::Path) -> Option<Vec<u8>> {
+/// PNG `pixels` wide (or the video's own width, when smaller).
+pub fn video_frame(path: &std::path::Path, pixels: f64) -> Option<Vec<u8>> {
     #[cfg(target_os = "macos")]
     {
-        mac::video_frame(path)
+        mac::video_frame(path, pixels)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = path;
+        let _ = (path, pixels);
         None
     }
+}
+
+/// The pixel size a `w` × `h` picture draws at `pixels` wide, within
+/// [`MAX_PIXELS`].
+pub fn drawn_size(w: f64, h: f64, pixels: f64) -> (f64, f64) {
+    let mut scale = pixels.max(1.0) / w;
+    if w * h * scale * scale > MAX_PIXELS {
+        scale = (MAX_PIXELS / (w * h)).sqrt();
+    }
+    ((w * scale).round().max(1.0), (h * scale).round().max(1.0))
 }
 
 #[cfg(target_os = "macos")]
@@ -46,7 +64,7 @@ mod mac {
     use objc::runtime::{BOOL, Class, NO, Object, YES};
     use objc::{class, msg_send, sel, sel_impl};
 
-    use super::THUMB_PIXELS;
+    use super::drawn_size;
 
     #[link(name = "PDFKit", kind = "framework")]
     unsafe extern "C" {}
@@ -130,7 +148,7 @@ mod mac {
         unsafe { data_bytes(png) }
     }
 
-    pub(super) fn pdf_first_page(bytes: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn pdf_pages(bytes: &[u8], max: usize, pixels: f64) -> Option<super::PdfPages> {
         let doc_class = Class::get("PDFDocument")?;
         pooled(|| unsafe {
             let data: *mut Object = msg_send![
@@ -149,7 +167,23 @@ mod mac {
             if locked != NO || count == 0 {
                 return None;
             }
-            let page: *mut Object = msg_send![doc, pageAtIndex: 0usize];
+            let mut pages = Vec::new();
+            for ix in 0..count.min(max) {
+                // Each page in its own pool: a bitmap per page adds up.
+                match pooled(|| page_png(doc, ix, pixels)) {
+                    Some(png) => pages.push(png),
+                    None if ix == 0 => return None,
+                    None => break,
+                }
+            }
+            Some(super::PdfPages { pages, count })
+        })
+    }
+
+    /// Page `ix` of `doc` as a PNG `pixels` wide.
+    unsafe fn page_png(doc: *mut Object, ix: usize, pixels: f64) -> Option<Vec<u8>> {
+        unsafe {
+            let page: *mut Object = msg_send![doc, pageAtIndex: ix];
             if page.is_null() {
                 return None;
             }
@@ -162,11 +196,8 @@ mod mac {
             if w <= 0.0 || h <= 0.0 {
                 return None;
             }
-            let scale = THUMB_PIXELS / w.max(h);
-            let size = CGSize {
-                width: (w * scale).round(),
-                height: (h * scale).round(),
-            };
+            let (width, height) = drawn_size(w, h, pixels);
+            let size = CGSize { width, height };
             let image: *mut Object = msg_send![page, thumbnailOfSize: size forBox: CROP_BOX];
             if image.is_null() {
                 return None;
@@ -177,10 +208,10 @@ mod mac {
             }
             let rep: *mut Object = msg_send![class!(NSBitmapImageRep), imageRepWithData: tiff];
             rep_png(rep)
-        })
+        }
     }
 
-    pub(super) fn video_frame(path: &std::path::Path) -> Option<Vec<u8>> {
+    pub(super) fn video_frame(path: &std::path::Path, pixels: f64) -> Option<Vec<u8>> {
         let asset_class = Class::get("AVURLAsset")?;
         let generator_class = Class::get("AVAssetImageGenerator")?;
         let path = CString::new(path.to_str()?).ok()?;
@@ -199,9 +230,10 @@ mod mac {
                 return None;
             }
             let _: () = msg_send![generator, setAppliesPreferredTrackTransform: YES];
+            // The width decides (a tall frame shows its top, column wide).
             let max = CGSize {
-                width: THUMB_PIXELS,
-                height: THUMB_PIXELS,
+                width: pixels.max(1.0),
+                height: pixels.max(1.0) * 8.0,
             };
             let _: () = msg_send![generator, setMaximumSize: max];
             // A second in skips a black first frame; a shorter clip falls
@@ -244,14 +276,23 @@ mod mac {
 mod tests {
     use super::*;
 
-    /// A one-page PDF, 200×100 points.
-    fn tiny_pdf() -> Vec<u8> {
-        let objects = [
-            "<< /Type /Catalog /Pages 2 0 R >>",
-            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R >>",
-            "<< /Length 31 >>\nstream\n0 0 1 rg 10 10 80 40 re f\nendstream",
+    /// A PDF of `pages` pages, 200×100 points each.
+    fn tiny_pdf(pages: usize) -> Vec<u8> {
+        let kids: Vec<String> = (0..pages).map(|ix| format!("{} 0 R", ix + 4)).collect();
+        let mut objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            format!(
+                "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+                kids.join(" ")
+            ),
+            "<< /Length 31 >>\nstream\n0 0 1 rg 10 10 80 40 re f\nendstream".to_owned(),
         ];
+        for _ in 0..pages {
+            objects.push(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 3 0 R >>"
+                    .to_owned(),
+            );
+        }
         let mut out = String::from("%PDF-1.4\n");
         let mut offsets = Vec::new();
         for (ix, body) in objects.iter().enumerate() {
@@ -274,15 +315,29 @@ mod tests {
     }
 
     #[test]
-    fn a_pdf_first_page_draws_at_its_aspect() {
-        let png = pdf_first_page(&tiny_pdf()).expect("a thumbnail");
-        let (w, h) = crate::files::preview::image_dims(&png).expect("a png");
-        assert!(w >= h * 2 - 4 && w <= h * 2 + 4, "{w}x{h}");
-        assert!(pdf_first_page(b"not a pdf").is_none());
+    fn pdf_pages_draw_at_their_aspect_up_to_the_cap() {
+        let drawn = pdf_pages(&tiny_pdf(5), 3, 600.0).expect("pages");
+        assert_eq!((drawn.pages.len(), drawn.count), (3, 5));
+        for png in &drawn.pages {
+            let (w, h) = crate::files::preview::image_dims(png).expect("a png");
+            assert!(w >= h * 2 - 4 && w <= h * 2 + 4, "{w}x{h}");
+            // At least as wide as asked (a Retina screen may draw twice it).
+            assert!(w >= 596, "{w}x{h}");
+        }
+        let one = pdf_pages(&tiny_pdf(1), 3, 300.0).expect("a page");
+        assert_eq!((one.pages.len(), one.count), (1, 1));
+        assert!(pdf_pages(b"not a pdf", 3, 600.0).is_none());
+    }
+
+    #[test]
+    fn drawn_sizes_follow_the_width_within_the_pixel_cap() {
+        assert_eq!(drawn_size(200.0, 100.0, 1536.0), (1536.0, 768.0));
+        let (w, h) = drawn_size(100.0, 10_000.0, 1536.0);
+        assert!(w * h <= MAX_PIXELS * 1.01 && w < 1536.0, "{w}x{h}");
     }
 
     #[test]
     fn a_missing_video_has_no_frame() {
-        assert!(video_frame(std::path::Path::new("/nonexistent/clip.mp4")).is_none());
+        assert!(video_frame(std::path::Path::new("/nonexistent/clip.mp4"), 600.0).is_none());
     }
 }

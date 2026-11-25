@@ -75,6 +75,22 @@ impl Transcript {
         }
     }
 
+    /// The reply column's width that previews fill, rounded up to a
+    /// [`PREVIEW_WIDTH_STEP`]: what an SVG, a PDF page or a video frame is
+    /// drawn for (a column grown past it draws them again).
+    pub(super) fn preview_width(&self, cx: &gpui::App) -> f32 {
+        let gutter = if self.embedded { 14.0 } else { 48.0 };
+        let tile = self
+            .viewport_size
+            .map(|(width, _)| width)
+            .unwrap_or(super::MAX_CONTENT_WIDTH + 2.0 * gutter);
+        let mut column = (tile - 2.0 * gutter).max(1.0);
+        if !crate::appearance::chat_style::settings(cx).wide {
+            column = column.min(super::MAX_CONTENT_WIDTH);
+        }
+        preview_step(column)
+    }
+
     pub(super) fn image_scope(&self, cx: &Context<Self>) -> SharedString {
         self.state
             .read(cx)
@@ -101,6 +117,7 @@ impl Transcript {
             return;
         }
         let scope = self.image_scope(cx);
+        let width = self.preview_width(cx);
         for (src, _) in sources {
             let key = Key {
                 scope: scope.clone(),
@@ -109,16 +126,20 @@ impl Transcript {
             let row = row_id.clone();
             image::request(
                 key,
+                width,
                 cx,
-                |cx| self.load_image(src, cx),
+                |cx| self.load_image(src, width, cx),
                 move |this: &mut Self, cx| this.remeasure_row(&row, cx),
             );
         }
     }
 
+    /// Load `src` to fill a column `width` points wide (an SVG draws sharp
+    /// there; 0 when it only shows small).
     pub(super) fn load_image(
         &self,
         src: &str,
+        width: f32,
         cx: &mut Context<Self>,
     ) -> Task<Result<Loaded, SharedString>> {
         let state = self.state.read(cx);
@@ -162,7 +183,7 @@ impl Transcript {
                         .await
                         {
                             Ok((bytes, _)) => {
-                                return decode(bytes, Origin::File(open), cx).await;
+                                return decode(bytes, Origin::File(open), width, cx).await;
                             }
                             Err(message) if message.starts_with("Too large") => {
                                 return Err(too_large());
@@ -181,7 +202,7 @@ impl Transcript {
             Source::Outside { .. } => Task::ready(Err("outside the session's folders".into())),
             Source::Remote { url } => cx.spawn(async move |_, cx| {
                 let bytes = fetch(http, &url).await?;
-                decode(bytes, Origin::Url(url), cx).await
+                decode(bytes, Origin::Url(url), width, cx).await
             }),
             Source::Data { payload, .. } => cx.spawn(async move |_, cx| {
                 if payload.len() as u64 / 4 * 3 > MAX_BYTES {
@@ -195,7 +216,7 @@ impl Transcript {
                             .map_err(|_| SharedString::from("unreadable data"))
                     })
                     .await?;
-                decode(bytes, Origin::Inline, cx).await
+                decode(bytes, Origin::Inline, width, cx).await
             }),
             Source::Rejected(Rejection::Insecure) => {
                 Task::ready(Err("not loaded over insecure http".into()))
@@ -225,8 +246,9 @@ impl Transcript {
         let row = row_id.clone();
         image::request(
             key.clone(),
+            0.0,
             cx,
-            |cx| self.load_image(src, cx),
+            |cx| self.load_image(src, 0.0, cx),
             move |this: &mut Self, cx| this.remeasure_row(&row, cx),
         );
         let Shown::Ready(loaded) = image::lookup(&key) else {
@@ -573,32 +595,57 @@ fn checked_url(url: Option<url::Url>) -> Result<url::Url, SharedString> {
     Ok(url)
 }
 
+/// Previews draw for the column rounded up to this many points, so a
+/// slowly widening window draws them again only every step.
+pub(super) const PREVIEW_WIDTH_STEP: f32 = 256.0;
+
+/// `column` rounded up to a [`PREVIEW_WIDTH_STEP`].
+pub(super) fn preview_step(column: f32) -> f32 {
+    (column / PREVIEW_WIDTH_STEP).ceil().max(1.0) * PREVIEW_WIDTH_STEP
+}
+
 /// Check the bytes are a supported image and measure it, off the UI thread.
 async fn decode(
     bytes: Vec<u8>,
     origin: Origin,
+    width: f32,
     cx: &mut gpui::AsyncApp,
 ) -> Result<Loaded, SharedString> {
     cx.background_executor()
-        .spawn(async move { measure(bytes, origin) })
+        .spawn(async move { measure(bytes, origin, width) })
         .await
 }
 
+/// The most points an enlarged SVG covers (width × height): gpui draws it
+/// at twice that in pixels, so this bounds its bitmap (~64 MB).
+const SVG_MAX_AREA: f32 = 2048.0 * 2048.0;
+
 /// A loaded image from its bytes: format by content (the name may lie),
-/// size from the header; an SVG is enlarged so a small icon is legible.
-pub(super) fn measure(bytes: Vec<u8>, origin: Origin) -> Result<Loaded, SharedString> {
+/// size from the header. An SVG is enlarged to draw sharp `width` points
+/// wide (the column it fills), and so a small icon is legible elsewhere.
+pub(super) fn measure(bytes: Vec<u8>, origin: Origin, width: f32) -> Result<Loaded, SharedString> {
     if bytes.len() as u64 > MAX_BYTES {
         return Err(too_large());
     }
     let format = Format::sniff(&bytes).ok_or_else(|| SharedString::from("unsupported format"))?;
+    let column = width;
+    let mut sharp_to = f32::INFINITY;
     let (gpui_format, bytes, (width, height)) = match format {
         Format::Svg => {
             let source = String::from_utf8_lossy(&bytes).into_owned();
-            let (bytes, declared) = crate::files::preview::svg_preview_bytes(&source);
             let min = crate::files::preview::SVG_PREVIEW_MIN;
-            // Drawn with its long side at least `min` (see the preview).
+            // Its long side at least `min` (see the preview) and as wide as
+            // the column, within the area bound.
+            let scale_for = |w: f32, h: f32| {
+                (min / w.max(h))
+                    .max(column / w)
+                    .min((SVG_MAX_AREA / (w * h)).sqrt())
+                    .max(1.0)
+            };
+            let (bytes, declared) = crate::files::preview::svg_scaled_bytes(&source, scale_for);
             let (w, h) = declared.unwrap_or((min, min));
-            let scale = (min / w.max(h)).max(1.0);
+            let scale = scale_for(w, h);
+            sharp_to = column;
             (ImageFormat::Svg, bytes, (w * scale, h * scale))
         }
         raster => {
@@ -621,6 +668,7 @@ pub(super) fn measure(bytes: Vec<u8>, origin: Origin) -> Result<Loaded, SharedSt
         width,
         height,
         origin,
+        sharp_to,
     })
 }
 
@@ -631,20 +679,55 @@ mod tests {
     const PNG_1X1: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
     #[test]
+    fn previews_draw_for_the_column_in_steps() {
+        assert_eq!(preview_step(1.0), 256.0);
+        assert_eq!(preview_step(640.0), 768.0);
+        assert_eq!(preview_step(768.0), 768.0);
+        assert_eq!(preview_step(769.0), 1024.0);
+    }
+
+    #[test]
     fn bytes_are_measured_by_content() {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(PNG_1X1)
             .unwrap();
-        let loaded = measure(bytes, Origin::Inline).ok().unwrap();
+        let loaded = measure(bytes, Origin::Inline, 0.0).ok().unwrap();
         assert_eq!((loaded.width, loaded.height), (1.0, 1.0));
         assert_eq!(loaded.image.format(), ImageFormat::Png);
-        let svg = measure(b"<svg width=\"16\" height=\"8\"/>".to_vec(), Origin::Inline)
-            .ok()
-            .unwrap();
+        assert_eq!(loaded.sharp_to, f32::INFINITY);
+        let svg = measure(
+            b"<svg width=\"16\" height=\"8\"/>".to_vec(),
+            Origin::Inline,
+            0.0,
+        )
+        .ok()
+        .unwrap();
         assert_eq!(svg.image.format(), ImageFormat::Svg);
         assert!(svg.width >= 16.0 && (svg.width / svg.height - 2.0).abs() < 0.01);
+        // Enlarged to draw sharp across the column it was loaded for, its
+        // area bounded.
+        let svg = measure(
+            b"<svg width=\"16\" height=\"8\"/>".to_vec(),
+            Origin::Inline,
+            768.0,
+        )
+        .ok()
+        .unwrap();
+        assert_eq!((svg.width, svg.sharp_to), (768.0, 768.0));
+        let source = String::from_utf8_lossy(svg.image.bytes()).into_owned();
+        assert!(source.contains("width=\"768\""), "{source}");
+        let tall = measure(
+            b"<svg width=\"10\" height=\"1000\"/>".to_vec(),
+            Origin::Inline,
+            768.0,
+        )
+        .ok()
+        .unwrap();
+        assert!(tall.width * tall.height <= SVG_MAX_AREA * 1.001);
         assert_eq!(
-            measure(b"%PDF-1.7".to_vec(), Origin::Inline).err().unwrap(),
+            measure(b"%PDF-1.7".to_vec(), Origin::Inline, 0.0)
+                .err()
+                .unwrap(),
             "unsupported format"
         );
     }
@@ -787,7 +870,7 @@ mod tests {
             .unwrap();
         bytes.resize(MAX_BYTES as usize + 1, 0);
         assert!(
-            measure(bytes, Origin::Inline)
+            measure(bytes, Origin::Inline, 0.0)
                 .err()
                 .unwrap()
                 .starts_with("too large")
