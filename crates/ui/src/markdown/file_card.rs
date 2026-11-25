@@ -599,6 +599,54 @@ mod tests {
         assert_eq!(human_size(3 * 1024 * 1024 + 400 * 1024), "3.4 MB");
     }
 
+    #[gpui::test]
+    fn pages_draw_again_for_a_wider_column(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+        struct Host;
+        let host = cx.new(|_| Host);
+        let key = Key {
+            scope: "sharpen-test".into(),
+            src: "a.pdf".into(),
+        };
+        let loads = Rc::new(Cell::new(0));
+        let ask = |width: f32, cx: &mut gpui::TestAppContext| {
+            let (key, loads) = (key.clone(), loads.clone());
+            host.update(cx, |_, cx| {
+                request(
+                    key,
+                    width,
+                    cx,
+                    move |_| {
+                        loads.set(loads.get() + 1);
+                        Task::ready(Ok(Loaded {
+                            kind: Kind::Pdf,
+                            name: "a.pdf".into(),
+                            size: 1,
+                            body: Body::Plain,
+                            open: "a.pdf".into(),
+                            local: None,
+                            sharp_to: width,
+                        }))
+                    },
+                    |_, _| {},
+                )
+            });
+        };
+        let sharp_to = || match lookup(&key) {
+            Shown::Ready(loaded) => Some(loaded.sharp_to),
+            _ => None,
+        };
+        ask(512.0, cx);
+        cx.run_until_parked();
+        ask(512.0, cx);
+        cx.run_until_parked();
+        assert_eq!((loads.get(), sharp_to()), (1, Some(512.0)));
+        ask(768.0, cx);
+        assert_eq!(sharp_to(), Some(512.0));
+        cx.run_until_parked();
+        assert_eq!((loads.get(), sharp_to()), (2, Some(768.0)));
+    }
+
     #[test]
     fn columns_fit_their_widest_cell_up_to_the_clip() {
         let table = super::super::file_preview::parse_table(

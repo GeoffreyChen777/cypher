@@ -378,6 +378,67 @@ pub fn render(src: &str, alt: &str, caption: bool, ctx: BlockCtx) -> AnyElement 
 mod tests {
     use super::*;
 
+    #[gpui::test]
+    fn a_wider_column_loads_again_showing_the_old_meanwhile(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+        struct Host;
+        let host = cx.new(|_| Host);
+        let key = Key {
+            scope: "sharpen-test".into(),
+            src: "a.svg".into(),
+        };
+        let loads = Rc::new(Cell::new(0));
+        let ask = |width: f32, result: Result<f32, &'static str>, cx: &mut gpui::TestAppContext| {
+            let (key, loads) = (key.clone(), loads.clone());
+            host.update(cx, |_, cx| {
+                request(
+                    key,
+                    width,
+                    cx,
+                    move |_| {
+                        loads.set(loads.get() + 1);
+                        Task::ready(
+                            result
+                                .map(|sharp_to| Loaded {
+                                    image: Arc::new(Image::from_bytes(
+                                        gpui::ImageFormat::Svg,
+                                        b"<svg/>".to_vec(),
+                                    )),
+                                    width: 10.0,
+                                    height: 10.0,
+                                    origin: Origin::Inline,
+                                    sharp_to,
+                                })
+                                .map_err(SharedString::from),
+                        )
+                    },
+                    |_, _| {},
+                )
+            });
+        };
+        let sharp_to = || match lookup(&key) {
+            Shown::Ready(loaded) => Some(loaded.sharp_to),
+            _ => None,
+        };
+        ask(512.0, Ok(512.0), cx);
+        cx.run_until_parked();
+        assert_eq!((loads.get(), sharp_to()), (1, Some(512.0)));
+        // As wide or narrower: kept.
+        ask(256.0, Ok(256.0), cx);
+        ask(512.0, Ok(512.0), cx);
+        cx.run_until_parked();
+        assert_eq!(loads.get(), 1);
+        // Wider: loads again, the old one showing until it lands.
+        ask(768.0, Ok(768.0), cx);
+        assert_eq!((loads.get(), sharp_to()), (2, Some(512.0)));
+        cx.run_until_parked();
+        assert_eq!(sharp_to(), Some(768.0));
+        // A failed reload keeps what showed.
+        ask(1024.0, Err("gone"), cx);
+        cx.run_until_parked();
+        assert_eq!((loads.get(), sharp_to()), (3, Some(768.0)));
+    }
+
     #[test]
     fn errors_name_the_image() {
         assert_eq!(label("shots/a.png", " The chart "), "The chart");
