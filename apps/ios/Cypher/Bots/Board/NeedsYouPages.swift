@@ -132,7 +132,9 @@ struct NeedsYouPage: View {
                     },
                 ], busy: actions.busy)
         case .asking(let chatId, _):
-            if let chat = model.chat(id: chatId), let store = model.sessionStore(for: chat) {
+            // Answered where it is open: the session, or the subagent's
+            // child chat under it that asks.
+            if let chat = model.chat(id: row.askingChatId ?? chatId), let store = model.sessionStore(for: chat) {
                 AskingAnswer(chat: chat, store: store, answered: $answered, compact: true)
             }
         case .chat, .review:
@@ -356,7 +358,11 @@ struct AskingPage: View {
 
     var body: some View {
         if let chat = model.chat(id: chatId) {
-            page(chat, store: model.sessionStore(for: chat))
+            // The question is answered where it is open: the session or a
+            // subagent's child chat under it (plan_asks.rs `PlanQuestion`).
+            let question = model.data?.planQuestion(chatId)
+            let asker = question.flatMap { model.chat(id: $0.chatId) } ?? chat
+            page(chat, asker: asker, waiting: question?.offline == true, store: model.sessionStore(for: asker))
         } else {
             BotEmptyState(
                 symbol: "questionmark.circle", title: "Not on this device yet",
@@ -364,8 +370,8 @@ struct AskingPage: View {
         }
     }
 
-    private func page(_ chat: Chat, store: SessionStore?) -> some View {
-        let asking = model.indicator(for: chat) == .awaitingInput
+    private func page(_ chat: Chat, asker: Chat, waiting: Bool, store: SessionStore?) -> some View {
+        let asking = model.data?.sessionAsking(chat.id) ?? (model.indicator(for: chat) == .awaitingInput)
         let space = chat.spaceId.flatMap { id in model.spaces.first { $0.id == id } }
         let work = workId.flatMap { model.data?.work(id: $0) }
         let request = store?.openInputRequest.flatMap { answered.contains($0.requestId) ? nil : $0 }
@@ -387,6 +393,10 @@ struct AskingPage: View {
                 } else {
                     BotFact(label: "From", value: model.bot(id: botId)?.name ?? "The workspace")
                 }
+                if waiting {
+                    BotFact(status: BotStatusLabel(BoardNeedRow.waitingForDevice, .waiting, symbol: "wifi.slash"))
+                        .accessibilityIdentifier("asking-waiting")
+                }
                 if request == nil {
                     if !answered.isEmpty {
                         BotFact(status: BotStatusLabel("Answer sent", .done))
@@ -400,7 +410,7 @@ struct AskingPage: View {
             .groupedRowStyle()
             if let request, let store {
                 Section {
-                    AskingAnswer(chat: chat, store: store, answered: $answered)
+                    AskingAnswer(chat: asker, store: store, answered: $answered)
                 } header: {
                     ListSectionHeader(title: AskingAnswer.simple(request.questions) ? "Answer" : "Question")
                 }

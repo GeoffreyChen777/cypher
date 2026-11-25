@@ -86,11 +86,11 @@ extension BotRecords {
             .sorted { $0.createdAt < $1.createdAt }
             .map { .approval($0.id) }
         let mine = work.filter { $0.botId == botId }.sorted { $0.createdAt < $1.createdAt }
-        // A session the workspace started that waits on an answer needs the
-        // owner whatever its work did since: the work may have ended while
-        // the question stays open.
+        // A session the workspace started (or steered) that waits on an
+        // answer needs the owner whatever its work did since: the work may
+        // have ended while the question stays open.
         for item in mine {
-            for session in item.sessionIds where asking(session) {
+            for session in item.planChatIds where asking(session) {
                 items.append(.asking(chatId: session, workId: item.id))
             }
         }

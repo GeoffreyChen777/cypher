@@ -10,6 +10,13 @@ extension AppModel {
         enterDemoMode()
         if args.contains("-demo-many") { demo?.addManyProjects() }
         if args.contains("-demo-history") { demo?.addSessionHistory() }
+        // DemoDataset+PlanAsks.swift: a plan's questions, every way one asks.
+        if args.contains("-demo-plan-asks") { demo?.addPlanAsks() }
+        // `-plan-asks-answer <chat id>`: that question answered elsewhere
+        // (another device) once the app is up.
+        if let ix = args.firstIndex(of: "-plan-asks-answer"), ix + 1 < args.count, let demo {
+            demo.answerPlanAsk(chatId: args[ix + 1], requestId: "")
+        }
         if args.contains("-demo-long-plans"), let demo {
             // DemoDataset+PlanBodies.swift: bodies now, never, or after N s.
             let late = args.firstIndex(of: "-plan-bodies-late").flatMap { ix in

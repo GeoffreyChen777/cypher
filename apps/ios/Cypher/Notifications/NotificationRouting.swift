@@ -68,6 +68,11 @@ extension WorkspaceData {
         case .review(let id):
             return botRecords.exchanges.contains { $0.id == id && $0.botId == botId } ? .exchange(id) : nil
         case .asking(let chatId):
+            // A session one of its plans started (docs/design/plan-asks.md):
+            // its question waits in the workspace's Needs you too.
+            if let session = chat(id: chatId), let startedBy = session.startedBy, startedBy.botId == botId {
+                return .asking(chatId: chatId, workId: startedBy.workId)
+            }
             guard let thread = chat(id: chatId), let marker = thread.bot, marker.botId == botId, !marker.isMain
             else { return nil }
             if case .work(let workId) = marker.thread { return .asking(chatId: chatId, workId: workId) }
