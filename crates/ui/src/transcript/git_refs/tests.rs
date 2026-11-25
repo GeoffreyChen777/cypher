@@ -215,3 +215,14 @@ fn a_looked_up_commit_opens_by_its_sha() {
     assert_eq!(history.subject, "iOS: cap tool calls");
     assert!(history.authored_at.starts_with("1970-01-12"));
 }
+
+#[test]
+fn a_card_opens_where_it_fits_without_covering_its_link() {
+    // Room for the tallest card below: below, however much is above.
+    assert!(card_goes_below(CARD_ROOM, 600.0));
+    // Near the bottom of the window (a pull request card would be snapped
+    // up over the link): above, where there is more room.
+    assert!(!card_goes_below(165.0, 670.0));
+    // Near the top: below, even when short of the tallest card's room.
+    assert!(card_goes_below(150.0, 60.0));
+}

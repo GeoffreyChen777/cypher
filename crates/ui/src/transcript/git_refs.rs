@@ -36,6 +36,11 @@ const PENDING_FOR: Duration = Duration::from_secs(20);
 /// Cards kept, per transcript.
 const CACHE_BUDGET: usize = 128;
 const CARD_WIDTH: f32 = 340.0;
+/// Room the tallest card needs (a pull request with a two-line title,
+/// branches, checks and stats): with less below the link, the card goes to
+/// the side with more room, so snapping it into the window never covers
+/// the link it describes.
+const CARD_ROOM: f32 = 200.0;
 
 /// Where a chat's references resolve: its host and, in a workspace's own
 /// chat, the granted project shown in Git.
@@ -617,7 +622,7 @@ impl Transcript {
         let card = crate::kit::frost::frosted_always(12.0, crate::kit::frost::MENU_BLUR, card);
         let anchor = hover.anchor;
         let below = f32::from(viewport.height - anchor.bottom());
-        let (position, corner) = if below >= 120.0 || below >= f32::from(anchor.top()) {
+        let (position, corner) = if card_goes_below(below, f32::from(anchor.top())) {
             (
                 point(anchor.left(), anchor.bottom() + px(4.0)),
                 gpui::Anchor::TopLeft,
@@ -640,6 +645,12 @@ impl Transcript {
             .into_any_element(),
         )
     }
+}
+
+/// Whether the card opens below its link: when the tallest card fits there,
+/// else on the side with more room.
+fn card_goes_below(below: f32, above: f32) -> bool {
+    below >= CARD_ROOM || below >= above
 }
 
 fn card_body(theme: &Theme, model: CardModel) -> AnyElement {
