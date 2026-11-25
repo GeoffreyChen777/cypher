@@ -395,6 +395,10 @@ impl EngineCore {
         self.doc_host.set_command_trust(Arc::new(trust.clone()));
         // Runs launch from signed records under "Only paired devices".
         self.workspace.set_launch_hook(self.doc_host.launch_hook());
+        // Chain heads pushed over the registry socket (T1) pace the chain sync.
+        let signals = trust.clone();
+        self.workspace
+            .set_trust_hook(Arc::new(move |signal| signals.registry_signal(signal)));
         *lock(&self.trust) = Some(trust);
     }
 

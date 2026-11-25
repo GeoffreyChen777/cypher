@@ -95,6 +95,9 @@ impl WorkspaceHost {
                         }
                         inner.bump_changed();
                         tracing::info!(org = %org_id, "registry room joined");
+                        // The join's own Connected/Trust events may have
+                        // fired before `events` subscribed.
+                        inner.report_trust_session();
                         drop(inner);
                         // The slot is the sole owner. This lets engine-level
                         // revocation close the socket synchronously by taking it.
@@ -108,6 +111,11 @@ impl WorkspaceHost {
                                     Ok(event @ (cypher_sync::RegistryEvent::Applied
                                     | cypher_sync::RegistryEvent::Connected)) => {
                                         let Some(inner) = weak.upgrade() else { return };
+                                        if event == cypher_sync::RegistryEvent::Connected {
+                                            inner.signal_trust(
+                                                crate::device_trust::RegistryTrust::Joined,
+                                            );
+                                        }
                                         if event == cypher_sync::RegistryEvent::Connected
                                             && !lock(&inner.relay_probe_backoff).is_empty()
                                         {
@@ -126,8 +134,20 @@ impl WorkspaceHost {
                                         let Some(inner) = weak.upgrade() else { return };
                                         inner.publish();
                                     }
-                                    Ok(cypher_sync::RegistryEvent::Disconnected) => {}
-                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                                    Ok(cypher_sync::RegistryEvent::Trust(length)) => {
+                                        let Some(inner) = weak.upgrade() else { return };
+                                        inner.signal_trust(
+                                            crate::device_trust::RegistryTrust::Head(length),
+                                        );
+                                    }
+                                    Ok(cypher_sync::RegistryEvent::Disconnected) => {
+                                        let Some(inner) = weak.upgrade() else { return };
+                                        inner.signal_trust(crate::device_trust::RegistryTrust::Left);
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        let Some(inner) = weak.upgrade() else { return };
+                                        inner.report_trust_session();
+                                    }
                                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                 },
                                 _ = token_changed(&mut token_changes) => {
@@ -169,6 +189,30 @@ impl WorkspaceHost {
 }
 
 impl WorkspaceHostInner {
+    fn signal_trust(&self, signal: crate::device_trust::RegistryTrust) {
+        let hook = lock(&self.trust_hook).clone();
+        if let Some(hook) = hook {
+            hook(signal);
+        }
+    }
+
+    /// Report the current registry session from scratch: joined or not, and
+    /// the head it carries. Used where an event may have been missed (the
+    /// join before the pump subscribed, a lagged pump, a late hook).
+    pub(super) fn report_trust_session(&self) {
+        use crate::device_trust::RegistryTrust;
+        let room = lock(&self.room).clone();
+        match room {
+            Some(room) if room.stats().connected => {
+                self.signal_trust(RegistryTrust::Joined);
+                if let Some(length) = room.trust_head() {
+                    self.signal_trust(RegistryTrust::Head(length));
+                }
+            }
+            _ => self.signal_trust(RegistryTrust::Left),
+        }
+    }
+
     pub(super) fn save_snapshot(&self) {
         let saved = self.persisted.save(&self.store, || {
             let mut reg = lock(&self.reg);

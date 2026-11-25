@@ -534,3 +534,52 @@ async fn two_engines_converge_through_a_real_workspace_room() {
     a.shutdown().await;
     b.shutdown().await;
 }
+
+/// Chain-head pushes (T1, docs/design/do-cost.md): the registry session's
+/// join, its `state.trust` and later `trust` frames reach device trust
+/// through the workspace host's trust hook — including a hook set after the
+/// join, and a room that never reports a head (an older Worker).
+#[tokio::test]
+async fn registry_session_reports_chain_heads_to_the_trust_hook() {
+    use cypher_engine::device_trust::RegistryTrust;
+    let record = |core: &EngineCore| {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<RegistryTrust>::new()));
+        let sink = seen.clone();
+        core.workspace
+            .set_trust_hook(Arc::new(move |signal| sink.lock().unwrap().push(signal)));
+        seen
+    };
+    let has = |seen: &std::sync::Mutex<Vec<RegistryTrust>>, signal: RegistryTrust| {
+        seen.lock().unwrap().contains(&signal)
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = support::assemble_device(dir.path(), "dev-a", registry());
+    let server = cypher_sync::registry::mock_server::MockRegistryServer::start().await;
+    server.set_trust_head(Some(2));
+    core.workspace.connect_registry_url(&server.url());
+    wait_for(|| core.workspace.registry_synced(), "joined").await;
+    // Set after the join: the current session is reported at once.
+    let seen = record(&core);
+    wait_for(|| has(&seen, RegistryTrust::Head(2)), "head from state").await;
+    server.push_trust_head(3);
+    wait_for(|| has(&seen, RegistryTrust::Head(3)), "pushed head").await;
+
+    // An older Worker: joined, but never a head.
+    let old_dir = tempfile::tempdir().unwrap();
+    let old = support::assemble_device(old_dir.path(), "dev-b", registry());
+    let seen_old = record(&old);
+    let old_server = cypher_sync::registry::mock_server::MockRegistryServer::start().await;
+    old.workspace.connect_registry_url(&old_server.url());
+    wait_for(|| has(&seen_old, RegistryTrust::Joined), "joined old room").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !seen_old
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| matches!(s, RegistryTrust::Head(_))),
+        "{:?}",
+        seen_old.lock().unwrap()
+    );
+}
