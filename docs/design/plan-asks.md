@@ -340,3 +340,24 @@ Live: private dev instance `plan-asks-surface` (local mode, mock harness), shots
 step back to Running and finished the session (`plan-continues.png`). A graceful engine
 stop ends runs and their questions (and fails a running plan, as before); only a crash
 leaves a question open.
+
+### Step 2, iPhone and Worker (part B)
+
+- **iPhone** (`apps/ios`, commit `1d1530ee`). `SessionRow.asking` (lenient: a malformed
+  value reads as no question); `effectiveStatus` keeps `awaitingInput` while it is set.
+  `Bots/PlanAsks.swift` ports `plan_asks.rs` (`sessionAsk`, `ChatTree.question`,
+  `findPlanQuestion`); `BotWork.steered`, `planChatIds`, `settledSteps`. Needs you, the
+  workspace counts and the Asking page read the rule; the card answers in the chat that
+  asks and says "Waiting for its device" when its host is offline; a push naming a plan's
+  session opens its Asking page. `PlanAsksTests` runs every vector. Demo:
+  `-demo-plan-asks` (cases a, b, d′ child, e1, f under one plan), `-plan-asks-answer <chat>`.
+- **Worker** (`apps/edge/src/notifications`, commit `f4852113`). An open question awaits
+  input whatever the row's status says; each new `asking.requestId` is its own claim, so
+  it is a new `input` notice without a status change (h), the same id never twice. A
+  plan's session, or a subagent's chat under one, asks as its workspace's Needs you item
+  (`itemKind: "asking"`, `itemId` = the plan's session) instead of as a session notice:
+  it is muted with the workspace, not the project, and a tap opens the workspace. With
+  the workspace gone it notifies as itself, as before. A question mirrored into a chat
+  above (whose `asking.fromChatId` names the child) pushes once, for that chat; a
+  child's alert already queued is withdrawn. Old hosts send no `asking` and notify as
+  before.
