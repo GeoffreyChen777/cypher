@@ -14,7 +14,11 @@
  *
  * Delivery: bots hold no sockets. A room that queues an entry for its host
  * sends the host device's DeviceRoom a durable `bots` nudge, and the host
- * pulls `GET /inbox` and acknowledges what it has written down. An exchange
+ * pulls `GET /inbox` and acknowledges what it has written down. A nudge the
+ * DeviceRoom handed to a socket (which may have died unseen) or that failed
+ * is repeated from the alarm while entries stay unacknowledged
+ * ([`RENUDGE_MS`]), so a host whose page says `push` pulls only on nudges
+ * and a slow safety poll (docs/design/do-cost.md B1). An exchange
  * not settled 7 days after it was sent expires on both sides; settled rows
  * stay a day without bodies so the per-connection rate limits can count them.
  */
@@ -48,6 +52,23 @@ const PULL_MAX = 100;
 const INVITE_TTL_MIN_MS = 10 * 60_000;
 const INVITE_TTL_MAX_MS = 30 * DAY_MS;
 const INVITE_USES_MAX = 100;
+
+/** Waits before each repeat of a nudge the host has not acknowledged: 15 s,
+ * 30 s, 60 s, ten more minutes at 60 s, then every 15 min, until the inbox is
+ * empty, a nudge is queued for an offline host, or [`RENUDGE_MAX`] repeats. */
+const RENUDGE_MS = [15_000, 30_000, ...Array<number>(11).fill(60_000)];
+const RENUDGE_SLOW_MS = 15 * 60_000;
+/** About a day of repeats: a host that never acknowledges (a bot moved off
+ * the device, a broken engine) stops costing alarms; its next entry starts
+ * over, and the host's own safety poll still reads the inbox. */
+const RENUDGE_MAX = RENUDGE_MS.length + 96;
+
+const renudgeDelay = (step: number): number => RENUDGE_MS[step] ?? RENUDGE_SLOW_MS;
+
+/** What became of a nudge: handed to a host socket, queued for the host's
+ * next join, refused for good (no such device, someone else's), failed, or
+ * not sent (no host recorded). */
+type NudgeOutcome = "delivered" | "queued" | "refused" | "failed" | "none";
 
 interface Profile {
   name: string;
@@ -272,44 +293,101 @@ export class BotRoom implements DurableObject {
       now - DAY_MS
     );
     sql.exec("DELETE FROM invites WHERE expires_at <= ?", now - 30 * DAY_MS);
-    // The alarm only expires; settled rows are pruned by whatever request
-    // or alarm comes next.
+    await this.armAlarm(now);
+  }
+
+  /** Arm the alarm for the earlier of the next expiry and the next repeat
+   * of an unacknowledged nudge. Settled rows are pruned by whatever request
+   * or alarm comes next. */
+  private async armAlarm(now: number): Promise<void> {
     const [next] = this.rows<{ at: number | null }>(
       `SELECT MIN(sent_at) + ? AS at FROM (
         SELECT sent_at FROM inbox WHERE state NOT IN ('answered', 'declined', 'expired')
         UNION ALL SELECT sent_at FROM outbox WHERE state NOT IN ('answered', 'declined', 'expired'))`,
       EXCHANGE_TTL_MS
     );
-    if (next?.at != null) {
-      const at = Math.max(next.at, now + 1_000);
-      const current = await this.ctx.storage.getAlarm();
-      if (current === null || current > at || current <= now) await this.ctx.storage.setAlarm(at);
+    const renudge = Number(this.meta("renudge_at") ?? NaN);
+    const due = [next?.at ?? NaN, renudge].filter((at) => Number.isFinite(at));
+    const current = await this.ctx.storage.getAlarm();
+    if (due.length === 0) {
+      // A repeat the host's acknowledgement made unnecessary costs no alarm.
+      if (current !== null && current > now) await this.ctx.storage.deleteAlarm();
+      return;
     }
+    const at = Math.max(Math.min(...due), now + 1_000);
+    if (current !== at) await this.ctx.storage.setAlarm(at);
   }
 
   async alarm(): Promise<void> {
-    await this.sweep(Date.now());
+    const now = Date.now();
+    await this.sweep(now);
+    await this.renudge(now);
+    await this.armAlarm(now);
   }
 
-  /** Tell the host device a new entry waits: a durable nudge to its
-   * DeviceRoom, sent as the owner (the DeviceRoom accepts only its owner,
-   * so a room can only ever nudge its own owner's devices). */
+  /** The alarm's half of delivery: repeat the nudge while the host has not
+   * acknowledged everything, on the [`RENUDGE_MS`] ladder. */
+  private async renudge(now: number): Promise<void> {
+    const at = Number(this.meta("renudge_at") ?? NaN);
+    if (!Number.isFinite(at) || now < at) return;
+    if (this.pull().length === 0) {
+      this.stopRenudge();
+      return;
+    }
+    const step = Number(this.meta("renudge_step") ?? 0) + 1;
+    const outcome = await this.sendNudge();
+    if ((outcome === "delivered" || outcome === "failed") && step < RENUDGE_MAX) {
+      this.setMeta("renudge_step", String(step));
+      this.setMeta("renudge_at", String(now + renudgeDelay(step)));
+    } else {
+      this.stopRenudge();
+    }
+  }
+
+  private stopRenudge(): void {
+    this.ctx.storage.sql.exec("DELETE FROM meta WHERE key IN ('renudge_at', 'renudge_step')");
+  }
+
+  /** Tell the host device a new entry waits, and arm the repeat when the
+   * nudge may not have arrived: a nudge handed to a host socket can die with
+   * a socket that went away unseen, and a failed call is lost. A queued one
+   * is replayed by the DeviceRoom on the host's next join. */
   private async nudgeHost(): Promise<void> {
+    const outcome = await this.sendNudge();
+    if (outcome === "delivered" || outcome === "failed") {
+      const now = Date.now();
+      this.setMeta("renudge_step", "0");
+      this.setMeta("renudge_at", String(now + renudgeDelay(0)));
+      await this.armAlarm(now);
+    } else {
+      this.stopRenudge();
+    }
+  }
+
+  /** A durable nudge to the host device's DeviceRoom, sent as the owner (the
+   * DeviceRoom accepts only its owner, so a room can only ever nudge its own
+   * owner's devices). */
+  private async sendNudge(): Promise<NudgeOutcome> {
     const host = this.meta("host");
     const owner = this.meta("owner");
     const room = this.meta("room");
-    if (!host || !owner || !room || !ID_RE.test(host)) return;
+    if (!host || !owner || !room || !ID_RE.test(host)) return "none";
     try {
       const stub = this.env.DEVICE_ROOMS.get(this.env.DEVICE_ROOMS.idFromName(`d2/${host}`));
-      await stub.fetch(
+      const response = await stub.fetch(
         new Request("https://device/nudge", {
           method: "POST",
           headers: { [AUTH_USER_HEADER]: owner, "content-type": "application/json" },
           body: JSON.stringify({ botRoomId: room })
         })
       );
+      if (response.status >= 500) return "failed";
+      if (!response.ok) return "refused";
+      const reply = (await response.json().catch(() => ({}))) as { delivered?: unknown; queued?: unknown };
+      if (reply.queued === true) return "queued";
+      return "delivered";
     } catch {
-      // Best effort: the host also pulls every minute while it waits.
+      return "failed";
     }
   }
 
@@ -396,7 +474,9 @@ export class BotRoom implements DurableObject {
 
     const segments = path.split("/").filter(Boolean);
     const [head, tail] = segments;
-    if (head === "inbox" && method === "GET") return ok({ entries: this.pull() });
+    // `push`: this room repeats unacknowledged nudges, so its host may pull
+    // on nudges and a slow safety poll instead of every minute.
+    if (head === "inbox" && method === "GET") return ok({ entries: this.pull(), push: true });
     if (head === "invites" && method === "POST" && !tail) return ok(await this.createInvite(body, room, now));
     if (head === "invites" && method === "DELETE" && tail) {
       const changed = this.ctx.storage.sql.exec(
@@ -651,6 +731,11 @@ export class BotRoom implements DurableObject {
       if (typeof connectionId !== "string") continue;
       sql.exec("UPDATE connections SET link_pending = NULL WHERE id = ?", connectionId);
     }
+    // Everything acknowledged: the host has it, no nudge needs repeating.
+    if (this.meta("renudge_at") !== undefined && this.pull().length === 0) {
+      this.stopRenudge();
+      await this.armAlarm(Date.now());
+    }
     return { ok: true };
   }
 
@@ -765,13 +850,16 @@ export class BotRoom implements DurableObject {
         const connection = this.peerConnection(body.connectionId, body.room);
         const state = body.state;
         if (state !== "delivered" && state !== "working" && state !== "awaiting_review") return ok({ ok: false });
-        sql.exec(
+        const changed = sql.exec(
           `UPDATE outbox SET state = ? WHERE exchange_id = ? AND connection_id = ?
-           AND state NOT IN ('answered', 'declined', 'expired')`,
+           AND state NOT IN ('answered', 'declined', 'expired') AND state != ?`,
           state,
           body.exchangeId,
-          connection.id
-        );
+          connection.id,
+          state
+        ).rowsWritten;
+        // Progress reaches the asking host at once, not on its next poll.
+        if (changed > 0) await this.nudgeHost();
         return ok();
       }
       default:
