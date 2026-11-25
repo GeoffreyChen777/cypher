@@ -1430,7 +1430,12 @@ async fn a_plans_time_limit_models_and_limits_follow_the_owners_settings() {
             .count()
     };
     wait_for(|| warnings() == 1, "the warning").await;
-    assert!(rig.work(&work_id).warned_at.is_some());
+    // The host queues the steer, then records `warnedAt`: wait for both.
+    wait_for(
+        || rig.work(&work_id).warned_at.is_some(),
+        "the warning recorded",
+    )
+    .await;
     let details = rig
         .tool(
             &bot.chat_id,
