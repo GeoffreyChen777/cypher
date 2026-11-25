@@ -17,6 +17,12 @@ struct TranscriptImageFiles {
     var context: @MainActor () async -> ImageSource.Context
     /// One candidate's bytes, refused past `ImageSource.maxBytes`.
     var read: @MainActor (ImageSource.Candidate) async throws -> Data
+    /// A file preview's read of one candidate (FilePreviewLoader): its first
+    /// `limit` bytes when `head`, else the whole file refused past `limit`;
+    /// with the file's whole size. nil where only images are read.
+    var preview:
+        (@MainActor (_ candidate: ImageSource.Candidate, _ limit: UInt64, _ head: Bool) async throws -> (Data, UInt64))? =
+            nil
 }
 
 extension EnvironmentValues {
@@ -267,7 +273,7 @@ final class ImageLoader {
         return context
     }
 
-    private static func loadError(_ error: Error) -> ImageLoadError {
+    static func loadError(_ error: Error) -> ImageLoadError {
         if let error = error as? ImageLoadError { return error }
         if case WorkspaceBrowserError.tooLarge = error { return .tooLarge }
         if case WorkspaceBrowserError.invalidPath = error { return .notFound }

@@ -79,7 +79,8 @@ final class ImageSourceTests: XCTestCase {
         guard case .paragraph(let runs) = blocks[0] else { return XCTFail("\(blocks)") }
         // The sentence keeps the alt text (desktop parser.rs).
         XCTAssertEqual(runs.map(\.text).joined(), "Here is the chart Revenue for Q3.")
-        XCTAssertEqual(blocks[1], .image(src: "shots/chart.png", alt: "Revenue"))
+        // The sentence says the alt, so the image doesn't caption it again.
+        XCTAssertEqual(blocks[1], .image(src: "shots/chart.png", alt: "Revenue", caption: false))
     }
 
     func testAParagraphOfOnlyImagesIsJustTheImages() {
@@ -92,9 +93,9 @@ final class ImageSourceTests: XCTestCase {
         XCTAssertEqual(heading.count, 2)
         guard case .heading(_, let runs) = heading[0] else { return XCTFail() }
         XCTAssertEqual(runs.map(\.text).joined(), "Logo x")
-        XCTAssertEqual(heading[1], .image(src: "a.png", alt: "x"))
+        XCTAssertEqual(heading[1], .image(src: "a.png", alt: "x", caption: false))
         let table = MarkdownParser.parse("| a |\n|---|\n| ![p](p.gif) |").map(\.block)
-        XCTAssertEqual(table.last, .image(src: "p.gif", alt: "p"))
+        XCTAssertEqual(table.last, .image(src: "p.gif", alt: "p", caption: false))
     }
 
     func testAnImagePathParagraphIsAnImage() {
@@ -105,6 +106,26 @@ final class ImageSourceTests: XCTestCase {
         // In a list item too, after its marker.
         guard case .list(_, let items) = MarkdownParser.parse("- shots/a.png")[0].block else { return XCTFail() }
         XCTAssertEqual(items.first?.children, [.image(src: "shots/a.png", alt: "shots/a.png")])
+    }
+
+    /// Desktop parser/tests.rs: an image whose alt the text around it keeps
+    /// has no caption; one that was all its paragraph said keeps it.
+    func testTheAltIsSaidOnce() {
+        let said = MarkdownParser.parse("The icon ![app icon](a.png) is unchanged.").map(\.block)
+        XCTAssertEqual(said.count, 2)
+        XCTAssertEqual(said[1], .image(src: "a.png", alt: "app icon", caption: false))
+        XCTAssertEqual(
+            MarkdownParser.parse("![App icon](a.png)").map(\.block),
+            [.image(src: "a.png", alt: "App icon", caption: true)])
+        // Quotes and list items: the same rule inside them.
+        guard case .blockquote(let quoted) = MarkdownParser.parse("> ![q](q.jpg)")[0].block else { return XCTFail() }
+        XCTAssertEqual(quoted, [.image(src: "q.jpg", alt: "q", caption: true)])
+        guard case .list(_, let items) = MarkdownParser.parse("- shot: ![a](a.png)\n- b")[0].block else {
+            return XCTFail()
+        }
+        XCTAssertEqual(items[0].children.last, .image(src: "a.png", alt: "a", caption: false))
+        // The comment text still reads the alt.
+        XCTAssertEqual(MDBlock.image(src: "a.png", alt: "app icon", caption: false).commentText, "app icon")
     }
 
     func testNonImageSourcesStayAltText() {

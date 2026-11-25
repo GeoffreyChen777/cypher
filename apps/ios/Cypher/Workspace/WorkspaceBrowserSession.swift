@@ -170,13 +170,25 @@ final class WorkspaceBrowserSession {
     func fileBytes(
         _ path: String, limit: UInt64 = 24 * 1024 * 1024, rootSpaceId: String? = nil
     ) async throws -> Data {
+        try await fileRead(path, limit: limit, head: false, rootSpaceId: rootSpaceId).data
+    }
+
+    /// A file's bytes and its whole size. `head`: only its first `limit`
+    /// bytes (a table preview), never refused for its size; else the whole
+    /// file, refused past `limit`.
+    func fileRead(
+        _ path: String, limit: UInt64, head: Bool, rootSpaceId: String? = nil
+    ) async throws -> (data: Data, size: UInt64) {
         try check()
         guard WorkspaceFilePath.valid(path, allowRoot: false) else { throw WorkspaceBrowserError.invalidPath }
         if isDemo {
             guard let data = Self.demoBytes(path) ?? Self.demoText(path).map({ Data($0.utf8) }) else {
                 throw WorkspaceBrowserError.invalidPath
             }
-            return data
+            let size = UInt64(data.count)
+            if head { return (data.prefix(Int(min(limit, size))), size) }
+            guard size <= limit else { throw WorkspaceBrowserError.tooLarge }
+            return (data, size)
         }
         struct Chunk: Decodable, Sendable {
             var data: String
@@ -193,12 +205,13 @@ final class WorkspaceBrowserSession {
         while true {
             let chunk: Chunk = try await call(
                 "ReadWorkspaceFileChunk", path: path, extra: root.merging(["offset": offset]) { _, new in new })
-            guard chunk.bytes <= limit else { throw WorkspaceBrowserError.tooLarge }
+            guard head || chunk.bytes <= limit else { throw WorkspaceBrowserError.tooLarge }
             if offset > 0, chunk.modifiedMs != modified { throw WorkspaceBrowserError.changedWhileReading }
             modified = chunk.modifiedMs
             guard let slice = Data(base64Encoded: chunk.data) else { throw WorkspaceBrowserError.unavailable }
             data.append(slice)
-            if chunk.done { return data }
+            if head, UInt64(data.count) >= limit { return (data.prefix(Int(limit)), chunk.bytes) }
+            if chunk.done { return (data, chunk.bytes) }
             guard chunk.nextOffset > offset else { throw WorkspaceBrowserError.unavailable }
             offset = chunk.nextOffset
         }
@@ -248,20 +261,32 @@ final class WorkspaceBrowserSession {
     /// One candidate's bytes: in the chat's own folder, or in the granted
     /// project whose folder it names.
     func imageBytes(_ candidate: ImageSource.Candidate) async throws -> Data {
+        try await fileBytes(candidate.path, limit: ImageSource.maxBytes, rootSpaceId: rootSpace(of: candidate))
+    }
+
+    /// One candidate's bytes for a file preview (`TranscriptImageFiles.preview`),
+    /// with the file's whole size.
+    func previewBytes(
+        _ candidate: ImageSource.Candidate, limit: UInt64, head: Bool
+    ) async throws -> (data: Data, size: UInt64) {
+        try await fileRead(candidate.path, limit: limit, head: head, rootSpaceId: rootSpace(of: candidate))
+    }
+
+    /// The granted project a candidate's root is (`rootSpaceId`); nil for
+    /// the chat's own folder. Throws `ImageLoadError.outside` for any other.
+    private func rootSpace(of candidate: ImageSource.Candidate) async throws -> String? {
         let cwd = chat.cwd ?? ""
-        if candidate.root == cwd || candidate.root == ImageSource.normalize(cwd) {
-            return try await fileBytes(candidate.path, limit: ImageSource.maxBytes)
-        }
+        if candidate.root == cwd || candidate.root == ImageSource.normalize(cwd) { return nil }
         let roots = await fileRoots()
         let home = Self.imageContext(cwd: cwd, roots: roots.map(\.path)).home
         let ownExpanded = home.map { ImageSource.normalize($0 + cwd.dropFirst()) }
         if candidate.root == ownExpanded || roots.contains(where: { $0.path == candidate.root && $0.spaceId == nil }) {
-            return try await fileBytes(candidate.path, limit: ImageSource.maxBytes)
+            return nil
         }
         guard let space = roots.first(where: { $0.path == candidate.root })?.spaceId else {
             throw ImageLoadError.outside
         }
-        return try await fileBytes(candidate.path, limit: ImageSource.maxBytes, rootSpaceId: space)
+        return space
     }
 
     /// Where a reference or link a reply wrote lands in this checkout
@@ -331,6 +356,9 @@ final class WorkspaceBrowserSession {
         "notes": [
             .init(name: "guide.md", isDir: false), .init(name: "page.html", isDir: false),
             .init(name: "diagram.svg", isDir: false), .init(name: "icon.png", isDir: false),
+            .init(name: "latency.csv", isDir: false), .init(name: "regions.tsv", isDir: false),
+            .init(name: "report.pdf", isDir: false), .init(name: "demo.mp4", isDir: false),
+            .init(name: "prototype.html", isDir: false),
         ],
     ]
 
@@ -372,12 +400,22 @@ final class WorkspaceBrowserSession {
             </svg>
 
             """
+        case "notes/latency.csv": DemoDataset.latencyCSV
+        case "notes/regions.tsv": DemoDataset.regionsTSV
+        case "notes/prototype.html": DemoDataset.prototypeHTML
         default: nil
         }
     }
 
-    /// The demo checkout's one image: a small generated PNG.
+    /// The demo checkout's binary files: a small generated PNG, a two-page
+    /// PDF drawn here and the bundled three-second clip.
     static func demoBytes(_ path: String) -> Data? {
+        switch path {
+        case "notes/report.pdf": return DemoDataset.reportPDF()
+        case "notes/demo.mp4":
+            return Bundle.main.url(forResource: "demo-clip", withExtension: "mp4").flatMap { try? Data(contentsOf: $0) }
+        default: break
+        }
         guard path == "notes/icon.png" else { return nil }
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1

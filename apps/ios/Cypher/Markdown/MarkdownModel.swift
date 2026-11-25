@@ -57,8 +57,13 @@ indirect enum MDBlock: Hashable {
     case rule
     /// An image (`![alt](src)`, or a paragraph that is only an image path):
     /// a block preview after the paragraph it was written in. `src` as
-    /// written; `ImageSource` says where its bytes come from.
-    case image(src: String, alt: String)
+    /// written; `ImageSource` says where its bytes come from. `caption` is
+    /// false when the text the image stood in kept its alt (desktop
+    /// parser.rs `Block::Image`): the alt is said once.
+    case image(src: String, alt: String, caption: Bool = true)
+    /// A paragraph that is only a path to a csv/tsv, pdf, video or html
+    /// file (`FilePreview.fileLine`): a table, first page, frame or page card.
+    case filePreview(src: String, kind: FilePreview.Kind)
 }
 
 /// A top-level block plus the 1-based source line it starts on (the stable
@@ -111,37 +116,46 @@ enum MarkdownParser {
 
     /// A block as the blocks it renders as (desktop parser.rs
     /// `paragraph_blocks`): a paragraph, heading or table is followed by the
-    /// images written in it — the sentence keeps their alt text, and a
-    /// paragraph that said nothing but the images is dropped — and a
-    /// paragraph that only names an image file is that image.
+    /// images written in it — the sentence keeps their alt text and the
+    /// images then carry no caption, so it is said once; a paragraph that
+    /// said nothing but the images is dropped and they caption themselves —
+    /// and a paragraph that only names an image file is that image, one that
+    /// only names a previewable file that file's preview.
     private static func convertBlocks(_ markup: Markup, _ context: Context) -> [MDBlock] {
-        if let paragraph = markup as? Paragraph, let src = imageLine(of: paragraph, context) {
-            return [.image(src: src, alt: src)]
+        if let paragraph = markup as? Paragraph, let source = lineSource(of: paragraph, context) {
+            if let src = ImageSource.imageLine(source) { return [.image(src: src, alt: src)] }
+            if let src = FilePreview.fileLine(source), let kind = FilePreview.kind(src) {
+                return [.filePreview(src: src, kind: kind)]
+            }
         }
         let taken = context.images.images.count
         let block = convertBlock(markup, context)
-        let images = context.images.images[taken...].map { MDBlock.image(src: $0.src, alt: $0.alt) }
-        let alts = context.images.images[taken...].map(\.alt)
+        let found = Array(context.images.images[taken...])
         context.images.images.removeSubrange(taken...)
-        guard let block else { return images }
-        guard !images.isEmpty else { return [block] }
+        func images(caption: Bool) -> [MDBlock] {
+            found.map { MDBlock.image(src: $0.src, alt: $0.alt, caption: caption) }
+        }
+        guard let block else { return images(caption: true) }
+        guard !found.isEmpty else { return [block] }
         if case .paragraph(let runs) = block {
             let squeeze = { (text: String) in text.filter { !$0.isWhitespace } }
-            if runs.map({ squeeze($0.text) }).joined() == alts.map(squeeze).joined() { return images }
+            if runs.map({ squeeze($0.text) }).joined() == found.map({ squeeze($0.alt) }).joined() {
+                return images(caption: true)
+            }
         }
-        return [block] + images
+        return [block] + images(caption: false)
     }
 
-    /// The image a one-line paragraph names on its own (`ImageSource.imageLine`
-    /// on its source).
-    private static func imageLine(of paragraph: Paragraph, _ context: Context) -> String? {
+    /// A one-line paragraph's Markdown source, for `ImageSource.imageLine`
+    /// and `FilePreview.fileLine`.
+    private static func lineSource(of paragraph: Paragraph, _ context: Context) -> String? {
         guard let range = paragraph.range, range.lowerBound.line == range.upperBound.line,
             range.lowerBound.line >= 1, range.lowerBound.line - 1 < context.lines.count
         else { return nil }
         let line = context.lines[range.lowerBound.line - 1].utf8
         let source = String(decoding: line.dropFirst(max(0, range.lowerBound.column - 1)), as: UTF8.self)
         guard source.utf8.count <= 4096 else { return nil }
-        return ImageSource.imageLine(source)
+        return source
     }
 
     private static func convertBlock(_ markup: Markup, _ context: Context) -> MDBlock? {

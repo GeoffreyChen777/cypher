@@ -719,6 +719,10 @@ struct SessionView: View {
             context: { [model] in await WorkspaceBrowserSession(model: model, chat: chat).imageContext() },
             read: { [model] candidate in
                 try await WorkspaceBrowserSession(model: model, chat: chat).imageBytes(candidate)
+            },
+            preview: { [model] candidate, limit, head in
+                try await WorkspaceBrowserSession(model: model, chat: chat).previewBytes(
+                    candidate, limit: limit, head: head)
             })
     }
 

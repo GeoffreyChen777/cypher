@@ -82,8 +82,11 @@ struct MarkdownBlockView: View {
                 .fill(Theme.border)
                 .frame(height: 1)
 
-        case .image(let src, let alt):
-            InlineImageBlock(src: src, alt: alt)
+        case .image(let src, let alt, let caption):
+            InlineImageBlock(src: src, alt: alt, caption: caption)
+
+        case .filePreview(let src, let kind):
+            FilePreviewBlock(src: src, kind: kind)
         }
     }
 }

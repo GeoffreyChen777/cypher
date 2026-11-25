@@ -256,7 +256,7 @@ enum TranscriptTextStyle {
             return true
         case .list(_, let items):
             return items.allSatisfy { $0.children.allSatisfy(isProse) }
-        case .codeBlock, .artifact, .blockquote, .table, .rule, .image:
+        case .codeBlock, .artifact, .blockquote, .table, .rule, .image, .filePreview:
             return false
         }
     }
@@ -328,7 +328,7 @@ enum TranscriptTextStyle {
                     appendProse(child, to: result, indent: indent + listIndent, spacingBefore: listItemGap)
                 }
             }
-        case .codeBlock, .artifact, .blockquote, .table, .rule, .image:
+        case .codeBlock, .artifact, .blockquote, .table, .rule, .image, .filePreview:
             // Not prose: callers only pass `isProse` blocks.
             break
         }

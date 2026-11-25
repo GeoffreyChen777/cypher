@@ -13,6 +13,9 @@ import UIKit
 struct InlineImageBlock: View {
     let src: String
     let alt: String
+    /// Show the alt as a caption: false when the sentence the image stood
+    /// in already says it (MDBlock.image).
+    var caption = true
 
     static let maxHeight: CGFloat = 360
     static let radius: CGFloat = 8
@@ -23,11 +26,11 @@ struct InlineImageBlock: View {
     @State private var page: ArtifactPage?
 
     /// The caption: the alt text (a paragraph that was only an image path
-    /// has the path as its alt).
-    private var caption: String? { alt.isEmpty ? nil : alt }
+    /// has the path as its alt), unless the text around it said it.
+    private var captionText: String? { alt.isEmpty || !caption ? nil : alt }
 
-    /// What names the image where there's no caption: its file name.
-    private var name: String { caption ?? ImageLoader.fileName(src) }
+    /// What names the image: its alt, else its file name.
+    private var name: String { alt.isEmpty ? ImageLoader.fileName(src) : alt }
 
     var body: some View {
         let current =
@@ -50,8 +53,8 @@ struct InlineImageBlock: View {
             case nil:
                 placeholder
             }
-            if let caption, case .success(let image) = current, image.bitmap != nil {
-                Text(caption)
+            if let captionText, case .success(let image) = current, image.bitmap != nil {
+                Text(captionText)
                     .font(alt == src ? Theme.mono(11.5) : Theme.sans(12))
                     .foregroundStyle(Theme.textMuted)
                     .lineLimit(3)
@@ -224,41 +227,20 @@ struct ImageErrorCard: View {
     }
 }
 
-/// An SVG image: a card naming it, which opens it as a page.
+/// An SVG image: a card naming it, which opens it as a page (the file
+/// previews' card, FilePreviewView.swift).
 struct SVGCard: View {
     let title: String
     let open: () -> Void
 
     var body: some View {
         Button(action: open) {
-            HStack(spacing: 10) {
-                Text("SVG")
-                    .font(Theme.mono(10.5, weight: .semibold))
-                    .foregroundStyle(Theme.textMuted)
-                    .padding(.horizontal, 6)
-                    .frame(height: 20)
-                    .background(whiteAlpha(0.06), in: RoundedRectangle(cornerRadius: 5))
-                Text(title)
-                    .font(Theme.sans(12.5))
-                    .foregroundStyle(Theme.text.opacity(0.85))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 0)
-                Text("Open")
-                    .font(Theme.sans(12, weight: .medium))
-                    .foregroundStyle(Theme.textMuted)
+            FileCard {
+                FileCardRow(symbol: FilePreview.Kind.svg.symbol, title: title, detail: "SVG image", trailing: .open)
             }
-            .padding(.horizontal, 12)
-            .frame(height: 40)
-            .frame(maxWidth: 420)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(PressWashButtonStyle(cornerRadius: InlineImageBlock.radius))
-        .background(FileReferenceChip.wash.swiftUI, in: RoundedRectangle(cornerRadius: InlineImageBlock.radius))
-        .overlay(
-            RoundedRectangle(cornerRadius: InlineImageBlock.radius)
-                .strokeBorder(FileReferenceChip.hairline.swiftUI, lineWidth: 1)
-        )
+        .buttonStyle(FileCardButtonStyle())
+        .accessibilityHint("Opens the image")
         .accessibilityIdentifier("inline-image-svg")
     }
 }

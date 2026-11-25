@@ -152,21 +152,33 @@ enum ImageSource {
             if rest.isEmpty || !remoteMayBeImage(src) { return .notImage }
             return .remote(url: src)
         }
+        guard let path = localPath(src), let format = Format(path: path) else { return .notImage }
+        return local(path, format: format, context)
+    }
+
+    /// The file path `src` names on the session's host, cleaned (desktop
+    /// image_source.rs `local_path`): `file://` (optionally `localhost`) or
+    /// `cypher-file:` stripped, a `#fragment` or `?query` dropped,
+    /// percent-escapes decoded and a `:12`, `:12-20` or `:12:5` suffix
+    /// dropped. nil for a URL or another scheme (`https:`, `data:`,
+    /// `mailto:`) and for an empty path.
+    static func localPath(_ src: String) -> String? {
+        let src = src.trimmingCharacters(in: .whitespacesAndNewlines)
+        if src.isEmpty { return nil }
         var path: Substring
         if let rest = stripPrefix(src, "file://") {
             path = rest.hasPrefix("localhost") ? rest.dropFirst("localhost".count) : rest
         } else if let rest = stripPrefix(src, "cypher-file:") {
             path = rest
         } else if hasScheme(src) {
-            return .notImage
+            return nil
         } else {
             path = Substring(src)
         }
         if let cut = path.firstIndex(where: { $0 == "#" || $0 == "?" }) { path = path[..<cut] }
         let decoded = percentDecode(path) ?? String(path)
         let bare = stripLineSuffix(decoded)
-        guard let format = Format(path: bare) else { return .notImage }
-        return local(String(bare), format: format, context)
+        return bare.isEmpty ? nil : String(bare)
     }
 
     /// The image a whole reply paragraph names, given as its Markdown source
@@ -174,6 +186,21 @@ enum ImageSource {
     /// a supported image file. nil for anything else (prose, a link, several
     /// tokens, a path to another kind of file, plain `http://`).
     static func imageLine(_ line: String) -> String? {
+        guard let inner = lineToken(line) else { return nil }
+        let named: Bool
+        switch classify(inner, Context()) {
+        case .local, .outside: named = true
+        // A bare URL is an image only when its path says so.
+        case .remote(let url): named = remoteExtension(url).flatMap { Format(extension: $0) } != nil
+        case .data, .rejected, .notImage: named = false
+        }
+        return named ? inner : nil
+    }
+
+    /// The one token a whole paragraph is (trimmed): bare, in backticks or in
+    /// `<…>`, without whitespace; bare tokens hold none of `* [ ] ( ) < > ` !`
+    /// (desktop image_source.rs `line_token`).
+    static func lineToken(_ line: String) -> String? {
         let line = line.trimmingCharacters(in: .whitespacesAndNewlines)
         let inner: String
         if line.count >= 2, line.hasPrefix("`"), line.hasSuffix("`") {
@@ -185,14 +212,7 @@ enum ImageSource {
             inner = line
         }
         if inner.isEmpty || inner.contains(where: \.isWhitespace) || inner.contains("`") { return nil }
-        let named: Bool
-        switch classify(inner, Context()) {
-        case .local, .outside: named = true
-        // A bare URL is an image only when its path says so.
-        case .remote(let url): named = remoteExtension(url).flatMap { Format(extension: $0) } != nil
-        case .data, .rejected, .notImage: named = false
-        }
-        return named ? inner : nil
+        return inner
     }
 
     // MARK: Pieces
@@ -243,6 +263,23 @@ enum ImageSource {
     /// checked against the roots, so a `..` that climbs out of every root
     /// (or above an unknown home) reads nothing.
     private static func local(_ path: String, format: Format, _ context: Context) -> Kind {
+        switch candidates(path, context) {
+        case .inside(let candidates): return .local(candidates: candidates, format: format)
+        case .outside(let path): return .outside(path: path)
+        }
+    }
+
+    /// Where a cleaned local path (`localPath`) may be read.
+    enum Resolved: Hashable, Sendable {
+        /// Each place to try, in order.
+        case inside([Candidate])
+        /// Outside every root the chat may read (absolute, normalized).
+        case outside(String)
+    }
+
+    /// The places a cleaned local path resolves to in `context` (desktop
+    /// image_source.rs `local_candidates`), for any kind of file.
+    static func candidates(_ path: String, _ context: Context) -> Resolved {
         let home = context.home.map { trimTrailingSlashes($0) }
         func absolute(_ path: String) -> Place? {
             if path == "~" || path.hasPrefix("~/") {
@@ -286,8 +323,8 @@ enum ImageSource {
                 if !candidates.contains(candidate) { candidates.append(candidate) }
             }
         }
-        if candidates.isEmpty { return .outside(path: tries.first?.path ?? path) }
-        return .local(candidates: candidates, format: format)
+        if candidates.isEmpty { return .outside(tries.first?.path ?? path) }
+        return .inside(candidates)
     }
 
     /// `~` + `rest` under an unknown home: folded, unless a `..` climbs
