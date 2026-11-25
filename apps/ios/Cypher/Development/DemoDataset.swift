@@ -350,10 +350,6 @@ final class DemoDataset {
         }
     }
 
-    /// Replies over the tool call cap (`ToolCallCap`): twelve calls in one
-    /// group, which shows its last five under "Show 7 earlier tool calls",
-    /// then a work run of nine calls between three thoughts, which once
-    /// opened folds its first four calls and two thoughts the same way.
     /// Images in a reply (`-demo -route chat:chat-images`): read from the
     /// demo checkout (`notes/icon.png`, `notes/diagram.svg`), a data URI, a
     /// chip and a tool row with thumbnails, a missing file and plain http.
@@ -387,6 +383,10 @@ final class DemoDataset {
         ]
     }
 
+    /// Replies over the tool call cap (`ToolCallCap`): twelve calls in one
+    /// group, which shows its last five under "Show 7 earlier tool calls",
+    /// then a work run of nine calls between three thoughts, which once
+    /// opened folds its first four calls and two thoughts the same way.
     private static func longToolRuns(now: Int64) -> [MessageEntry] {
         func call(_ id: String, _ tag: String, _ field: String, _ value: String, failed: Bool = false) -> MessagePart {
             .tool(id: id, call: RenderToolCall(tag: tag, fields: [field: value]), isError: failed, resolved: true)
