@@ -359,6 +359,10 @@ pub fn render(src: &str, alt: &str, caption: bool, ctx: BlockCtx) -> AnyElement 
                 loaded.height,
                 img(loaded.image.clone()).size_full().into_any_element(),
             )
+            // A hairline edge, like the file previews': a light picture
+            // (or a cropped one's cut) still shows where it ends.
+            .border_1()
+            .border_color(hairline(0.11))
             .id(id)
             .cursor_pointer()
             .on_click(move |_, window, cx| on_open(key.clone(), alt.clone(), window, cx))
