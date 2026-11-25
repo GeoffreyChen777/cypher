@@ -90,6 +90,11 @@ pub enum RegistryEvent {
     Applied,
     /// A remote device's presence beat arrived.
     Presence,
+    /// The room reported the user's trust chain length: in the join's
+    /// `state` (right after [`Self::Connected`]) or in a `trust` frame after
+    /// an append. A session that never sends this is on a room without
+    /// chain-head pushes. See [`RegistryClient::trust_head`].
+    Trust(u64),
 }
 
 /// Plain-HTTPS pull/push transport used when the WebSocket is unavailable.
@@ -194,7 +199,12 @@ struct Stats {
     full_resyncs: std::sync::atomic::AtomicU64,
     disconnects: std::sync::atomic::AtomicU64,
     rejected: std::sync::atomic::AtomicU64,
+    /// The current session's trust chain length; [`NO_TRUST_HEAD`] while not
+    /// joined or when the room has not reported one.
+    trust_head: std::sync::atomic::AtomicU64,
 }
+
+const NO_TRUST_HEAD: u64 = u64::MAX;
 
 impl Stats {
     fn snapshot(&self) -> RoomStatsSnapshot {
@@ -320,7 +330,10 @@ impl RegistryClient {
         let (sync_tx, sync_rx) = mpsc::channel(1);
         let (presence_tx, presence_rx) = mpsc::channel(4);
         let presence = Arc::new(Mutex::new(HashMap::new()));
-        let stats = Arc::new(Stats::default());
+        let stats = Arc::new(Stats {
+            trust_head: std::sync::atomic::AtomicU64::new(NO_TRUST_HEAD),
+            ..Stats::default()
+        });
 
         let actor = Actor {
             doc: doc.clone(),
@@ -432,6 +445,20 @@ impl RegistryClient {
 
     pub fn stats(&self) -> RoomStatsSnapshot {
         self.stats.snapshot()
+    }
+
+    /// The trust chain length the joined room last reported, `None` while
+    /// not joined or on a room that does not push the chain head. Lets a
+    /// subscriber that missed [`RegistryEvent::Trust`] catch up.
+    pub fn trust_head(&self) -> Option<u64> {
+        match self
+            .stats
+            .trust_head
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            NO_TRUST_HEAD => None,
+            length => Some(length),
+        }
     }
 
     /// Leave cleanly and stop the actor.

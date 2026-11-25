@@ -1,7 +1,7 @@
 //! The connection actor: dial, hello/state handshake, push/ack, presence,
 //! probe liveness and reconnect, plus the HTTPS fallback sync.
 
-use super::frames::{ClientFrame, ServerFrame};
+use super::frames::{CAP_TRUST, ClientFrame, ServerFrame};
 use super::*;
 
 pub(super) struct Actor {
@@ -125,6 +125,9 @@ impl Actor {
                     self.stats
                         .disconnects
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.stats
+                        .trust_head
+                        .store(NO_TRUST_HEAD, std::sync::atomic::Ordering::Relaxed);
                     let _ = self.events.send(RegistryEvent::Disconnected);
                     if ready.is_some() {
                         // Handshake failed on the very first session.
@@ -312,6 +315,7 @@ impl Actor {
         let hello = serde_json::to_string(&ClientFrame::Hello {
             cursor,
             device: &self.device_id,
+            caps: &[CAP_TRUST],
         })
         .expect("hello serializes");
         if pipe.tx.send(hello).await.is_err() {
@@ -339,6 +343,7 @@ impl Actor {
             gc_floor,
             rows,
             presence,
+            trust,
         })) = state
         else {
             tracing::warn!("registry: no state frame within deadline");
@@ -361,6 +366,11 @@ impl Actor {
                 map.insert(device, (at, now));
             }
         }
+        // Before `connected`: a reader that sees the session joined also sees
+        // its head (or its absence).
+        self.stats
+            .trust_head
+            .store(trust.map_or(NO_TRUST_HEAD, |head| head.length), Relaxed);
         self.stats.connected.store(true, Relaxed);
         self.stats.server_known.store(true, Relaxed);
         self.stats.last_pushed_ms.store(now_ms(), Relaxed);
@@ -371,6 +381,9 @@ impl Actor {
             let _ = ready.send(Ok(()));
         }
         let _ = self.events.send(RegistryEvent::Connected);
+        if let Some(head) = trust {
+            let _ = self.events.send(RegistryEvent::Trust(head.length));
+        }
         let _ = self.events.send(RegistryEvent::Applied);
 
         // Anything pending (offline writes, reseeds, migration) pushes now.
@@ -533,9 +546,14 @@ impl Actor {
                 gc_floor,
                 rows,
                 presence,
+                trust,
             } => {
                 // Servers only send state as a hello answer, but applying a
                 // late duplicate is harmless and simpler than special-casing.
+                if let Some(head) = trust {
+                    self.stats.trust_head.store(head.length, Relaxed);
+                    let _ = self.events.send(RegistryEvent::Trust(head.length));
+                }
                 let mut doc = lock(&self.doc);
                 doc.apply_state(seq, full, gc_floor, rows);
                 drop(doc);
@@ -550,6 +568,10 @@ impl Actor {
             ServerFrame::Error { code, message } => {
                 self.stats.rejected.fetch_add(1, Relaxed);
                 tracing::warn!(code, message, "registry: server rejected a frame");
+            }
+            ServerFrame::Trust { length } => {
+                self.stats.trust_head.store(length, Relaxed);
+                let _ = self.events.send(RegistryEvent::Trust(length));
             }
         }
         true

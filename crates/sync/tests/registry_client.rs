@@ -457,3 +457,73 @@ async fn applied_events_fire_for_republish() {
     client_a.shutdown().await;
     client_b.shutdown().await;
 }
+
+/// Chain-head pushes (T1, docs/design/do-cost.md): the hello declares the
+/// capability, the join's `state.trust` and later `trust` frames reach the
+/// engine as `RegistryEvent::Trust`, and the head clears while not joined.
+#[tokio::test]
+async fn trust_head_arrives_in_state_and_in_trust_frames() {
+    let server = MockRegistryServer::start().await;
+    server.set_trust_head(Some(3));
+    let doc = new_doc("dev-a");
+    let client = RegistryClient::connect(&server.url(), doc, "dev-a")
+        .await
+        .expect("connects");
+    let mut events = client.events();
+    wait_until(|| client.trust_head() == Some(3)).await;
+    assert_eq!(server.hello_caps(), vec![vec!["trust".to_string()]]);
+
+    server.push_trust_head(4);
+    let seen = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(RegistryEvent::Trust(length)) = events.recv().await {
+                return length;
+            }
+        }
+    })
+    .await
+    .expect("trust event");
+    assert_eq!(seen, 4);
+    assert_eq!(client.trust_head(), Some(4));
+
+    // A rejoin reports the head again from `state`.
+    client.redial();
+    let rejoined = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut disconnected = false;
+        loop {
+            match events.recv().await {
+                Ok(RegistryEvent::Disconnected) => disconnected = true,
+                Ok(RegistryEvent::Trust(length)) if disconnected => return length,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("rejoin trust event");
+    assert_eq!(rejoined, 4);
+    assert_eq!(server.hello_caps().len(), 2);
+}
+
+/// A room without chain-head pushes (an older Worker): no `state.trust`, no
+/// `trust` frame, so the engine keeps its 60 s chain poll.
+#[tokio::test]
+async fn room_without_chain_heads_never_reports_one() {
+    let server = MockRegistryServer::start().await;
+    let doc = new_doc("dev-a");
+    let client = RegistryClient::connect(&server.url(), doc.clone(), "dev-a")
+        .await
+        .expect("connects");
+    let mut events = client.events();
+    wait_until(|| client.stats().connected).await;
+    {
+        let mut doc = doc.lock().unwrap();
+        doc.upsert_device(&device("dev-a")).unwrap();
+    }
+    client.nudge();
+    wait_until(|| server.row_count() == 1).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    while let Ok(event) = events.try_recv() {
+        assert!(!matches!(event, RegistryEvent::Trust(_)), "{event:?}");
+    }
+    assert_eq!(client.trust_head(), None);
+}

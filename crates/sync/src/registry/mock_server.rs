@@ -26,12 +26,18 @@ struct Shared {
     presence: HashMap<String, i64>,
     /// Pushes accepted per device (assertion surface for tests).
     pushes: HashMap<String, u64>,
+    /// The trust chain length the room reports (`state.trust`, `trust`
+    /// frames); `None` behaves like a Worker without chain-head pushes.
+    trust: Option<u64>,
+    /// Every hello's `caps`, in arrival order.
+    hello_caps: Vec<Vec<String>>,
 }
 
 /// A running mock registry server on a local TCP port.
 pub struct MockRegistryServer {
     addr: std::net::SocketAddr,
     state: Arc<Mutex<Shared>>,
+    trust_tx: broadcast::Sender<u64>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -41,8 +47,10 @@ impl MockRegistryServer {
         let addr = listener.local_addr().expect("addr");
         let state = Arc::new(Mutex::new(Shared::default()));
         let (tx, _) = broadcast::channel(1024);
+        let (trust_tx, _) = broadcast::channel(64);
         let accept_state = state.clone();
         let accept_tx = tx.clone();
+        let accept_trust = trust_tx.clone();
         let task = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
@@ -50,15 +58,38 @@ impl MockRegistryServer {
                 };
                 let state = accept_state.clone();
                 let bcast = accept_tx.clone();
+                let trust = accept_trust.subscribe();
                 tokio::spawn(async move {
                     let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
                         return;
                     };
-                    serve(ws, state, bcast).await;
+                    serve(ws, state, bcast, trust).await;
                 });
             }
         });
-        Self { addr, state, task }
+        Self {
+            addr,
+            state,
+            trust_tx,
+            task,
+        }
+    }
+
+    /// Start reporting the trust chain length (`None`: like an old Worker).
+    pub fn set_trust_head(&self, length: Option<u64>) {
+        lock(&self.state).trust = length;
+    }
+
+    /// The chain grew: store `length` and send the `trust` frame to every
+    /// ready socket whose hello declared the capability.
+    pub fn push_trust_head(&self, length: u64) {
+        lock(&self.state).trust = Some(length);
+        let _ = self.trust_tx.send(length);
+    }
+
+    /// Every hello's `caps` so far.
+    pub fn hello_caps(&self) -> Vec<Vec<String>> {
+        lock(&self.state).hello_caps.clone()
     }
 
     pub fn url(&self) -> String {
@@ -108,11 +139,13 @@ async fn serve(
     ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     state: Arc<Mutex<Shared>>,
     bcast: broadcast::Sender<String>,
+    mut trust_rx: broadcast::Receiver<u64>,
 ) {
     let (mut sink, mut stream) = ws.split();
     let mut rx = bcast.subscribe();
     let mut device = String::new();
     let mut ready = false;
+    let mut trust_capable = false;
     loop {
         tokio::select! {
             frame = stream.next() => {
@@ -139,8 +172,19 @@ async fn serve(
                             .unwrap_or("")
                             .to_string();
                         ready = true;
+                        let caps: Vec<String> = frame
+                            .get("caps")
+                            .and_then(Value::as_array)
+                            .map(|caps| {
+                                caps.iter()
+                                    .filter_map(|c| c.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        trust_capable = caps.iter().any(|c| c == "trust");
                         let reply = {
-                            let state = lock(&state);
+                            let mut state = lock(&state);
+                            state.hello_caps.push(caps);
                             let full = match cursor {
                                 None => true,
                                 Some(c) => c < state.gc_floor || c > state.seq,
@@ -150,15 +194,18 @@ async fn serve(
                                 .values()
                                 .filter(|r| full || r.seq > cursor.unwrap_or(0))
                                 .collect();
-                            json!({
+                            let mut reply = json!({
                                 "t": "state",
                                 "seq": state.seq,
                                 "full": full,
                                 "gcFloor": state.gc_floor,
                                 "rows": rows,
                                 "presence": state.presence,
-                            })
-                            .to_string()
+                            });
+                            if let Some(length) = state.trust.filter(|_| trust_capable) {
+                                reply["trust"] = json!({ "length": length });
+                            }
+                            reply.to_string()
                         };
                         if sink.send(WsMessage::Text(reply)).await.is_err() {
                             return;
@@ -262,6 +309,25 @@ async fn serve(
                             ))
                             .await;
                     }
+                }
+            }
+            length = trust_rx.recv() => {
+                match length {
+                    Ok(length) => {
+                        if ready
+                            && trust_capable
+                            && sink
+                                .send(WsMessage::Text(
+                                    json!({"t":"trust","length":length}).to_string(),
+                                ))
+                                .await
+                                .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return,
                 }
             }
             text = rx.recv() => {
