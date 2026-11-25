@@ -696,3 +696,121 @@ async fn steer_after_restart_dispatches_new_turn_with_resume() {
     }
     core.shutdown().await;
 }
+
+/// CHARACTERISATION of a plan-asks miss (docs/design/plan-asks.md, case e1).
+/// A run dies (kill -9) while its permission prompt is open. By design the
+/// question stays answerable after the restart: the doc keeps the unresolved
+/// input part (the composer still shows it) and `RespondInput`'s dead-run
+/// fallback answers it as a new turn. But boot recovery leaves the session
+/// row `Idle`, and every reader of "asking" reads the row: Needs you, the
+/// badges and iOS drop the question, and a plan's `wait_for_session` reports
+/// the session as finished. Asserts today's behaviour; the fix (step 2)
+/// flips the marked assertion.
+#[tokio::test]
+async fn a_question_open_across_a_crash_is_not_asking_after_recovery_today() {
+    use cypher_proto::view::{Indicator, effective_indicator};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("device-id"), "dev-crash").unwrap();
+
+    // The crashed state: the assistant entry still streaming with an open
+    // permission prompt; the journal's last event is that question. Old
+    // stamps, so recovery doesn't auto-resume.
+    let store = DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
+    let doc = SessionDoc::init(CHAT).unwrap();
+    doc.push_message(&message_entry(
+        "msg-user-1",
+        MessageRole::User,
+        "long task",
+        "dev-crash",
+        Some(MessageStatus::Complete),
+    ))
+    .unwrap();
+    let question = cypher_proto::UserInputQuestion {
+        id: "q1".into(),
+        header: "Run this command?".into(),
+        question: "Run this command?".into(),
+        options: vec!["Allow".into(), "Deny".into()],
+        multi_select: false,
+        permission: Some(cypher_proto::PermissionPrompt {
+            kind: cypher_proto::PermissionPromptKind::Escalate,
+            tool_call_id: None,
+        }),
+        asked_by: None,
+    };
+    let mut asking = message_entry(
+        "msg-assistant-1",
+        MessageRole::Assistant,
+        "checking…",
+        "dev-crash",
+        Some(MessageStatus::Streaming),
+    );
+    asking.created_at = 2;
+    asking.parts.push(MessagePart::Input {
+        id: "in-req-1".into(),
+        request_id: "req-1".into(),
+        questions: vec![question.clone()],
+        resolved: false,
+    });
+    doc.push_message(&asking).unwrap();
+    store
+        .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
+        .unwrap();
+    let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
+    journal
+        .append(
+            CHAT,
+            &support::session_started(
+                HarnessId::Mock,
+                "mock-1",
+                "/tmp",
+                "hs-crash",
+                "msg-assistant-1",
+            ),
+        )
+        .unwrap();
+    journal
+        .append(
+            CHAT,
+            &AgentEvent::InputRequested {
+                request_id: "req-1".into(),
+                questions: vec![question],
+            },
+        )
+        .unwrap();
+    drop(journal);
+
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    let core = assemble(
+        &dir,
+        RecordingHarness {
+            requests: requests.clone(),
+            session_id: "hs-after-crash".into(),
+            fail_starts: Default::default(),
+        },
+    );
+
+    // The question is still open in the doc, on the aborted entry.
+    let entries = entries(&core, CHAT);
+    let open = entries.iter().any(|e| {
+        e.parts.iter().any(|p| {
+            matches!(
+                p,
+                MessagePart::Input { request_id, resolved: false, .. } if request_id == "req-1"
+            )
+        })
+    });
+    assert!(open, "the question survives the crash: {entries:#?}");
+    // Step 2 flips this: the row must keep saying "asking".
+    let row = core.sessions.session_status(CHAT).expect("session row");
+    assert_eq!(row.status, cypher_proto::SessionStatus::Idle);
+    assert_ne!(
+        effective_indicator(Some(&row), chrono::Utc::now()),
+        Indicator::AwaitingInput,
+        "today recovery leaves the row idle, so no reader sees the open question"
+    );
+    assert!(requests.lock().unwrap().is_empty(), "no auto-resume");
+    core.shutdown().await;
+}

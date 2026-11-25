@@ -80,7 +80,7 @@ workspace's Needs you count (the same `bot_needs` list) and, separately, the Doc
 | (c) sync subagent asks (child chat), parent turn running | ✓ via the mirror in the step session (root held `AwaitingInput`, root run heartbeats) | ✓ / ✓ | Running, step Asking | `Asking` on the mirror; permission wording | ✓ | ✓ for the root; the child chat is reported too (attention "input" from its parent), a possible second push, not verified | none while the root's run is alive; the child chat itself is never a plan chat (`needs_you` reads `step.sessions` only) |
 | (d) async subagent asks, the step session's turn already ended, its persistent session still parked | ✓ (parked run still heartbeats) | ✓ / ✓ | Running, step Asking | `Asking` | ✓ | ✓ for the root | none yet |
 | **(d′) async subagent question open when the parked step session is reaped (30 min, `SESSION_IDLE`), or asked after its run ended** | ✗ 45 s after the run ends | ✗ / ✗ | Running, step **Asking** (raw row) | **`Asking`**, "your owner sees it under Needs you" | ✗ | ✓ once, when it was asked | the held root row has no run behind it, so nothing refreshes `updated_at`; every client reads it as stale. The child's own row stays fresh, but the child is not a plan chat. Proven by `a_question_forwarded_into_an_ended_parent_goes_stale_today` |
-| (e1) step session's own question open across an engine restart (mid-turn) | ✗ | ✗ / ✗ | Running, step Running (row `Idle` after `recover_stale`) or Working if auto-resumed | **`Finished`** (row `Idle`; the open part is ignored) or `Working` while resumed | ✗ | push withdrawn (the Worker settles the input notice on the `idle` report) | by design the question stays answerable (`pending_input_request` in `crates/ui/src/composer/layout.rs` keeps showing it; `RespondInput`'s dead-run fallback in `crates/engine/src/host/doc_host/commands.rs` answers it as a new turn), but "asking" is read only from the row, which recovery set to `Idle`. The coordinator then reports the step session as finished |
+| (e1) step session's own question open across an engine restart (mid-turn) | ✗ | ✗ / ✗ | Running, step Running (row `Idle` after `recover_stale`) or Working if auto-resumed | **`Finished`** (row `Idle`; the open part is ignored) or `Working` while resumed | ✗ | push withdrawn (the Worker settles the input notice on the `idle` report) | by design the question stays answerable (`pending_input_request` in `crates/ui/src/composer/layout.rs` keeps showing it; `RespondInput`'s dead-run fallback in `crates/engine/src/host/doc_host/commands.rs` answers it as a new turn), but "asking" is read only from the row, which recovery set to `Idle`. The coordinator then reports the step session as finished. Proven by `a_question_open_across_a_crash_is_not_asking_after_recovery_today` |
 | (e2) forwarded (subagent) question open in a parked or ended step session across an engine restart | ✗ | ✗ / ✗ | step **Asking forever** | **`Asking` forever** on a dead mirror | ✗ | no change (the Worker keeps the old input notice until it expires) | the forward map and `held_statuses` are memory only; the root's journal is not stale, so `recover_stale` never rewrites its durable row, which stays `AwaitingInput` with an old `updated_at`. Clients hide it as stale (right: the child's question died with its run), but the work host and the coordinator read the raw row and the unresolved mirror and wait for an owner who sees nothing. Answering the mirror is rejected ("the subagent's question is no longer pending") |
 | (f) step session on another device that goes offline (sleep, network) with its question open | ✗ 45 s after its last touch | ✗ / ✗ | Running, step Asking | `Asking` | ✗ | ✓ when asked (the host reported it before going offline) | freshness is the heartbeat of a run on a device that no longer reaches the registry; the question is still open (answerable as soon as the device is back) but every client drops it instead of showing it as waiting for its device |
 | (g) a session the plan steers but did not start (`steer_session` after the owner allowed it) | ✗ | ✗ / ✓ (as a normal session) | step unchanged | `Asking` | ✗ | as an ordinary session | `needs_you` and `settle_steps` read only `work.session_ids()`; `steer_session` (`may_drive`) does not record the session on the work |
@@ -127,6 +127,11 @@ Tests added (both assert today's behaviour; step 2 flips the marked assertions):
   parent's row stays `AwaitingInput` with the same `updated_at` for 50 s and reads as
   `Indicator::None`, while the child's row stays fresh. Rows (d′) and, by the same
   mechanism, (f). Passed 2026-11-25.
+- `crates/engine/tests/it/turns/restart_resume.rs`:
+  `a_question_open_across_a_crash_is_not_asking_after_recovery_today` (runs in CI,
+  fast). A run dies under an open permission prompt (manufactured kill -9 state, no
+  auto-resume): after boot recovery the question is still unresolved in the doc, but
+  the row is `Idle` and reads as not asking. Row (e1). Passed 2026-11-25.
 - `crates/proto/src/bot_records.rs`:
   `plan_questions_outside_fresh_step_rows_are_missed_today` (runs in CI). A child
   chat's open question is not in `needs_you`; a step session whose `AwaitingInput` row
@@ -136,8 +141,9 @@ Tests added (both assert today's behaviour; step 2 flips the marked assertions):
 From code only: (a), (b), (c), (d) (the existing `child_bridge` tests
 `child_question_is_forwarded_to_the_parent_and_answered_there`,
 `a_parent_between_turns_still_gets_the_question` and
-`the_parent_turn_ending_keeps_the_question_open` cover the engine part), (e1), (e2),
-(g), (h), every iOS cell (a line-by-line twin of the desktop rule) and every push cell.
+`the_parent_turn_ending_keeps_the_question_open` cover the engine part), the
+coordinator half of (e1) (`session_state` maps `Idle` to `Finished`), (e2), (g), (h),
+every iOS cell (a line-by-line twin of the desktop rule) and every push cell.
 
 ## 4. Root causes, in one line each
 
@@ -205,7 +211,8 @@ Put the open question on the durable session row so every reader uses the same f
   question is reported (fixes h); report the root, not the child, for a forwarded
   question.
 - Flip `a_question_forwarded_into_an_ended_parent_goes_stale_today` and drop its
-  `#[ignore]` if it can run without the 50 s sleep (assert `asking` instead of age).
+  `#[ignore]` if it can run without the 50 s sleep (assert `asking` instead of age),
+  and flip `a_question_open_across_a_crash_is_not_asking_after_recovery_today`.
 
 ### Desktop (`crates/ui`)
 
