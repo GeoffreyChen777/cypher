@@ -92,7 +92,11 @@ async fn room() -> Room {
     let end = server.await.unwrap();
     settle().await;
     assert!(client.stats().connected);
-    assert_eq!(http.pulls.load(Ordering::SeqCst), 1, "one bootstrap pull");
+    assert_eq!(
+        http.pulls.load(Ordering::SeqCst),
+        1,
+        "a cold chat pulls beside its first dial"
+    );
     Room {
         client,
         end,
@@ -400,4 +404,159 @@ async fn incomplete_row_repairs_are_bounded_then_recover_over_http() {
     assert_eq!(lock(&room.sink.rows)[0].0, b"command");
     assert!(room.http.pulls.load(Ordering::SeqCst) > 1);
     room.client.shutdown().await;
+}
+
+// ── C1: the HTTPS pull hedges the dial ──────────────────────────────────────
+
+/// A dial that never completes: a WebSocket upgrade that stalls.
+struct StalledConnector;
+
+impl BinConnector for StalledConnector {
+    fn connect(&self) -> BoxFuture<'static, Result<BinPipe, SyncError>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+/// A chat this device synced before (cursor 3): the hedge applies.
+const WARM: u64 = 3;
+
+async fn hedged_client(
+    connector: Arc<dyn BinConnector>,
+    sink: Arc<RecordingSink>,
+) -> (ChatClient, Arc<CountingTransport>) {
+    client_at(connector, sink, WARM).await
+}
+
+async fn client_at(
+    connector: Arc<dyn BinConnector>,
+    sink: Arc<RecordingSink>,
+    cursor: u64,
+) -> (ChatClient, Arc<CountingTransport>) {
+    let http = Arc::new(CountingTransport::default());
+    let (fetch, _) = fetcher(b"");
+    let client = ChatClient::connect_with_transport(
+        connector,
+        sink,
+        fetch,
+        "dev-a",
+        cursor,
+        ChatTuning::default(),
+        Some(http.clone()),
+    )
+    .await
+    .unwrap();
+    settle().await;
+    (client, http)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rejoin_inside_the_hedge_needs_no_https_pull() {
+    let (first, mut first_end) = pipe_pair();
+    let (second, mut second_end) = pipe_pair();
+    let server = tokio::spawn(async move {
+        let rows = (1..=WARM)
+            .map(|seq| (seq, "dev-b", vec![seq as u8]))
+            .collect();
+        serve_join(&mut first_end, state(WARM), &[], rows, false).await;
+        // The session drops; the client redials after its 250 ms backoff.
+        drop(first_end);
+        serve_join(&mut second_end, state(WARM), &[], vec![], true).await;
+        second_end
+    });
+    let (client, http) = hedged_client(
+        connector(vec![first, second]),
+        Arc::new(RecordingSink::default()),
+    )
+    .await;
+    let _end = server.await.unwrap();
+    tokio::time::advance(Duration::from_secs(10)).await;
+    settle().await;
+    assert!(client.stats().connected);
+    assert_eq!(client.stats().disconnects, 1);
+    assert_eq!(
+        http.pulls.load(Ordering::SeqCst),
+        0,
+        "start and rejoin both joined inside the hedge"
+    );
+    client.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stalled_dial_pulls_once_at_the_hedge() {
+    let (client, http) = hedged_client(
+        Arc::new(StalledConnector),
+        Arc::new(RecordingSink::default()),
+    )
+    .await;
+    tokio::time::advance(crate::hedge::HEDGE_DELAY - Duration::from_millis(100)).await;
+    settle().await;
+    assert_eq!(http.pulls.load(Ordering::SeqCst), 0, "not before the hedge");
+    tokio::time::advance(Duration::from_millis(200)).await;
+    settle().await;
+    assert_eq!(http.pulls.load(Ordering::SeqCst), 1, "one pull at 1.5 s");
+    // Until the dial's own timeout (unchanged), nothing more.
+    tokio::time::advance(CONNECT_TIMEOUT - crate::hedge::HEDGE_DELAY - Duration::from_secs(1))
+        .await;
+    settle().await;
+    assert_eq!(http.pulls.load(Ordering::SeqCst), 1);
+    client.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stalled_handshake_pulls_at_the_hedge() {
+    // The upgrade succeeds but `state` never comes.
+    let (pipe, end) = pipe_pair();
+    let (client, http) =
+        hedged_client(connector(vec![pipe]), Arc::new(RecordingSink::default())).await;
+    tokio::time::advance(crate::hedge::HEDGE_DELAY + Duration::from_millis(100)).await;
+    settle().await;
+    assert_eq!(http.pulls.load(Ordering::SeqCst), 1);
+    drop(end);
+    client.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_dial_pulls_at_once() {
+    // No pipes: the first dial fails straight away.
+    let (client, http) = hedged_client(connector(vec![]), Arc::new(RecordingSink::default())).await;
+    assert_eq!(http.pulls.load(Ordering::SeqCst), 1);
+    client.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_waiting_local_write_pulls_at_once() {
+    let sink = Arc::new(RecordingSink::default());
+    sink.enqueue_outbox("offline-write", b"w").unwrap();
+    let (client, http) = hedged_client(Arc::new(StalledConnector), sink).await;
+    assert_eq!(http.posts.load(Ordering::SeqCst), 1, "the write goes out");
+    assert_eq!(
+        http.pulls.load(Ordering::SeqCst),
+        1,
+        "with its pull, at once"
+    );
+    tokio::time::advance(crate::hedge::HEDGE_DELAY * 2).await;
+    settle().await;
+    assert_eq!(
+        http.pulls.load(Ordering::SeqCst),
+        1,
+        "that pull was the connect's hedge"
+    );
+    client.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cold_chat_pulls_beside_its_first_dial() {
+    // Never synced: nothing local to show, so the first row must not wait
+    // for the hedge.
+    let (client, http) = client_at(
+        Arc::new(StalledConnector),
+        Arc::new(RecordingSink::default()),
+        0,
+    )
+    .await;
+    assert_eq!(http.pulls.load(Ordering::SeqCst), 1);
+    tokio::time::advance(crate::hedge::HEDGE_DELAY * 2).await;
+    settle().await;
+    assert_eq!(http.pulls.load(Ordering::SeqCst), 1);
+    client.shutdown().await;
 }

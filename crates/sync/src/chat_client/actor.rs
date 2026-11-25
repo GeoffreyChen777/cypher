@@ -38,6 +38,13 @@ pub(super) struct Actor {
     pub(super) http_sync_again: Arc<std::sync::atomic::AtomicBool>,
     pub(super) http_sync_tx: mpsc::Sender<()>,
     pub(super) http_sync_rx: mpsc::Receiver<()>,
+    /// C1: the HTTPS pull beside a dial waits until the dial has had
+    /// [`crate::hedge::HEDGE_DELAY`] to join.
+    pub(super) hedge: crate::hedge::Hedge,
+    /// The last session ended on a deadline: its socket stayed open but
+    /// stopped delivering. The reconnect then recovers over HTTPS at once
+    /// instead of hedging.
+    pub(super) stalled: bool,
 }
 
 enum SessionEnd {
@@ -65,7 +72,14 @@ impl Actor {
             if let Some(ready) = ready.take() {
                 let _ = ready.send(Ok(()));
             }
-            self.spawn_http_sync();
+            if lock(&self.shared).cursor == 0 {
+                // A cold chat: nothing local to show, so the pull beside the
+                // dial is the fastest first row (and a never-synced chat is
+                // rare next to reconnects).
+                self.hedged_sync();
+            } else {
+                self.pull_or_hedge();
+            }
         }
         // Suspend/resume and sibling-dial successes are EVENTS that end a
         // backoff wait immediately (see room.rs) — without them a recovered
@@ -84,11 +98,14 @@ impl Actor {
             tokio::pin!(dial);
             let deadline = tokio::time::sleep(CONNECT_TIMEOUT);
             tokio::pin!(deadline);
+            self.hedge.dial();
             let dial = loop {
+                let hedge_at = self.hedge.due_at();
                 tokio::select! {
                     result = &mut dial => break Some(result),
-                    _ = self.nudge_rx.recv() => self.spawn_http_sync(),
-                    _ = self.http_sync_rx.recv() => self.spawn_http_sync(),
+                    _ = self.nudge_rx.recv() => self.hedged_sync(),
+                    _ = self.http_sync_rx.recv() => self.hedged_sync(),
+                    _ = crate::hedge::until(hedge_at) => self.hedged_sync(),
                     _ = &mut deadline => break None,
                     _ = self.shutdown.changed() => {
                         if *self.shutdown.borrow() {
@@ -105,10 +122,10 @@ impl Actor {
                         return; // first join failed: caller owns the retry
                     }
                     tracing::warn!(error = %err, "chat2 dial failed; backing off");
-                    self.spawn_http_sync();
+                    self.hedged_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
-                        Waited::Nudge => self.spawn_http_sync(),
+                        Waited::Nudge => self.hedged_sync(),
                         Waited::Woke => backoff = BACKOFF_BASE,
                         Waited::Elapsed => backoff = (backoff * 2).min(BACKOFF_CAP),
                     }
@@ -120,10 +137,10 @@ impl Actor {
                         return;
                     }
                     tracing::warn!("chat2 dial timed out; backing off");
-                    self.spawn_http_sync();
+                    self.hedged_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
-                        Waited::Nudge => self.spawn_http_sync(),
+                        Waited::Nudge => self.hedged_sync(),
                         Waited::Woke => backoff = BACKOFF_BASE,
                         Waited::Elapsed => backoff = (backoff * 2).min(BACKOFF_CAP),
                     }
@@ -156,19 +173,50 @@ impl Actor {
                         }
                         return;
                     }
+                    let stalled = std::mem::take(&mut self.stalled);
                     if joined {
                         backoff = BACKOFF_BASE;
                     }
-                    self.spawn_http_sync();
+                    if joined && !stalled {
+                        // C1: the next session's `state` and backfill carry
+                        // the rows; pull only if it has not joined in time.
+                        self.pull_or_hedge();
+                    } else {
+                        // A session that never joined is a failed dial; one
+                        // whose socket stalled recovers over HTTPS at once.
+                        self.hedged_sync();
+                    }
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
-                        Waited::Nudge => self.spawn_http_sync(),
+                        Waited::Nudge => self.hedged_sync(),
                         Waited::Woke => backoff = BACKOFF_BASE,
                         Waited::Elapsed => backoff = (backoff * 2).min(BACKOFF_CAP),
                     }
                 }
             }
         }
+    }
+
+    /// A connect after start or after a joined session: pull at once when a
+    /// local write is waiting to be sent, else hedge the next dial.
+    fn pull_or_hedge(&mut self) {
+        if lock(&self.shared).pending.is_empty() {
+            self.hedge.arm();
+        } else {
+            self.hedged_sync();
+        }
+    }
+
+    /// End a joined session whose socket stopped delivering.
+    fn stalled_end(&mut self) -> SessionEnd {
+        self.stalled = true;
+        SessionEnd::Reconnect
+    }
+
+    /// Run the HTTPS cycle now; it stands in for this connect's hedge.
+    fn hedged_sync(&mut self) {
+        self.hedge.cancel();
+        self.spawn_http_sync();
     }
 
     /// Run one bounded HTTPS synchronization cycle. The endpoint returns
@@ -285,24 +333,35 @@ impl Actor {
         if pipe.tx.send(hello).await.is_err() {
             return Err(SessionEnd::Reconnect);
         }
-        let state = tokio::time::timeout(HELLO_DEADLINE, async {
-            loop {
-                let bytes = pipe.rx.recv().await?;
-                let Some(frame) = wire::decode(&bytes) else {
-                    tracing::warn!("chat2: bad frame during handshake");
-                    return None;
-                };
-                if frame.kind == frame_type::STATE {
-                    return Some(frame);
+        let state = {
+            let state_wait = tokio::time::timeout(HELLO_DEADLINE, async {
+                loop {
+                    let bytes = pipe.rx.recv().await?;
+                    let Some(frame) = wire::decode(&bytes) else {
+                        tracing::warn!("chat2: bad frame during handshake");
+                        return None;
+                    };
+                    if frame.kind == frame_type::STATE {
+                        return Some(frame);
+                    }
+                    // Stale broadcast before our state: skip.
                 }
-                // Stale broadcast before our state: skip.
+            });
+            tokio::pin!(state_wait);
+            loop {
+                let hedge_at = self.hedge.due_at();
+                tokio::select! {
+                    state = &mut state_wait => break state,
+                    _ = crate::hedge::until(hedge_at) => self.hedged_sync(),
+                }
             }
-        })
-        .await;
+        };
         let Ok(Some(state_frame)) = state else {
             tracing::warn!("chat2: no state frame within deadline");
             return Err(SessionEnd::Reconnect);
         };
+        // Joined: the socket carries the rows from here.
+        self.hedge.cancel();
         let Ok(state) = serde_json::from_value::<wire::StateHeader>(state_frame.header.clone())
         else {
             tracing::warn!("chat2: malformed state header");
@@ -446,9 +505,16 @@ impl Actor {
             }
         })
         .await;
-        let Ok(Some(head_seq)) = backfill else {
-            tracing::warn!("chat2: backfill did not complete");
-            return Err(SessionEnd::Reconnect);
+        let head_seq = match backfill {
+            Ok(Some(head_seq)) => head_seq,
+            Ok(None) => {
+                tracing::warn!("chat2: backfill did not complete");
+                return Err(SessionEnd::Reconnect);
+            }
+            Err(_) => {
+                tracing::warn!("chat2: backfill did not complete");
+                return Err(self.stalled_end());
+            }
         };
         {
             let mut shared = lock(&self.shared);
@@ -597,16 +663,16 @@ impl Actor {
                     // An HTTP ACK may have retired it while we were waiting.
                     if lock(&self.shared).in_flight.as_ref().is_some_and(|(_, at)| *at <= tokio::time::Instant::now()) {
                         tracing::warn!("chat2: push ACK overdue; recovering via HTTP and redial");
-                        return SessionEnd::Reconnect;
+                        return self.stalled_end();
                     }
                 }
                 _ = tokio::time::sleep_until(repair_at) => {
                     tracing::warn!("chat2: row repair stalled; recovering via HTTP and redial");
-                    return SessionEnd::Reconnect;
+                    return self.stalled_end();
                 }
                 _ = tokio::time::sleep_until(deadline_at) => {
                     tracing::warn!("chat2: probe unanswered past deadline; redialing");
-                    return SessionEnd::Reconnect;
+                    return self.stalled_end();
                 }
                 _ = self.shutdown.changed() => {
                     if *self.shutdown.borrow() {
@@ -622,7 +688,7 @@ impl Actor {
     /// causing an infinite request loop; the next reconnect performs the
     /// stronger full catch-up path.
     async fn maybe_repair_gap(
-        &self,
+        &mut self,
         pipe: &mut BinPipe,
         repairs: &mut u32,
         deadline: &mut Option<tokio::time::Instant>,
@@ -641,6 +707,7 @@ impl Actor {
         *repairs += 1;
         if *repairs > MAX_GAP_REPAIRS_PER_SESSION {
             tracing::warn!("chat2: gap repairs exhausted; redialing for a full catch-up");
+            self.stalled = true;
             return false;
         }
         tracing::info!(

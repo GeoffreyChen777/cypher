@@ -14,6 +14,7 @@
 
 pub mod chat_client;
 pub mod chat_frames;
+mod hedge;
 pub mod preview_link;
 pub mod registry;
 mod store;

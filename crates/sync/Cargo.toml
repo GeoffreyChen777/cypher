@@ -39,6 +39,11 @@ required-features = ["mock-server"]
 name = "registry_transport"
 required-features = ["mock-server"]
 
+# C1 cold-open latency against the in-process servers.
+[[example]]
+name = "cold_open"
+required-features = ["mock-server"]
+
 [dev-dependencies]
 chrono.workspace = true
 # registry_edge reads CYPHER_EDGE_WS.

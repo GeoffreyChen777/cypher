@@ -107,8 +107,9 @@ fn ws_url() -> StaticUrl {
 /// Writes on a JOINED room take the socket and nothing else. The HTTPS cycle
 /// that used to run beside every mutation cost a full billable Durable Object
 /// request each time (a WS message bills at 20:1) and duplicated what the
-/// socket was already delivering. Bootstrap still runs its one cycle: that is
-/// the local-first path that makes the client usable before the WS answers.
+/// socket was already delivering. Bootstrap still runs its one cycle on a
+/// doc that never synced: the local-first path that makes the client usable
+/// before the WS answers (C1 hedges it on every other connect).
 #[tokio::test]
 async fn nudges_on_a_connected_room_stay_on_the_socket() {
     let server = MockRegistryServer::start().await;
@@ -299,4 +300,169 @@ async fn an_immediate_activity_beat_only_claims_success_on_a_live_socket() {
     dead.shutdown().await;
     live.shutdown().await;
     peer.shutdown().await;
+}
+
+// ── C1: the HTTPS pull hedges the dial ──────────────────────────────────────
+
+/// The hedge (1.5 s) plus scheduling slack.
+const PAST_HEDGE: Duration = Duration::from_millis(1_900);
+
+/// A TCP port that accepts and then never answers the WebSocket upgrade.
+async fn stalled_ws() -> (StaticUrl, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = StaticUrl(format!("ws://{}/registry", listener.local_addr().unwrap()));
+    let task = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    (url, task)
+}
+
+/// A doc that synced before (generation 1): connects hedge their pull.
+fn warm_doc() -> Arc<Mutex<cypher_doc::RegistryDoc>> {
+    let mut doc = cypher_doc::RegistryDoc::new("dev-http");
+    doc.apply_state(0, false, 0, Vec::new());
+    Arc::new(Mutex::new(doc))
+}
+
+#[tokio::test]
+async fn a_cold_doc_pulls_beside_its_first_dial() {
+    let (url, stall) = stalled_ws().await;
+    let transport = FakeTransport::gated();
+    let client = RegistryClient::connect_via_transport(
+        Arc::new(url),
+        Arc::new(Mutex::new(cypher_doc::RegistryDoc::new("dev-http"))),
+        "dev-http",
+        transport.clone(),
+    )
+    .await
+    .unwrap();
+    common::wait_until(Duration::from_millis(500), || {
+        transport.fetches.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    tokio::time::sleep(PAST_HEDGE).await;
+    assert_eq!(transport.fetches.load(Ordering::SeqCst), 1);
+    client.shutdown().await;
+    stall.abort();
+}
+
+#[tokio::test]
+async fn a_join_and_a_rejoin_inside_the_hedge_make_no_https_pull() {
+    let server = MockRegistryServer::start().await;
+    let transport = FakeTransport::gated();
+    let client = RegistryClient::connect_via_transport(
+        Arc::new(StaticUrl(server.url())),
+        warm_doc(),
+        "dev-http",
+        transport.clone(),
+    )
+    .await
+    .unwrap();
+    wait_until(|| client.stats().connected).await;
+    client.redial();
+    wait_until(|| client.stats().disconnects == 1 && client.stats().connected).await;
+    tokio::time::sleep(PAST_HEDGE).await;
+    assert_eq!(transport.fetches.load(Ordering::SeqCst), 0);
+    assert_eq!(transport.pushes.load(Ordering::SeqCst), 0);
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_stalled_dial_pulls_once_at_the_hedge() {
+    let (url, stall) = stalled_ws().await;
+    let transport = FakeTransport::gated();
+    let client = RegistryClient::connect_via_transport(
+        Arc::new(url),
+        warm_doc(),
+        "dev-http",
+        transport.clone(),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    assert_eq!(
+        transport.fetches.load(Ordering::SeqCst),
+        0,
+        "not before 1.5 s"
+    );
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        transport.fetches.load(Ordering::SeqCst),
+        1,
+        "one pull at 1.5 s"
+    );
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(transport.fetches.load(Ordering::SeqCst), 1);
+    client.shutdown().await;
+    stall.abort();
+}
+
+#[tokio::test]
+async fn a_slow_join_pulls_at_the_hedge() {
+    let server = MockRegistryServer::start().await;
+    server.set_state_delay(Duration::from_secs(5));
+    let transport = FakeTransport::gated();
+    let client = RegistryClient::connect_via_transport(
+        Arc::new(StaticUrl(server.url())),
+        warm_doc(),
+        "dev-http",
+        transport.clone(),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(PAST_HEDGE).await;
+    assert!(!client.stats().connected);
+    assert_eq!(transport.fetches.load(Ordering::SeqCst), 1);
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failed_dial_pulls_at_once() {
+    let transport = FakeTransport::gated();
+    let client = RegistryClient::connect_via_transport(
+        Arc::new(ws_url()),
+        warm_doc(),
+        "dev-http",
+        transport.clone(),
+    )
+    .await
+    .unwrap();
+    common::wait_until(Duration::from_millis(500), || {
+        transport.fetches.load(Ordering::SeqCst) >= 1
+    })
+    .await;
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_waiting_local_write_pulls_at_once() {
+    let (url, stall) = stalled_ws().await;
+    let transport = FakeTransport::hanging();
+    let doc = warm_doc();
+    doc.lock()
+        .unwrap()
+        .upsert_chat(&chat("chat-1", "offline"))
+        .unwrap();
+    let client = RegistryClient::connect_via_transport_tuned(
+        Arc::new(url),
+        doc,
+        "dev-http",
+        RegistryTuning {
+            probe_quiet: Duration::from_secs(60),
+            http_timeout: Duration::from_millis(100),
+        },
+        transport.clone(),
+    )
+    .await
+    .unwrap();
+    common::wait_until(Duration::from_millis(500), || {
+        transport.pushes.load(Ordering::SeqCst) == 1
+            && transport.fetches.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    client.shutdown().await;
+    stall.abort();
 }

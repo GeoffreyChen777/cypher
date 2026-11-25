@@ -22,6 +22,12 @@ pub(super) struct Actor {
     pub(super) sync_again: Arc<std::sync::atomic::AtomicBool>,
     pub(super) sync_tx: mpsc::Sender<()>,
     pub(super) sync_rx: mpsc::Receiver<()>,
+    /// C1: the HTTPS pull beside a dial waits until the dial has had
+    /// [`crate::hedge::HEDGE_DELAY`] to join.
+    pub(super) hedge: crate::hedge::Hedge,
+    /// The last session ended on its probe deadline: the socket stayed open
+    /// but stopped answering. The reconnect then pulls at once.
+    pub(super) stalled: bool,
 }
 
 enum SessionEnd {
@@ -49,7 +55,13 @@ impl Actor {
             if let Some(ready) = ready.take() {
                 let _ = ready.send(Ok(()));
             }
-            self.spawn_offline_sync();
+            if self.cold() {
+                // Nothing local to show: the pull beside the dial is the
+                // fastest first row, and a never-synced room is rare.
+                self.hedged_sync();
+            } else {
+                self.pull_or_hedge();
+            }
         }
         // Suspend/resume and sibling-dial successes are EVENTS that end a
         // backoff wait immediately (`cypher_net::wake`) — without them a recovered
@@ -64,11 +76,14 @@ impl Actor {
             tokio::pin!(dial);
             let deadline = tokio::time::sleep(CONNECT_TIMEOUT);
             tokio::pin!(deadline);
+            self.hedge.dial();
             let dial = loop {
+                let hedge_at = self.hedge.due_at();
                 tokio::select! {
                     result = &mut dial => break Some(result),
-                    _ = self.nudge_rx.recv() => self.spawn_offline_sync(),
-                    _ = self.sync_rx.recv() => self.spawn_offline_sync(),
+                    _ = self.nudge_rx.recv() => self.hedged_sync(),
+                    _ = self.sync_rx.recv() => self.hedged_sync(),
+                    _ = crate::hedge::until(hedge_at) => self.hedged_sync(),
                     _ = &mut deadline => break None,
                     _ = self.shutdown.changed() => {
                         if *self.shutdown.borrow() {
@@ -85,10 +100,10 @@ impl Actor {
                         return; // first join failed: caller owns the retry
                     }
                     tracing::warn!(error = %err, "registry dial failed; backing off");
-                    self.spawn_offline_sync();
+                    self.hedged_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
-                        Waited::Nudge => self.spawn_offline_sync(),
+                        Waited::Nudge => self.hedged_sync(),
                         Waited::Woke => backoff = BACKOFF_BASE,
                         Waited::Elapsed => backoff = (backoff * 2).min(BACKOFF_CAP),
                     }
@@ -100,10 +115,10 @@ impl Actor {
                         return;
                     }
                     tracing::warn!("registry dial timed out; backing off");
-                    self.spawn_offline_sync();
+                    self.hedged_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
-                        Waited::Nudge => self.spawn_offline_sync(),
+                        Waited::Nudge => self.hedged_sync(),
                         Waited::Woke => backoff = BACKOFF_BASE,
                         Waited::Elapsed => backoff = (backoff * 2).min(BACKOFF_CAP),
                     }
@@ -137,19 +152,50 @@ impl Actor {
                         }
                         return;
                     }
+                    let stalled = std::mem::take(&mut self.stalled);
                     if joined {
                         backoff = BACKOFF_BASE;
                     }
-                    self.spawn_offline_sync();
+                    if joined && !stalled {
+                        // C1: the next session's `state` carries the rows;
+                        // pull only if it has not joined in time.
+                        self.pull_or_hedge();
+                    } else {
+                        // A session that never joined is a failed dial; one
+                        // whose socket stalled recovers over HTTPS at once.
+                        self.hedged_sync();
+                    }
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
-                        Waited::Nudge => self.spawn_offline_sync(),
+                        Waited::Nudge => self.hedged_sync(),
                         Waited::Woke => backoff = BACKOFF_BASE,
                         Waited::Elapsed => backoff = (backoff * 2).min(BACKOFF_CAP),
                     }
                 }
             }
         }
+    }
+
+    /// The local copy has never synced (the hello carries no cursor).
+    fn cold(&self) -> bool {
+        let doc = lock(&self.doc);
+        doc.cursor() == 0 && doc.pending_len() == 0 && doc.generation() == 0
+    }
+
+    /// A connect after start or after a joined session: pull at once when a
+    /// local write is waiting to be sent, else hedge the next dial.
+    fn pull_or_hedge(&mut self) {
+        if lock(&self.doc).pending_len() > 0 {
+            self.hedged_sync();
+        } else {
+            self.hedge.arm();
+        }
+    }
+
+    /// Run the HTTPS cycle now; it stands in for this connect's hedge.
+    fn hedged_sync(&mut self) {
+        self.hedge.cancel();
+        self.spawn_offline_sync();
     }
 
     /// Flush pending registry ops and then pull the server delta over HTTPS.
@@ -321,22 +367,31 @@ impl Actor {
         if pipe.tx.send(hello).await.is_err() {
             return SessionEnd::Reconnect;
         }
-        let state = tokio::time::timeout(HELLO_DEADLINE, async {
+        let state = {
+            let state_wait = tokio::time::timeout(HELLO_DEADLINE, async {
+                loop {
+                    match pipe.rx.recv().await {
+                        Some(text) => match serde_json::from_str::<ServerFrame>(&text) {
+                            Ok(frame @ ServerFrame::State { .. }) => return Some(frame),
+                            Ok(_) => continue, // stale broadcast before our state
+                            Err(err) => {
+                                tracing::warn!(error = %err, "registry: bad frame during handshake");
+                                return None;
+                            }
+                        },
+                        None => None?,
+                    }
+                }
+            });
+            tokio::pin!(state_wait);
             loop {
-                match pipe.rx.recv().await {
-                    Some(text) => match serde_json::from_str::<ServerFrame>(&text) {
-                        Ok(frame @ ServerFrame::State { .. }) => return Some(frame),
-                        Ok(_) => continue, // stale broadcast before our state
-                        Err(err) => {
-                            tracing::warn!(error = %err, "registry: bad frame during handshake");
-                            return None;
-                        }
-                    },
-                    None => None?,
+                let hedge_at = self.hedge.due_at();
+                tokio::select! {
+                    state = &mut state_wait => break state,
+                    _ = crate::hedge::until(hedge_at) => self.hedged_sync(),
                 }
             }
-        })
-        .await;
+        };
         let Ok(Some(ServerFrame::State {
             seq,
             full,
@@ -349,6 +404,8 @@ impl Actor {
             tracing::warn!("registry: no state frame within deadline");
             return SessionEnd::Reconnect;
         };
+        // Joined: the rows came with `state`.
+        self.hedge.cancel();
         {
             let mut doc = lock(&self.doc);
             let outcome = doc.apply_state(seq, full, gc_floor, rows);
@@ -462,6 +519,7 @@ impl Actor {
                 }
                 _ = tokio::time::sleep_until(deadline_at) => {
                     tracing::warn!("registry: probe unanswered past deadline; redialing");
+                    self.stalled = true;
                     return SessionEnd::Reconnect;
                 }
                 _ = self.shutdown.changed() => {

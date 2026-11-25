@@ -353,6 +353,8 @@ impl RegistryClient {
             sync_again: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sync_tx,
             sync_rx,
+            hedge: crate::hedge::Hedge::default(),
+            stalled: false,
         };
         let task = tokio::spawn(actor.run(ready_tx));
 

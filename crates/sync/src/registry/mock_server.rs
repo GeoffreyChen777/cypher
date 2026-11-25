@@ -31,6 +31,8 @@ struct Shared {
     trust: Option<u64>,
     /// Every hello's `caps`, in arrival order.
     hello_caps: Vec<Vec<String>>,
+    /// How long a hello waits for its `state` (a slow or stalled join).
+    state_delay: std::time::Duration,
 }
 
 /// A running mock registry server on a local TCP port.
@@ -85,6 +87,12 @@ impl MockRegistryServer {
     pub fn push_trust_head(&self, length: u64) {
         lock(&self.state).trust = Some(length);
         let _ = self.trust_tx.send(length);
+    }
+
+    /// Hold every hello's `state` answer for `delay` (zero: answer at once),
+    /// like a room whose upgrade went through but whose join is slow.
+    pub fn set_state_delay(&self, delay: std::time::Duration) {
+        lock(&self.state).state_delay = delay;
     }
 
     /// Every hello's `caps` so far.
@@ -205,8 +213,12 @@ async fn serve(
                             if let Some(length) = state.trust.filter(|_| trust_capable) {
                                 reply["trust"] = json!({ "length": length });
                             }
-                            reply.to_string()
+                            (reply.to_string(), state.state_delay)
                         };
+                        let (reply, delay) = reply;
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
                         if sink.send(WsMessage::Text(reply)).await.is_err() {
                             return;
                         }
