@@ -491,11 +491,20 @@ impl Engine {
                 links_config = links_config.with_trust(Arc::new(trust));
             }
             let links = cypher_rpc::LinkCache::new(links_config);
-            let links_for_presence = links.clone();
+            // Weak: the cache holds the workspace (presence check below).
+            let links_for_presence = Arc::downgrade(&links);
             core.workspace
                 .set_peer_alive_hook(Arc::new(move |device_id: &str| {
-                    links_for_presence.reset_cooldown(device_id);
+                    if let Some(links) = links_for_presence.upgrade() {
+                        links.reset_cooldown(device_id);
+                    }
                 }));
+            // D1: a hostless relay answer only earns the long cooldown while
+            // the peer's presence is stale.
+            let workspace = core.workspace.clone();
+            links.set_presence_check(Arc::new(move |device_id: &str| {
+                workspace.device_online(device_id)
+            }));
             core.set_links(links);
             core.start_host_relay(&edge.url)
         });
