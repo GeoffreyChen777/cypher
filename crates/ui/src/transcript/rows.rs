@@ -460,6 +460,11 @@ impl EventEmitter<TranscriptEvent> for Transcript {}
 /// Text copied by the entry-level action, not by a virtualized markdown row.
 /// Keep Markdown intact; tool payloads and input-wizard internals aren't prose.
 pub(super) fn message_copy_text(entry: &SessionMessageEntry) -> Option<String> {
+    // What the reader sees: no notice an older harness streamed in.
+    let cleaned = (entry.role != MessageRole::User)
+        .then(|| without_reply_notices(entry))
+        .flatten();
+    let entry = cleaned.as_ref().unwrap_or(entry);
     let text = entry
         .parts
         .iter()
@@ -771,6 +776,11 @@ pub(super) fn entry_rows(
         }
         return vec![user_row(entry, pending)];
     }
+
+    // Notices an older harness streamed into the reply text (an extension's
+    // rate-limit warning): never the reply's.
+    let cleaned = without_reply_notices(entry);
+    let entry = cleaned.as_ref().unwrap_or(entry);
 
     // Assistant/system: split parts into block rows, folding consecutive tools.
     let cx = EntryRows {
@@ -1241,6 +1251,31 @@ fn permission_output(
     }
     lines.push(output.unwrap_or("(no output)").to_owned());
     lines.join("\n")
+}
+
+/// `entry` without the extension notices an older harness streamed into
+/// its text parts ([`cypher_proto::strip_reply_notices`]): a part that is a
+/// notice and nothing else empties (and so renders nothing), one that opens
+/// or closes with one loses it. `None` when no part held one.
+pub(super) fn without_reply_notices(entry: &SessionMessageEntry) -> Option<SessionMessageEntry> {
+    let stripped: Vec<Option<String>> = entry
+        .parts
+        .iter()
+        .map(|part| match part {
+            MessagePart::Text { text, .. } => cypher_proto::strip_reply_notices(text),
+            _ => None,
+        })
+        .collect();
+    if stripped.iter().all(Option::is_none) {
+        return None;
+    }
+    let mut cleaned = entry.clone();
+    for (part, text) in cleaned.parts.iter_mut().zip(stripped) {
+        if let (MessagePart::Text { text: old, .. }, Some(text)) = (part, text) {
+            *old = text;
+        }
+    }
+    Some(cleaned)
 }
 
 /// Whether a part renders no row: an empty text or thought, or a question

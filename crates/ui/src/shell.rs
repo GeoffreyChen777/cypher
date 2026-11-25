@@ -1417,6 +1417,9 @@ pub struct Shell {
     /// aren't closed as deleted until a frame lists them (which clears the
     /// entry) or [`tabs::EXPECTED_CHAT_TTL`] passes.
     expected_chats: std::collections::HashMap<String, std::time::Instant>,
+    /// One re-render per shown extension notice, when it expires: chat →
+    /// (the notice's arrival, the timer).
+    notice_timers: std::collections::HashMap<String, (chrono::DateTime<Utc>, Task<()>)>,
     /// Tile measurements and the tab-strip, rail and tab-drag state they drive.
     geometry: TileGeometry,
     /// The window's popover menus.
@@ -1655,6 +1658,7 @@ impl Shell {
             closed_tabs: ClosedTabStash::default(),
             seen_chats_generation: 0,
             expected_chats: std::collections::HashMap::new(),
+            notice_timers: std::collections::HashMap::new(),
             geometry: TileGeometry::default(),
             menus: ShellMenus::default(),
             route,

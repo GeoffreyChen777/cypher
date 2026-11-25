@@ -271,15 +271,33 @@ while read -r line; do
       # A toolResult message is not an assistant message: internal only.
       emit '{"type":"message_start","message":{"role":"toolResult","toolCallId":"t1","content":[]}}'
       emit '{"type":"message_end","message":{"role":"toolResult","toolCallId":"t1","content":[]}}'
-      # Extension noise: an error surfaces as an Error event, notify maps to
-      # a TextDelta (its text is cleared by the next assistant message_start,
-      # so Done's result stays the last assistant text).
+      # Extension noise: an error surfaces as an Error event; a notify while
+      # the agent runs is a Notice, never reply text or Done's result.
       emit '{"type":"extension_error","extensionPath":"/x.ts","event":"tool_call","error":"boom"}'
       emit '{"type":"extension_ui_request","id":"u-ff","method":"notify","message":"hi","notifyType":"info"}'
       # A second assistant message completes the turn (LLM→tool→LLM).
       emit '{"type":"message_start","message":{"role":"assistant","id":"m2","content":[]}}'
       emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Done."}}'
       emit '{"type":"message_end","message":{"role":"assistant","id":"m2","model":"gpt-6-astra","content":[{"type":"text","text":"Done."}],"stopReason":"stop"}}'
+      emit '{"type":"agent_settled"}'
+      exit 0
+      ;;
+
+    *scenario:turn-notice*)
+      # A command that starts the agent (`/goal ...`): its handler notifies
+      # BEFORE the agent starts (the command's output → TextDelta), then the
+      # model turn runs and a provider bridge notifies mid-message (rate-limit
+      # warning, an info line, and an error) — Notices and an Error, never
+      # reply text, never Done's result.
+      emit '{"type":"extension_ui_request","id":"g-1","method":"notify","message":"Goal set.","notifyType":"info"}'
+      emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+      emit '{"type":"agent_start"}'
+      emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
+      emit '{"type":"extension_ui_request","id":"n-1","method":"notify","message":"Claude rate limit warning: 58% used (seven_day)","notifyType":"warning"}'
+      emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Answer."}}'
+      emit '{"type":"extension_ui_request","id":"n-2","method":"notify","message":"bridge info","notifyType":"info"}'
+      emit '{"type":"extension_ui_request","id":"n-3","method":"notify","message":"bridge failed","notifyType":"error"}'
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"Answer."}],"stopReason":"stop"}}'
       emit '{"type":"agent_settled"}'
       exit 0
       ;;

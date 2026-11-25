@@ -64,6 +64,7 @@ pub fn session() -> Session {
         throughput: None,
         recovery: None,
         progress: None,
+        notice: None,
     }
 }
 

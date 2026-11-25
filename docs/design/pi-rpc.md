@@ -145,7 +145,7 @@ agent events at all still terminates — see below):
 | class | methods | cypher behavior |
 |---|---|---|
 | blocking dialogs | `select` / `confirm` / `input` / `editor` | **bridged** — correctness requires the answer (see the UI bridge above) |
-| output channel | `notify` | `notifyType: "error"` → `Error` event; `info`/`warning` → `TextDelta` (message fed into Done's `result`; multi-line `\n`-escaped text passes through as-is) |
+| output channel / notices | `notify` | `notifyType: "error"` → `Error` event. `info`/`warning` from an extension COMMAND — inside a prompt's turn before any agent lifecycle event, or while a slash command routed mid-turn awaits its response — → `TextDelta` (message fed into Done's `result`; multi-line `\n`-escaped text passes through as-is). Any other `info`/`warning` (during a model turn, a self-started run, between turns: a provider bridge's rate-limit warning) → `Notice` — never reply text, never `result`; the engine keeps the latest on the session row (`Session::notice`), clients show it in the status strip for 90 s (`crates/proto/src/notice.rs`) |
 | structured status | `setStatus` with `statusKey: "cypher.subagents.v1"` | **parsed** — see the Subagent status protocol below |
 | transient TUI furniture | `setStatus` (any other key) / `setWidget` / `setTitle` / `set_editor_text` | **deliberately ignored** — transient TUI staging, cypher has its own state surface |
 | TUI-only | `custom()` / `setFooter` and friends | no-op in RPC mode (pi itself does nothing with them) |

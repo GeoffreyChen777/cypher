@@ -1483,6 +1483,7 @@ impl Inner {
                     throughput: None,
                     recovery: None,
                     progress: None,
+                    notice: None,
                 });
             if entry.context_usage == Some(usage) {
                 return;
@@ -1552,6 +1553,36 @@ impl Inner {
         self.publish_session(chat_id, &session);
     }
 
+    /// An extension notice ([`AgentEvent::Notice`]): the chat's latest one
+    /// replaces the one before on its session row, the same notice again
+    /// is dropped (a bridge re-stating its warning must not refresh the
+    /// row or restart the clients' countdown). A registry write, so every
+    /// device's status strip shows it; notices are rare (the Claude
+    /// bridge's warning fires once per 5% step). No row, no notice: a
+    /// running chat always has one.
+    fn set_notice(&self, chat_id: &str, level: cypher_proto::NoticeLevel, text: &str) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.level == level && n.text == text)
+            {
+                return;
+            }
+            entry.notice = Some(cypher_proto::SessionNotice {
+                level,
+                text: text.to_owned(),
+                at: Utc::now(),
+            });
+            entry.clone()
+        };
+        self.publish_session(chat_id, &session);
+    }
+
     fn set_throughput(&self, chat_id: &str, throughput: Option<Throughput>) {
         {
             let mut statuses = lock(&self.statuses);
@@ -1591,6 +1622,7 @@ impl Inner {
                     throughput: None,
                     recovery: None,
                     progress: None,
+                    notice: None,
                 });
             entry.subagents = runs;
             entry.updated_at = now;
@@ -1695,6 +1727,7 @@ impl Inner {
                     throughput: None,
                     recovery: None,
                     progress: None,
+                    notice: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -1713,6 +1746,11 @@ impl Inner {
                     entry.started_at = Some(now);
                     entry.throughput = None;
                     entry.progress = None;
+                    // A notice outlives its turn while it shows; a turn
+                    // starting after it expired drops it from the row.
+                    if entry.notice.as_ref().is_some_and(|n| !n.is_live(now)) {
+                        entry.notice = None;
+                    }
                 }
                 SessionStatus::Working | SessionStatus::AwaitingInput => {}
                 SessionStatus::Idle | SessionStatus::Errored => {

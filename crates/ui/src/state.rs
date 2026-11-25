@@ -324,6 +324,9 @@ pub struct AppState {
     /// the local device.
     pub selected_device: Option<String>,
     pub selected_chat: Option<String>,
+    /// Extension notices dismissed here: chat → the dismissed notice's
+    /// arrival (`SessionNotice::at`). A newer notice shows again.
+    pub dismissed_notices: HashMap<String, DateTime<Utc>>,
     /// Boot auto-select happened (or a manual selection superseded it).
     pub auto_selected: bool,
     /// First chats / spaces watch frame has landed — device-local state that
@@ -563,6 +566,7 @@ impl AppState {
             scratch_pending: false,
             selected_device: None,
             selected_chat: None,
+            dismissed_notices: HashMap::new(),
             transcript: Vec::new(),
             commands: Vec::new(),
             echoes: HashMap::new(),

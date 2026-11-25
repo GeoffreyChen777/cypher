@@ -296,6 +296,7 @@ struct AnsweredLabel: Equatable {
 /// transport lines, mentions as their `@name` chips.
 enum MessageCopy {
     static func text(_ entry: MessageEntry) -> String? {
+        let entry = NoticeText.withoutReplyNotices(entry)
         let joined = entry.parts.compactMap { part -> String? in
             switch part {
             case .text(_, let text, _), .post(_, let text, _): return text
@@ -470,6 +471,9 @@ enum TranscriptRowBuilder {
             return
         }
 
+        // Notices an older harness streamed into the reply text (an
+        // extension's rate-limit warning): never the reply's.
+        let entry = NoticeText.withoutReplyNotices(entry)
         let entryStart = rows.count
         let fold = PermissionFold(entry)
         var first = true

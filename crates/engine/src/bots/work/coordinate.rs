@@ -2105,6 +2105,7 @@ mod state_tests {
             throughput: None,
             recovery: None,
             progress: None,
+            notice: None,
         }
     }
 
