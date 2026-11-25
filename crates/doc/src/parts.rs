@@ -508,8 +508,11 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         // engine consumes it before the fold) — never transcript content, and
         // so are ContextUsage and Throughput.
         // InputTranslation belongs to the USER entry the engine stamps
-        // directly, never to the assistant segment being folded.
+        // directly, never to the assistant segment being folded. A Notice is
+        // an extension's side remark, kept on the session row — never reply
+        // text.
         AgentEvent::AssistantMessageCompleted { .. }
+        | AgentEvent::Notice { .. }
         | AgentEvent::Usage { .. }
         | AgentEvent::AvailableCommands { .. }
         | AgentEvent::SubagentStatus { .. }

@@ -283,7 +283,8 @@ final class WorkspaceStore: WorkspaceData {
                 subagents: SubagentProjection.snapshot(f["subagents"]),
                 contextUsage: ContextUsage(f["contextUsage"]),
                 recovery: RecoveryProgress(f["recovery"]),
-                progress: RunProgress(f["progress"]))
+                progress: RunProgress(f["progress"]),
+                notice: SessionNotice(f["notice"]))
         }
         sessions = rows
         projectWorkspaces()

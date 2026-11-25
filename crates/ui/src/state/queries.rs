@@ -461,6 +461,21 @@ impl AppState {
         self.sessions.iter().find(|s| s.chat_id == chat_id)
     }
 
+    /// The extension notice the chat's status strip shows at `now`: its
+    /// session row's latest, while live ([`cypher_proto::NOTICE_TTL_SECS`])
+    /// and not dismissed here.
+    pub fn shown_notice(
+        &self,
+        chat_id: &str,
+        now: DateTime<Utc>,
+    ) -> Option<&cypher_proto::SessionNotice> {
+        self.session_for(chat_id)?
+            .notice
+            .as_ref()
+            .filter(|n| n.is_live(now))
+            .filter(|n| self.dismissed_notices.get(chat_id) != Some(&n.at))
+    }
+
     /// Staleness-checked status dot for a chat row. A send in flight reads as
     /// Working (see [`Self::display_status_for`]).
     pub fn indicator_for(&self, chat_id: &str, now: DateTime<Utc>) -> Indicator {

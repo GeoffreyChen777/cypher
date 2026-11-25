@@ -644,6 +644,18 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    /// An extension's `notify` (info/warning) during a model turn — a
+    /// provider bridge's rate-limit warning, say. Not reply text: never
+    /// folded into the transcript, never part of Done's `result`, never
+    /// journaled, never sent to the model. The engine keeps the latest one
+    /// on the chat's session row ([`crate::Session::notice`]); clients show
+    /// it in the status strip for a while. An extension COMMAND's notify
+    /// (a slash command that never starts the agent) is its output and
+    /// still streams as `TextDelta`; error notifies stay `Error`.
+    Notice {
+        level: crate::NoticeLevel,
+        text: String,
+    },
     #[serde(rename_all = "camelCase")]
     InputRequested {
         request_id: String,

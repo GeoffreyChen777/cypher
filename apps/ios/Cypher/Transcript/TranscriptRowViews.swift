@@ -12,6 +12,8 @@ struct UserBubble: View {
     var isSteer = false
     /// Sent again by the host after a failed turn (context recovery).
     var recovery: ContextRecovery? = nil
+    /// The comments the prompt carried, over the bubble.
+    var comments: [MessageComment] = []
     /// The chat's host device — where attachment files live (read-back key).
     var deviceId = ""
 
@@ -42,32 +44,107 @@ struct UserBubble: View {
                 if !parsed.attachments.isEmpty, !deviceId.isEmpty {
                     UserAttachmentsStrip(deviceId: deviceId, attachments: parsed.attachments)
                 }
-                if !parsed.text.isEmpty {
-                    SelectableTranscriptText(
-                        attributed: TranscriptTextStyle.inline(
-                            Mentions.inlineRuns(parsed.text)), hugsContent: true
-                    )
-                    .environment(\.commentDrafts, pending ? nil : commentDrafts)
-                    .padding(.horizontal, 16)
-                    // Optical centering for the native text line box: move
-                    // the text up 1pt while preserving the bubble's height.
-                    .padding(.top, 9)
-                    .padding(.bottom, 11)
-                    .background(
-                        Theme.userBubble.opacity(isSteer ? 0.55 : 1),
-                        in: RoundedRectangle(cornerRadius: Theme.bubbleRadius)
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: Theme.bubbleRadius)
-                            .strokeBorder(isSteer ? Theme.border : .clear, lineWidth: 1)
-                            .allowsHitTesting(false)
+                // render.rs `render_user_row`: the comments sit between the
+                // attachment strip and the bubble, 6pt over it.
+                VStack(alignment: .trailing, spacing: 6) {
+                    if !comments.isEmpty {
+                        UserComments(comments: comments)
                     }
-                    .frame(maxWidth: TranscriptView.maxContentWidth * 0.8, alignment: .trailing)
+                    if !parsed.text.isEmpty {
+                        bubble(parsed.text)
+                    }
                 }
             }
         }
         .opacity(pending ? 0.65 : 1)
         .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    private func bubble(_ text: String) -> some View {
+        SelectableTranscriptText(
+            attributed: TranscriptTextStyle.inline(
+                Mentions.inlineRuns(text)), hugsContent: true
+        )
+        .environment(\.commentDrafts, pending ? nil : commentDrafts)
+        .padding(.horizontal, 16)
+        // Optical centering for the native text line box: move
+        // the text up 1pt while preserving the bubble's height.
+        .padding(.top, 9)
+        .padding(.bottom, 11)
+        .background(
+            Theme.userBubble.opacity(isSteer ? 0.55 : 1),
+            in: RoundedRectangle(cornerRadius: Theme.bubbleRadius)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: Theme.bubbleRadius)
+                .strokeBorder(isSteer ? Theme.border : .clear, lineWidth: 1)
+                .allowsHitTesting(false)
+        }
+        .frame(maxWidth: TranscriptView.maxContentWidth * 0.8, alignment: .trailing)
+    }
+}
+
+// MARK: - Sent comments (transcript/rows.rs `user_comments`)
+
+/// The comments a prompt carried, right-aligned over its bubble and capped
+/// like it: each quote as one muted line over what the user wrote about it,
+/// behind a 2pt rule. Dimmed with the bubble while the send is pending (the
+/// bubble's own opacity). A long press offers to copy the whole quote or the
+/// comment.
+struct UserComments: View {
+    let comments: [MessageComment]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(comments.enumerated()), id: \.offset) { _, comment in
+                UserCommentView(comment: comment)
+            }
+        }
+        .frame(maxWidth: TranscriptView.maxContentWidth * 0.8, alignment: .trailing)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("user-comments")
+    }
+
+    /// composer layout.rs `comment_quote_preview`: line breaks folded to
+    /// spaces, cut at 120 characters.
+    static func quotePreview(_ quote: String) -> String {
+        let single = quote.replacingOccurrences(of: "\r\n", with: " ").replacingOccurrences(of: "\n", with: " ")
+        return single.count > 120 ? String(single.prefix(120)) + "\u{2026}" : single
+    }
+}
+
+private struct UserCommentView: View {
+    let comment: MessageComment
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(UserComments.quotePreview(comment.quote))
+                .font(Theme.sans(11.5, relativeTo: .caption))
+                .foregroundStyle(Theme.textMuted)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Text(comment.comment)
+                .font(Theme.sans(13, relativeTo: .footnote))
+                .foregroundStyle(Theme.text)
+                .lineSpacing(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.leading, 10)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(Theme.border).frame(width: 2)
+        }
+        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 6).inset(by: -4))
+        .contextMenu {
+            Button("Copy Quote", systemImage: "text.quote") { UIPasteboard.general.string = comment.quote }
+            Button("Copy Comment", systemImage: "doc.on.doc") { UIPasteboard.general.string = comment.comment }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityAction(named: "Copy Quote") { UIPasteboard.general.string = comment.quote }
+        .accessibilityAction(named: "Copy Comment") { UIPasteboard.general.string = comment.comment }
+        .accessibilityLabel(
+            "Comment on \u{201c}\(UserComments.quotePreview(comment.quote))\u{201d}: \(comment.comment)"
+        )
+        .accessibilityIdentifier("user-comment")
     }
 }
 

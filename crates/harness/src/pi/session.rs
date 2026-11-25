@@ -135,7 +135,8 @@ struct PiRun {
     /// restarts reuse the same slot. Serialized with steer calls (never both
     /// in flight); followers queue in `prompt_backlog` until the turn settles.
     idle_prompt: Option<BoxFuture<'static, Result<Value, HarnessError>>>,
-    /// True if a blocking dialog (select/input/editor/confirm) or a notify
+    /// True if a blocking dialog (select/input/editor/confirm) or a
+    /// command's notify (one before the agent starts — see the `notify` arm)
     /// landed while the prompt RPC was in flight. Real pi only ACKs extension
     /// commands after the handler returns, so an ACK with that UI and no agent
     /// lifecycle means the command is done — do not wait the 2s no-activity

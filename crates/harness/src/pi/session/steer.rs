@@ -50,6 +50,15 @@ pub(super) struct RoutedSteer {
     message: MailboxMessage,
 }
 
+impl RoutedSteer {
+    /// Whether the routed message is a slash command: pi runs its handler
+    /// at once and answers only after it returns, so a notify meanwhile is
+    /// the command's output.
+    pub(super) fn is_command(&self) -> bool {
+        self.message.text.trim_start().starts_with('/')
+    }
+}
+
 /// The next turn a parked run opens (the main loop's top branch).
 pub(super) enum NextTurn {
     /// A mailbox message to dispatch as a parked `prompt`.

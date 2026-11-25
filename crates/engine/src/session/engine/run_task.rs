@@ -1220,6 +1220,12 @@ fn apply_projection(scope: &RunScope<'_>, doc: &SessionDoc, event: &AgentEvent) 
         AgentEvent::Throughput { throughput } => {
             inner.set_throughput(chat_id, *throughput);
         }
+        // An extension's side remark (a provider's rate-limit warning): the
+        // chat's latest notice on its session row — never journaled, folded
+        // into the reply, or counted as run activity.
+        AgentEvent::Notice { level, text } => {
+            inner.set_notice(chat_id, *level, text);
+        }
         // A prompt's translation belongs to the USER entry it replaced, which
         // was written before the run saw it — stamped there directly, never
         // folded into the assistant segment. Handled ahead of the parked gate

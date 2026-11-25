@@ -72,6 +72,7 @@ mod turns {
     mod context_recovery;
     mod crash_outbox_recovery;
     mod e2e;
+    mod extension_notices;
     mod follow_up_attachments;
     mod input_translation;
     mod model_switch;
