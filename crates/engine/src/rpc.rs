@@ -949,6 +949,7 @@ impl RpcService for EngineRpc {
             }
             methods::WATCH_AGENT_EVENTS => chats::watch_agent_events(self, params),
             methods::OWNER_WORDS => chats::owner_words(self, params),
+            methods::PERMISSION_LEVEL => chats::permission_level(self, params),
             methods::CREATE_BOT => bots::create_bot(self, params),
             methods::WATCH_BOTS => Ok(RpcReply::Stream(watch_stream(self.workspace.watch_bots()))),
             methods::WATCH_BOT_RECORDS => Ok(RpcReply::Stream(watch_stream(

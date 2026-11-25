@@ -93,6 +93,9 @@ pub(super) struct BoardUi {
     /// The work item whose Stop is armed (a second click stops it), and the
     /// task that disarms it.
     stop_armed: Option<String>,
+    /// The plan level picker whose menu is open (its element id: the work
+    /// page's header, or a plan's card on the Needs you page).
+    level_menu: crate::kit::popover::Popup<String>,
     stop_disarm: Option<Task<()>>,
     /// The Activity panel's kind filter; `None` shows everything.
     activity_filter: Option<cypher_proto::ActivityGroup>,
@@ -167,13 +170,16 @@ pub(super) enum Need {
     Record(cypher_proto::NeedsYou),
 }
 
-/// Whether `chat_id` is a session waiting on an answer.
-fn chat_asking(state: &crate::state::AppState, chat_id: &str, now: chrono::DateTime<Utc>) -> bool {
-    state
-        .chats
-        .iter()
-        .find(|c| c.id == chat_id)
-        .is_some_and(|chat| state.display_status_for(chat, now) == ChatIndicator::AwaitingInput)
+/// Whether `chat_id` waits on an answer: its own question or one in a
+/// subagent's child chat under it, however old its row
+/// ([`crate::state::AppState::plan_question_in`], docs/design/plan-asks.md).
+fn chat_asking(
+    state: &crate::state::AppState,
+    tree: &cypher_proto::view::ChatTree<'_>,
+    chat_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    state.plan_question_in(tree, chat_id, now).is_some()
 }
 
 /// What needs the owner for `bot`, most pressing first: its own question,
@@ -185,12 +191,13 @@ pub(super) fn bot_needs(
     bot: &Bot,
     now: chrono::DateTime<Utc>,
 ) -> Vec<Need> {
-    let chat = chat_asking(state, &bot.chat_id, now).then_some(Need::Chat);
+    let tree = state.chat_tree();
+    let chat = chat_asking(state, &tree, &bot.chat_id, now).then_some(Need::Chat);
     chat.into_iter()
         .chain(
             state
                 .bot_records
-                .needs_you(&bot.id, |chat_id| chat_asking(state, chat_id, now))
+                .needs_you(&bot.id, |chat_id| chat_asking(state, &tree, chat_id, now))
                 .into_iter()
                 .map(Need::Record),
         )

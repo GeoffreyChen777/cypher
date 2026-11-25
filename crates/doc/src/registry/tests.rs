@@ -334,6 +334,8 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         throughput: None,
         recovery: None,
         progress: None,
+        notice: None,
+        asking: None,
     }
 }
 
@@ -708,6 +710,87 @@ fn session_progress_syncs_and_clears_with_the_turn() {
     let mut docs = [&mut a, &mut b];
     server_round(&mut server, &mut seq, &mut docs);
     assert_eq!(b.read_sessions().unwrap()[0].progress, None);
+}
+
+/// An extension notice rides the host's row to its peers (every device's
+/// status strip), keeps riding the settle write, and a malformed one reads
+/// as none without costing the row.
+#[test]
+fn session_notice_syncs_and_reads_leniently() {
+    let notice = cypher_proto::SessionNotice {
+        level: cypher_proto::NoticeLevel::Warning,
+        text: "Claude rate limit warning: 58% used (seven_day)".into(),
+        at: ts(3_400),
+    };
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let (mut server, mut seq) = (HashMap::new(), 0);
+    let mut working = session("chat-1", "dev-a", SessionStatus::Working);
+    working.notice = Some(notice.clone());
+    a.upsert_session(&working).unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    assert_eq!(b.read_sessions().unwrap()[0].notice, Some(notice.clone()));
+
+    let mut idle = session("chat-1", "dev-a", SessionStatus::Idle);
+    idle.notice = Some(notice.clone());
+    a.upsert_session(&idle).unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    assert_eq!(b.read_sessions().unwrap()[0].notice, Some(notice));
+
+    let raw: super::rows::RawSession = serde_json::from_value(json!({
+        "chatId": "chat-1",
+        "deviceId": "dev-a",
+        "status": "idle",
+        "updatedAt": 1,
+        "notice": {"level": "shout", "text": 3},
+    }))
+    .unwrap();
+    assert_eq!(Session::from(raw).notice, None);
+}
+
+/// An open question rides the host's row to its peers in the shape of
+/// `protocol/vectors/plan-asks-v1.json`, whatever the row's status, and a
+/// row without one clears it; old rows and malformed values read as none.
+#[test]
+fn session_asking_syncs_and_clears() {
+    let ask = cypher_proto::SessionAsk {
+        request_id: "m1".into(),
+        asked_at: 3_400,
+        permission: Some(cypher_proto::PermissionPromptKind::Escalate),
+        asked_by: Some("reviewer".into()),
+        from_chat_id: Some("child-1".into()),
+    };
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let (mut server, mut seq) = (HashMap::new(), 0);
+    let mut idle = session("chat-1", "dev-a", SessionStatus::Idle);
+    idle.asking = Some(ask.clone());
+    a.upsert_session(&idle).unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    assert_eq!(b.read_sessions().unwrap()[0].asking, Some(ask.clone()));
+    assert_eq!(
+        serde_json::to_value(&ask).unwrap(),
+        json!({"requestId": "m1", "askedAt": 3_400, "permission": "escalate",
+               "askedBy": "reviewer", "fromChatId": "child-1"})
+    );
+
+    a.upsert_session(&session("chat-1", "dev-a", SessionStatus::Working))
+        .unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    assert_eq!(b.read_sessions().unwrap()[0].asking, None);
+
+    for asking in [json!(null), json!({"requestId": 3})] {
+        let raw: super::rows::RawSession = serde_json::from_value(json!({
+            "chatId": "chat-1", "deviceId": "dev-a", "status": "awaitingInput",
+            "updatedAt": 1, "asking": asking,
+        }))
+        .unwrap();
+        assert_eq!(Session::from(raw).asking, None);
+    }
 }
 
 /// A context recovery under way rides the host's row to its peers (the

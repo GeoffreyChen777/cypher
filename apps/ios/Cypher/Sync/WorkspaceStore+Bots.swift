@@ -10,10 +10,42 @@ import Foundation
 extension WorkspaceStore {
     // MARK: Owner fields
 
+    /// bots.rs `ResolveBotPlan`: approving confirms the level it runs at
+    /// (the one picked on the card, else the proposal's) in the owner's
+    /// `level` field.
     func resolvePlan(workId: String, approve: Bool) async throws {
         guard let work = botRecords.work.first(where: { $0.id == workId }) else { throw BotActionError.missing("plan") }
         guard work.awaitingApproval else { throw BotActionError.alreadyDecided }
-        try updateRecord("botWork", workId, what: "plan", ["decision": decision(approve)])
+        var set: [String: JSONValue] = ["decision": decision(approve)]
+        if approve {
+            let level = work.effectiveLevel
+            try refuseRaiseIfReceiveOnly(work, level)
+            set["level"] = .string(level.sandbox)
+        }
+        try updateRecord("botWork", workId, what: "plan", set)
+    }
+
+    /// bots.rs `SetBotWorkLevel`: the owner's choice of a proposed or
+    /// running plan's level; its host gives it to every session the plan
+    /// started.
+    func setWorkLevel(workId: String, level: String) async throws {
+        guard let work = botRecords.work.first(where: { $0.id == workId }) else { throw BotActionError.missing("plan") }
+        guard work.isLive else {
+            throw BotActionError("Only a proposed or running plan's permission level can change.")
+        }
+        guard let chosen = PermissionLevel.all.first(where: { $0.sandbox == level }) else {
+            throw BotActionError("That isn't a permission level.")
+        }
+        guard work.level != chosen.sandbox else { return }
+        try refuseRaiseIfReceiveOnly(work, chosen)
+        try updateRecord("botWork", workId, what: "plan", ["level": .string(chosen.sandbox)])
+    }
+
+    /// bots.rs `refuse_raise_from_receive_only`: a receive-only phone may
+    /// lower a plan's level, never raise it.
+    private func refuseRaiseIfReceiveOnly(_ work: BotWork, _ level: PermissionLevel) throws {
+        guard level.isAbove(work.effectiveLevel), receiveOnly else { return }
+        throw BotActionError("This iPhone is receive-only, so it can't raise a plan's permission level.")
     }
 
     func stopWork(workId: String) async throws {

@@ -24,6 +24,7 @@ Every language loads the same JSON file and runs every case in it.
 | Signed durable commands and launch records: the bytes a signature covers, from the entry's Loro value tree | [`crates/doc/src/command_auth.rs`](../crates/doc/src/command_auth.rs); generator and check [`crates/doc/tests/command_vectors.rs`](../crates/doc/tests/command_vectors.rs) | — (the Edge never sees inside commands) | [`Sync/CommandSignature.swift`](../apps/ios/Cypher/Sync/CommandSignature.swift); [`scripts/tests/command-signing-vectors.swift`](../scripts/tests/command-signing-vectors.swift), [`DeviceTrustTests.swift`](../apps/ios/CypherTests/Sync/DeviceTrustTests.swift) | [`command-signing-v1.json`](vectors/command-signing-v1.json) |
 | Preview reducer | [`crates/sync/src/preview_link.rs`](../crates/sync/src/preview_link.rs) (inline tests) | — | [`Sync/PreviewProjection.swift`](../apps/ios/Cypher/Sync/PreviewProjection.swift); [`PreviewProjectionTests.swift`](../apps/ios/CypherTests/Sync/PreviewProjectionTests.swift) | [`preview-reducer-v1.json`](vectors/preview-reducer-v1.json) |
 | Plan text reader (`PlanText::of`: a row's `bodyRev`/`resultRev` against the workspace chat doc's `planBodies` entry, docs/design/plan-body.md) | [`crates/proto/src/plan_body.rs`](../crates/proto/src/plan_body.rs); [`crates/proto/tests/plan_text_vectors.rs`](../crates/proto/tests/plan_text_vectors.rs) | — | [`Bots/PlanText.swift`](../apps/ios/Cypher/Bots/PlanText.swift); [`PlanTextTests.swift`](../apps/ios/CypherTests/Bots/PlanTextTests.swift) | [`plan-text-v1.json`](vectors/plan-text-v1.json) |
+| Slash command test (`slash_command`: whether a sent message ran as a slash command, from the host's `ListCommands` names or, before they load, the strict `/name` shape rule) | [`crates/ui/src/slash_command.rs`](../crates/ui/src/slash_command.rs) (inline tests) | — | [`Composer/SlashCommandText.swift`](../apps/ios/Cypher/Composer/SlashCommandText.swift); [`SlashCommandTextTests.swift`](../apps/ios/CypherTests/Composer/SlashCommandTextTests.swift) | [`slash-commands-v1.json`](vectors/slash-commands-v1.json) |
 
 The two preview files are also run without a simulator: the macOS stage of
 `scripts/check.sh` compiles the iOS sources with
@@ -128,6 +129,13 @@ it (`null`: no entry; each of its `plan` and `result` parts is read on its own,
 and one that doesn't read is missing). `PlanText.of(work, bodies)` gives
 `expect`'s `instruction`, `details` (in step order), `plan`, `result` and
 `resultSource` (`row`, `body` or `preview`) and `loading`.
+
+### `slash-commands-v1.json`
+
+An object; `cases` holds `{name, text, commands, expect}`: `commands` is the
+host's command names for the chat's harness (`null`: not loaded; an empty list
+counts as none) and `expect` the leading `/command` token when `text` runs as
+a slash command, else `null`. The file's `description` states the rule.
 
 ### `artifact-patch-v1.json`
 

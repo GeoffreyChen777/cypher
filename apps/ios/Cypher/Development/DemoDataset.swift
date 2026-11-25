@@ -155,6 +155,8 @@ final class DemoDataset {
                 spaceId: cypher.id, lastSeenAt: now - 1_700_000),
             // Code in prose: inline code, chips, CJK, a list and a code block.
             codeTypesettingChat(spaceId: cypher.id, cwd: cypher.path, config: claude, now: now),
+            // Comments sent with a prompt, over its bubble.
+            messageCommentsChat(spaceId: cypher.id, cwd: cypher.path, config: claude, now: now),
             // Artifacts in a reply (the mock harness's [mock:artifacts] showcase).
             Chat(
                 id: "chat-artifacts", deviceId: "dev-mac", title: "Explain binary search",
@@ -518,13 +520,16 @@ final class DemoDataset {
         if let existing = stores[chatId] { return existing }
         let store = SessionStore(chatId: chatId, config: Self.dummyConfig, offline: true)
         store.setEntries(Self.transcript(for: chatId))
-        store.demoResponder = { [weak self, weak store] prompt, isSteer in
+        store.demoResponder = { [weak self, weak store] prompt, isSteer, comments in
             guard let self, let store else { return }
             if chatId == Self.recoveryReplayChatId {
                 self.playRecoveryStory(store: store, chatId: chatId, prompt: prompt)
             } else {
-                self.simulateTurn(store: store, chatId: chatId, prompt: prompt, isSteer: isSteer)
+                self.simulateTurn(store: store, chatId: chatId, prompt: prompt, isSteer: isSteer, comments: comments)
             }
+        }
+        store.demoInputAnswered = { [weak self] requestId in
+            self?.answerPlanAsk(chatId: chatId, requestId: requestId)
         }
         stores[chatId] = store
         refreshRecoveryShowcase(chatId)
@@ -895,6 +900,8 @@ final class DemoDataset {
             ]
         case codeTypesettingChatId:
             return codeTypesettingTranscript(now: now)
+        case messageCommentsChatId:
+            return messageCommentsTranscript(now: now)
         case "chat-tools":
             return longToolRuns(now: now)
         case "chat-permissions-story":
@@ -904,7 +911,8 @@ final class DemoDataset {
         default:
             // The context recovery showcase, a workspace's chat or thread,
             // or a freshly minted chat (empty).
-            return recoveryTranscript(for: chatId, now: now) ?? workspaceChatTranscript(for: chatId, now: now) ?? []
+            return recoveryTranscript(for: chatId, now: now) ?? workspaceChatTranscript(for: chatId, now: now)
+                ?? planAsksTranscript(for: chatId, now: now) ?? []
         }
     }
 
@@ -1335,7 +1343,7 @@ final class DemoDataset {
             isError: outcome == .blocked || outcome == .denied, resolved: true)
     }
 
-    private static func prompt(
+    static func prompt(
         _ id: String, _ title: String, options: [String], kind: String?, call: String?, resolved: Bool = true
     ) -> MessagePart {
         .input(
@@ -1348,12 +1356,12 @@ final class DemoDataset {
             resolved: resolved)
     }
 
-    private static let escalateOptions = ["Run once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"]
-    private static let accessOptions = ["Allow once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"]
+    static let escalateOptions = ["Run once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"]
+    static let accessOptions = ["Allow once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"]
     private static let sshStatus = "ssh deploy@web 'systemctl status app --no-pager'"
     private static let push = "git push --force origin release/0.3.49"
 
-    private static func escalateTitle(_ command: String, purpose: String, pattern: String, reason: String) -> String {
+    static func escalateTitle(_ command: String, purpose: String, pattern: String, reason: String) -> String {
         """
         Run this command outside the sandbox?
 
@@ -1466,7 +1474,9 @@ final class DemoDataset {
 
     // MARK: Streaming simulation
 
-    private func simulateTurn(store: SessionStore, chatId: String, prompt: String, isSteer: Bool) {
+    private func simulateTurn(
+        store: SessionStore, chatId: String, prompt: String, isSteer: Bool, comments: [MessageComment] = []
+    ) {
         streamTask?.cancel()
         let now = nowMs()
         var entries = store.fedEntries
@@ -1475,7 +1485,8 @@ final class DemoDataset {
                 id: "u-\(now)", role: .user,
                 parts: [
                     .text(id: "t0", text: prompt)
-                ], createdAt: now, deviceId: "ios-demo", status: .complete, continuationOf: nil, isSteer: isSteer))
+                ], createdAt: now, deviceId: "ios-demo", status: .complete, continuationOf: nil, isSteer: isSteer,
+                comments: comments))
         let liveId = "a-\(now)"
         entries.append(
             MessageEntry(

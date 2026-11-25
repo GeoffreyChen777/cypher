@@ -33,18 +33,35 @@ extension WorkspaceData {
         chat.bot.flatMap { bot(id: $0.botId) }
     }
 
-    /// Whether a session waits on an answer, as its row's dot says
-    /// (bots.rs `chat_asking`).
+    /// The chats by parent, for `planQuestion` (plan_asks.rs `ChatTree`).
+    var chatTree: ChatTree { ChatTree(chats) }
+
+    /// The question open in `chatId` or in a subagent's child chat under it,
+    /// however old its row (plan_asks.rs `plan_question`): which chat asks,
+    /// and whether its device is offline.
+    func planQuestion(_ chatId: String, tree: ChatTree? = nil, now: Int64 = nowMs()) -> PlanQuestion? {
+        let sessions = sessions
+        return findPlanQuestion(
+            tree: tree ?? chatTree, chatId: chatId, sessions: { sessions[$0] }, deviceOnline: deviceOnline,
+            now: now)
+    }
+
+    /// Whether a session waits on an answer: its own question or one in a
+    /// child chat under it (bots.rs `chat_asking`, docs/design/plan-asks.md).
     func sessionAsking(_ chatId: String) -> Bool {
-        guard let chat = chat(id: chatId) else { return false }
-        return indicator(for: chat) == .awaitingInput
+        planQuestion(chatId) != nil
     }
 
     /// What waits on the owner for a workspace, most pressing first: its
-    /// own chat asking, then approvals, sessions it started that ask, plans
-    /// and review drafts (bots.rs `bot_needs`).
+    /// own chat asking, then approvals, sessions its plans started or
+    /// steered that ask (or a child chat under one), plans and review
+    /// drafts (bots.rs `bot_needs`).
     func needsYou(botId: String) -> [NeedsYouItem] {
-        botRecords.needsYou(botId: botId, chatId: bot(id: botId)?.chatId, asking: sessionAsking)
+        let tree = chatTree
+        let now = nowMs()
+        return botRecords.needsYou(botId: botId, chatId: bot(id: botId)?.chatId) {
+            planQuestion($0, tree: tree, now: now) != nil
+        }
     }
 
     func needsYouCount(botId: String) -> Int {

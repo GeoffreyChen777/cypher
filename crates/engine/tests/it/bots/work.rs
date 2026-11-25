@@ -21,6 +21,8 @@ use cypher_proto::{
 
 use support::{run_request, wait_for, wait_for_some};
 
+mod plan_level;
+
 type Runs = Arc<Mutex<Vec<(RunRequest, Option<cypher_harness::BotRunEnv>)>>>;
 /// Each run's chat, prompt and the owner's words it was given
 /// (`CYPHER_OWNER_WORDS`).
@@ -107,12 +109,17 @@ struct Rig {
 }
 
 fn rig(finish: bool) -> Rig {
+    rig_with(finish, |harness| harness)
+}
+
+/// [`rig`], with its stand-in Pi tuned by `tune`.
+fn rig_with(finish: bool, tune: impl FnOnce(support::TestHarness) -> support::TestHarness) -> Rig {
     let root = tempfile::tempdir().unwrap();
     let runs = Runs::default();
     let words = Words::default();
     let core = support::engine_at(
         &root.path().join("data"),
-        harness(runs.clone(), words.clone(), finish),
+        tune(harness(runs.clone(), words.clone(), finish)),
     );
     for (space, chat) in [("sp-billing", "chat-billing"), ("sp-web", "chat-web")] {
         let path = root.path().join(space);
@@ -1423,7 +1430,12 @@ async fn a_plans_time_limit_models_and_limits_follow_the_owners_settings() {
             .count()
     };
     wait_for(|| warnings() == 1, "the warning").await;
-    assert!(rig.work(&work_id).warned_at.is_some());
+    // The host queues the steer, then records `warnedAt`: wait for both.
+    wait_for(
+        || rig.work(&work_id).warned_at.is_some(),
+        "the warning recorded",
+    )
+    .await;
     let details = rig
         .tool(
             &bot.chat_id,

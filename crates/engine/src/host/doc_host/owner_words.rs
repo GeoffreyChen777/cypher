@@ -131,10 +131,38 @@ impl OwnerWord {
     }
 }
 
+/// The least a quote of the owner's words says ([`weight`]): a word or two,
+/// never a lone "ok" that any message contains.
+pub(crate) const QUOTE_MIN_WEIGHT: usize = 4;
+
 impl OwnerWords {
     pub(crate) fn to_env(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
+
+    /// Whether `quote` is the owner's own: word for word (case and spacing
+    /// aside) in what they typed, replied or answered, never in a plan's
+    /// instruction or card, which only restate earlier words. Whether the
+    /// words mean what an agent cites them for is the owner's to confirm
+    /// (a plan's card shows the quote with the level it asks for).
+    pub(crate) fn quotes(&self, quote: &str) -> bool {
+        let quote = normalized(quote);
+        if weight(&quote) < QUOTE_MIN_WEIGHT {
+            return false;
+        }
+        self.messages
+            .iter()
+            .filter(|word| matches!(word.source, source::TYPED | source::REPLY | source::ANSWER))
+            .any(|word| normalized(&word.text).contains(&quote))
+    }
+}
+
+/// `text` lowercased, every run of whitespace one space.
+fn normalized(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 impl DocHost {
@@ -142,6 +170,17 @@ impl DocHost {
     /// them; `None` when its ledger can't be read (the run then gets none,
     /// and no danger runs on an explicit request).
     pub(crate) fn owner_words_env(&self, chat_id: &str, origin: &ChatOrigin) -> Option<String> {
+        Some(self.owner_words_of(chat_id, origin)?.to_env())
+    }
+
+    /// Whether `quote` is in the owner's own words in `chat_id`
+    /// ([`OwnerWords::quotes`]); `false` when its ledger can't be read.
+    pub(crate) fn owner_quoted(&self, chat_id: &str, quote: &str) -> bool {
+        self.owner_words_of(chat_id, &ChatOrigin::default())
+            .is_some_and(|words| words.quotes(quote))
+    }
+
+    fn owner_words_of(&self, chat_id: &str, origin: &ChatOrigin) -> Option<OwnerWords> {
         let handle = self.open(chat_id).ok()?;
         if handle.is_ephemeral() {
             return None;
@@ -153,7 +192,7 @@ impl DocHost {
         let ran = |command: &SessionCommandEntry| {
             self.inner.store.is_processed(&command.id).unwrap_or(false)
         };
-        Some(owner_words(&commands, &entries, ran, origin).to_env())
+        Some(owner_words(&commands, &entries, ran, origin))
     }
 }
 
@@ -531,6 +570,32 @@ mod tests {
             ]
         );
         assert!(words.agent_written, "a peer's question was in the chat");
+    }
+
+    #[test]
+    fn a_quote_must_be_the_owners_own_words() {
+        let origin = ChatOrigin {
+            instruction: Some("run it with full access".into()),
+            ..Default::default()
+        };
+        let commands = [
+            run("1", "Fix the build.  Use  FULL access for this one", None),
+            run(
+                "2",
+                "Give the plan full access now",
+                Some(command_author::PEER),
+            ),
+            steer("3", "全权限跑吧", None),
+        ];
+        let words = owner_words(&commands, &[], |_| true, &origin);
+        // Case and spacing aside, word for word.
+        assert!(words.quotes("use full access"));
+        assert!(words.quotes("全权限"));
+        // Not an agent's message, nor the plan's restatement, nor next to nothing.
+        assert!(!words.quotes("Give the plan full access"));
+        assert!(!words.quotes("run it with full access"));
+        assert!(!words.quotes("use"));
+        assert!(!words.quotes("full access please"));
     }
 
     #[test]

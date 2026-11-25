@@ -20,6 +20,7 @@ fn step(id: &str, detail: Option<&str>) -> WorkStep {
 
 fn work(instruction: &str, steps: Vec<WorkStep>) -> BotWork {
     BotWork {
+        steered: Vec::new(),
         id: "w1".into(),
         bot_id: "b".into(),
         title: "Ship it".into(),
@@ -43,6 +44,10 @@ fn work(instruction: &str, steps: Vec<WorkStep>) -> BotWork {
         coordinator_choice: Default::default(),
         body_rev: None,
         result_rev: None,
+        level: None,
+        proposed_level: None,
+        level_quote: None,
+        applied_level: None,
     }
 }
 

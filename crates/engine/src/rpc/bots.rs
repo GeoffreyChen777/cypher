@@ -88,6 +88,22 @@ pub(super) async fn redeem_bot_invite(
 }
 
 impl EngineRpc {
+    /// A receive-only device may lower a plan's level, never raise it: the
+    /// same rule as a chat's own level, whose raise such a device can't
+    /// sign (`DocHost::launch_hook`).
+    fn refuse_raise_from_receive_only(
+        &self,
+        work: &cypher_proto::BotWork,
+        level: cypher_proto::SandboxLevel,
+    ) -> Result<(), RpcError> {
+        if level.above(work.effective_level()) && self.local_receive_only() {
+            return Err(RpcError::Failed(
+                "This device is receive-only, so it can't raise a plan's permission level.".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// The owner's edits of bot records: each writes only the fields an
     /// owner device owns (docs/design/agent-bots.md §13.1); the bot's host
     /// watches the rows and acts on them.
@@ -106,17 +122,42 @@ impl EngineRpc {
         let missing = |what: &str| RpcError::Failed(format!("No such {what}."));
         let decision = |approve: bool| serde_json::json!(p::PlanDecision { approve, at: now });
         match params {
-            MutateParams::ResolveBotPlan { work_id, approve } => {
+            MutateParams::ResolveBotPlan {
+                work_id,
+                approve,
+                level,
+            } => {
                 let work: p::BotWork = ws
                     .record(p::KIND_BOT_WORK, &work_id)
                     .ok_or_else(|| missing("plan"))?;
                 if !work.awaiting_approval() {
                     return Err(RpcError::Failed("This plan was already decided.".into()));
                 }
+                let mut set = vec![("decision", decision(approve))];
+                // Approving confirms a level: the one picked on the card,
+                // else the one it was proposed at.
+                if approve {
+                    let level = level.unwrap_or_else(|| work.effective_level());
+                    self.refuse_raise_from_receive_only(&work, level)?;
+                    set.push(("level", serde_json::json!(level)));
+                }
+                ws.update_record(p::KIND_BOT_WORK, &work_id, fields(&set))
+                    .map_err(failed)?;
+            }
+            MutateParams::SetBotWorkLevel { work_id, level } => {
+                let work: p::BotWork = ws
+                    .record(p::KIND_BOT_WORK, &work_id)
+                    .ok_or_else(|| missing("plan"))?;
+                if !work.is_live() {
+                    return Err(RpcError::BadParams(
+                        "Only a proposed or running plan's permission level can change.".into(),
+                    ));
+                }
+                self.refuse_raise_from_receive_only(&work, level)?;
                 ws.update_record(
                     p::KIND_BOT_WORK,
                     &work_id,
-                    fields(&[("decision", decision(approve))]),
+                    fields(&[("level", serde_json::json!(level))]),
                 )
                 .map_err(failed)?;
             }

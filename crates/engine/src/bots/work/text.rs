@@ -313,6 +313,7 @@ mod tests {
             session_choice: Default::default(),
         };
         let work = BotWork {
+            steered: Vec::new(),
             id: "w1".into(),
             bot_id: "b".into(),
             title: "Fix rounding".into(),
@@ -339,6 +340,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         let spaces = [
             space("sp-a", "mac-a", "/w/app-a"),

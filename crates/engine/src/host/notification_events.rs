@@ -17,6 +17,9 @@ struct Signature {
     status: SessionStatus,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
     children: Vec<(String, SubagentRunMode, SubagentRunStatus)>,
+    /// The open question's request id: a new question is an event even
+    /// when the status stays awaiting input (plan-asks.md, h).
+    asking: Option<String>,
 }
 
 impl From<&Session> for Signature {
@@ -33,6 +36,7 @@ impl From<&Session> for Signature {
                 .take(32)
                 .map(|run| (run.run_id.clone(), run.mode, run.status))
                 .collect(),
+            asking: session.asking.as_ref().map(|a| a.request_id.clone()),
         }
     }
 }

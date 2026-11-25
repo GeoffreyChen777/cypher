@@ -978,6 +978,7 @@ mod tests {
 
         // A plan running in the background reads as working first.
         let work = BotWork {
+            steered: Vec::new(),
             id: "w".into(),
             bot_id: bot.id.clone(),
             title: "t".into(),
@@ -1001,6 +1002,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         state.bot_records = BotRecords {
             work: vec![work],
@@ -1101,6 +1106,7 @@ mod tests {
     fn a_workspace_works_while_a_plan_of_its_runs() {
         use cypher_proto::{BotRecords, BotWork, WorkState};
         let work = |bot: &str, state: WorkState| BotWork {
+            steered: Vec::new(),
             id: format!("{bot}-{state:?}"),
             bot_id: bot.into(),
             title: "t".into(),
@@ -1124,6 +1130,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         let records = BotRecords {
             work: vec![

@@ -145,6 +145,91 @@ struct SessionRow: Hashable {
     /// A long turn's narrated progress (entities.rs `progress`): the status
     /// strip's progress bar. Belongs to one turn; a settled row drops it.
     var progress: RunProgress? = nil
+    /// The latest extension notice (entities.rs `notice`): the status
+    /// strip's quiet line while it is live.
+    var notice: SessionNotice? = nil
+    /// The question the chat waits on while one is open (entities.rs
+    /// `asking`): its own, or a subagent's mirrored into it. It holds
+    /// whatever `updatedAt` says (docs/design/plan-asks.md). nil while none
+    /// is open, and on rows from hosts that don't write it.
+    var asking: SessionAsk? = nil
+
+    /// rows.rs `RawSession`: a row without its keys is skipped; the
+    /// optional parts are lenient, a malformed one drops itself only.
+    init?(fields f: [String: JSONValue]) {
+        guard let chatId = f["chatId"]?.stringValue,
+            let deviceId = f["deviceId"]?.stringValue,
+            let status = f["status"]?.stringValue.flatMap(SessionStatus.init(rawValue:))
+        else { return nil }
+        self.init(
+            chatId: chatId, deviceId: deviceId, status: status,
+            startedAt: f["startedAt"]?.int64Value,
+            updatedAt: f["updatedAt"]?.int64Value ?? 0,
+            subagents: SubagentProjection.snapshot(f["subagents"]),
+            contextUsage: ContextUsage(f["contextUsage"]),
+            recovery: RecoveryProgress(f["recovery"]),
+            progress: RunProgress(f["progress"]),
+            notice: SessionNotice(f["notice"]),
+            asking: SessionAsk(f["asking"]))
+    }
+
+    init(
+        chatId: String, deviceId: String, status: SessionStatus, startedAt: Int64? = nil, updatedAt: Int64,
+        subagents: [SubagentRun] = [], contextUsage: ContextUsage? = nil, recovery: RecoveryProgress? = nil,
+        progress: RunProgress? = nil, notice: SessionNotice? = nil, asking: SessionAsk? = nil
+    ) {
+        self.chatId = chatId
+        self.deviceId = deviceId
+        self.status = status
+        self.startedAt = startedAt
+        self.updatedAt = updatedAt
+        self.subagents = subagents
+        self.contextUsage = contextUsage
+        self.recovery = recovery
+        self.progress = progress
+        self.notice = notice
+        self.asking = asking
+    }
+}
+
+/// entities.rs `SessionAsk`: the open question on a session row, the
+/// newest unresolved input request in the chat's doc.
+struct SessionAsk: Hashable {
+    /// The doc's input request id (a mirror's own id for a forwarded
+    /// question): a new id is a new question.
+    var requestId: String
+    /// Epoch ms.
+    var askedAt: Int64
+    /// What a permission prompt asks to do; nil for a question.
+    var permission: String? = nil
+    /// The subagent that asked, when the question was forwarded from one.
+    var askedBy: String? = nil
+    /// The child chat the question was asked in, when this row mirrors it.
+    var fromChatId: String? = nil
+
+    /// Lenient like `contextUsage`: a malformed value reads as no question,
+    /// never drops the row.
+    init?(_ value: JSONValue?) {
+        guard let object = value?.objectValue,
+            let requestId = object["requestId"]?.stringValue, !requestId.isEmpty
+        else { return nil }
+        self.requestId = requestId
+        askedAt = object["askedAt"]?.int64Value ?? 0
+        permission = object["permission"]?.stringValue
+        askedBy = object["askedBy"]?.stringValue
+        fromChatId = object["fromChatId"]?.stringValue
+    }
+
+    init(
+        requestId: String, askedAt: Int64, permission: String? = nil, askedBy: String? = nil,
+        fromChatId: String? = nil
+    ) {
+        self.requestId = requestId
+        self.askedAt = askedAt
+        self.permission = permission
+        self.askedBy = askedBy
+        self.fromChatId = fromChatId
+    }
 }
 
 /// entities.rs `ContextUsage`: tokens in the context window, of its size.
@@ -199,6 +284,10 @@ let presenceFreshMs: Int64 = 45_000
 
 func effectiveStatus(_ row: SessionRow?, now: Int64) -> SessionStatus? {
     guard let row else { return nil }
+    // An open question never ages out (view.rs `effective_indicator`): it is
+    // a fact of the chat's doc, not of a live run, and wins over the status
+    // (a run that died under it leaves the row idle).
+    if row.asking != nil { return .awaitingInput }
     switch row.status {
     case .working, .awaitingInput:
         let age = now - row.updatedAt
@@ -365,6 +454,10 @@ struct MessageEntry: Identifiable, Hashable {
     /// Explicit sender intent from the durable command ledger, not a claim
     /// that the agent has consumed the instruction (or a new wire field).
     var isSteer = false
+    /// schema.rs `comments`: the comments that rode a user prompt (the
+    /// Comment feature), drawn over its bubble. Absent on old rows, old
+    /// writers and every prompt sent without comments.
+    var comments: [MessageComment] = []
     /// schema.rs `models`: the models that answered an assistant entry,
     /// distinct and in the order they first answered. Only Pi writes it.
     var models: [AnsweredModel] = []
@@ -704,6 +797,9 @@ struct PendingSend {
     var text: String
     var at: Int64
     var isSteer = false
+    /// The comments the send carries, read back from its agent prompt
+    /// (`MessageComment.fromAgentPrompt`), as the host's entry will store them.
+    var comments: [MessageComment] = []
 }
 
 // MARK: - Folder browsing (add-space palette data)

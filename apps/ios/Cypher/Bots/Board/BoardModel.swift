@@ -81,8 +81,16 @@ struct BoardNeedRow: Identifiable, Equatable {
     /// Where it comes from, for its card's head (needs.rs `NeedItem.source`):
     /// the work an approval or a session belongs to, the routine, the peer.
     var source = ""
+    /// For a session asking: the chat whose question the row answers (the
+    /// session, or a subagent's child chat under it; plan_asks.rs
+    /// `PlanQuestion`).
+    var askingChatId: String? = nil
+    /// Its question waits for its device, which is offline.
+    var waiting = false
 
     var id: String { item.id }
+
+    static let waitingForDevice = "Waiting for its device"
 }
 
 // MARK: - Work
@@ -523,11 +531,17 @@ extension WorkspaceData {
         case .asking(let chatId, _):
             guard let chat = chat(id: chatId) else { return nil }
             let project = chat.spaceId.flatMap { id in spaces.first { $0.id == id } }?.displayName
+            // Where the question is open (the session or a child chat under
+            // it), and whether it waits for its device.
+            let question = planQuestion(chatId)
+            let waiting = question?.offline == true
+            let state = waiting ? BoardNeedRow.waitingForDevice : "Asking"
             let title = singleLine(chat.displayTitle)
             return BoardNeedRow(
                 item: item, symbol: "questionmark.circle", title: title,
-                sub: project.map { "Asking · in \($0)" } ?? "Asking", at: chat.lastMessageAt,
-                source: askingSource(chat, title: title, project: project))
+                sub: project.map { "\(state) · in \($0)" } ?? state, at: chat.lastMessageAt,
+                source: askingSource(chat, title: title, project: project),
+                askingChatId: question?.chatId ?? chatId, waiting: waiting)
         case .review(let id):
             guard let exchange = exchange(id: id) else { return nil }
             let peer = connection(id: exchange.connectionId)?.peer.name ?? "a connected workspace"

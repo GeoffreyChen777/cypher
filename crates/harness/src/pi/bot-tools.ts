@@ -89,6 +89,7 @@ export const PLAN_LIMITS = {
   PLAN_TIME_LIMIT_MIN_MINUTES: 15,
   PLAN_TIME_LIMIT_MAX_MINUTES: 4_320,
   PROMPT_MAX: 4_000,
+  LEVEL_QUOTE_MAX: 300,
 } as const;
 const L = PLAN_LIMITS;
 /** A cap as the descriptions write it: 30,000. */
@@ -198,7 +199,7 @@ const TOOLS: ToolDef[] = [
     // itself, never from a script.
     exposure: "model-only",
     description:
-      "Propose a plan for work that takes more than a couple of steps or touches another device. It shows your owner a plan card to approve; once approved, a background session carries it out and reports back here. That session reads only the plan and your owner's last message, not this conversation, so the steps' details must carry whatever else it needs. Text over a limit is refused, never cut. Set time_limit_minutes, a coordinator or a step's session only when your owner asked for it (\"give it 8 hours\", \"use Opus with high thinking for the fix\"); otherwise the workspace's settings apply. After proposing, stop and wait: end your turn.",
+      "Propose a plan for work that takes more than a couple of steps or touches another device. It shows your owner a plan card to approve; once approved, a background session carries it out and reports back here. That session reads only the plan and your owner's last message, not this conversation, so the steps' details must carry whatever else it needs. Text over a limit is refused, never cut. Set time_limit_minutes, a coordinator or a step's session only when your owner asked for it (\"give it 8 hours\", \"use Opus with high thinking for the fix\"); otherwise the workspace's settings apply. The same for level, the permission level its sessions run at: only your owner chooses it, so propose one above the workspace's only with level_quote, their own words asking for it, copied exactly. After proposing, stop and wait: end your turn.",
     parameters: Type.Object({
       title: Type.String({ maxLength: L.TITLE_MAX, description: `Short title of the task, at most ${L.TITLE_MAX} characters` }),
       summary: Type.Optional(Type.String({ maxLength: L.DETAIL_MAX, description: `One or two sentences, at most ${L.DETAIL_MAX} characters: the approach and how the steps depend on each other` })),
@@ -222,6 +223,15 @@ const TOOLS: ToolDef[] = [
         Type.Object(choiceFields("this chat's"), {
           description: "The model, thinking level and Fast mode of the background session that carries out the plan",
         }),
+      ),
+      level: Type.Optional(
+        Type.Union([Type.Literal("read-only"), Type.Literal("workspace-write"), Type.Literal("danger-full-access")], {
+          description:
+            "The permission level the plan's sessions and its background session run at: read-only (ask before edits), workspace-write (edit the project) or danger-full-access (full access). Default: the workspace's. Your owner sees it on the card and may change it",
+        }),
+      ),
+      level_quote: Type.Optional(
+        Type.String({ maxLength: L.LEVEL_QUOTE_MAX, description: `For a level above the workspace's: your owner's own words in this chat that ask for it, copied exactly, at most ${L.LEVEL_QUOTE_MAX} characters` }),
       ),
     }),
   },

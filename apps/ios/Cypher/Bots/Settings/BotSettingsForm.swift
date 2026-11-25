@@ -130,6 +130,13 @@ struct BotSettingsDraft: Equatable {
         set { plans.sessionsMax = newValue == PlanSettings.defaultSessions ? nil : newValue }
     }
 
+    /// The level new plans are proposed at; Edit project, the default, is
+    /// stored as none.
+    var planLevel: PermissionLevel {
+        get { plans.planLevel }
+        set { plans.level = newValue == PermissionLevel.of(sandbox: nil) ? nil : newValue.sandbox }
+    }
+
     /// The limits the picker offers, and this workspace's own.
     var timeLimitOptions: [Int] {
         Array(Set(PlanSettings.timeLimitChoices + [plans.timeLimit])).sorted()

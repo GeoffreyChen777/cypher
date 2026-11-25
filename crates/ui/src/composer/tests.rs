@@ -133,30 +133,46 @@ fn a_translated_quote_is_sent_as_the_original_passage() {
 
 #[test]
 fn slash_send_blocked_only_with_comments() {
-    assert!(block_slash_with_comments(true, "/compact"));
-    assert!(block_slash_with_comments(true, "  /goal ship"));
-    assert!(!block_slash_with_comments(false, "/compact"));
-    assert!(!block_slash_with_comments(true, "run /compact"));
-    assert!(!block_slash_with_comments(true, ""));
-}
-
-#[test]
-fn slash_command_label_reads_the_leading_token() {
-    assert_eq!(
-        slash_command_label("/subagent-config"),
-        Some("/subagent-config")
-    );
-    assert_eq!(slash_command_label("  /mcp reconnect foo"), Some("/mcp"));
-    assert_eq!(slash_command_label("hello"), None);
-    assert_eq!(slash_command_label("// comment"), None);
-    assert_eq!(slash_command_label("/"), None);
+    assert!(block_slash_with_comments(true, "/compact", None));
+    assert!(block_slash_with_comments(true, "  /goal ship", None));
+    assert!(!block_slash_with_comments(false, "/compact", None));
+    assert!(!block_slash_with_comments(true, "run /compact", None));
+    assert!(!block_slash_with_comments(true, "", None));
+    // A message that merely starts with `/` is not a command.
+    assert!(!block_slash_with_comments(
+        true,
+        "/Users/me/x.png 是什么",
+        None
+    ));
+    assert!(!block_slash_with_comments(true, "/ 这个呢", None));
+    let known = crate::slash_command::CommandNames::from_names(["goal", "compact"]);
+    assert!(block_slash_with_comments(true, "/goal ship", Some(&known)));
+    assert!(!block_slash_with_comments(
+        true,
+        "/notacommand x",
+        Some(&known)
+    ));
 }
 
 #[test]
 fn a_permission_prompt_in_a_slash_turn_stays_a_permission_prompt() {
     let asked = vec![question("Pick a goal", &["a", "b"], false)];
-    assert_eq!(question_slash_owner(&asked, "/goal ship it"), Some("/goal"));
-    assert_eq!(question_slash_owner(&asked, "ship it"), None);
+    assert_eq!(
+        question_slash_owner(&asked, "/goal ship it", None),
+        Some("/goal")
+    );
+    assert_eq!(question_slash_owner(&asked, "ship it", None), None);
+    // A path, or a name the host doesn't offer, owns no question.
+    assert_eq!(question_slash_owner(&asked, "/tmp/a 是什么", None), None);
+    let known = crate::slash_command::CommandNames::from_names(["goal"]);
+    assert_eq!(
+        question_slash_owner(&asked, "/goal ship it", Some(&known)),
+        Some("/goal")
+    );
+    assert_eq!(
+        question_slash_owner(&asked, "/notacommand x", Some(&known)),
+        None
+    );
     let marked = vec![cypher_proto::UserInputQuestion {
         permission: Some(cypher_proto::PermissionPrompt {
             kind: cypher_proto::PermissionPromptKind::Escalate,
@@ -168,13 +184,13 @@ fn a_permission_prompt_in_a_slash_turn_stays_a_permission_prompt() {
             false,
         )
     }];
-    assert_eq!(question_slash_owner(&marked, "/goal ship it"), None);
+    assert_eq!(question_slash_owner(&marked, "/goal ship it", None), None);
     let unmarked = vec![question(
         "Allow the agent to read a sensitive file?",
         &["Allow once", "Deny", "Deny and stop"],
         false,
     )];
-    assert_eq!(question_slash_owner(&unmarked, "/goal ship it"), None);
+    assert_eq!(question_slash_owner(&unmarked, "/goal ship it", None), None);
 }
 
 #[test]
@@ -648,8 +664,9 @@ fn issue_refs_dedupe_and_name_the_worktree() {
         .map(|(head, _)| head.to_string()),
         Some("7".into())
     );
-    assert!(block_slash_with_issue_refs(&format!("/compact {a}")));
-    assert!(!block_slash_with_issue_refs(&format!("see {a}")));
+    assert!(block_slash_with_issue_refs(&format!("/compact {a}"), None));
+    assert!(!block_slash_with_issue_refs(&format!("see {a}"), None));
+    assert!(!block_slash_with_issue_refs(&format!("/tmp/x {a}"), None));
     let long = issue_chip_label(1, &"x".repeat(200));
     assert!(long.ends_with('…'));
 }
@@ -1252,12 +1269,14 @@ fn mention_scroll_child_skips_section_headers() {
 #[test]
 fn slash_blocked_with_session_refs_like_comments() {
     let with_ref = format!("/compact {}", local_session_link("s", "chat-1"));
-    assert!(block_slash_with_session_refs(&with_ref));
+    assert!(block_slash_with_session_refs(&with_ref, None));
     let with_ref = format!("  /goal ship {}", local_session_link("s", "chat-1"));
-    assert!(block_slash_with_session_refs(&with_ref));
-    assert!(!block_slash_with_session_refs("/compact"));
-    assert!(!block_slash_with_session_refs("run /compact"));
-    assert!(!block_slash_with_session_refs(""));
+    assert!(block_slash_with_session_refs(&with_ref, None));
+    assert!(!block_slash_with_session_refs("/compact", None));
+    assert!(!block_slash_with_session_refs("run /compact", None));
+    assert!(!block_slash_with_session_refs("", None));
+    let with_ref = format!("/Users/me/a.png {}", local_session_link("s", "chat-1"));
+    assert!(!block_slash_with_session_refs(&with_ref, None));
 }
 
 #[test]

@@ -863,6 +863,7 @@ fn bot_tools_plan_limits_match_the_engines() {
             p::PLAN_TIME_LIMIT_MAX_MINUTES as usize,
         ),
         ("PROMPT_MAX", p::PROMPT_MAX),
+        ("LEVEL_QUOTE_MAX", p::LEVEL_QUOTE_MAX),
     ]
     .into_iter()
     .collect();

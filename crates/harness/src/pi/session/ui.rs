@@ -155,14 +155,21 @@ impl PiRun {
                     &payload,
                 );
             }
-            // notify is the extension command's output channel:
-            // info/warning maps to a TextDelta (and feeds Done's
-            // result, so a notify-only run still carries its
-            // output), error to an Error event. The message lives
-            // at the request top level and may carry escaped
-            // multi-line text — passed through as-is.
+            // notify is two things. Inside a prompt's turn, before the
+            // agent starts, only the prompt's extension COMMAND handler
+            // can run (pi ACKs a command once its handler returns), so a
+            // notify there is the command's output — as is one while a
+            // slash command routed mid-turn awaits its answer (`/fast`
+            // during a run): info/warning maps to
+            // a TextDelta and feeds Done's result (a notify-only command
+            // still carries its output). Once the agent runs — a model
+            // turn, a self-started run — or between turns, a notify is an
+            // extension's side remark (a provider bridge's rate-limit
+            // warning): a Notice, never reply text, never the result,
+            // never the model's. Error notifies are an Error event either
+            // way. The message lives at the request top level and may
+            // carry escaped multi-line text — passed through as-is.
             "notify" => {
-                self.had_ui = true;
                 let message = payload
                     .get("message")
                     .and_then(Value::as_str)
@@ -173,13 +180,33 @@ impl PiRun {
                     .and_then(Value::as_str)
                     .map(|t| t == "error")
                     .unwrap_or(false);
+                let command_output = (self.in_turn && !self.agent_started)
+                    || self.steer_call.as_ref().is_some_and(|c| c.is_command());
+                // Only a command's own UI collapses the no-activity grace.
+                if command_output {
+                    self.had_ui = true;
+                }
                 if is_error {
                     if !send(&self.event_tx, AgentEvent::Error { message }).await {
                         return Flow::Break;
                     }
-                } else if !message.is_empty() {
-                    self.last_assistant_text.push_str(&message);
-                    if !send(&self.event_tx, AgentEvent::TextDelta { text: message }).await {
+                } else if command_output {
+                    if !message.is_empty() {
+                        self.last_assistant_text.push_str(&message);
+                        if !send(&self.event_tx, AgentEvent::TextDelta { text: message }).await {
+                            return Flow::Break;
+                        }
+                    }
+                } else if !message.trim().is_empty() {
+                    let level = match payload.get("notifyType").and_then(Value::as_str) {
+                        Some("warning") => cypher_proto::NoticeLevel::Warning,
+                        _ => cypher_proto::NoticeLevel::Info,
+                    };
+                    let notice = AgentEvent::Notice {
+                        level,
+                        text: message,
+                    };
+                    if !send(&self.event_tx, notice).await {
                         return Flow::Break;
                     }
                 }

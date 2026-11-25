@@ -22,7 +22,9 @@ struct TranscriptRound: Equatable {
 
     static func rounds(in rows: [TranscriptRow]) -> [TranscriptRound] {
         rows.indices.compactMap { ix in
-            guard case .user(let text, let isSteer, _) = rows[ix].kind, !isSteer else { return nil }
+            // A comments-only prompt has no text to preview, and `prompt`
+            // skips it above the window too.
+            guard case .user(let text, let isSteer, _, _) = rows[ix].kind, !isSteer, !text.isEmpty else { return nil }
             return TranscriptRound(rowId: rows[ix].id, rowIndex: ix, preview: previewLine(text))
         }
     }

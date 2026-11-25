@@ -1685,8 +1685,13 @@ impl Render for Pickers {
                 )
                 .px(px(8.0))
                 .tooltip(|_, cx| {
-                    cx.new(|_| PermissionHint("Full access: no checks and no sandbox".into()))
-                        .into()
+                    cx.new(|_| {
+                        PermissionHint(
+                        "Full access: no sandbox or review; only the riskiest actions still ask"
+                            .into(),
+                    )
+                    })
+                    .into()
                 })
             });
         let model_chip = self.trigger_chip(

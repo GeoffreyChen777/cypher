@@ -138,6 +138,22 @@ struct BotWork: Codable, Hashable, Identifiable, Sendable {
     var bodyRev: String?
     /// The same for `result` (`planBodies[id].result`).
     var resultRev: String?
+    /// Host-written: sessions the orchestration steered but didn't start,
+    /// oldest first. Their questions are the plan's too (`planChatIds`),
+    /// but they are not `sessionIds`: steering one again needs the owner.
+    var steered: [String] = []
+    /// Owner-written: the permission level the owner chose (`sandbox`
+    /// values, PermissionLevel), on the card or while it runs. nil: the
+    /// proposal's stands.
+    var level: String?
+    /// The level the card offers: the workspace's default unless the
+    /// owner's own words asked for another (`levelQuote`).
+    var proposedLevel: String?
+    /// The owner's words, verbatim, a proposal cited for a level above the
+    /// workspace's default.
+    var levelQuote: String?
+    /// The level the host last gave the plan's sessions.
+    var appliedLevel: String?
 
     var isLive: Bool { state == .proposed || state == .running }
 
@@ -160,11 +176,48 @@ struct BotWork: Codable, Hashable, Identifiable, Sendable {
         }
     }
 
+    /// The level it runs at (bot_records.rs `effective_level`): the
+    /// owner's choice, else the proposal's, else (rows from before levels)
+    /// Edit project.
+    var effectiveLevel: PermissionLevel { PermissionLevel.of(sandbox: level ?? proposedLevel) }
+
+    /// The level its sessions were last given (`level_in_effect`).
+    var levelInEffect: PermissionLevel { PermissionLevel.of(sandbox: appliedLevel) }
+
+    /// The owner's choice is still on its way to the running sessions (its
+    /// host is offline, or hasn't acted yet).
+    var levelPending: Bool { state == .running && effectiveLevel != levelInEffect }
+
     /// Awaiting the owner's approval: proposed, and nobody decided yet.
     var awaitingApproval: Bool { state == .proposed && decision == nil }
 
     /// Every session the orchestration started, in step order.
     var sessionIds: [String] { steps.flatMap(\.sessions) }
+
+    /// Every chat whose question is the plan's (bot_records.rs
+    /// `plan_chat_ids`): the sessions it started, then the ones it steered,
+    /// each once. Child chats under them count too (`ChatTree.question`).
+    var planChatIds: [String] {
+        var seen = Set<String>()
+        return (sessionIds + steered).filter { seen.insert($0).inserted }
+    }
+
+    /// The steps' states with `asking(chatId)` applied (bot_records.rs
+    /// `settled_steps`): a running step whose sessions (or, for the current
+    /// step, a steered session) wait on an answer is Asking, and back to
+    /// Running once none does. Every other state stays.
+    func settledSteps(asking: (String) -> Bool) -> [StepState] {
+        let current = steps.firstIndex { $0.state == .running || $0.state == .asking }
+        let steeredAsks = steered.contains(where: asking)
+        return steps.enumerated().map { index, step in
+            let waiting = step.sessions.contains(where: asking) || (steeredAsks && current == index)
+            switch step.state {
+            case .running where waiting: return .asking
+            case .asking where !waiting: return .running
+            default: return step.state
+            }
+        }
+    }
 
     /// Steps done (or skipped) out of all, for a progress bar.
     var progress: (done: Int, total: Int) {
@@ -215,7 +268,8 @@ extension BotWork {
     private enum CodingKeys: String, CodingKey {
         case id, botId, title, instruction, summary, steps, state, chatId, toolCallId, threadChatId
         case createdAt, startedAt, endedAt, result, decision, stopRequestedAt
-        case timeLimitMinutes, timeAddedMinutes, coordinatorChoice, bodyRev, resultRev
+        case timeLimitMinutes, timeAddedMinutes, coordinatorChoice, bodyRev, resultRev, steered
+        case level, proposedLevel, levelQuote, appliedLevel
     }
 
     init(from decoder: Decoder) throws {
@@ -242,6 +296,13 @@ extension BotWork {
             ((try? c.decodeIfPresent(SessionChoice.self, forKey: .coordinatorChoice)) ?? nil) ?? SessionChoice()
         bodyRev = try c.decodeIfPresent(String.self, forKey: .bodyRev)
         resultRev = try c.decodeIfPresent(String.self, forKey: .resultRev)
+        steered = (try? c.decodeIfPresent([String].self, forKey: .steered)) ?? []
+        // Absent on rows from before levels; a value this app can't read
+        // stays as it is (and reads as Edit project).
+        level = (try? c.decodeIfPresent(String.self, forKey: .level)) ?? nil
+        proposedLevel = (try? c.decodeIfPresent(String.self, forKey: .proposedLevel)) ?? nil
+        levelQuote = (try? c.decodeIfPresent(String.self, forKey: .levelQuote)) ?? nil
+        appliedLevel = (try? c.decodeIfPresent(String.self, forKey: .appliedLevel)) ?? nil
         closeSteps()
     }
 }
@@ -747,13 +808,15 @@ enum ActivityKind: String, Hashable, Sendable {
     case sessionStarted, sessionSteered, sessionAnswered, sessionStopped, worktreeCreated
     case noteWritten, routineRan, taskRan, approvalAsked
     case peerAsked, peerAnswered, connectionAdded, connectionRevoked
+    /// The owner changed a plan's permission level.
+    case planLevelChanged
     /// A kind from a newer engine.
     case other
 
     var group: ActivityGroup {
         switch self {
         case .planProposed, .planApproved, .planCancelled, .workFinished, .workFailed, .workStopped,
-            .approvalAsked, .other:
+            .approvalAsked, .planLevelChanged, .other:
             return .plans
         case .sessionStarted, .sessionSteered, .sessionAnswered, .sessionStopped, .worktreeCreated:
             return .sessions

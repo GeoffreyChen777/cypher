@@ -19,8 +19,8 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::BotScope;
 use crate::plan_body::REV_MAX;
+use crate::{BotScope, SandboxLevel};
 
 /// Registry row kinds.
 pub const KIND_BOT_WORK: &str = "botWork";
@@ -69,6 +69,8 @@ pub const PROMPT_MAX: usize = 4_000;
 pub const ANSWER_MAX: usize = 8_000;
 pub const PLAN_STEPS_MAX: usize = 10;
 pub const STEP_SESSIONS_MAX: usize = 8;
+/// Sessions one plan records as steered ([`BotWork::steered`]).
+pub const STEERED_MAX: usize = 16;
 
 /// Limits the host enforces per bot (§6.6), when its [`PlanSettings`]
 /// leave them out.
@@ -314,6 +316,11 @@ pub struct PlanSettings {
     /// Sessions one plan may start (default 8).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sessions_max: Option<u32>,
+    /// The permission level a new plan runs at, its sessions and its
+    /// coordinating session (default workspace-write, "Edit project").
+    /// The owner changes a plan's own on its card ([`BotWork::level`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<SandboxLevel>,
 }
 
 impl PlanSettings {
@@ -338,6 +345,11 @@ impl PlanSettings {
         self.sessions_max.map_or(MAX_SESSIONS_PER_WORK, |n| {
             n.clamp(1, SESSIONS_PER_WORK_CAP) as usize
         })
+    }
+
+    /// The level a new plan is proposed at.
+    pub fn level(&self) -> SandboxLevel {
+        self.level.unwrap_or(SandboxLevel::WorkspaceWrite)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -487,12 +499,54 @@ pub struct BotWork {
     /// [`PlanResult`](crate::PlanResult)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_rev: Option<String>,
+    /// Host-written: sessions the orchestration steered but didn't start
+    /// (`steer_session` after the owner allowed it), oldest first. Their
+    /// questions are the plan's too ([`Self::plan_chat_ids`]), but steering
+    /// one again still needs the owner: they are not [`Self::session_ids`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steered: Vec<String>,
+    /// Owner-written: the permission level the owner chose for the plan, on
+    /// its card when approving or at any time while it runs (Mutate
+    /// `setBotWorkLevel`). Absent: [`Self::proposed_level`] stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<SandboxLevel>,
+    /// Host-written when proposed: the level the card offers, the
+    /// workspace's default ([`PlanSettings::level`]) unless the owner's own
+    /// words asked for another ([`Self::level_quote`]). Rows from before it
+    /// run at workspace-write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_level: Option<SandboxLevel>,
+    /// Host-written: the owner's words, verbatim, a proposal cited for a
+    /// level above the workspace's default (the card shows them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level_quote: Option<String>,
+    /// Host-written: the level last given to the plan's sessions and its
+    /// coordinating session. Absent on a running row from before levels:
+    /// workspace-write, what its sessions were started with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_level: Option<SandboxLevel>,
 }
+
+/// The most of the owner's words a proposal's level cites.
+pub const LEVEL_QUOTE_MAX: usize = LINE_MAX;
 
 impl BotWork {
     /// The fields only an owner device writes.
     pub const OWNER_FIELDS: &'static [&'static str] =
-        &["decision", "stopRequestedAt", "timeAddedMinutes"];
+        &["decision", "stopRequestedAt", "timeAddedMinutes", "level"];
+
+    /// The level the plan runs at: the owner's choice, else what it was
+    /// proposed at, else (rows from before levels) workspace-write.
+    pub fn effective_level(&self) -> SandboxLevel {
+        self.level
+            .or(self.proposed_level)
+            .unwrap_or(SandboxLevel::WorkspaceWrite)
+    }
+
+    /// The level its sessions were last given ([`Self::applied_level`]).
+    pub fn level_in_effect(&self) -> SandboxLevel {
+        self.applied_level.unwrap_or(SandboxLevel::WorkspaceWrite)
+    }
 
     /// Its whole time limit in minutes: its own (else `fallback`, the
     /// workspace's) plus what the owner added.
@@ -516,6 +570,7 @@ impl BotWork {
     /// body when that happens.
     pub fn clamp(&mut self) {
         self.coordinator_choice.clamp();
+        self.level_quote = clip_opt(&self.level_quote, LEVEL_QUOTE_MAX);
         self.body_rev = clip_opt(&self.body_rev, REV_MAX);
         self.result_rev = clip_opt(&self.result_rev, REV_MAX);
         self.title = clip(&self.title, TITLE_MAX);
@@ -523,6 +578,7 @@ impl BotWork {
         self.summary = clip_opt(&self.summary, DETAIL_MAX);
         self.result = clip_opt(&self.result, RESULT_MAX);
         self.steps.truncate(PLAN_STEPS_MAX);
+        self.steered.truncate(STEERED_MAX);
         for step in &mut self.steps {
             step.clamp();
         }
@@ -649,6 +705,43 @@ impl BotWork {
         self.steps
             .iter()
             .flat_map(|s| s.sessions.iter().map(String::as_str))
+    }
+
+    /// Every chat whose question is the plan's: the sessions it started,
+    /// then the ones it steered, each once. (Child chats under them count
+    /// too; [`crate::view::ChatTree::question`] walks those.)
+    pub fn plan_chat_ids(&self) -> Vec<&str> {
+        let mut seen = std::collections::HashSet::new();
+        self.session_ids()
+            .chain(self.steered.iter().map(String::as_str))
+            .filter(|id| seen.insert(*id))
+            .collect()
+    }
+
+    /// The steps' states with `asking(chat id)` applied: a running step
+    /// whose sessions (or, for the current step, a steered session) wait
+    /// on an answer is Asking, and back to Running once none does. Every
+    /// other state stays. `asking` is the plan-question rule (the chat or a
+    /// child chat under it asks).
+    pub fn settled_steps(&self, asking: impl Fn(&str) -> bool) -> Vec<StepState> {
+        let current = self
+            .steps
+            .iter()
+            .position(|s| matches!(s.state, StepState::Running | StepState::Asking));
+        let steered = self.steered.iter().any(|id| asking(id));
+        self.steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| {
+                let waiting = step.sessions.iter().any(|id| asking(id))
+                    || (steered && current == Some(index));
+                match step.state {
+                    StepState::Running if waiting => StepState::Asking,
+                    StepState::Asking if !waiting => StepState::Running,
+                    other => other,
+                }
+            })
+            .collect()
     }
 
     /// Steps done out of all, for the Work card's bar.
@@ -1372,6 +1465,9 @@ pub enum ActivityKind {
     PeerAnswered,
     ConnectionAdded,
     ConnectionRevoked,
+    /// The owner changed a plan's permission level (its host gave it to the
+    /// plan's sessions).
+    PlanLevelChanged,
     #[serde(other)]
     Other,
 }
@@ -1386,7 +1482,8 @@ impl ActivityKind {
             | Self::WorkFinished
             | Self::WorkFailed
             | Self::WorkStopped
-            | Self::ApprovalAsked => ActivityGroup::Plans,
+            | Self::ApprovalAsked
+            | Self::PlanLevelChanged => ActivityGroup::Plans,
             Self::SessionStarted
             | Self::SessionSteered
             | Self::SessionAnswered
@@ -1660,7 +1757,9 @@ impl BotRecords {
 
     /// What waits on the owner's decision for `bot_id`, oldest first within
     /// each kind and most pressing kind first. `asking(chat id)` says
-    /// whether a session is waiting on an answer. Only decisions: a failed
+    /// whether a session is waiting on an answer: callers pass the
+    /// plan-question rule ([`crate::view::plan_question`]: the chat or a
+    /// child chat under it has an open question). Only decisions: a failed
     /// routine run is state, shown on the routine, not here.
     pub fn needs_you(&self, bot_id: &str, asking: impl Fn(&str) -> bool) -> Vec<NeedsYou> {
         let mut items = Vec::new();
@@ -1681,7 +1780,7 @@ impl BotRecords {
         // whatever its work did since: the work may have ended (or been
         // stopped) while the question stays open.
         for w in &work {
-            for chat_id in w.session_ids() {
+            for chat_id in w.plan_chat_ids() {
                 if asking(chat_id) {
                     items.push(NeedsYou::Asking {
                         chat_id: chat_id.to_string(),
@@ -1876,6 +1975,7 @@ mod tests {
     #[test]
     fn clamping_bounds_every_text() {
         let mut work = BotWork {
+            steered: Vec::new(),
             id: "w".into(),
             bot_id: "b".into(),
             title: "t".repeat(500),
@@ -1912,6 +2012,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         work.clamp();
         let units = serde_json::to_string(&work).unwrap().encode_utf16().count();
@@ -1936,6 +2040,10 @@ mod tests {
         work.time_limit_minutes = Some(PLAN_TIME_LIMIT_MAX_MINUTES);
         work.time_added_minutes = Some(PLAN_TIME_ADDED_MAX_MINUTES);
         work.warned_at = Some(1_794_465_204_971);
+        work.level = Some(crate::SandboxLevel::DangerFullAccess);
+        work.proposed_level = Some(crate::SandboxLevel::DangerFullAccess);
+        work.applied_level = Some(crate::SandboxLevel::DangerFullAccess);
+        work.level_quote = Some("\"".repeat(LEVEL_QUOTE_MAX));
         let steps = work.steps.len();
         for (index, step) in work.steps.iter_mut().enumerate() {
             step.detail = Some("\"".repeat(PLAN_DETAILS_MAX));
@@ -2015,6 +2123,60 @@ mod tests {
     }
 
     #[test]
+    fn plan_levels_read_old_rows_and_round_trip() {
+        use crate::SandboxLevel;
+        // A row and settings from before levels: workspace-write, nothing
+        // applied beyond it, and nothing new written back.
+        let old: BotWork = serde_json::from_value(serde_json::json!({
+            "id": "w", "botId": "b", "title": "t", "state": "running",
+            "chatId": "c", "createdAt": 0,
+        }))
+        .unwrap();
+        assert_eq!(old.effective_level(), SandboxLevel::WorkspaceWrite);
+        assert_eq!(old.level_in_effect(), SandboxLevel::WorkspaceWrite);
+        let json = serde_json::to_value(&old).unwrap();
+        for key in ["level", "proposedLevel", "levelQuote", "appliedLevel"] {
+            assert!(json.get(key).is_none(), "{key} left out");
+        }
+        let settings: PlanSettings =
+            serde_json::from_value(serde_json::json!({ "timeLimitMinutes": 60 })).unwrap();
+        assert_eq!(settings.level(), SandboxLevel::WorkspaceWrite);
+
+        // The owner's choice wins over the proposal; both over the default.
+        let mut work = old.clone();
+        work.proposed_level = Some(SandboxLevel::ReadOnly);
+        assert_eq!(work.effective_level(), SandboxLevel::ReadOnly);
+        work.level = Some(SandboxLevel::DangerFullAccess);
+        assert_eq!(work.effective_level(), SandboxLevel::DangerFullAccess);
+        work.level_quote = Some("q".repeat(LEVEL_QUOTE_MAX * 2));
+        work.applied_level = Some(SandboxLevel::DangerFullAccess);
+        work.clamp();
+        assert_eq!(
+            work.level_quote.as_deref().map(|q| q.chars().count()),
+            Some(LEVEL_QUOTE_MAX)
+        );
+        let json = serde_json::to_value(&work).unwrap();
+        assert_eq!(json["level"], "danger-full-access");
+        assert_eq!(json["proposedLevel"], "read-only");
+        assert_eq!(json["appliedLevel"], "danger-full-access");
+        assert_eq!(serde_json::from_value::<BotWork>(json).unwrap(), work);
+        // Only an owner device writes the choice.
+        assert!(BotWork::OWNER_FIELDS.contains(&"level"));
+        for host in ["proposedLevel", "levelQuote", "appliedLevel"] {
+            assert!(!BotWork::OWNER_FIELDS.contains(&host), "{host}");
+        }
+        // An activity line from a newer engine still reads.
+        let kind: ActivityKind = serde_json::from_value("planLevelChanged".into()).unwrap();
+        assert_eq!(kind.group(), ActivityGroup::Plans);
+        assert_eq!(
+            SandboxLevel::parse("full-access"),
+            Some(SandboxLevel::DangerFullAccess)
+        );
+        assert!(SandboxLevel::DangerFullAccess.above(SandboxLevel::WorkspaceWrite));
+        assert!(!SandboxLevel::ReadOnly.above(SandboxLevel::ReadOnly));
+    }
+
+    #[test]
     fn plan_settings_default_and_stay_in_bounds() {
         let plans = PlanSettings::default();
         assert_eq!(plans.time_limit_minutes(), 240);
@@ -2025,6 +2187,7 @@ mod tests {
             time_limit_minutes: Some(1),
             running_max: Some(0),
             sessions_max: Some(99),
+            level: None,
         };
         assert!(wild.validate().is_err());
         assert_eq!(wild.time_limit_minutes(), PLAN_TIME_LIMIT_MIN_MINUTES);
@@ -2037,6 +2200,15 @@ mod tests {
             })
             .unwrap(),
             serde_json::json!({ "timeLimitMinutes": 480 })
+        );
+        assert_eq!(plans.level(), crate::SandboxLevel::WorkspaceWrite);
+        assert_eq!(
+            serde_json::to_value(PlanSettings {
+                level: Some(crate::SandboxLevel::DangerFullAccess),
+                ..Default::default()
+            })
+            .unwrap(),
+            serde_json::json!({ "level": "danger-full-access" })
         );
         assert_eq!(describe_minutes(240), "4 hours");
         assert_eq!(describe_minutes(90), "1 hour 30 minutes");
@@ -2075,6 +2247,7 @@ mod tests {
         };
         let q = |max: usize| "\"".repeat(max);
         let ended = |detail: &str| BotWork {
+            steered: Vec::new(),
             id: id.clone(),
             bot_id: id.clone(),
             title: q(TITLE_MAX),
@@ -2112,6 +2285,10 @@ mod tests {
             coordinator_choice: choice.clone(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         // The proposal as the engine stores it: nothing has run yet.
         let proposed = |detail: &str| {
@@ -2189,6 +2366,7 @@ mod tests {
             session_choice: Default::default(),
         };
         let mut work = BotWork {
+            steered: Vec::new(),
             id: "w".into(),
             bot_id: "b".into(),
             title: "t".repeat(TITLE_MAX),
@@ -2216,6 +2394,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         let before = work.clone();
         work.clamp();
@@ -2237,6 +2419,7 @@ mod tests {
             session_choice: Default::default(),
         };
         let work = |state: WorkState| BotWork {
+            steered: Vec::new(),
             id: "w".into(),
             bot_id: "b".into(),
             title: "w".into(),
@@ -2265,6 +2448,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         let states = |w: &BotWork| w.steps.iter().map(|s| s.state).collect::<Vec<_>>();
         use StepState::{Asking, Done, Failed, Pending, Running, Skipped};
@@ -2309,6 +2496,7 @@ mod tests {
             session_choice: Default::default(),
         };
         let work = |id: &str, state: WorkState, sessions: Vec<&str>| BotWork {
+            steered: Vec::new(),
             id: id.into(),
             bot_id: "b".into(),
             title: id.into(),
@@ -2332,6 +2520,10 @@ mod tests {
             coordinator_choice: Default::default(),
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: None,
+            level_quote: None,
+            applied_level: None,
         };
         records.work = vec![
             work("plan", WorkState::Proposed, vec![]),
@@ -2368,6 +2560,143 @@ mod tests {
             ]
         );
         assert_eq!(records.started_by("s1").unwrap().0.id, "run");
+    }
+
+    /// The plan-asks misses (docs/design/plan-asks.md) are gone: a plan's
+    /// question is one open in a step session, a session it steered, or
+    /// any child chat under one, and it does not age out with the row.
+    /// (1) a question in a subagent's child chat under a step session is
+    /// listed under the step session; (2) a step session whose row stopped
+    /// being refreshed (its run ended with a forwarded question held, its
+    /// host offline) is listed, offline when its device is; the step reads
+    /// Asking on the same rule. Every case: `tests/plan_asks_vectors.rs`.
+    #[test]
+    fn plan_questions_outside_fresh_step_rows_are_needs_you() {
+        use crate::view::{ChatLink, ChatTree, PlanQuestion, plan_question};
+        let mut records = BotRecords::default();
+        let work: BotWork = serde_json::from_value(serde_json::json!({
+            "id": "w", "botId": "b", "title": "Plan", "instruction": "",
+            "state": "running", "chatId": "c", "createdAt": 0,
+            "steps": [{ "id": "1", "title": "Step", "state": "running",
+                         "sessions": ["step-session"] }]
+        }))
+        .unwrap();
+        records.work = vec![work];
+        let now = Utc::now();
+        let row = |chat: &str, status, age_ms: i64, asking: bool| crate::Session {
+            chat_id: chat.into(),
+            device_id: "host".into(),
+            status,
+            started_at: None,
+            updated_at: now - Duration::milliseconds(age_ms),
+            subagents: Vec::new(),
+            context_usage: None,
+            throughput: None,
+            recovery: None,
+            progress: None,
+            notice: None,
+            asking: asking.then(|| crate::SessionAsk {
+                request_id: format!("r-{chat}"),
+                asked_at: 0,
+                permission: None,
+                asked_by: None,
+                from_chat_id: None,
+            }),
+        };
+        let tree = ChatTree::new([
+            ChatLink {
+                id: "step-session",
+                parent_chat_id: None,
+                archived: false,
+            },
+            ChatLink {
+                id: "child-of-step-session",
+                parent_chat_id: Some("step-session"),
+                archived: false,
+            },
+        ]);
+        let item = vec![NeedsYou::Asking {
+            chat_id: "step-session".into(),
+            work_id: Some("w".into()),
+        }];
+
+        // (1) The subagent's child chat asks; the step session itself not.
+        let rows = [
+            row("step-session", crate::SessionStatus::Idle, 600_000, false),
+            row(
+                "child-of-step-session",
+                crate::SessionStatus::AwaitingInput,
+                5_000,
+                true,
+            ),
+        ];
+        let q = |chat: &str| {
+            plan_question(
+                &tree,
+                chat,
+                |id| rows.iter().find(|r| r.chat_id == id),
+                |_| true,
+                now,
+            )
+        };
+        assert_eq!(records.needs_you("b", |c| q(c).is_some()), item);
+        assert_eq!(
+            q("step-session"),
+            Some(PlanQuestion {
+                chat_id: "child-of-step-session".into(),
+                offline: false
+            })
+        );
+        assert_eq!(
+            records.work[0].settled_steps(|c| q(c).is_some()),
+            vec![StepState::Asking]
+        );
+
+        // (2) The step session's row is 46 s old (and its device offline);
+        // its question is still open.
+        let rows = [row(
+            "step-session",
+            crate::SessionStatus::AwaitingInput,
+            46_000,
+            true,
+        )];
+        let q = |chat: &str| {
+            plan_question(
+                &tree,
+                chat,
+                |id| rows.iter().find(|r| r.chat_id == id),
+                |_| false,
+                now,
+            )
+        };
+        assert_eq!(records.needs_you("b", |c| q(c).is_some()), item);
+        assert!(q("step-session").unwrap().offline);
+    }
+
+    #[test]
+    fn steered_sessions_are_plan_chats_but_not_started_ones() {
+        let work: BotWork = serde_json::from_value(serde_json::json!({
+            "id": "w", "botId": "b", "title": "Plan", "chatId": "c", "createdAt": 0,
+            "state": "running", "steered": ["x", "s1"],
+            "steps": [
+                { "id": "1", "title": "A", "state": "done", "sessions": ["s1"] },
+                { "id": "2", "title": "B", "state": "running" },
+                { "id": "3", "title": "C", "state": "pending" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(work.plan_chat_ids(), vec!["s1", "x"]);
+        assert_eq!(work.session_ids().collect::<Vec<_>>(), vec!["s1"]);
+        assert_eq!(
+            work.settled_steps(|c| c == "x"),
+            vec![StepState::Done, StepState::Asking, StepState::Pending]
+        );
+        assert_eq!(
+            work.settled_steps(|_| false),
+            vec![StepState::Done, StepState::Running, StepState::Pending]
+        );
+        let back: BotWork = serde_json::from_value(serde_json::to_value(&work).unwrap()).unwrap();
+        assert_eq!(back.steered, work.steered);
     }
 
     #[test]

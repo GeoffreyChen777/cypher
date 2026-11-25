@@ -924,6 +924,7 @@ async fn owner_turns_learn_where_their_plans_stand() {
     let bot = create_bot(&core, billing_only()).await;
     let now = cypher_proto::now_ms();
     let done = cypher_proto::BotWork {
+        steered: Vec::new(),
         id: "w-done".into(),
         bot_id: bot.id.clone(),
         title: "Fix rounding".into(),
@@ -947,6 +948,10 @@ async fn owner_turns_learn_where_their_plans_stand() {
         coordinator_choice: Default::default(),
         body_rev: None,
         result_rev: None,
+        level: None,
+        proposed_level: None,
+        level_quote: None,
+        applied_level: None,
     };
     core.workspace
         .put_record(

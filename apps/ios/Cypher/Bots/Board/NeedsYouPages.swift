@@ -199,10 +199,12 @@ struct NeedsYouItemCard: View {
                     ], busy: actions.busy)
             }
         case .asking(let chatId, _):
-            if let chat = model.chat(id: chatId), let store = model.sessionStore(for: chat) {
+            // Answered where it is open: the session, or the subagent's
+            // child chat under it that asks.
+            if let chat = model.chat(id: row.askingChatId ?? chatId), let store = model.sessionStore(for: chat) {
                 AskingCard(
                     chat: chat, store: store, source: row.source, at: row.at, link: link, linkId: linkId,
-                    answered: $answered)
+                    waiting: row.waiting, answered: $answered)
             } else {
                 card { NeedsCardNote(text: "The session syncs from the device it runs on.") }
             }
@@ -263,6 +265,8 @@ struct AskingCard: View {
     /// On the session's own page: the title in full, and no way into the
     /// session (the page's bar has it).
     var onPage = false
+    /// Its question waits for its device, which is offline.
+    var waiting = false
     /// Requests answered from here, until the session says so.
     @Binding var answered: Set<String>
     @State private var answerError: String?
@@ -361,7 +365,9 @@ struct AskingCard: View {
     /// What the card says with no question open.
     private var status: String {
         if !answered.isEmpty { return "Answer sent." }
-        if !store.entries.isEmpty || model.indicator(for: chat) != .awaitingInput {
+        if waiting { return "\(BoardNeedRow.waitingForDevice)." }
+        let asking = model.data?.sessionAsking(chat.id) ?? (model.indicator(for: chat) == .awaitingInput)
+        if !store.entries.isEmpty || !asking {
             return "Nothing to answer right now."
         }
         return "Loading the question…"
@@ -520,7 +526,11 @@ struct AskingPage: View {
 
     var body: some View {
         if let chat = model.chat(id: chatId) {
-            page(chat, store: model.sessionStore(for: chat))
+            // The question is answered where it is open: the session or a
+            // subagent's child chat under it (plan_asks.rs `PlanQuestion`).
+            let question = model.data?.planQuestion(chatId)
+            let asker = question.flatMap { model.chat(id: $0.chatId) } ?? chat
+            page(chat, asker: asker, waiting: question?.offline == true, store: model.sessionStore(for: asker))
         } else {
             BotEmptyState(
                 symbol: "questionmark.circle", title: "Not on this device yet",
@@ -528,7 +538,7 @@ struct AskingPage: View {
         }
     }
 
-    private func page(_ chat: Chat, store: SessionStore?) -> some View {
+    private func page(_ chat: Chat, asker: Chat, waiting: Bool, store: SessionStore?) -> some View {
         let space = chat.spaceId.flatMap { id in model.spaces.first { $0.id == id } }
         let work = workId.flatMap { model.data?.work(id: $0) }
         // The work and the project are the facts card's: the head names the
@@ -537,8 +547,8 @@ struct AskingPage: View {
         return BotCardPage(title: "Asking") {
             if let store {
                 AskingCard(
-                    chat: chat, store: store, source: source, at: chat.lastMessageAt, onPage: true,
-                    answered: $answered)
+                    chat: asker, store: store, source: source, at: chat.lastMessageAt, onPage: true,
+                    waiting: waiting, answered: $answered)
             } else {
                 NeedsYouCard(
                     symbol: "questionmark.circle", source: source, title: singleLine(chat.displayTitle),
@@ -563,6 +573,13 @@ struct AskingPage: View {
                     BotFact(label: "From", value: model.bot(id: botId)?.name ?? "The workspace")
                         .padding(.horizontal, NeedsCardMetrics.pad)
                         .padding(.vertical, 11)
+                }
+                if waiting {
+                    CardDivider()
+                    BotFact(status: BotStatusLabel(BoardNeedRow.waitingForDevice, .waiting, symbol: "wifi.slash"))
+                        .padding(.horizontal, NeedsCardMetrics.pad)
+                        .padding(.vertical, 11)
+                        .accessibilityIdentifier("asking-waiting")
                 }
             }
             .needsCard(padding: 0)

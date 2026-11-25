@@ -6,6 +6,8 @@ use std::collections::{HashMap, HashSet};
 
 use cypher_proto::{PermissionOutcome, ToolPermission};
 
+use crate::slash_command::{CommandNames, slash_command};
+
 mod fold;
 mod gates;
 mod tools;
@@ -40,6 +42,10 @@ pub enum RowKind {
         /// outlined bubble (the iOS `UserBubble` treatment). Set in
         /// [`TranscriptView::rows_for`] from the command ledger.
         steer: bool,
+        /// Ran as a slash command: drawn as the quiet command chip, not a
+        /// bubble. Set in `build_rows` from the host's catalog
+        /// ([`mark_command_rows`]).
+        command: bool,
     },
     /// One top-level markdown block of a completed message.
     Markdown {
@@ -334,16 +340,37 @@ pub fn answered_label(models: &[AnsweredModel]) -> Option<AnsweredLabel> {
 
 /// Whether a user row renders as the quiet slash-command action chip rather
 /// than a prompt bubble (settings commands are not a message to the model).
-/// Shared by the renderer and the find index so the two agree on which rows
-/// carry searchable, highlightable bubble text.
+/// Decided once per build ([`mark_command_rows`]) into the row, which the
+/// renderer, the timestamp strip and the find index all read, so they agree
+/// on which rows carry searchable, highlightable bubble text.
 pub(super) fn renders_as_command_chip(
     text: &str,
     mentions: &[crate::composer::SentMentionSpan],
     attachments: &[crate::attachments::UserAttachment],
+    known: Option<&CommandNames>,
 ) -> bool {
-    crate::composer::slash_command_label(text).is_some()
-        && mentions.is_empty()
-        && attachments.is_empty()
+    slash_command(text, known).is_some() && mentions.is_empty() && attachments.is_empty()
+}
+
+/// Mark the user rows that ran as slash commands under the host's catalog
+/// `known`. A marked row's version moves, so a catalog arriving after the
+/// first paint re-splices (and re-measures) only the rows it reclassifies.
+pub(super) fn mark_command_rows(rows: &mut [Row], known: Option<&CommandNames>) {
+    for row in rows {
+        if let RowKind::User {
+            text,
+            mentions,
+            attachments,
+            command,
+            ..
+        } = &mut row.kind
+        {
+            *command = renders_as_command_chip(text, mentions, attachments, known);
+            if *command {
+                row.version ^= 1 << 62;
+            }
+        }
+    }
 }
 
 /// How many find matches a row holds, over exactly the text elements the row
@@ -353,13 +380,8 @@ pub(super) fn renders_as_command_chip(
 /// user cannot see would break the "n of N" contract.
 pub(super) fn row_match_count(row: &Row, query: &str) -> u32 {
     let count = match &row.kind {
-        RowKind::User {
-            text,
-            mentions,
-            attachments,
-            ..
-        } => {
-            if text.is_empty() || renders_as_command_chip(text, mentions, attachments) {
+        RowKind::User { text, command, .. } => {
+            if text.is_empty() || *command {
                 0
             } else {
                 crate::markdown::find::count_matches(text, query)
@@ -460,6 +482,11 @@ impl EventEmitter<TranscriptEvent> for Transcript {}
 /// Text copied by the entry-level action, not by a virtualized markdown row.
 /// Keep Markdown intact; tool payloads and input-wizard internals aren't prose.
 pub(super) fn message_copy_text(entry: &SessionMessageEntry) -> Option<String> {
+    // What the reader sees: no notice an older harness streamed in.
+    let cleaned = (entry.role != MessageRole::User)
+        .then(|| without_reply_notices(entry))
+        .flatten();
+    let entry = cleaned.as_ref().unwrap_or(entry);
     let text = entry
         .parts
         .iter()
@@ -716,7 +743,10 @@ pub(super) fn mark_steer_rows(rows: &mut [Row]) {
     }
 }
 
-pub(super) fn user_entry_is_slash_command(entry: &SessionMessageEntry) -> bool {
+pub(super) fn user_entry_is_slash_command(
+    entry: &SessionMessageEntry,
+    known: Option<&CommandNames>,
+) -> bool {
     let text: String = entry
         .parts
         .iter()
@@ -726,7 +756,7 @@ pub(super) fn user_entry_is_slash_command(entry: &SessionMessageEntry) -> bool {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    crate::composer::slash_command_label(&text).is_some()
+    slash_command(&text, known).is_some()
 }
 
 /// [`entry_rows`] with no memory cards and no plan records.
@@ -771,6 +801,11 @@ pub(super) fn entry_rows(
         }
         return vec![user_row(entry, pending)];
     }
+
+    // Notices an older harness streamed into the reply text (an extension's
+    // rate-limit warning): never the reply's.
+    let cleaned = without_reply_notices(entry);
+    let entry = cleaned.as_ref().unwrap_or(entry);
 
     // Assistant/system: split parts into block rows, folding consecutive tools.
     let cx = EntryRows {
@@ -1043,6 +1078,7 @@ fn user_row(entry: &SessionMessageEntry, pending: bool) -> Row {
             recovery: entry.recovery.clone().map(Arc::new),
             pending,
             steer: false,
+            command: false,
         },
         entry_id: entry.id.clone().into(),
         role: entry.role,
@@ -1241,6 +1277,31 @@ fn permission_output(
     }
     lines.push(output.unwrap_or("(no output)").to_owned());
     lines.join("\n")
+}
+
+/// `entry` without the extension notices an older harness streamed into
+/// its text parts ([`cypher_proto::strip_reply_notices`]): a part that is a
+/// notice and nothing else empties (and so renders nothing), one that opens
+/// or closes with one loses it. `None` when no part held one.
+pub(super) fn without_reply_notices(entry: &SessionMessageEntry) -> Option<SessionMessageEntry> {
+    let stripped: Vec<Option<String>> = entry
+        .parts
+        .iter()
+        .map(|part| match part {
+            MessagePart::Text { text, .. } => cypher_proto::strip_reply_notices(text),
+            _ => None,
+        })
+        .collect();
+    if stripped.iter().all(Option::is_none) {
+        return None;
+    }
+    let mut cleaned = entry.clone();
+    for (part, text) in cleaned.parts.iter_mut().zip(stripped) {
+        if let (MessagePart::Text { text: old, .. }, Some(text)) = (part, text) {
+            *old = text;
+        }
+    }
+    Some(cleaned)
 }
 
 /// Whether a part renders no row: an empty text or thought, or a question

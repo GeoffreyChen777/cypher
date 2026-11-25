@@ -217,9 +217,11 @@ fn routine_works_directly(workspace: &WorkspaceHost, marker: &BotChat) -> bool {
 }
 
 /// The permission level a bot thread's run spawns with, whatever its chat
-/// row says (any owner device may write that): workspace-write for an
-/// owner thread working directly in local checkouts, read-only for every
-/// other bot thread. `None` for other chats.
+/// row says (any owner device may write that): for an owner thread working
+/// directly in local checkouts workspace-write, or for a plan's
+/// coordinating session the level the owner gave the plan
+/// ([`BotWork::effective_level`]); read-only for every other bot thread.
+/// `None` for other chats.
 pub(super) fn run_sandbox(workspace: &WorkspaceHost, chat: &Chat) -> Option<SandboxLevel> {
     let marker = chat.bot.as_ref().filter(|m| m.is_bot_thread())?;
     let writes = workspace
@@ -227,10 +229,15 @@ pub(super) fn run_sandbox(workspace: &WorkspaceHost, chat: &Chat) -> Option<Sand
         .ok()
         .flatten()
         .is_some_and(|bot| !workspace_roots(workspace, &bot, marker).is_empty());
-    Some(if writes {
-        SandboxLevel::WorkspaceWrite
-    } else {
-        SandboxLevel::ReadOnly
+    if !writes {
+        return Some(SandboxLevel::ReadOnly);
+    }
+    Some(match role(marker) {
+        Role::Work(work_id) => workspace
+            .record::<BotWork>(p::KIND_BOT_WORK, &work_id)
+            .filter(|work| work.bot_id == marker.bot_id)
+            .map_or(SandboxLevel::WorkspaceWrite, |work| work.effective_level()),
+        _ => SandboxLevel::WorkspaceWrite,
     })
 }
 

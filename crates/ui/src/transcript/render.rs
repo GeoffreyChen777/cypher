@@ -42,7 +42,8 @@ impl Transcript {
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
-                        crate::composer::slash_command_label(&text).is_some()
+                        crate::slash_command::slash_command(&text, self.known_commands.as_deref())
+                            .is_some()
                     });
                 let assistant_working = state.transcript.iter().rev().any(|e| {
                     e.role == MessageRole::Assistant
@@ -527,6 +528,7 @@ impl Transcript {
                 recovery,
                 pending,
                 steer,
+                command,
             } => {
                 let user = UserRowView {
                     text,
@@ -536,6 +538,7 @@ impl Transcript {
                     recovery: recovery.clone(),
                     pending: *pending,
                     steer: *steer,
+                    command: *command,
                 };
                 self.render_user_row(row, user, wide, theme, cx)
             }
@@ -674,6 +677,7 @@ impl Transcript {
         let mentions = user.mentions.clone();
         let pending = user.pending;
         let steer = user.steer;
+        let command = user.command;
         // Attachment thumbnails ride ABOVE the bubble, right-aligned
         // (chat-view.tsx RowView: UserAttachmentStrip then the text
         // HStack); image-only sends show no bubble at all.
@@ -703,7 +707,7 @@ impl Transcript {
             ));
         }
         if !text.is_empty() {
-            if renders_as_command_chip(&text, &mentions, &attachments) {
+            if command {
                 column = column.child(command_chip(text, pending, theme));
             } else {
                 // `min_w_0` is load-bearing: gpui text answers min/max-content
@@ -762,7 +766,7 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> Option<gpui::Div> {
         let is_user_row = match &row.kind {
-            RowKind::User { text, .. } => crate::composer::slash_command_label(text).is_none(),
+            RowKind::User { command, .. } => !command,
             _ => false,
         };
         let hovered = self
@@ -1168,6 +1172,8 @@ struct UserRowView<'a> {
     recovery: Option<Arc<cypher_proto::ContextRecovery>>,
     pending: bool,
     steer: bool,
+    /// Ran as a slash command: the chip, not a bubble.
+    command: bool,
 }
 
 /// iOS UserBubble: a muted "↳ Steer" caption over the bubble, inset to line

@@ -63,7 +63,9 @@ enum NeedKind {
         id: String,
         reason: String,
     },
-    /// A session the workspace runs is asking.
+    /// A session the workspace runs is asking. `chat_id` is the chat that
+    /// asks (the session, or a subagent's child chat under it): the card
+    /// reads and answers its question there.
     Asking {
         chat_id: String,
     },
@@ -82,6 +84,8 @@ struct NeedItem {
     /// Where it comes from: "Fix invoice rounding › Migrate tables".
     source: String,
     at: Option<chrono::DateTime<Utc>>,
+    /// Its host device is offline: the question waits for it.
+    waiting: bool,
     kind: NeedKind,
 }
 
@@ -150,6 +154,7 @@ fn need_items(state: &crate::state::AppState, bot: &Bot, needs: Vec<Need>) -> Ve
                     title: format!("{name} asked you something"),
                     source: name.clone(),
                     at: chat.last_message_at,
+                    waiting: false,
                     kind: NeedKind::Chat {
                         preview: chat
                             .last_message_preview
@@ -167,6 +172,7 @@ fn need_items(state: &crate::state::AppState, bot: &Bot, needs: Vec<Need>) -> Ve
                     title: transcript::single_line(&work.title),
                     source: "Plan to approve".into(),
                     at: Some(super::items::at(work.created_at)),
+                    waiting: false,
                     kind: NeedKind::Plan {
                         sub: plan_line(state, work),
                         summary: work
@@ -192,6 +198,7 @@ fn need_items(state: &crate::state::AppState, bot: &Bot, needs: Vec<Need>) -> Ve
                     title: transcript::single_line(&approval.action),
                     source: from,
                     at: Some(super::items::at(approval.created_at)),
+                    waiting: false,
                     kind: NeedKind::Approval {
                         reason: approval.reason.clone(),
                         id,
@@ -200,6 +207,11 @@ fn need_items(state: &crate::state::AppState, bot: &Bot, needs: Vec<Need>) -> Ve
             }
             Need::Record(NeedsYou::Asking { chat_id, .. }) => {
                 let chat = state.chats.iter().find(|c| c.id == chat_id)?;
+                // Where the question is open: the session or a child chat
+                // under it; offline when its device is.
+                let question = state.plan_question(&chat_id, Utc::now());
+                let waiting = question.as_ref().is_some_and(|q| q.offline);
+                let asker = question.map_or_else(|| chat_id.clone(), |q| q.chat_id);
                 let title = transcript::single_line(chat.title.as_deref().unwrap_or("New session"));
                 let project = chat
                     .space_id
@@ -220,7 +232,8 @@ fn need_items(state: &crate::state::AppState, bot: &Bot, needs: Vec<Need>) -> Ve
                     title,
                     source,
                     at: chat.last_message_at,
-                    kind: NeedKind::Asking { chat_id },
+                    waiting,
+                    kind: NeedKind::Asking { chat_id: asker },
                 })
             }
             Need::Record(NeedsYou::Review(id)) => {
@@ -237,6 +250,7 @@ fn need_items(state: &crate::state::AppState, bot: &Bot, needs: Vec<Need>) -> Ve
                     title: transcript::single_line(&exchange.question),
                     source: format!("Answer to {peer}, to review"),
                     at: Some(super::items::at(exchange.asked_at)),
+                    waiting: false,
                     kind: NeedKind::Review { id },
                 })
             }
@@ -474,6 +488,10 @@ fn card_copy(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
 }
 
 /// A quiet note in place of a card's buttons (an answer on its way).
+/// A question whose session's device is offline: it stays open and is
+/// answered once the device is back (docs/design/plan-asks.md).
+const WAITING_FOR_DEVICE: &str = "Waiting for its device";
+
 fn card_note(text: &'static str, theme: &Theme) -> gpui::Div {
     div()
         .mt(px(8.0))
@@ -584,8 +602,12 @@ impl Shell {
                     &format!("bot-need-{}", item.key),
                     Some(card_glyph(item.glyph, theme.warning)),
                     item.title,
-                    item.at
-                        .map(|at| card_corner(format_time_ago(at, now), None, theme)),
+                    if item.waiting {
+                        Some(card_corner(WAITING_FOR_DEVICE, None, theme))
+                    } else {
+                        item.at
+                            .map(|at| card_corner(format_time_ago(at, now), None, theme))
+                    },
                     false,
                     theme,
                 )
@@ -755,13 +777,20 @@ impl Shell {
                     .text_color(theme.text_muted)
                     .child(SharedString::from(item.source.clone())),
             )
-            .children(item.at.map(|at| {
-                div()
-                    .flex_none()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(format_time_ago(at, now)))
-            }))
+            .children(
+                if item.waiting {
+                    Some(WAITING_FOR_DEVICE.to_string())
+                } else {
+                    item.at.map(|at| format_time_ago(at, now))
+                }
+                .map(|corner| {
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(corner))
+                }),
+            )
             .children(open)
     }
 
@@ -801,6 +830,17 @@ impl Shell {
             } => {
                 let (approve, reject, details) =
                     (work_id.clone(), work_id.clone(), work_id.clone());
+                // Its level, picked here as on its card and page.
+                let work = self
+                    .state
+                    .read(cx)
+                    .bot_records
+                    .work
+                    .iter()
+                    .find(|w| w.id == *work_id)
+                    .cloned();
+                let picker = work
+                    .and_then(|work| self.level_picker(&format!("{key}-level"), &work, theme, cx));
                 NeedContent::of(
                     div()
                         .flex()
@@ -826,6 +866,7 @@ impl Shell {
                                         })),
                                 )
                                 .child(div().flex_1())
+                                .children(picker)
                                 .child(
                                     quiet_button(&format!("{key}-reject"), "Reject", theme)
                                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -842,12 +883,14 @@ impl Shell {
                                 .child(
                                     primary_button(&format!("{key}-approve"), "Approve", theme)
                                         .on_click(cx.listener(move |this, _, _, cx| {
+                                            let held = this
+                                                .state
+                                                .read(cx)
+                                                .plan_level_picks
+                                                .get(&approve)
+                                                .copied();
                                             this.decide_need(
-                                                serde_json::json!({
-                                                    "op": "resolveBotPlan",
-                                                    "workId": approve,
-                                                    "approve": true,
-                                                }),
+                                                crate::plan_level::approve_params(&approve, held),
                                                 cx,
                                             )
                                         })),

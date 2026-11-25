@@ -64,6 +64,8 @@ pub fn session() -> Session {
         throughput: None,
         recovery: None,
         progress: None,
+        notice: None,
+        asking: None,
     }
 }
 
@@ -106,6 +108,7 @@ pub fn bot() -> Bot {
 /// A proposed one-step plan of `bot_id`, proposed in `"bot-chat"`.
 pub fn bot_work(id: &str, bot_id: &str) -> BotWork {
     BotWork {
+        steered: Vec::new(),
         id: id.into(),
         bot_id: bot_id.into(),
         title: "Plan".into(),
@@ -140,6 +143,10 @@ pub fn bot_work(id: &str, bot_id: &str) -> BotWork {
         coordinator_choice: Default::default(),
         body_rev: None,
         result_rev: None,
+        level: None,
+        proposed_level: None,
+        level_quote: None,
+        applied_level: None,
     }
 }
 

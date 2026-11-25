@@ -246,7 +246,10 @@ extension DemoDataset {
                 ],
                 state: .running, chatId: "chat-atlas", toolCallId: "call-plan-flaky",
                 threadChatId: "chat-atlas-thread-flaky", createdAt: now - 20 * minute,
-                startedAt: now - 18 * minute, decision: PlanDecision(approve: true, at: now - 19 * minute)),
+                startedAt: now - 18 * minute, decision: PlanDecision(approve: true, at: now - 19 * minute),
+                // The owner raised it to Full access as they approved it.
+                level: PermissionLevel.fullAccess, proposedLevel: "workspace-write",
+                appliedLevel: PermissionLevel.fullAccess),
             BotWork(
                 id: "work-rounding", botId: Self.atlasId, title: "Fix invoice rounding in CSV exports",
                 instruction: """
@@ -265,7 +268,7 @@ extension DemoDataset {
                         id: "3", title: "Add a regression test for half-cent totals", project: "space-webapp"),
                 ],
                 state: .proposed, chatId: "chat-atlas", toolCallId: "call-plan-rounding",
-                createdAt: now - 22 * minute),
+                createdAt: now - 22 * minute, proposedLevel: "workspace-write"),
         ]
 
         botRecords.approvals = [

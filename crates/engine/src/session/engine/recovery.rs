@@ -120,6 +120,7 @@ impl SessionsEngine {
 
         let stale = self.inner.journal.stale_sessions()?;
         let mut recovered = 0usize;
+        let mut reopened = HashSet::new();
         for chat_id in stale {
             if lock(&self.inner.runs).contains_key(&chat_id) {
                 continue; // a live run owns this journal
@@ -176,7 +177,11 @@ impl SessionsEngine {
             };
             self.inner.publish(&chat_id, &done);
             let stamped = handle.mark_abandoned_streams(note)?.len();
+            // Its questions outlive the run (answerable through the dead-run
+            // fallback) unless the run is picked back up, which asks again.
+            self.reopen_questions(&chat_id, will_resume);
             self.set_status(&chat_id, SessionStatus::Idle, false);
+            reopened.insert(chat_id.clone());
             tracing::info!(chat = %chat_id, stamped, will_resume, attempts, "recovered stale session journal");
             recovered += 1;
 
@@ -233,7 +238,117 @@ impl SessionsEngine {
                 }
             });
         }
+        if let Err(err) = self.recover_open_questions(&reopened) {
+            tracing::error!(error = %err, "open-question recovery failed");
+        }
         Ok(recovered)
+    }
+
+    /// Boot recovery for questions (docs/design/plan-asks.md, e1/e2): the
+    /// previous engine's open questions are memory, so every row of this
+    /// device that still says it asks (`asking`, or awaiting input) and has
+    /// no run is rebuilt from its doc: its own questions stay open, a
+    /// forwarded mirror whose subagent run died with the engine is resolved
+    /// and the root's awaiting-input hold ends. `skip`: chats
+    /// [`Self::recover_stale`] already did. Returns the rows rewritten.
+    pub fn recover_open_questions(&self, skip: &HashSet<String>) -> Result<usize, EngineError> {
+        let Some(ws) = self.inner.workspace() else {
+            return Ok(0);
+        };
+        let mut fixed = 0usize;
+        for row in ws.read_sessions()? {
+            if row.device_id != self.inner.device_id
+                || skip.contains(&row.chat_id)
+                || (row.status != SessionStatus::AwaitingInput && row.asking.is_none())
+                || lock(&self.inner.runs).contains_key(&row.chat_id)
+            {
+                continue;
+            }
+            self.reopen_questions(&row.chat_id, false);
+            let status = match row.status {
+                SessionStatus::Errored => SessionStatus::Errored,
+                _ => SessionStatus::Idle,
+            };
+            self.set_status(&row.chat_id, status, false);
+            fixed += 1;
+        }
+        if fixed > 0 {
+            tracing::info!(fixed, "open questions recovered on boot");
+        }
+        Ok(fixed)
+    }
+
+    /// Rebuild `chat_id`'s open questions from its doc once no run holds
+    /// them: its own unresolved questions stay open, unless `rerun` (the
+    /// turn is dispatched again and asks anew) or it is a child chat (its
+    /// subagent run, the parent's tool call, died with it); those and any
+    /// mirror without a live forward are resolved in the doc. The row picks
+    /// the result up on its next write.
+    fn reopen_questions(&self, chat_id: &str, rerun: bool) {
+        let Ok(handle) = self.doc_handle(chat_id) else {
+            return;
+        };
+        let Ok(entries) = handle.doc().read_entries() else {
+            return;
+        };
+        let child = self
+            .inner
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+            .is_some_and(|chat| chat.is_child());
+        let live_mirrors: HashSet<String> = lock(&self.inner.forwarded)
+            .iter()
+            .filter(|(_, from)| from.root == chat_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut own = Vec::new();
+        for entry in &entries {
+            for part in &entry.parts {
+                let MessagePart::Input {
+                    request_id,
+                    questions,
+                    resolved: false,
+                    ..
+                } = part
+                else {
+                    continue;
+                };
+                let mirror = questions.iter().any(|q| q.asked_by.is_some());
+                if mirror && live_mirrors.contains(request_id) {
+                    continue;
+                }
+                if mirror || rerun || child {
+                    if let Err(err) = handle.doc().resolve_input(request_id) {
+                        tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
+                            "dead question resolve failed");
+                    }
+                    continue;
+                }
+                own.push(cypher_proto::SessionAsk {
+                    request_id: request_id.clone(),
+                    asked_at: entry.created_at,
+                    permission: super::ask_permission(questions),
+                    asked_by: None,
+                    from_chat_id: None,
+                });
+            }
+        }
+        {
+            let mut open = lock(&self.inner.open_asks);
+            let mut asks = own;
+            asks.extend(
+                open.remove(chat_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|a| live_mirrors.contains(&a.request_id)),
+            );
+            if !asks.is_empty() {
+                open.insert(chat_id.to_string(), asks);
+            }
+        }
+        if live_mirrors.is_empty() {
+            lock(&self.inner.held_statuses).remove(chat_id);
+        }
     }
 }
 

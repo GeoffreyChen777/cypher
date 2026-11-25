@@ -14,6 +14,13 @@ extension AppModel {
             // DemoDataset+NeedsYou.swift: a permission prompt, a long title.
             demo?.addNeedsYouStates(many: args.contains("-demo-needs-many"))
         }
+        // DemoDataset+PlanAsks.swift: a plan's questions, every way one asks.
+        if args.contains("-demo-plan-asks") { demo?.addPlanAsks() }
+        // `-plan-asks-answer <chat id>`: that question answered elsewhere
+        // (another device) once the app is up.
+        if let ix = args.firstIndex(of: "-plan-asks-answer"), ix + 1 < args.count, let demo {
+            demo.answerPlanAsk(chatId: args[ix + 1], requestId: "")
+        }
         if args.contains("-demo-long-plans"), let demo {
             // DemoDataset+PlanBodies.swift: bodies now, never, or after N s.
             let late = args.firstIndex(of: "-plan-bodies-late").flatMap { ix in
@@ -67,7 +74,7 @@ extension AppModel {
                     let store = demo.sessionStore(for: chatId)
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        store.demoResponder?("Show me the streamed reply path.", false)
+                        store.demoResponder?("Show me the streamed reply path.", false, [])
                     }
                 }
             } else if spec.hasPrefix("space:") {

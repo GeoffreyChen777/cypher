@@ -327,7 +327,15 @@ pub enum ChatIndicator {
 /// Derive the display status. `live` must already be staleness-gated by the
 /// caller (the UI's 45s window) — pass `None` for a stale/absent session row.
 pub(crate) fn chat_indicator(chat: &Chat, live: Option<&Session>) -> ChatIndicator {
-    match live.map(|s| s.status) {
+    // An open question wins over the row's status: a run that died under
+    // it leaves the row Idle while the question stays answerable.
+    match live.map(|s| {
+        if s.asking.is_some() {
+            SessionStatus::AwaitingInput
+        } else {
+            s.status
+        }
+    }) {
         Some(SessionStatus::Working) => ChatIndicator::Working,
         Some(SessionStatus::AwaitingInput) => ChatIndicator::AwaitingInput,
         Some(SessionStatus::Errored) if chat.unseen() => ChatIndicator::Errored,
@@ -387,6 +395,46 @@ pub struct Session {
     /// or newly started turn drops it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<RunProgress>,
+    /// The latest extension notice ([`crate::AgentEvent::Notice`]): the
+    /// status strip's quiet line while it is live. Transient run state —
+    /// never transcript content; a new notice replaces it, and a turn that
+    /// starts after it expired drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<crate::SessionNotice>,
+    /// The question this chat waits on, while one is open: an unresolved
+    /// input request in its doc (a permission prompt or an `ask_user`
+    /// question), its own or a subagent's mirrored into it. Set by the host
+    /// when the question is asked and cleared when it is answered,
+    /// withdrawn or dies with its run, so it holds whatever `updated_at`
+    /// says: a question open across an engine restart or on a device gone
+    /// offline is still open (docs/design/plan-asks.md). Rows from hosts
+    /// that don't write it read `None` and fall back to the status +
+    /// freshness rule ([`crate::view::session_ask`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asking: Option<SessionAsk>,
+}
+
+/// The open question on a session row ([`Session::asking`]): the newest
+/// unresolved input request in the chat's doc.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionAsk {
+    /// The doc's `MessagePart::Input` request id (the mirror's own id for
+    /// a forwarded question): a new id is a new question.
+    pub request_id: String,
+    /// Epoch milliseconds (the registry's time unit, here as on the wire).
+    pub asked_at: i64,
+    /// What a permission prompt asks to do; `None` for a question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<crate::PermissionPromptKind>,
+    /// The subagent that asked, when the question was forwarded from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_by: Option<String>,
+    /// The child chat the question was asked in, when this row only
+    /// mirrors it (the child's own row carries it too): a reader that
+    /// reports questions once per root skips the child's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_chat_id: Option<String>,
 }
 
 /// A cheap model's reading of how far a long turn has got. An estimate for

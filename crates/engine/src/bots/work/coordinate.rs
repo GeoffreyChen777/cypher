@@ -83,6 +83,13 @@ struct ProposePlan {
     /// The coordinating session's model, thinking and Fast mode.
     #[serde(default)]
     coordinator: Option<ChoiceArgs>,
+    /// The permission level its sessions run at; the workspace's when left
+    /// out. Above the workspace's only with [`Self::level_quote`].
+    #[serde(default)]
+    level: Option<String>,
+    /// The owner's own words asking for `level`, verbatim.
+    #[serde(default)]
+    level_quote: Option<String>,
     /// Set by the `BotTool` RPC from the Pi tool call.
     #[serde(default, rename = "_toolCallId")]
     tool_call_id: Option<String>,
@@ -300,6 +307,22 @@ pub(super) fn session_state(
             SessionState::NotStarted("It has not run yet.".into())
         };
     };
+    // An open question on the row asks whatever its status says: a run
+    // that died under it leaves the row Idle, and it is still the owner's
+    // to answer (docs/design/plan-asks.md, e1).
+    if row.asking.is_some()
+        && row.status != SessionStatus::Working
+        && let Some((request_id, questions)) = pending_input(entries)
+    {
+        return if commands.answered.contains(&request_id) {
+            SessionState::Working
+        } else {
+            SessionState::Asking {
+                request_id,
+                questions,
+            }
+        };
+    }
     match row.status {
         SessionStatus::Working => SessionState::Working,
         SessionStatus::AwaitingInput => match pending_input(entries) {
@@ -384,6 +407,24 @@ fn permission_words(kind: PermissionPromptKind) -> &'static str {
         PermissionPromptKind::Tool => "use a tool that asks first",
     }
 }
+
+/// Note `session_id` on the work's steered sessions, once, newest kept
+/// when the list is full.
+pub(super) fn record_steered(work: &mut BotWork, session_id: &str) {
+    if work.steered.iter().any(|id| id == session_id) {
+        return;
+    }
+    if work.steered.len() >= p::STEERED_MAX {
+        work.steered.remove(0);
+    }
+    work.steered.push(session_id.to_string());
+}
+
+/// Added to `wait_for_session`'s answer for a question on a device that is
+/// offline: it stays open, and the owner sees it as waiting for its device.
+pub(super) const OFFLINE_ASK: &str = "\n\nIts device is offline right now: the question \
+     stays open and your owner sees it under Needs you as waiting for its device. It can \
+     be answered once the device is back; wait again or do other steps meanwhile.";
 
 /// `wait_for_session`'s answer. `read_before`: the thread was already
 /// handed this question and has waited on its owner's answer since.
@@ -606,6 +647,12 @@ impl Bots {
                     },
                     command_author::PLAN,
                 )?;
+                // A session it steers but didn't start: its questions are
+                // the plan's too (Needs you, the step), though steering it
+                // again still needs the owner (`may_drive`).
+                if !work.session_ids().any(|id| id == session.id) {
+                    self.edit_work(&work.id, |w| record_steered(w, &session.id))?;
+                }
                 self.log(
                     &view.bot.id,
                     ActivityKind::SessionSteered,
@@ -732,6 +779,7 @@ impl Bots {
             .transpose()
             .map_err(|err| refuse(format!("The coordinator's choice: {err}")))?
             .unwrap_or_default();
+        let (proposed_level, level_quote) = self.proposed_level(chat, view, &args)?;
         let mut steps = Vec::with_capacity(args.steps.len());
         for (index, step) in args.steps.iter().enumerate() {
             if step.title.trim().is_empty() {
@@ -772,6 +820,7 @@ impl Bots {
         let instruction_len = instruction.trim().chars().count();
         let now = p::now_ms();
         let mut work = BotWork {
+            steered: Vec::new(),
             id: new_id(),
             bot_id: view.bot.id.clone(),
             title: title.to_string(),
@@ -800,6 +849,10 @@ impl Bots {
             coordinator_choice,
             body_rev: None,
             result_rev: None,
+            level: None,
+            proposed_level: Some(proposed_level),
+            level_quote,
+            applied_level: None,
         };
         // The row keeps previews; what they cut goes to the chat doc first
         // (docs/design/plan-body.md §4), so no device sees a row whose body
@@ -858,13 +911,75 @@ impl Bots {
         }
         Ok(format!(
             "The plan \"{}\" (work {}) is waiting for your owner's approval in a card in this \
-             chat. Once running it may take {}.{waiting} Stop here: end your turn with one line \
+             chat. Once running it may take {}, at the permission level {} unless your owner \
+             picks another.{waiting} Stop here: end your turn with one line \
              saying it awaits approval. Once approved, a background session carries it out and \
              you are told here when it ends; list_work and get_work show where it stands.",
             work.title,
             work.id,
-            p::describe_minutes(time_limit)
+            p::describe_minutes(time_limit),
+            proposed_level.label()
         ))
+    }
+
+    /// The level a proposal offers ([`BotWork::proposed_level`]): the
+    /// workspace's, or the one asked for. Only the owner chooses a level: one
+    /// above the workspace's needs their own words asking for it, quoted from
+    /// this chat ([`crate::host::doc_host::DocHost::owner_quoted`]); the card
+    /// shows the quote, and approving confirms it. A stricter one needs none.
+    fn proposed_level(
+        &self,
+        chat: &Chat,
+        view: &View,
+        args: &ProposePlan,
+    ) -> Result<(SandboxLevel, Option<String>), EngineError> {
+        let default = view.bot.plans.level();
+        let Some(asked) = args
+            .level
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+        else {
+            return Ok((default, None));
+        };
+        let level = SandboxLevel::parse(asked).ok_or_else(|| {
+            refuse(format!(
+                "level is read-only, workspace-write or danger-full-access, not \"{asked}\"."
+            ))
+        })?;
+        if !level.above(default) {
+            return Ok((level, None));
+        }
+        let quote = args
+            .level_quote
+            .as_deref()
+            .map(str::trim)
+            .filter(|q| !q.is_empty());
+        let Some(quote) = quote else {
+            return Err(refuse(format!(
+                "Only your owner chooses a plan's permission level. Propose it without level (it \
+                 runs at {}, the workspace's), or add level_quote: your owner's own words in this \
+                 chat asking for {}, copied exactly.",
+                default.label(),
+                level.label()
+            )));
+        };
+        if quote.chars().count() > p::LEVEL_QUOTE_MAX {
+            return Err(refuse(format!(
+                "Keep level_quote under {} characters: the words that ask for the level.",
+                p::LEVEL_QUOTE_MAX
+            )));
+        }
+        if !self.inner.doc_host.owner_quoted(&chat.id, quote) {
+            return Err(refuse(format!(
+                "\"{quote}\" isn't in what your owner wrote in this chat, word for word. Quote \
+                 the words where they ask for {}, or propose the plan without level (it runs at \
+                 {}).",
+                level.label(),
+                default.label()
+            )));
+        }
+        Ok((level, Some(quote.to_string())))
     }
 
     /// The owner's newest message in the bot chat: the instruction a plan
@@ -1006,6 +1121,10 @@ impl Bots {
             }
             _ => out.push(format!("Time limit {}", p::describe_minutes(limit))),
         }
+        out.push(format!(
+            "Permission level: {} (only your owner changes it)",
+            work.effective_level().label()
+        ));
         if !work.coordinator_choice.is_empty() {
             out.push(format!(
                 "Coordinating session: {}",
@@ -1459,8 +1578,13 @@ impl Bots {
         // This call's choice, else the step's, else the workspace's for
         // sessions, else the workspace chat's own config.
         let choice = choice.or(&step.session_choice).or(&view.bot.session_choice);
+        // The level the owner gave the plan as it is now (it may have changed
+        // since this call read the row); never one the agent asks for.
+        let level = ws
+            .record::<BotWork>(p::KIND_BOT_WORK, &work.id)
+            .map_or_else(|| work.effective_level(), |w| w.effective_level());
         let mut config = ChatConfig {
-            sandbox: SandboxLevel::WorkspaceWrite,
+            sandbox: level,
             ..bot_config
         };
         choice.apply(&mut config);
@@ -1472,6 +1596,11 @@ impl Bots {
             Some(config.clone()),
             Some(cwd.clone()),
         )?;
+        // Signed, so a host under "Only paired devices" runs it at the
+        // plan's level rather than the row's capped one.
+        self.inner
+            .doc_host
+            .record_chat_launch(&session_id, false, true, false);
         ws.rename_chat(&session_id, &title)?;
         // The session is this workspace's: listed there, not among the
         // owner's own sessions.
@@ -1610,14 +1739,21 @@ impl Bots {
                         lock(&self.inner.work.asked).remove(&key);
                     }
                 }
-                return Ok(render_wait(
+                let mut out = render_wait(
                     &session.id,
                     title(&session),
                     &state,
                     last_answer(&entries).as_deref(),
                     true,
                     read_before,
-                ));
+                );
+                if matches!(state, SessionState::Asking { .. })
+                    && let Some(row) = &row
+                    && !self.inner.workspace.device_online(&row.device_id)
+                {
+                    out.push_str(OFFLINE_ASK);
+                }
+                return Ok(out);
             }
             tokio::select! {
                 () = cancelled.cancelled() => {}
@@ -2017,6 +2153,8 @@ mod state_tests {
             throughput: None,
             recovery: None,
             progress: None,
+            notice: None,
+            asking: None,
         }
     }
 
@@ -2119,6 +2257,66 @@ mod state_tests {
                 },
             ],
         )]
+    }
+
+    /// plan-asks e1: a run died under its question, the row is Idle, and the
+    /// question is still open (on the row and in the doc): Asking, not
+    /// Finished. Without `asking` an Idle row stays Finished (old hosts).
+    #[test]
+    fn an_idle_row_with_an_open_question_is_asking() {
+        let issued = Commands {
+            latest: Some(10_000),
+            any: true,
+            ..Default::default()
+        };
+        let mut idle = row(SessionStatus::Idle, 11_000);
+        let entries = asking(true);
+        assert_eq!(
+            session_state(Some(&idle), &issued, &entries, 12_000),
+            SessionState::Finished,
+            "an old host's idle row"
+        );
+        idle.asking = Some(p::SessionAsk {
+            request_id: "req-1".into(),
+            asked_at: 10_500,
+            permission: Some(PermissionPromptKind::Escalate),
+            asked_by: None,
+            from_chat_id: None,
+        });
+        assert!(matches!(
+            session_state(Some(&idle), &issued, &entries, 12_000),
+            SessionState::Asking { request_id, .. } if request_id == "req-1"
+        ));
+        let answered = Commands {
+            answered: ["req-1".to_string()].into_iter().collect(),
+            ..issued_clone(&issued)
+        };
+        assert_eq!(
+            session_state(Some(&idle), &answered, &entries, 12_000),
+            SessionState::Working,
+            "answered; the fallback turn hasn't started yet"
+        );
+    }
+
+    #[test]
+    fn steered_sessions_are_recorded_once_and_bounded() {
+        let mut work: BotWork = serde_json::from_value(serde_json::json!({
+            "id": "w", "botId": "b", "title": "Plan", "chatId": "c", "createdAt": 0
+        }))
+        .unwrap();
+        record_steered(&mut work, "x");
+        record_steered(&mut work, "x");
+        assert_eq!(work.steered, ["x"]);
+        for i in 0..p::STEERED_MAX {
+            record_steered(&mut work, &format!("s{i}"));
+        }
+        assert_eq!(work.steered.len(), p::STEERED_MAX);
+        assert_eq!(work.steered.first().map(String::as_str), Some("s0"));
+        assert!(work.plan_chat_ids().contains(&"s0"));
+        assert!(
+            work.session_ids().next().is_none(),
+            "steering never makes it the plan's own"
+        );
     }
 
     #[test]

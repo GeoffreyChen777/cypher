@@ -16,6 +16,7 @@ extension DemoDataset {
         guard botRecords.work[ix].awaitingApproval else { throw BotActionError.alreadyDecided }
         let now = nowMs()
         botRecords.work[ix].decision = PlanDecision(approve: approve, at: now)
+        if approve { botRecords.work[ix].level = botRecords.work[ix].effectiveLevel.sandbox }
         let work = botRecords.work[ix]
         logActivity(
             work.botId, approve ? .planApproved : .planCancelled,
@@ -25,6 +26,7 @@ extension DemoDataset {
             if approve {
                 demo.botRecords.work[ix].state = .running
                 demo.botRecords.work[ix].startedAt = nowMs()
+                demo.botRecords.work[ix].appliedLevel = demo.botRecords.work[ix].effectiveLevel.sandbox
                 if !demo.botRecords.work[ix].steps.isEmpty {
                     demo.botRecords.work[ix].steps[0].state = .running
                     demo.botRecords.work[ix].steps[0].startedAt = nowMs()
@@ -33,6 +35,30 @@ extension DemoDataset {
                 demo.botRecords.work[ix].state = .cancelled
                 demo.botRecords.work[ix].endedAt = nowMs()
             }
+        }
+    }
+
+    func setWorkLevel(workId: String, level: String) async throws {
+        let ix = try index(of: workId, in: \.work, what: "plan")
+        guard botRecords.work[ix].isLive else {
+            throw BotActionError("Only a proposed or running plan's permission level can change.")
+        }
+        guard let chosen = PermissionLevel.all.first(where: { $0.sandbox == level }) else {
+            throw BotActionError("That isn't a permission level.")
+        }
+        let from = botRecords.work[ix].effectiveLevel
+        botRecords.work[ix].level = chosen.sandbox
+        guard botRecords.work[ix].state == .running, chosen != from else { return }
+        // The host gives it to the plan's sessions, and says so.
+        hostLater { demo in
+            guard let ix = demo.botRecords.work.firstIndex(where: { $0.id == workId }),
+                demo.botRecords.work[ix].state == .running
+            else { return }
+            demo.botRecords.work[ix].appliedLevel = demo.botRecords.work[ix].effectiveLevel.sandbox
+            let work = demo.botRecords.work[ix]
+            demo.logActivity(
+                work.botId, .planLevelChanged,
+                "Changed “\(work.title)” from \(from.label) to \(work.effectiveLevel.label)", workId: workId)
         }
     }
 

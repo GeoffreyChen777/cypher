@@ -34,8 +34,8 @@ use cypher_harness::{
 };
 use cypher_proto::{
     AgentEvent, AnsweredModel, ChatConfig, ContextUsage, DoneStatus, HarnessId, ReasoningLevel,
-    RunRequest, SandboxLevel, Session, SessionStatus, SubagentRun, SubagentRunStatus, Throughput,
-    UserInputAnswer, UserInputQuestion,
+    RunRequest, SandboxLevel, Session, SessionAsk, SessionStatus, SubagentRun, SubagentRunStatus,
+    Throughput, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::EngineError;
@@ -47,6 +47,7 @@ use crate::util::{new_id, now_ms};
 
 use crate::util::lock;
 
+mod live_level;
 mod recovery;
 mod run_task;
 mod steer;
@@ -179,6 +180,12 @@ struct Inner {
     /// Root chats showing as awaiting input for a forwarded question, with
     /// the status their own run last set (see [`Inner::set_status`]).
     held_statuses: Mutex<HashMap<String, SessionStatus>>,
+    /// Questions open in each chat, oldest first: its own run's input
+    /// requests and the subagent questions mirrored into it. The newest is
+    /// the row's [`Session::asking`] (docs/design/plan-asks.md). Host
+    /// memory; boot recovery rebuilds it from the docs
+    /// ([`SessionsEngine::recover_open_questions`]).
+    open_asks: Mutex<HashMap<String, Vec<SessionAsk>>>,
     /// chat_id → journal seq of the newest terminal `Done` published —
     /// context recovery keys its verdict on a round by it.
     done_seqs: Mutex<HashMap<String, u64>>,
@@ -274,6 +281,15 @@ fn is_active(status: SessionStatus) -> bool {
 /// How many child chats up [`Inner::forward_input`] looks for the root.
 const MAX_FORWARD_DEPTH: usize = 8;
 
+/// What a question's permission prompt asks to do, when it is one.
+pub(crate) fn ask_permission(
+    questions: &[UserInputQuestion],
+) -> Option<cypher_proto::PermissionPromptKind> {
+    questions
+        .iter()
+        .find_map(|q| q.permission.as_ref().map(|p| p.kind))
+}
+
 /// A child chat's question mirrored into its root chat by
 /// [`Inner::forward_input`]. Retired when the child's own question settles —
 /// answered (here or in the child chat), withdrawn, or dropped with its run.
@@ -363,6 +379,7 @@ impl SessionsEngine {
                 spent_child_channels: Mutex::new(HashMap::new()),
                 forwarded: Mutex::new(HashMap::new()),
                 held_statuses: Mutex::new(HashMap::new()),
+                open_asks: Mutex::new(HashMap::new()),
                 done_seqs: Mutex::new(HashMap::new()),
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
@@ -814,19 +831,9 @@ impl SessionsEngine {
         // The chat's permission level is its launch config's (the row's, or
         // under "Only paired devices" its signed record's), whatever request
         // this turn was rebuilt from (a remembered one predates a change).
-        if let Some(config) = self
-            .inner
-            .workspace()
-            .and_then(|ws| ws.launch_config(chat_id))
-        {
-            request.sandbox = config.sandbox;
-        }
         // A bot thread's level is the engine's, never the row's: any owner
         // device may write the row (docs/design/agent-bots.md §4.4).
-        if let Some(ws) = self.inner.workspace()
-            && let Ok(Some(chat)) = ws.chat(chat_id)
-            && let Some(level) = crate::bots::profile::run_sandbox(&ws, &chat)
-        {
+        if let Some(level) = self.run_level(chat_id) {
             request.sandbox = level;
         }
         // A parked process launched with other model settings or another
@@ -1193,6 +1200,13 @@ impl SessionsEngine {
         self.inner.set_status(chat_id, status, fresh_start);
     }
 
+    /// A question open in `chat_id`'s doc was closed outside its run (the
+    /// dead-run answer fallback, an orphaned mirror): its row stops asking.
+    pub fn input_closed(&self, chat_id: &str, request_id: &str) {
+        self.inner.close_ask(chat_id, request_id);
+        self.inner.sync_asking(chat_id);
+    }
+
     /// Context recovery's progress on the chat's session row: `Some` while a
     /// recovery is under way (the transcript's recovery spinner), `None` once
     /// the prompt is sent again or the recovery gives up. A chat without a
@@ -1492,6 +1506,8 @@ impl Inner {
                     throughput: None,
                     recovery: None,
                     progress: None,
+                    notice: None,
+                    asking: None,
                 });
             if entry.context_usage == Some(usage) {
                 return;
@@ -1561,6 +1577,36 @@ impl Inner {
         self.publish_session(chat_id, &session);
     }
 
+    /// An extension notice ([`AgentEvent::Notice`]): the chat's latest one
+    /// replaces the one before on its session row, the same notice again
+    /// is dropped (a bridge re-stating its warning must not refresh the
+    /// row or restart the clients' countdown). A registry write, so every
+    /// device's status strip shows it; notices are rare (the Claude
+    /// bridge's warning fires once per 5% step). No row, no notice: a
+    /// running chat always has one.
+    fn set_notice(&self, chat_id: &str, level: cypher_proto::NoticeLevel, text: &str) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.level == level && n.text == text)
+            {
+                return;
+            }
+            entry.notice = Some(cypher_proto::SessionNotice {
+                level,
+                text: text.to_owned(),
+                at: Utc::now(),
+            });
+            entry.clone()
+        };
+        self.publish_session(chat_id, &session);
+    }
+
     fn set_throughput(&self, chat_id: &str, throughput: Option<Throughput>) {
         {
             let mut statuses = lock(&self.statuses);
@@ -1600,6 +1646,8 @@ impl Inner {
                     throughput: None,
                     recovery: None,
                     progress: None,
+                    notice: None,
+                    asking: None,
                 });
             entry.subagents = runs;
             entry.updated_at = now;
@@ -1642,6 +1690,9 @@ impl Inner {
         let run = {
             let mut held = lock(&self.held_statuses);
             if held.contains_key(chat_id) {
+                drop(held);
+                // Another question while held: the row names the newest.
+                self.sync_asking(chat_id);
                 return;
             }
             let run = lock(&self.statuses)
@@ -1667,6 +1718,86 @@ impl Inner {
         self.write_status(chat_id, run, run, Some(is_active(run)), false);
     }
 
+    /// The newest question open in `chat_id` (its row's `asking`).
+    fn newest_ask(&self, chat_id: &str) -> Option<SessionAsk> {
+        lock(&self.open_asks)
+            .get(chat_id)
+            .and_then(|asks| asks.last().cloned())
+    }
+
+    /// Note a question open in `chat_id` (idempotent by request id). The
+    /// row picks it up on its next write: the caller's status write, or
+    /// [`Self::sync_asking`].
+    fn open_ask(&self, chat_id: &str, ask: SessionAsk) {
+        let mut open = lock(&self.open_asks);
+        let asks = open.entry(chat_id.to_string()).or_default();
+        if !asks.iter().any(|a| a.request_id == ask.request_id) {
+            asks.push(ask);
+        }
+    }
+
+    /// The question `request_id` in `chat_id` is answered or withdrawn.
+    fn close_ask(&self, chat_id: &str, request_id: &str) {
+        let mut open = lock(&self.open_asks);
+        if let Some(asks) = open.get_mut(chat_id) {
+            asks.retain(|a| a.request_id != request_id);
+            if asks.is_empty() {
+                open.remove(chat_id);
+            }
+        }
+    }
+
+    /// The chat's own run is over: its own questions died with it (the
+    /// run's settle resolves their parts). Mirrored subagent questions stay.
+    fn close_own_asks(&self, chat_id: &str) {
+        let mut open = lock(&self.open_asks);
+        if let Some(asks) = open.get_mut(chat_id) {
+            asks.retain(|a| a.from_chat_id.is_some());
+            if asks.is_empty() {
+                open.remove(chat_id);
+            }
+        }
+    }
+
+    /// Write the row's `asking` when it differs from the open questions,
+    /// without a status change: a second question while the row already
+    /// awaits input, or one closing under another. A real change, so the
+    /// row is written (and `updated_at` moves) like a transition. A chat
+    /// without a row gets one only when a question is open.
+    fn sync_asking(&self, chat_id: &str) {
+        let asking = self.newest_ask(chat_id);
+        let seed = self.durable_context_usage(chat_id);
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            if !statuses.contains_key(chat_id) && asking.is_none() {
+                return;
+            }
+            let entry = statuses
+                .entry(chat_id.to_string())
+                .or_insert_with(|| Session {
+                    chat_id: chat_id.to_string(),
+                    device_id: self.device_id.clone(),
+                    status: SessionStatus::Idle,
+                    started_at: None,
+                    updated_at: Utc::now(),
+                    subagents: Vec::new(),
+                    context_usage: seed,
+                    throughput: None,
+                    recovery: None,
+                    progress: None,
+                    notice: None,
+                    asking: None,
+                });
+            if entry.asking == asking {
+                return;
+            }
+            entry.asking = asking;
+            entry.updated_at = Utc::now();
+            entry.clone()
+        };
+        self.publish_session(chat_id, &session);
+    }
+
     /// Write and publish a status row. `shown` is what the row says; `run`
     /// (the chat's own run status) decides the turn timer and whether a turn
     /// just settled, against `run_was_active` when the row does not show it.
@@ -1681,6 +1812,7 @@ impl Inner {
         let status = shown;
         let now = Utc::now();
         let seed = self.durable_context_usage(chat_id);
+        let asking = self.newest_ask(chat_id);
         let (session, entered_attention, settled) = {
             let mut statuses = lock(&self.statuses);
             // A run that starts waiting on the user or fails is new activity
@@ -1704,6 +1836,8 @@ impl Inner {
                     throughput: None,
                     recovery: None,
                     progress: None,
+                    notice: None,
+                    asking: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -1714,6 +1848,7 @@ impl Inner {
             let was_active = run_was_active.unwrap_or_else(|| is_active(entry.status));
             entry.status = status;
             entry.updated_at = now;
+            entry.asking = asking;
             // Throughput belongs to one turn, like `started_at`: a settled
             // session must not keep the last tok/s, nor a new turn open with
             // the previous one's token count.
@@ -1722,6 +1857,11 @@ impl Inner {
                     entry.started_at = Some(now);
                     entry.throughput = None;
                     entry.progress = None;
+                    // A notice outlives its turn while it shows; a turn
+                    // starting after it expired drops it from the row.
+                    if entry.notice.as_ref().is_some_and(|n| !n.is_live(now)) {
+                        entry.notice = None;
+                    }
                 }
                 SessionStatus::Working | SessionStatus::AwaitingInput => {}
                 SessionStatus::Idle | SessionStatus::Errored => {
@@ -1914,6 +2054,7 @@ impl Inner {
         }
         let handle = self.doc_host()?.open(&root).ok()?;
         let mirror_id = new_id();
+        let permission = ask_permission(&questions);
         let questions = questions
             .into_iter()
             .map(|question| UserInputQuestion {
@@ -1959,6 +2100,16 @@ impl Inner {
                 root: root.clone(),
                 child: chat_id.to_string(),
                 request_id: request_id.to_string(),
+            },
+        );
+        self.open_ask(
+            &root,
+            SessionAsk {
+                request_id: mirror_id.clone(),
+                asked_at: now_ms(),
+                permission,
+                asked_by: Some(agent.clone()),
+                from_chat_id: Some(chat_id.to_string()),
             },
         );
         self.hold_awaiting_input(&root);
@@ -2008,8 +2159,11 @@ impl Inner {
         {
             tracing::warn!(chat = %from.root, error = %err, "forwarded question resolve failed");
         }
+        self.close_ask(&from.root, mirror_id);
         if last {
             self.release_awaiting_input(&from.root);
+        } else {
+            self.sync_asking(&from.root);
         }
     }
 

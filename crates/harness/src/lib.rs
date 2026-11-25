@@ -244,6 +244,13 @@ pub trait Harness: Send + Sync {
             "Interactive MCP sign-in requires an updated Pi harness.".into(),
         ))
     }
+    /// Tell the running process of `chat_id` its new permission level, in
+    /// place (the process keeps its turn and its conversation). `true` when
+    /// this harness applies a level live; otherwise the engine ends a
+    /// parked process launched at another level before its next turn.
+    fn apply_level(&self, _chat_id: &str, _level: cypher_proto::SandboxLevel) -> bool {
+        false
+    }
     /// Drop cached model/command discovery so the next probe reflects a
     /// changed agent config (Pi package enablement). No-op for harnesses
     /// without a cache.
