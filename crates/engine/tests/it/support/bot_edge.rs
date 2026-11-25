@@ -28,6 +28,10 @@ struct Hub {
     next: u64,
     /// Every call, as `user method room`.
     calls: Vec<String>,
+    /// Inbox pages say `push`, as the current Worker's do.
+    push: bool,
+    /// Nudges go missing (a host socket that died unseen).
+    lose_nudges: bool,
 }
 
 struct Room {
@@ -106,6 +110,40 @@ impl FakeHub {
         self.state.lock().unwrap().calls.clone()
     }
 
+    /// Answer inbox pulls with `push` (the current Worker) or without it (an
+    /// older one).
+    pub fn set_push(&self, push: bool) {
+        self.state.lock().unwrap().push = push;
+    }
+
+    /// Drop every nudge from now on, or deliver them again.
+    pub fn lose_nudges(&self, lose: bool) {
+        self.state.lock().unwrap().lose_nudges = lose;
+    }
+
+    /// How many times `room`'s inbox was pulled.
+    pub fn inbox_pulls(&self, room: &str) -> usize {
+        let suffix = format!(" inbox {room}");
+        self.state
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|c| c.ends_with(&suffix))
+            .count()
+    }
+
+    /// The room of the bot published as `name`.
+    pub fn room_named(&self, name: &str) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .rooms
+            .iter()
+            .find(|(_, r)| r.profile.name == name)
+            .map(|(id, _)| id.clone())
+    }
+
     /// The published profile of `room`.
     pub fn profile(&self, room: &str) -> Option<PublishRequest> {
         self.state
@@ -149,6 +187,9 @@ impl Hub {
 
     /// The engine to nudge for `room`, when its host device is its owner's.
     fn nudge_for(&self, room: &str) -> Vec<(String, Bots)> {
+        if self.lose_nudges {
+            return Vec::new();
+        }
         let Some(r) = self.rooms.get(room) else {
             return Vec::new();
         };
@@ -292,7 +333,8 @@ impl BotEdge for FakeEdge {
                 }
             });
         }
-        Ok(InboxPage { entries })
+        let push = hub.push;
+        Ok(InboxPage { entries, push })
     }
 
     async fn create_invite(

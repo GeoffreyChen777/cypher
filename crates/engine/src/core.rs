@@ -453,9 +453,12 @@ impl EngineCore {
     pub fn start_host_relay(&self, edge_url: &str) -> cypher_rpc::HostRelay {
         let auth = self.auth();
         let bots = self.bots.clone();
+        let joined = self.bots.clone();
         let mut config =
             cypher_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth))
-                .with_bots_nudge(Arc::new(move |room: String| bots.bots_nudged(room)));
+                .with_bots_nudge(Arc::new(move |room: String| bots.bots_nudged(room)))
+                // A nudge lost while the socket was away is found on the join.
+                .with_on_join(Arc::new(move || joined.host_relay_joined()));
         if let Some(trust) = self.trust() {
             config = config.with_trust(Arc::new(trust));
         }
