@@ -358,7 +358,8 @@ final class WorkspaceBrowserSession {
             .init(name: "diagram.svg", isDir: false), .init(name: "icon.png", isDir: false),
             .init(name: "latency.csv", isDir: false), .init(name: "regions.tsv", isDir: false),
             .init(name: "report.pdf", isDir: false), .init(name: "demo.mp4", isDir: false),
-            .init(name: "prototype.html", isDir: false),
+            .init(name: "prototype.html", isDir: false), .init(name: "screenshot.png", isDir: false),
+            .init(name: "banner.png", isDir: false),
         ],
     ]
 
@@ -407,11 +408,14 @@ final class WorkspaceBrowserSession {
         }
     }
 
-    /// The demo checkout's binary files: a small generated PNG, a two-page
-    /// PDF drawn here and the bundled three-second clip.
+    /// The demo checkout's binary files: small generated PNGs (an icon, a
+    /// phone screenshot, a wide banner), a five-page PDF drawn here and the
+    /// bundled three-second clip.
     static func demoBytes(_ path: String) -> Data? {
         switch path {
         case "notes/report.pdf": return DemoDataset.reportPDF()
+        case "notes/screenshot.png": return demoScreenshot()
+        case "notes/banner.png": return demoBanner()
         case "notes/demo.mp4":
             return Bundle.main.url(forResource: "demo-clip", withExtension: "mp4").flatMap { try? Data(contentsOf: $0) }
         default: break
@@ -425,6 +429,57 @@ final class WorkspaceBrowserSession {
             UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: 96, height: 96), cornerRadius: 22).fill()
             UIColor.white.setFill()
             UIBezierPath(ovalIn: CGRect(x: 28, y: 28, width: 40, height: 40)).fill()
+        }
+    }
+
+    /// `notes/screenshot.png`: a 390 × 844 phone screen (taller than 4:5): a
+    /// title, list rows, and a tab bar at the bottom a cropped preview cuts.
+    private static func demoScreenshot() -> Data {
+        let size = CGSize(width: 390, height: 844)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: size, format: format).pngData { _ in
+            UIColor(white: 0.97, alpha: 1).setFill()
+            UIRectFill(CGRect(origin: .zero, size: size))
+            let title: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 32, weight: .bold), .foregroundColor: UIColor.black,
+            ]
+            let row: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 17), .foregroundColor: UIColor.black,
+            ]
+            ("9:41" as NSString).draw(at: CGPoint(x: 32, y: 16), withAttributes: row)
+            ("Regions" as NSString).draw(at: CGPoint(x: 20, y: 96), withAttributes: title)
+            let colors: [UIColor] = [.systemGreen, .systemGreen, .systemOrange, .systemGreen, .systemBlue]
+            for (index, name) in ["eu-west", "us-east", "ap-south", "us-west", "sa-east"].enumerated() {
+                let y = 160 + CGFloat(index) * 64
+                UIColor.white.setFill()
+                UIBezierPath(roundedRect: CGRect(x: 16, y: y, width: 358, height: 56), cornerRadius: 12).fill()
+                colors[index].setFill()
+                UIBezierPath(ovalIn: CGRect(x: 32, y: y + 18, width: 20, height: 20)).fill()
+                (name as NSString).draw(at: CGPoint(x: 66, y: y + 17), withAttributes: row)
+            }
+            UIColor(white: 0.9, alpha: 1).setFill()
+            UIRectFill(CGRect(x: 0, y: 760, width: 390, height: 84))
+            ("Tab bar (cropped off in the preview)" as NSString).draw(
+                at: CGPoint(x: 52, y: 786), withAttributes: row)
+        }
+    }
+
+    /// `notes/banner.png`: a 1200 × 120 strip (10:1).
+    private static func demoBanner() -> Data {
+        let size = CGSize(width: 1200, height: 120)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: size, format: format).pngData { context in
+            let colors = [UIColor.systemIndigo.cgColor, UIColor.systemTeal.cgColor] as CFArray
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: nil) {
+                context.cgContext.drawLinearGradient(
+                    gradient, start: .zero, end: CGPoint(x: size.width, y: 0), options: [])
+            }
+            let text: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 56, weight: .heavy), .foregroundColor: UIColor.white,
+            ]
+            ("Cypher 0.4.8" as NSString).draw(at: CGPoint(x: 40, y: 24), withAttributes: text)
         }
     }
 

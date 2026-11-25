@@ -1,10 +1,10 @@
 // Loading file previews (FilePreview.swift): the file is read like a chat
 // image (ImageLoader), from the chat's folder and then each root it may
 // read on its host, through the Files RPCs, and stops at its kind's cap. A
-// table reads only its head; a PDF shows its first page (PDFKit) and a
-// video one frame (AVFoundation), both from a copy in the app's caches so
-// QuickLook and the player can open it. Cached by chat and source, like
-// the desktop's file_card store.
+// table reads only its head; a PDF shows its first pages (PDFKit, drawn for
+// the column by PDFPageImages) and a video one frame (AVFoundation), both
+// from a copy in the app's caches so QuickLook and the player can open it.
+// Cached by chat and source, like the desktop's file_card store.
 
 import AVFoundation
 import PDFKit
@@ -14,8 +14,11 @@ import UIKit
 final class LoadedFilePreview: @unchecked Sendable {
     enum Body {
         case table(FilePreview.Table)
-        /// A PDF's first page or a video's frame.
-        case thumb(UIImage)
+        /// A video's frame.
+        case frame(UIImage)
+        /// A PDF's first pages (`PreviewSize.pdfPages` at most): each one's
+        /// size in points, drawn for the column from `file`.
+        case pages([CGSize])
         /// An html or svg page: its `<title>` and source (the artifact viewer).
         case page(title: String?, code: String)
         /// Only the name and size: a video too large to fetch for its frame
@@ -52,7 +55,7 @@ final class LoadedFilePreview: @unchecked Sendable {
         switch body {
         case .table(let table): return table.countLabel
         case .page: return kind == .svg ? "SVG image" : "HTML page"
-        case .thumb, .plain:
+        case .frame, .pages, .plain:
             var parts: [String] = []
             if let pages { parts.append(pages == 1 ? "1 page" : "\(pages) pages") }
             if let duration, duration.isFinite, duration > 0 { parts.append(Self.clock(duration)) }
@@ -114,8 +117,8 @@ final class FilePreviewLoader {
     /// file comes over the relay); a larger one shows its name and size and
     /// is fetched when tapped.
     static let videoFrameBytes: UInt64 = 24 * 1024 * 1024
-    /// The pixel size a page or frame thumbnail is drawn at, at most.
-    nonisolated static let thumbPixels: CGFloat = 1080
+    /// The pixel size a video frame is drawn at, at most.
+    nonisolated static let thumbPixels: CGFloat = 1440
 
     private let ready = NSCache<NSString, LoadedFilePreview>()
     private var failures: [String: FilePreviewError] = [:]
@@ -246,15 +249,17 @@ final class FilePreviewLoader {
             return .success(
                 LoadedFilePreview(kind: kind, name: name, size: size, body: .page(title: title, code: code)))
         case .pdf:
-            guard let document = PDFDocument(data: data), let page = document.page(at: 0) else {
+            guard let document = PDFDocument(data: data), document.pageCount > 0 else {
                 return .failure(.unreadable)
             }
             let file = copy(data, name: name)
-            let image = pdfThumbnail(page)
+            let shown = PreviewSize.pdfPages(document.pageCount).shown
+            let pages = (0..<shown).compactMap { document.page(at: $0).map(PDFPageImages.size) }
+                .filter { $0.width > 0 && $0.height > 0 }
             return .success(
                 LoadedFilePreview(
-                    kind: kind, name: name, size: size, body: image.map { .thumb($0) } ?? .plain, file: file,
-                    pages: document.pageCount))
+                    kind: kind, name: name, size: size, body: file != nil && !pages.isEmpty ? .pages(pages) : .plain,
+                    file: file, pages: document.pageCount))
         case .video:
             guard let file = copy(data, name: name) else { return .failure(.failed("Couldn't keep a copy to play")) }
             let asset = AVURLAsset(url: file)
@@ -269,28 +274,8 @@ final class FilePreviewLoader {
             let frame = try? await generator.image(at: at).image
             return .success(
                 LoadedFilePreview(
-                    kind: kind, name: name, size: size, body: frame.map { .thumb(UIImage(cgImage: $0)) } ?? .plain,
+                    kind: kind, name: name, size: size, body: frame.map { .frame(UIImage(cgImage: $0)) } ?? .plain,
                     file: file, duration: duration))
-        }
-    }
-
-    /// A PDF page drawn on white, at most `thumbPixels` on its longer side.
-    nonisolated static func pdfThumbnail(_ page: PDFPage) -> UIImage? {
-        let bounds = page.bounds(for: .mediaBox)
-        guard bounds.width > 0, bounds.height > 0 else { return nil }
-        let scale = thumbPixels / max(bounds.width, bounds.height)
-        let size = CGSize(width: (bounds.width * scale).rounded(), height: (bounds.height * scale).rounded())
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        format.opaque = true
-        return UIGraphicsImageRenderer(size: size, format: format).image { context in
-            UIColor.white.setFill()
-            context.fill(CGRect(origin: .zero, size: size))
-            let cg = context.cgContext
-            cg.translateBy(x: 0, y: size.height)
-            cg.scaleBy(x: scale, y: -scale)
-            cg.translateBy(x: -bounds.minX, y: -bounds.minY)
-            page.draw(with: .mediaBox, to: cg)
         }
     }
 
@@ -307,6 +292,83 @@ final class FilePreviewLoader {
             return url
         } catch {
             return nil
+        }
+    }
+}
+
+/// A PDF's shown pages drawn on white for a column: `pixelWidth` wide each,
+/// at its own aspect. The widest drawing of each file is kept, so a row
+/// scrolled back in shows it at once; a wider column draws it again.
+@MainActor
+final class PDFPageImages {
+    static let shared = PDFPageImages()
+
+    final class Drawn: @unchecked Sendable {
+        let pixelWidth: CGFloat
+        let images: [UIImage]
+
+        init(pixelWidth: CGFloat, images: [UIImage]) {
+            self.pixelWidth = pixelWidth
+            self.images = images
+        }
+    }
+
+    private let drawn = NSCache<NSURL, Drawn>()
+    private var inFlight: [String: Task<Drawn?, Never>] = [:]
+
+    init() {
+        // Three Letter pages for a phone column are ~35 MB of pixels.
+        drawn.countLimit = 16
+        drawn.totalCostLimit = 160 * 1024 * 1024
+    }
+
+    func cached(_ file: URL) -> Drawn? { drawn.object(forKey: file as NSURL) }
+
+    /// The first `count` pages of `file`, `pixelWidth` wide.
+    func draw(_ file: URL, count: Int, pixelWidth: CGFloat) async -> Drawn? {
+        if let hit = cached(file), hit.pixelWidth >= pixelWidth, hit.images.count >= count { return hit }
+        let key = "\(file.path)\u{1}\(Int(pixelWidth))"
+        let task =
+            inFlight[key]
+            ?? Task.detached(priority: .userInitiated) { () -> Drawn? in
+                guard let document = PDFDocument(url: file) else { return nil }
+                let images = (0..<min(count, document.pageCount)).compactMap {
+                    document.page(at: $0).flatMap { Self.image($0, pixelWidth: pixelWidth) }
+                }
+                return images.isEmpty ? nil : Drawn(pixelWidth: pixelWidth, images: images)
+            }
+        inFlight[key] = task
+        let result = await task.value
+        inFlight[key] = nil
+        if let result, (cached(file)?.pixelWidth ?? 0) < result.pixelWidth {
+            let bytes = result.images.reduce(0) { $0 + Int($1.size.width * $1.size.height * $1.scale * $1.scale) * 4 }
+            drawn.setObject(result, forKey: file as NSURL, cost: bytes)
+        }
+        return result ?? cached(file)
+    }
+
+    /// A page's size in points (its media box).
+    nonisolated static func size(_ page: PDFPage) -> CGSize {
+        page.bounds(for: .mediaBox).size
+    }
+
+    /// A page drawn on white, `pixelWidth` wide at its aspect.
+    nonisolated static func image(_ page: PDFPage, pixelWidth: CGFloat) -> UIImage? {
+        let bounds = page.bounds(for: .mediaBox)
+        guard bounds.width > 0, bounds.height > 0, pixelWidth > 0 else { return nil }
+        let scale = pixelWidth / bounds.width
+        let size = CGSize(width: pixelWidth.rounded(), height: (bounds.height * scale).rounded())
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            let cg = context.cgContext
+            cg.translateBy(x: 0, y: size.height)
+            cg.scaleBy(x: scale, y: -scale)
+            cg.translateBy(x: -bounds.minX, y: -bounds.minY)
+            page.draw(with: .mediaBox, to: cg)
         }
     }
 }

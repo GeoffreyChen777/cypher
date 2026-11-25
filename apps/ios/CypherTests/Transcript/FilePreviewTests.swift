@@ -195,20 +195,24 @@ final class FilePreviewTests: XCTestCase {
     }
 
     @MainActor
-    func testAPDFShowsItsFirstPage() async throws {
+    func testAPDFShowsItsFirstPages() async throws {
         let host = Host()
         host.files["paper.pdf"] = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 200, height: 100)).pdfData {
             $0.beginPage()
             $0.beginPage()
         }
         let loaded = try await FilePreviewLoader().load("paper.pdf", kind: .pdf, files: host.images()).get()
-        guard case .thumb(let image) = loaded.body else { return XCTFail("\(loaded.body)") }
-        XCTAssertEqual(image.size.width / image.size.height, 2, accuracy: 0.01)
+        guard case .pages(let sizes) = loaded.body else { return XCTFail("\(loaded.body)") }
+        XCTAssertEqual(sizes, [CGSize(width: 200, height: 100), CGSize(width: 200, height: 100)])
         XCTAssertEqual(loaded.pages, 2)
         XCTAssertTrue(loaded.detail.hasPrefix("2 pages · "), loaded.detail)
         let file = try XCTUnwrap(loaded.file)
         XCTAssertEqual(file.lastPathComponent, "paper.pdf")
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        // Drawn for a column: each page that many pixels wide at its aspect.
+        let result = await PDFPageImages().draw(file, count: 2, pixelWidth: 768)
+        let drawn = try XCTUnwrap(result)
+        XCTAssertEqual(drawn.images.map(\.size), [CGSize(width: 768, height: 384), CGSize(width: 768, height: 384)])
         host.files["broken.pdf"] = Data("not a pdf".utf8)
         let broken = await FilePreviewLoader().load("broken.pdf", kind: .pdf, files: host.images())
         XCTAssertEqual(broken.failure, .unreadable)
@@ -240,7 +244,7 @@ final class FilePreviewTests: XCTestCase {
         let video = try await FilePreviewLoader.preview(
             kind: .video, name: "demo.mp4", data: clip, size: UInt64(clip.count)
         ).get()
-        guard case .thumb(let frame) = video.body else { return XCTFail("\(video.body)") }
+        guard case .frame(let frame) = video.body else { return XCTFail("\(video.body)") }
         XCTAssertEqual(frame.size.width / frame.size.height, 16 / 9, accuracy: 0.02)
         XCTAssertEqual(try XCTUnwrap(video.duration), 3, accuracy: 0.2)
         XCTAssertTrue(video.detail.hasPrefix("0:03 · "), video.detail)
@@ -248,7 +252,15 @@ final class FilePreviewTests: XCTestCase {
         let report = try await FilePreviewLoader.preview(
             kind: .pdf, name: "report.pdf", data: pdf, size: UInt64(pdf.count)
         ).get()
-        XCTAssertEqual(report.pages, 2)
+        XCTAssertEqual(report.pages, 5)
+        guard case .pages(let sizes) = report.body else { return XCTFail("\(report.body)") }
+        // Three of five shown, the rest counted.
+        XCTAssertEqual(sizes.count, 3)
+        XCTAssertEqual(PreviewSize.morePagesLabel(PreviewSize.pdfPages(5).more), "2 more pages")
+        for path in ["notes/screenshot.png", "notes/banner.png"] {
+            let data = try XCTUnwrap(WorkspaceBrowserSession.demoBytes(path), path)
+            XCTAssertNotNil(UIImage(data: data), path)
+        }
         let csv = FilePreview.parseTable(DemoDataset.latencyCSV, delimiter: ",", complete: true)
         XCTAssertEqual(csv.countLabel, "24 rows")
         XCTAssertEqual(csv.rows.count, 20)

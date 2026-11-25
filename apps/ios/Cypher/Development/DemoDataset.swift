@@ -364,6 +364,12 @@ final class DemoDataset {
 
             `notes/diagram.svg`
 
+            A phone screenshot is taller than 4:5, so it shows its top; a wide banner keeps its shape:
+
+            ![Phone screenshot](notes/screenshot.png)
+
+            ![Release banner](notes/banner.png)
+
             The chip `notes/icon.png` carries a thumbnail. These two can't show: \
             ![Missing shot](shots/missing.png) ![Insecure](http://example.com/a.png)
             """

@@ -1,15 +1,16 @@
 // A chat image: the block preview a reply's `![alt](src)` (or a paragraph of
 // only an image path) renders as, the thumbnails file chips and tool rows
 // show, and the full-screen viewer a tap opens (pinch and double-tap zoom,
-// Share). An SVG has no bitmap here: it shows as a card that opens the page
-// in the artifact viewer's web view.
+// Share). The block is the column's width (PreviewSize.swift: a picture
+// taller than 4:5 is cropped, keeping its top). An SVG is drawn for that
+// width by WebKit (SVGRaster.swift) and opens as a page in the artifact
+// viewer; one that can't be drawn shows as a card that opens it.
 
 import SwiftUI
 import UIKit
 
-/// The block preview: fitted to the column, at most `maxHeight` tall and
-/// never past the image's own size, with rounded corners and its alt text
-/// as a small caption under it.
+/// The block preview: the column's width, at most 4:5 tall (cropped from the
+/// top), with rounded corners and its alt text as a small caption under it.
 struct InlineImageBlock: View {
     let src: String
     let alt: String
@@ -17,7 +18,6 @@ struct InlineImageBlock: View {
     /// in already says it (MDBlock.image).
     var caption = true
 
-    static let maxHeight: CGFloat = 360
     static let radius: CGFloat = 8
 
     @Environment(\.transcriptImageFiles) private var files
@@ -83,37 +83,38 @@ struct InlineImageBlock: View {
     private func loaded(_ image: LoadedImage) -> some View {
         switch image.content {
         case .bitmap(let bitmap):
-            let size = Self.fitted(image.pixelSize)
             Button {
                 viewing = image
             } label: {
-                ImageBitmapView(image: bitmap)
-                    .aspectRatio(size.width / max(size.height, 1), contentMode: .fit)
-                    .frame(maxWidth: size.width)
-                    .clipShape(RoundedRectangle(cornerRadius: Self.radius))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Self.radius)
-                            .strokeBorder(FileReferenceChip.hairline.swiftUI, lineWidth: 1)
-                    )
-                    .contentShape(RoundedRectangle(cornerRadius: Self.radius))
+                PreviewFrame(natural: Self.natural(image.pixelSize, bitmap)) {
+                    ImageBitmapView(image: bitmap)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: Self.radius))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Self.radius)
+                        .strokeBorder(FileReferenceChip.hairline.swiftUI, lineWidth: 1)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: Self.radius))
             }
             .buttonStyle(.plain)
             .accessibilityLabel(alt.isEmpty ? "Image" : alt)
             .accessibilityHint("Opens the image")
             .accessibilityIdentifier("inline-image")
         case .svg(let text):
-            SVGCard(title: name) {
+            SVGPreview(text: text, natural: image.pixelSize, title: alt.isEmpty ? "Image" : alt) {
                 page = ArtifactPage(kind: .svg, title: name, code: text)
+            } fallback: {
+                SVGCard(title: name) {
+                    page = ArtifactPage(kind: .svg, title: name, code: text)
+                }
             }
         }
     }
 
-    /// The largest size at most `maxHeight` tall and its own size wide; the
-    /// column narrows it further, keeping the aspect ratio.
-    static func fitted(_ pixels: CGSize) -> CGSize {
-        guard pixels.width > 0, pixels.height > 0 else { return CGSize(width: maxHeight, height: maxHeight) }
-        let scale = min(1, maxHeight / pixels.height)
-        return CGSize(width: pixels.width * scale, height: pixels.height * scale)
+    /// The size the block lays the image out by: its pixel size, else the
+    /// decoded bitmap's.
+    static func natural(_ pixels: CGSize, _ bitmap: UIImage) -> CGSize {
+        pixels.width > 0 && pixels.height > 0 ? pixels : bitmap.size
     }
 
     private var placeholder: some View {
@@ -124,7 +125,7 @@ struct InlineImageBlock: View {
                     .strokeBorder(FileReferenceChip.hairline.swiftUI, lineWidth: 1)
             )
             .overlay { ProgressView().controlSize(.small) }
-            .frame(maxWidth: 320)
+            .frame(maxWidth: .infinity)
             .frame(height: 140)
             .accessibilityLabel("Loading image")
             .accessibilityIdentifier("inline-image-loading")

@@ -129,7 +129,8 @@ extension DemoDataset {
 
         """
 
-    /// `notes/report.pdf`: two Letter pages drawn here.
+    /// `notes/report.pdf`: five Letter pages drawn here (the preview shows
+    /// three, then "2 more pages").
     static func reportPDF() -> Data {
         let page = CGRect(x: 0, y: 0, width: 612, height: 792)
         let title: [NSAttributedString.Key: Any] = [
@@ -161,11 +162,14 @@ extension DemoDataset {
                 UIColor(white: 0.88, alpha: 1).setFill()
                 UIRectFill(CGRect(x: 56, y: 500 + CGFloat(line) * 22, width: line % 3 == 2 ? 320 : 500, height: 9))
             }
-            context.beginPage()
-            ("Method" as NSString).draw(at: CGPoint(x: 56, y: 64), withAttributes: title)
-            for line in 0..<20 {
-                UIColor(white: 0.88, alpha: 1).setFill()
-                UIRectFill(CGRect(x: 56, y: 112 + CGFloat(line) * 22, width: line % 4 == 3 ? 280 : 500, height: 9))
+            for heading in ["Method", "Appendix A: runs", "Appendix B: regions", "Appendix C: logs"] {
+                context.beginPage()
+                (heading as NSString).draw(at: CGPoint(x: 56, y: 64), withAttributes: title)
+                for line in 0..<20 {
+                    UIColor(white: 0.88, alpha: 1).setFill()
+                    UIRectFill(
+                        CGRect(x: 56, y: 112 + CGFloat(line) * 22, width: line % 4 == 3 ? 280 : 500, height: 9))
+                }
             }
         }
     }

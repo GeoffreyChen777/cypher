@@ -231,9 +231,13 @@ final class ImageSourceTests: XCTestCase {
         XCTAssertEqual(ImageDecoder.svgSize(#"<svg viewBox="0 0 30 10">"#), CGSize(width: 30, height: 10))
     }
 
-    func testTheBlockFitsUnderItsMaximumHeightWithoutUpscaling() {
-        XCTAssertEqual(InlineImageBlock.fitted(CGSize(width: 1600, height: 1200)), CGSize(width: 480, height: 360))
-        XCTAssertEqual(InlineImageBlock.fitted(CGSize(width: 96, height: 96)), CGSize(width: 96, height: 96))
+    /// The block sizes by the image's pixel size (PreviewSizeTests covers the
+    /// rule), else by the decoded bitmap.
+    func testTheBlockSizesByThePixelSize() {
+        let bitmap = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 2)).image { _ in }
+        XCTAssertEqual(
+            InlineImageBlock.natural(CGSize(width: 1600, height: 1200), bitmap), CGSize(width: 1600, height: 1200))
+        XCTAssertEqual(InlineImageBlock.natural(.zero, bitmap), CGSize(width: 4, height: 2))
     }
 
     // MARK: Loading
