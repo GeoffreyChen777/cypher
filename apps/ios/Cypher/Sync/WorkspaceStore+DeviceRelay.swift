@@ -58,7 +58,10 @@ extension WorkspaceStore {
         params: [String: Any]
     ) async throws -> T {
         guard
-            ["ListWorkspaceFiles", "ReadWorkspaceFile", "ReadWorkspaceFileChunk", "GetCheckoutDiff"].contains(method)
+            [
+                "ListWorkspaceFiles", "ReadWorkspaceFile", "ReadWorkspaceFileChunk", "GetCheckoutDiff",
+                "ListChatFileRoots",
+            ].contains(method)
         else {
             throw RelayError.notConnected
         }

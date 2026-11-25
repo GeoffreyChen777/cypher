@@ -517,6 +517,7 @@ struct SessionView: View {
             .environment(\.openWorkspace, chat.map { _ in { workspaceDestination = $0 } })
             .environment(\.fileReferenceContext, chat.map(referenceContext))
             .environment(\.fileReferenceSnippet, chat.map(referenceSnippet))
+            .environment(\.transcriptImageFiles, chat.map(imageFiles))
             .confirmationDialog(
                 "Restart from here?",
                 isPresented: Binding(
@@ -707,6 +708,17 @@ struct SessionView: View {
         { [model] reference in
             try await WorkspaceBrowserSession(model: model, chat: chat).snippet(reference)
         }
+    }
+
+    /// Where the transcript's images read local files: this chat's folders
+    /// on its host.
+    private func imageFiles(_ chat: Chat) -> TranscriptImageFiles {
+        TranscriptImageFiles(
+            scope: "\(chat.deviceId)\u{1}\(chat.id)\u{1}\(chat.cwd ?? "")",
+            context: { [model] in await WorkspaceBrowserSession(model: model, chat: chat).imageContext() },
+            read: { [model] candidate in
+                try await WorkspaceBrowserSession(model: model, chat: chat).imageBytes(candidate)
+            })
     }
 
     /// Fork and Side Chat on a selection — only what this session can do

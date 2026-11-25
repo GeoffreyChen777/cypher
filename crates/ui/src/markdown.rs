@@ -17,7 +17,14 @@
 pub mod artifact;
 pub mod code_ref;
 pub mod diff_fence;
+// The preview blocks that use these rules are still being built.
+pub mod file_card;
+pub mod file_preview;
+pub mod file_thumb;
 pub mod find;
+pub mod git_ref;
+pub mod image;
+pub mod image_source;
 pub mod justified;
 pub mod math;
 pub mod mend;

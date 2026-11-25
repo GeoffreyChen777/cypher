@@ -250,9 +250,11 @@ enum FileReferenceChip {
     /// hairline outline, and the desktop's document glyph, stroked in the
     /// glyph color, `padLeft` in from the box's edge and centered in it.
     /// Edges snap to the device's pixels so the hairline stays crisp.
+    /// A chip naming an image file whose thumbnail `thumbnail` has (by the
+    /// chip's inline code) shows it in the glyph's place.
     nonisolated static func paint(
         _ layout: NSLayoutManager, storage: NSTextStorage, container: NSTextContainer,
-        characters: NSRange, origin: CGPoint
+        characters: NSRange, origin: CGPoint, thumbnail: (String) -> UIImage? = { _ in nil }
     ) {
         let all = NSRange(location: 0, length: storage.length)
         let scale = UIGraphicsGetCurrentContext().map { abs($0.userSpaceToDeviceSpaceTransform.a) } ?? 1
@@ -286,6 +288,12 @@ enum FileReferenceChip {
                 x: snap(origin.x + first.minX + padLeft),
                 y: snap(origin.y + first.midY - side / 2),
                 width: side, height: side)
+            if let raw = storage.attribute(.cypherFileRef, at: chip.location, effectiveRange: nil) as? String,
+                let image = thumbnail(raw)
+            {
+                paintThumbnail(image, in: rect.insetBy(dx: -1, dy: -1))
+                return
+            }
             let path = UIBezierPath(cgPath: LineIconShape(icon: .document).path(in: rect).cgPath)
             path.lineWidth = 1.5 * side / 24
             path.lineCapStyle = .round
@@ -293,6 +301,34 @@ enum FileReferenceChip {
             color.setStroke()
             path.stroke()
         }
+    }
+}
+
+extension FileReferenceChip {
+    /// An image chip's thumbnail: filling a small rounded square, cropped to
+    /// it, with the chip's hairline around it.
+    nonisolated static func paintThumbnail(_ image: UIImage, in rect: CGRect) {
+        guard let context = UIGraphicsGetCurrentContext(), image.size.width > 0, image.size.height > 0 else { return }
+        context.saveGState()
+        let clip = UIBezierPath(roundedRect: rect, cornerRadius: 2.5)
+        clip.addClip()
+        let scale = max(rect.width / image.size.width, rect.height / image.size.height)
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        image.draw(
+            in: CGRect(
+                x: rect.midX - size.width / 2, y: rect.midY - size.height / 2, width: size.width, height: size.height))
+        context.restoreGState()
+        let edge = UIBezierPath(roundedRect: rect.insetBy(dx: 0.25, dy: 0.25), cornerRadius: 2.25)
+        edge.lineWidth = 0.5
+        ink(0.18).setStroke()
+        edge.stroke()
+    }
+
+    /// Whether a chip's inline code names an image file.
+    nonisolated static func namesImage(_ raw: String) -> Bool {
+        guard let path = FileReference.detect(raw)?.path else { return false }
+        if case .local = ImageSource.classify(path, ImageSource.Context(roots: ["/"])) { return true }
+        return false
     }
 }
 

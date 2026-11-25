@@ -33,6 +33,7 @@ mod demos {
 /// Repositories, worktrees, diffs and terminals.
 mod repos {
     mod diff_sync_churn;
+    mod git_ref_previews;
     mod repos_diffs_terminals;
     mod turn_changes;
     mod worktree_on_run;

@@ -60,7 +60,10 @@ pub use rows::*;
 mod chips;
 pub use chips::*;
 mod code_ref;
+mod file_previews;
+mod git_refs;
 mod highlight;
+mod images;
 use highlight::*;
 mod artifacts;
 mod attachments;
@@ -332,6 +335,9 @@ pub struct Transcript {
     /// The replies' file-reference chips: the hovered one's preview card
     /// and the resolved files behind it.
     code_refs: code_ref::CodeRefPreview,
+    /// The replies' pull request / issue / commit references: the hovered
+    /// one's card and the lookups behind it.
+    git_refs: git_refs::GitRefCards,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
     /// strip (zeron chat-view.tsx `group-hover`; the rows report hover
     /// themselves). Keyed by ROW so a row→row move within one entry can't
@@ -349,6 +355,8 @@ pub struct Transcript {
     attachment_preview: Option<crate::attachments::PreviewImage>,
     /// Focused while the lightbox is open so Escape reaches it.
     attachment_preview_focus: gpui::FocusHandle,
+    /// The reply image open full-size (click an image block).
+    image_viewer: Option<images::ImageViewer>,
     /// In-flight ReadAttachmentChunk loads, keyed `(deviceId, path)` — one per
     /// source; results land in the global attachment cache.
     attachment_loads: HashMap<(String, String), Task<()>>,
@@ -612,6 +620,7 @@ impl Transcript {
             synced_revision: None,
             rail_hover: None,
             code_refs: Default::default(),
+            git_refs: Default::default(),
             hovered_entry: None,
             copied_code: None,
             copied_clear: None,
@@ -619,6 +628,7 @@ impl Transcript {
             copied_message_clear: None,
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
+            image_viewer: None,
             attachment_loads: HashMap::new(),
             attachment_retries: HashMap::new(),
             blob_details: HashMap::new(),

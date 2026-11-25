@@ -773,6 +773,7 @@ fn every_pi_loads_the_app_extensions() {
         let source = std::fs::read_to_string(rendering).expect("extension written");
         assert!(source.contains("before_agent_start"));
         assert!(source.contains("mermaid fenced block"));
+        assert!(source.contains("![caption](path-or-url)"));
         assert!(explain.ends_with("cypher-explain.ts"), "{args:?}");
         let source = std::fs::read_to_string(explain).expect("extension written");
         assert!(source.contains(r#"registerCommand("explain""#));

@@ -18,6 +18,7 @@ mod bot_records;
 mod bot_wire;
 mod context_recovery;
 mod entities;
+pub mod git_refs;
 mod github;
 mod memory;
 pub mod motion;
@@ -36,6 +37,10 @@ pub use bot_records::*;
 pub use bot_wire::*;
 pub use context_recovery::*;
 pub use entities::*;
+pub use git_refs::{
+    GitCommitPreview, GitRef, GitRefResolution, GitRefUnavailable, GithubChecksState,
+    GithubChecksSummary, GithubIssuePreview, GithubPullPreview, GithubRefState,
+};
 pub use github::*;
 pub use memory::*;
 pub use notice::*;

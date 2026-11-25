@@ -29,7 +29,7 @@ pub mod editor;
 pub mod links;
 mod menu;
 mod ops;
-mod preview;
+pub(crate) mod preview;
 pub mod root_picker;
 pub mod roots;
 mod tree;
@@ -134,7 +134,7 @@ pub struct FilesContext {
 }
 
 impl FilesContext {
-    fn params(&self, path: &str) -> serde_json::Map<String, serde_json::Value> {
+    pub(crate) fn params(&self, path: &str) -> serde_json::Map<String, serde_json::Value> {
         let mut params = serde_json::Map::new();
         params.insert("chatId".into(), self.chat_id.clone().into());
         params.insert("cwd".into(), self.cwd.clone().into());

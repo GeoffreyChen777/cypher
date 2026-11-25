@@ -113,6 +113,7 @@ impl MockGithub {
             web_base: self.base.clone(),
             local_fallbacks: false,
             poll_unit: Duration::from_millis(5),
+            preview_timeout: Duration::from_secs(5),
         }
     }
 
@@ -829,3 +830,5 @@ async fn github_live_git_credential_reads_the_api() {
     let user: RestUser = github.get(&token, "/user", &[]).await.expect("GET /user");
     eprintln!("git credential authenticates as {}", user.login);
 }
+
+mod previews;

@@ -857,7 +857,7 @@ impl Shell {
 
     /// A History row click: the commit opens as its own pinned diff tab
     /// (user request).
-    fn add_commit_diff_surface(
+    pub(in crate::shell) fn add_commit_diff_surface(
         &mut self,
         sid: SlotId,
         commit: cypher_proto::GitHistoryCommit,
@@ -1644,7 +1644,7 @@ impl Shell {
 
     /// Open the dock if it is closed (a rail surface or `+` pick shows its
     /// surface straight away).
-    fn ensure_dock_open(&mut self, sid: SlotId, cx: &mut Context<Self>) {
+    pub(in crate::shell) fn ensure_dock_open(&mut self, sid: SlotId, cx: &mut Context<Self>) {
         if self
             .tiles
             .slots

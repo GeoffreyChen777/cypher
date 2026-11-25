@@ -98,6 +98,20 @@ pub enum Block {
         align: Vec<TableAlign>,
     },
     Rule,
+    /// An image ([`super::image_source`]): a Markdown image, set after the
+    /// paragraph it stood in (whose sentence keeps the alt text), or a
+    /// paragraph that was only an image path. `alt` is the caption.
+    Image {
+        src: String,
+        alt: String,
+    },
+    /// A paragraph that was only a path to a file with a preview
+    /// ([`super::file_preview::file_line`]): a table, PDF page, video frame
+    /// or page card ([`super::file_card`]).
+    FilePreview {
+        src: String,
+        kind: super::file_preview::Kind,
+    },
 }
 
 /// What an artifact renders as.
@@ -261,6 +275,7 @@ pub fn parse_full(source: &str) -> BlockTree {
         events: &events,
         ix: 0,
         paren_math: paren_math.as_deref().unwrap_or(&[]),
+        images: Vec::new(),
     };
     let mut blocks = Vec::new();
     while let Some((event, range)) = cur.peek() {
@@ -380,6 +395,9 @@ struct Cursor<'a, 'e> {
     ix: usize,
     /// Offsets of formulas written `\(…\)` ([`rewrite_tex_delimiters`]).
     paren_math: &'a [usize],
+    /// Images met in the inline text since the last block took them:
+    /// `(src, alt)`.
+    images: Vec<(String, String)>,
 }
 
 impl<'a, 'e> Cursor<'a, 'e> {
@@ -452,14 +470,21 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
     };
     match tag {
         Tag::Paragraph => {
-            vec![Block::Paragraph {
-                runs: parse_inline_container(cur, &InlineStyle::default()),
-            }]
+            let taken = cur.images.len();
+            let runs = parse_inline_container(cur, &InlineStyle::default());
+            let images: Vec<(String, String)> = cur.images.drain(taken..).collect();
+            let source = cur.source.get(range).unwrap_or_default();
+            paragraph_blocks(runs, images, source)
         }
-        Tag::Heading { level, .. } => vec![Block::Heading {
-            level: heading_level(level),
-            runs: parse_inline_container(cur, &InlineStyle::default()),
-        }],
+        Tag::Heading { level, .. } => {
+            let taken = cur.images.len();
+            let mut out = vec![Block::Heading {
+                level: heading_level(level),
+                runs: parse_inline_container(cur, &InlineStyle::default()),
+            }];
+            out.extend(image_blocks(cur.images.drain(taken..)));
+            out
+        }
         Tag::CodeBlock(kind) => {
             let closed = match &kind {
                 CodeBlockKind::Fenced(_) => cur.source.get(range).is_some_and(fence_closed),
@@ -539,7 +564,10 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
                     Alignment::None | Alignment::Left => TableAlign::Left,
                 })
                 .collect();
-            vec![parse_table(cur, align)]
+            let taken = cur.images.len();
+            let mut out = vec![parse_table(cur, align)];
+            out.extend(image_blocks(cur.images.drain(taken..)));
+            out
         }
         Tag::HtmlBlock => {
             // Render raw HTML blocks as plain text (zeron's markdown does the same).
@@ -573,6 +601,7 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
 fn parse_block_sequence(cur: &mut Cursor) -> Vec<Block> {
     let mut out: Vec<Block> = Vec::new();
     let mut inline_acc: Vec<InlineRun> = Vec::new();
+    let taken = cur.images.len();
     while let Some(event) = cur.peek_event() {
         match event {
             Event::End(_) => {
@@ -580,27 +609,78 @@ fn parse_block_sequence(cur: &mut Cursor) -> Vec<Block> {
                 break;
             }
             Event::Start(tag) if is_block_tag(tag) => {
-                flush_paragraph(&mut out, &mut inline_acc);
+                flush_paragraph(&mut out, &mut inline_acc, cur, taken);
                 out.extend(parse_started_block(cur));
             }
             Event::Rule => {
-                flush_paragraph(&mut out, &mut inline_acc);
+                flush_paragraph(&mut out, &mut inline_acc, cur, taken);
                 cur.bump();
                 out.push(Block::Rule);
             }
             _ => parse_inline_event(cur, &mut inline_acc, &InlineStyle::default()),
         }
     }
-    flush_paragraph(&mut out, &mut inline_acc);
+    flush_paragraph(&mut out, &mut inline_acc, cur, taken);
     out
 }
 
-fn flush_paragraph(out: &mut Vec<Block>, acc: &mut Vec<InlineRun>) {
-    if !acc.is_empty() {
-        out.push(Block::Paragraph {
-            runs: merge_runs(std::mem::take(acc)),
-        });
+/// A tight list item's bare inline text, as a paragraph (with the images it
+/// held after it).
+fn flush_paragraph(out: &mut Vec<Block>, acc: &mut Vec<InlineRun>, cur: &mut Cursor, taken: usize) {
+    let images: Vec<(String, String)> = cur.images.drain(taken.min(cur.images.len())..).collect();
+    if !acc.is_empty() || !images.is_empty() {
+        let runs = merge_runs(std::mem::take(acc));
+        out.extend(paragraph_blocks(runs, images, ""));
     }
+}
+
+/// A paragraph and the images it held: the paragraph (unless the images
+/// were all it said), then one block per image. A paragraph whose source is
+/// only an image path ([`image_source::image_line`]) is that image.
+///
+/// [`image_source::image_line`]: super::image_source::image_line
+fn paragraph_blocks(
+    runs: Vec<InlineRun>,
+    images: Vec<(String, String)>,
+    source: &str,
+) -> Vec<Block> {
+    if images.is_empty() {
+        if let Some(src) = super::image_source::image_line(source) {
+            return vec![Block::Image {
+                alt: src.clone(),
+                src,
+            }];
+        }
+        if let Some(src) = super::file_preview::file_line(source)
+            && let Some(kind) = super::file_preview::kind(&src)
+        {
+            return vec![Block::FilePreview { src, kind }];
+        }
+        if runs.is_empty() {
+            return Vec::new();
+        }
+        return vec![Block::Paragraph { runs }];
+    }
+    let squeeze = |text: &str| {
+        text.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    let said: String = runs.iter().map(|run| squeeze(&run.text)).collect();
+    let alts: String = images.iter().map(|(_, alt)| squeeze(alt)).collect();
+    let mut out = Vec::new();
+    if said != alts {
+        out.push(Block::Paragraph { runs });
+    }
+    out.extend(image_blocks(images));
+    out
+}
+
+fn image_blocks(images: impl IntoIterator<Item = (String, String)>) -> Vec<Block> {
+    images
+        .into_iter()
+        .map(|(src, alt)| Block::Image { src, alt })
+        .collect()
 }
 
 fn parse_table(cur: &mut Cursor, align: Vec<TableAlign>) -> Block {
@@ -705,6 +785,16 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
                 Tag::Emphasis => inner.italic = true,
                 Tag::Strong => inner.bold = true,
                 Tag::Strikethrough => inner.strikethrough = true,
+                Tag::Image { dest_url, .. } if super::image_source::is_image(&dest_url) => {
+                    // The sentence keeps the alt text, plain; the image
+                    // itself follows the paragraph.
+                    let alt = parse_inline_container(cur, style);
+                    let text: String = alt.iter().map(|run| run.text.as_str()).collect();
+                    cur.images
+                        .push((dest_url.into_string(), text.trim().to_owned()));
+                    runs.extend(alt);
+                    return;
+                }
                 Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
                     inner.link = Some(dest_url.into_string());
                 }
@@ -962,10 +1052,11 @@ impl IncrementalParser {
         // further back (a block's separation from its predecessor is decided
         // by its own already-streamed leading bytes), so two blocks suffice;
         // the parity tests stream corpora to hold this invariant.
-        let boundary = match self.tree.blocks.len() {
-            0 | 1 => 0,
-            n => self.tree.blocks[n - 2].range.start,
-        };
+        // Blocks of one source block (a paragraph and its images) share a
+        // range: count source blocks, not tree blocks.
+        let mut starts = self.tree.blocks.iter().rev().map(|b| b.range.start);
+        let last = starts.next();
+        let boundary = starts.find(|start| Some(*start) != last).unwrap_or(0);
         let boundary = self.source[..boundary]
             .rfind('\n')
             .map(|i| i + 1)
@@ -998,7 +1089,12 @@ impl IncrementalParser {
         // rules and tables have no inline tail to mend.
         if matches!(
             last.block,
-            Block::CodeBlock { .. } | Block::Artifact { .. } | Block::Rule | Block::Table { .. }
+            Block::CodeBlock { .. }
+                | Block::Artifact { .. }
+                | Block::Rule
+                | Block::Table { .. }
+                | Block::Image { .. }
+                | Block::FilePreview { .. }
         ) {
             return;
         }
