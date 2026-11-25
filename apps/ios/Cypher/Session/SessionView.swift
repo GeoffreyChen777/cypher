@@ -518,6 +518,7 @@ struct SessionView: View {
             .environment(\.fileReferenceContext, chat.map(referenceContext))
             .environment(\.fileReferenceSnippet, chat.map(referenceSnippet))
             .environment(\.transcriptImageFiles, chat.map(imageFiles))
+            .environment(\.transcriptGitRefs, chat.flatMap(gitRefs))
             .confirmationDialog(
                 "Restart from here?",
                 isPresented: Binding(
@@ -718,6 +719,22 @@ struct SessionView: View {
             context: { [model] in await WorkspaceBrowserSession(model: model, chat: chat).imageContext() },
             read: { [model] candidate in
                 try await WorkspaceBrowserSession(model: model, chat: chat).imageBytes(candidate)
+            })
+    }
+
+    /// Where a reply's pull request, issue and commit refs resolve: on the
+    /// chat's host, against its git checkout. None for a chat without one,
+    /// whose `#12` or hex word means nothing.
+    private func gitRefs(_ chat: Chat) -> TranscriptGitRefs? {
+        let checkout = chat.branch != nil || chat.checkoutId != nil || model.space(for: chat)?.gitDetected == true
+        guard checkout else { return nil }
+        let demo = model.demo != nil
+        return TranscriptGitRefs(
+            scope: "\(chat.deviceId)\u{1}\(chat.id)",
+            resolve: { [model] ref in
+                if demo { return DemoDataset.gitRefResolution(ref) }
+                guard let workspace = model.workspace else { throw RelayError.notConnected }
+                return try await workspace.resolveGitRef(deviceId: chat.deviceId, chatId: chat.id, ref: ref)
             })
     }
 

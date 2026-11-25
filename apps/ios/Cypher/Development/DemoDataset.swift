@@ -161,6 +161,13 @@ final class DemoDataset {
                 config: claude, lastMessagePreview: "Here is the icon.",
                 lastMessageAt: now - 1_650_000, createdAt: now - 1_750_000,
                 spaceId: cypher.id, lastSeenAt: now - 1_650_000),
+            // Git refs in a reply: PR, issue and commit cards.
+            Chat(
+                id: Self.previewsChatId, deviceId: "dev-mac", title: "Relay work and measurements",
+                archived: false, cwd: cypher.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "PR #71 carries the relay fix.",
+                lastMessageAt: now - 1_550_000, createdAt: now - 1_600_000,
+                spaceId: cypher.id, lastSeenAt: now - 1_550_000),
             // Code in prose: inline code, chips, CJK, a list and a code block.
             codeTypesettingChat(spaceId: cypher.id, cwd: cypher.path, config: claude, now: now),
             // Comments sent with a prompt, over its bubble.
@@ -947,6 +954,8 @@ final class DemoDataset {
             return longToolRuns(now: now)
         case "chat-images":
             return imagesTranscript(now: now)
+        case Self.previewsChatId:
+            return previewsTranscript(now: now)
         case "chat-permissions-story":
             return permissionStory(now: now)
         case "chat-permissions-card":
