@@ -127,6 +127,8 @@ final class SessionStore {
     /// Demo hook: invoked instead of the command plane when offline.
     /// Offline demo turns: the prompt, whether it steers, and the comments it carries.
     @ObservationIgnored var demoResponder: ((String, Bool, [MessageComment]) -> Void)?
+    /// Demo only: an answer was queued (the demo plays the host's side).
+    @ObservationIgnored var demoInputAnswered: ((String) -> Void)?
     /// For a transcript that isn't a synced doc (a side chat, fed through
     /// `setEntries`): sends, stops and answers go straight to the host
     /// instead of the doc's command ledger. Returns whether it was accepted.
@@ -1147,6 +1149,7 @@ final class SessionStore {
         guard let commandId else { return false }
         answeredInputs[requestId] = commandId
         inputAnswerFailure = nil
+        demoInputAnswered?(requestId)
         return true
     }
 

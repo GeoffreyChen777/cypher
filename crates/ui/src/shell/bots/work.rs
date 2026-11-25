@@ -840,10 +840,7 @@ impl Shell {
     ) -> AnyElement {
         let tip = WorkStatusTip::of(work);
         // A running plan parked on a question says so, as its ring does.
-        let asking = phase.running()
-            && work
-                .current_step()
-                .is_some_and(|(_, step)| step.state == StepState::Asking);
+        let asking = phase.running() && work.steps.iter().any(|s| s.state == StepState::Asking);
         let (word, tone) = if asking {
             ("Waiting on you", theme.warning)
         } else {
@@ -1636,6 +1633,7 @@ mod tests {
 
     fn work(id: &str, state: WorkState, at: i64) -> BotWork {
         BotWork {
+            steered: Vec::new(),
             id: id.into(),
             bot_id: "b".into(),
             title: id.into(),

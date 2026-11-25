@@ -69,6 +69,8 @@ pub const PROMPT_MAX: usize = 4_000;
 pub const ANSWER_MAX: usize = 8_000;
 pub const PLAN_STEPS_MAX: usize = 10;
 pub const STEP_SESSIONS_MAX: usize = 8;
+/// Sessions one plan records as steered ([`BotWork::steered`]).
+pub const STEERED_MAX: usize = 16;
 
 /// Limits the host enforces per bot (§6.6), when its [`PlanSettings`]
 /// leave them out.
@@ -497,6 +499,12 @@ pub struct BotWork {
     /// [`PlanResult`](crate::PlanResult)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_rev: Option<String>,
+    /// Host-written: sessions the orchestration steered but didn't start
+    /// (`steer_session` after the owner allowed it), oldest first. Their
+    /// questions are the plan's too ([`Self::plan_chat_ids`]), but steering
+    /// one again still needs the owner: they are not [`Self::session_ids`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steered: Vec<String>,
     /// Owner-written: the permission level the owner chose for the plan, on
     /// its card when approving or at any time while it runs (Mutate
     /// `setBotWorkLevel`). Absent: [`Self::proposed_level`] stands.
@@ -570,6 +578,7 @@ impl BotWork {
         self.summary = clip_opt(&self.summary, DETAIL_MAX);
         self.result = clip_opt(&self.result, RESULT_MAX);
         self.steps.truncate(PLAN_STEPS_MAX);
+        self.steered.truncate(STEERED_MAX);
         for step in &mut self.steps {
             step.clamp();
         }
@@ -696,6 +705,43 @@ impl BotWork {
         self.steps
             .iter()
             .flat_map(|s| s.sessions.iter().map(String::as_str))
+    }
+
+    /// Every chat whose question is the plan's: the sessions it started,
+    /// then the ones it steered, each once. (Child chats under them count
+    /// too; [`crate::view::ChatTree::question`] walks those.)
+    pub fn plan_chat_ids(&self) -> Vec<&str> {
+        let mut seen = std::collections::HashSet::new();
+        self.session_ids()
+            .chain(self.steered.iter().map(String::as_str))
+            .filter(|id| seen.insert(*id))
+            .collect()
+    }
+
+    /// The steps' states with `asking(chat id)` applied: a running step
+    /// whose sessions (or, for the current step, a steered session) wait
+    /// on an answer is Asking, and back to Running once none does. Every
+    /// other state stays. `asking` is the plan-question rule (the chat or a
+    /// child chat under it asks).
+    pub fn settled_steps(&self, asking: impl Fn(&str) -> bool) -> Vec<StepState> {
+        let current = self
+            .steps
+            .iter()
+            .position(|s| matches!(s.state, StepState::Running | StepState::Asking));
+        let steered = self.steered.iter().any(|id| asking(id));
+        self.steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| {
+                let waiting = step.sessions.iter().any(|id| asking(id))
+                    || (steered && current == Some(index));
+                match step.state {
+                    StepState::Running if waiting => StepState::Asking,
+                    StepState::Asking if !waiting => StepState::Running,
+                    other => other,
+                }
+            })
+            .collect()
     }
 
     /// Steps done out of all, for the Work card's bar.
@@ -1711,7 +1757,9 @@ impl BotRecords {
 
     /// What waits on the owner's decision for `bot_id`, oldest first within
     /// each kind and most pressing kind first. `asking(chat id)` says
-    /// whether a session is waiting on an answer. Only decisions: a failed
+    /// whether a session is waiting on an answer: callers pass the
+    /// plan-question rule ([`crate::view::plan_question`]: the chat or a
+    /// child chat under it has an open question). Only decisions: a failed
     /// routine run is state, shown on the routine, not here.
     pub fn needs_you(&self, bot_id: &str, asking: impl Fn(&str) -> bool) -> Vec<NeedsYou> {
         let mut items = Vec::new();
@@ -1732,7 +1780,7 @@ impl BotRecords {
         // whatever its work did since: the work may have ended (or been
         // stopped) while the question stays open.
         for w in &work {
-            for chat_id in w.session_ids() {
+            for chat_id in w.plan_chat_ids() {
                 if asking(chat_id) {
                     items.push(NeedsYou::Asking {
                         chat_id: chat_id.to_string(),
@@ -1927,6 +1975,7 @@ mod tests {
     #[test]
     fn clamping_bounds_every_text() {
         let mut work = BotWork {
+            steered: Vec::new(),
             id: "w".into(),
             bot_id: "b".into(),
             title: "t".repeat(500),
@@ -2198,6 +2247,7 @@ mod tests {
         };
         let q = |max: usize| "\"".repeat(max);
         let ended = |detail: &str| BotWork {
+            steered: Vec::new(),
             id: id.clone(),
             bot_id: id.clone(),
             title: q(TITLE_MAX),
@@ -2316,6 +2366,7 @@ mod tests {
             session_choice: Default::default(),
         };
         let mut work = BotWork {
+            steered: Vec::new(),
             id: "w".into(),
             bot_id: "b".into(),
             title: "t".repeat(TITLE_MAX),
@@ -2368,6 +2419,7 @@ mod tests {
             session_choice: Default::default(),
         };
         let work = |state: WorkState| BotWork {
+            steered: Vec::new(),
             id: "w".into(),
             bot_id: "b".into(),
             title: "w".into(),
@@ -2444,6 +2496,7 @@ mod tests {
             session_choice: Default::default(),
         };
         let work = |id: &str, state: WorkState, sessions: Vec<&str>| BotWork {
+            steered: Vec::new(),
             id: id.into(),
             bot_id: "b".into(),
             title: id.into(),
@@ -2507,6 +2560,143 @@ mod tests {
             ]
         );
         assert_eq!(records.started_by("s1").unwrap().0.id, "run");
+    }
+
+    /// The plan-asks misses (docs/design/plan-asks.md) are gone: a plan's
+    /// question is one open in a step session, a session it steered, or
+    /// any child chat under one, and it does not age out with the row.
+    /// (1) a question in a subagent's child chat under a step session is
+    /// listed under the step session; (2) a step session whose row stopped
+    /// being refreshed (its run ended with a forwarded question held, its
+    /// host offline) is listed, offline when its device is; the step reads
+    /// Asking on the same rule. Every case: `tests/plan_asks_vectors.rs`.
+    #[test]
+    fn plan_questions_outside_fresh_step_rows_are_needs_you() {
+        use crate::view::{ChatLink, ChatTree, PlanQuestion, plan_question};
+        let mut records = BotRecords::default();
+        let work: BotWork = serde_json::from_value(serde_json::json!({
+            "id": "w", "botId": "b", "title": "Plan", "instruction": "",
+            "state": "running", "chatId": "c", "createdAt": 0,
+            "steps": [{ "id": "1", "title": "Step", "state": "running",
+                         "sessions": ["step-session"] }]
+        }))
+        .unwrap();
+        records.work = vec![work];
+        let now = Utc::now();
+        let row = |chat: &str, status, age_ms: i64, asking: bool| crate::Session {
+            chat_id: chat.into(),
+            device_id: "host".into(),
+            status,
+            started_at: None,
+            updated_at: now - Duration::milliseconds(age_ms),
+            subagents: Vec::new(),
+            context_usage: None,
+            throughput: None,
+            recovery: None,
+            progress: None,
+            notice: None,
+            asking: asking.then(|| crate::SessionAsk {
+                request_id: format!("r-{chat}"),
+                asked_at: 0,
+                permission: None,
+                asked_by: None,
+                from_chat_id: None,
+            }),
+        };
+        let tree = ChatTree::new([
+            ChatLink {
+                id: "step-session",
+                parent_chat_id: None,
+                archived: false,
+            },
+            ChatLink {
+                id: "child-of-step-session",
+                parent_chat_id: Some("step-session"),
+                archived: false,
+            },
+        ]);
+        let item = vec![NeedsYou::Asking {
+            chat_id: "step-session".into(),
+            work_id: Some("w".into()),
+        }];
+
+        // (1) The subagent's child chat asks; the step session itself not.
+        let rows = [
+            row("step-session", crate::SessionStatus::Idle, 600_000, false),
+            row(
+                "child-of-step-session",
+                crate::SessionStatus::AwaitingInput,
+                5_000,
+                true,
+            ),
+        ];
+        let q = |chat: &str| {
+            plan_question(
+                &tree,
+                chat,
+                |id| rows.iter().find(|r| r.chat_id == id),
+                |_| true,
+                now,
+            )
+        };
+        assert_eq!(records.needs_you("b", |c| q(c).is_some()), item);
+        assert_eq!(
+            q("step-session"),
+            Some(PlanQuestion {
+                chat_id: "child-of-step-session".into(),
+                offline: false
+            })
+        );
+        assert_eq!(
+            records.work[0].settled_steps(|c| q(c).is_some()),
+            vec![StepState::Asking]
+        );
+
+        // (2) The step session's row is 46 s old (and its device offline);
+        // its question is still open.
+        let rows = [row(
+            "step-session",
+            crate::SessionStatus::AwaitingInput,
+            46_000,
+            true,
+        )];
+        let q = |chat: &str| {
+            plan_question(
+                &tree,
+                chat,
+                |id| rows.iter().find(|r| r.chat_id == id),
+                |_| false,
+                now,
+            )
+        };
+        assert_eq!(records.needs_you("b", |c| q(c).is_some()), item);
+        assert!(q("step-session").unwrap().offline);
+    }
+
+    #[test]
+    fn steered_sessions_are_plan_chats_but_not_started_ones() {
+        let work: BotWork = serde_json::from_value(serde_json::json!({
+            "id": "w", "botId": "b", "title": "Plan", "chatId": "c", "createdAt": 0,
+            "state": "running", "steered": ["x", "s1"],
+            "steps": [
+                { "id": "1", "title": "A", "state": "done", "sessions": ["s1"] },
+                { "id": "2", "title": "B", "state": "running" },
+                { "id": "3", "title": "C", "state": "pending" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(work.plan_chat_ids(), vec!["s1", "x"]);
+        assert_eq!(work.session_ids().collect::<Vec<_>>(), vec!["s1"]);
+        assert_eq!(
+            work.settled_steps(|c| c == "x"),
+            vec![StepState::Done, StepState::Asking, StepState::Pending]
+        );
+        assert_eq!(
+            work.settled_steps(|_| false),
+            vec![StepState::Done, StepState::Running, StepState::Pending]
+        );
+        let back: BotWork = serde_json::from_value(serde_json::to_value(&work).unwrap()).unwrap();
+        assert_eq!(back.steered, work.steered);
     }
 
     #[test]

@@ -136,9 +136,10 @@ struct ProgressRing: View {
 // MARK: - Marks
 
 extension BotWork {
-    /// A running plan parked on a question.
+    /// A running plan parked on a question: any of its steps asks (a
+    /// session it started or steered, or a child chat under one; work.rs).
     var asking: Bool {
-        phase == .running && currentStep?.step.state == .asking
+        phase == .running && steps.contains { $0.state == .asking }
     }
 
     /// Its ring while it is under way; nil once it ended or while it

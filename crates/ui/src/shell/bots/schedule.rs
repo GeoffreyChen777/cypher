@@ -833,7 +833,12 @@ impl Shell {
                 .last
                 .as_ref()
                 .and_then(|run| run.chat_id.as_deref())
-                .is_some_and(|chat_id| super::chat_asking(self.state.read(cx), chat_id, Utc::now()))
+                .is_some_and(|chat_id| {
+                    self.state
+                        .read(cx)
+                        .plan_question(chat_id, Utc::now())
+                        .is_some()
+                })
     }
 
     /// A routine's mark, on its row and its page: the ring while a run is

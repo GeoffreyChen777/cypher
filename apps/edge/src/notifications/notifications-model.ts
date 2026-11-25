@@ -64,6 +64,9 @@ export interface Notice {
   /** The Needs you item this notice announces; absent for a session's own
    * status notice. */
   item?: NeedsItem;
+  /** For a plan's question (`item` names the plan's session): the chat
+   * that asked, when it is a subagent's chat under that session. */
+  from?: string;
 }
 export function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("invalid object");
@@ -150,6 +153,33 @@ export function askingThreadOf(fields: Record<string, unknown>): string | undefi
   const kind = (thread as Record<string, unknown>).kind;
   return kind === "work" || kind === "routine" || kind === "routineSession" ? botId : undefined;
 }
+/** The open question on a session row or a host's event report
+ * (`Session.asking`, docs/design/plan-asks.md §6): present only while one is
+ * open, absent on old hosts. `fromChatId` names the child chat a root's
+ * question was mirrored from (the child's own row carries it too). */
+export interface Question { requestId: string; fromChatId?: string }
+export function questionOf(value: unknown): Question | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const { requestId, fromChatId } = value as Record<string, unknown>;
+  if (typeof requestId !== "string" || !requestId || requestId.length > 256) return undefined;
+  return typeof fromChatId === "string" && ID_RE.test(fromChatId) ? { requestId, fromChatId } : { requestId };
+}
+/** A session's status as notices read it: an open question is awaiting
+ * input whatever the status says (a run that died under it leaves the row
+ * idle; view.rs `effective_indicator`). Rows of old hosts: their status. */
+export function askingStatus(status: unknown, question: Question | undefined): unknown {
+  return question ? "awaitingInput" : status;
+}
+/** The workspace whose plan started this chat (`startedBy`), if any. */
+export function startedByOf(fields: Record<string, unknown>): string | undefined {
+  const by = fields.startedBy;
+  if (!by || typeof by !== "object" || Array.isArray(by)) return undefined;
+  const id = (by as Record<string, unknown>).botId;
+  return typeof id === "string" && ID_RE.test(id) ? id : undefined;
+}
+/** How many chats up a subagent's question is looked for (plan_asks.rs
+ * `MAX_CHILD_DEPTH`). */
+export const MAX_CHILD_DEPTH = 8;
 /** Does this record row wait on its owner (`BotWork::awaiting_approval`,
  * `BotApproval::awaiting`, `BotExchange::awaiting_review`)? Missing fields
  * read as the Rust defaults: a work row's `state` is `proposed`, an

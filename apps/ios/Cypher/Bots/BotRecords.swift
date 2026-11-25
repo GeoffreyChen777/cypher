@@ -138,6 +138,10 @@ struct BotWork: Codable, Hashable, Identifiable, Sendable {
     var bodyRev: String?
     /// The same for `result` (`planBodies[id].result`).
     var resultRev: String?
+    /// Host-written: sessions the orchestration steered but didn't start,
+    /// oldest first. Their questions are the plan's too (`planChatIds`),
+    /// but they are not `sessionIds`: steering one again needs the owner.
+    var steered: [String] = []
     /// Owner-written: the permission level the owner chose (`sandbox`
     /// values, PermissionLevel), on the card or while it runs. nil: the
     /// proposal's stands.
@@ -190,6 +194,31 @@ struct BotWork: Codable, Hashable, Identifiable, Sendable {
     /// Every session the orchestration started, in step order.
     var sessionIds: [String] { steps.flatMap(\.sessions) }
 
+    /// Every chat whose question is the plan's (bot_records.rs
+    /// `plan_chat_ids`): the sessions it started, then the ones it steered,
+    /// each once. Child chats under them count too (`ChatTree.question`).
+    var planChatIds: [String] {
+        var seen = Set<String>()
+        return (sessionIds + steered).filter { seen.insert($0).inserted }
+    }
+
+    /// The steps' states with `asking(chatId)` applied (bot_records.rs
+    /// `settled_steps`): a running step whose sessions (or, for the current
+    /// step, a steered session) wait on an answer is Asking, and back to
+    /// Running once none does. Every other state stays.
+    func settledSteps(asking: (String) -> Bool) -> [StepState] {
+        let current = steps.firstIndex { $0.state == .running || $0.state == .asking }
+        let steeredAsks = steered.contains(where: asking)
+        return steps.enumerated().map { index, step in
+            let waiting = step.sessions.contains(where: asking) || (steeredAsks && current == index)
+            switch step.state {
+            case .running where waiting: return .asking
+            case .asking where !waiting: return .running
+            default: return step.state
+            }
+        }
+    }
+
     /// Steps done (or skipped) out of all, for a progress bar.
     var progress: (done: Int, total: Int) {
         (steps.filter { $0.state == .done || $0.state == .skipped }.count, steps.count)
@@ -239,7 +268,7 @@ extension BotWork {
     private enum CodingKeys: String, CodingKey {
         case id, botId, title, instruction, summary, steps, state, chatId, toolCallId, threadChatId
         case createdAt, startedAt, endedAt, result, decision, stopRequestedAt
-        case timeLimitMinutes, timeAddedMinutes, coordinatorChoice, bodyRev, resultRev
+        case timeLimitMinutes, timeAddedMinutes, coordinatorChoice, bodyRev, resultRev, steered
         case level, proposedLevel, levelQuote, appliedLevel
     }
 
@@ -267,6 +296,7 @@ extension BotWork {
             ((try? c.decodeIfPresent(SessionChoice.self, forKey: .coordinatorChoice)) ?? nil) ?? SessionChoice()
         bodyRev = try c.decodeIfPresent(String.self, forKey: .bodyRev)
         resultRev = try c.decodeIfPresent(String.self, forKey: .resultRev)
+        steered = (try? c.decodeIfPresent([String].self, forKey: .steered)) ?? []
         // Absent on rows from before levels; a value this app can't read
         // stays as it is (and reads as Edit project).
         level = (try? c.decodeIfPresent(String.self, forKey: .level)) ?? nil

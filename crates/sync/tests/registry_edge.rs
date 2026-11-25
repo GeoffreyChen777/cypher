@@ -65,6 +65,7 @@ async fn two_rust_clients_converge_through_a_real_registry_do() {
             recovery: None,
             progress: None,
             notice: None,
+            asking: None,
         })
         .unwrap();
     }
@@ -191,6 +192,7 @@ async fn cursor_delta_and_churn_stay_bounded_on_a_real_do() {
                 recovery: None,
                 progress: None,
                 notice: None,
+                asking: None,
             })
             .unwrap();
         }

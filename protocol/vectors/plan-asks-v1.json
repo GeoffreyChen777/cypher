@@ -1,0 +1,267 @@
+{
+  "about": "Plan questions and Needs you (docs/design/plan-asks.md, crates/proto/src/view/plan_asks.rs). Each case is one workspace snapshot: `now` (epoch ms), `online` (device ids whose host is reachable; any other device is offline), `chats` (registry chat rows, only the fields the rule reads: id, deviceId, archived, child.parentChatId), `sessions` (registry session rows exactly as the host writes them, times in epoch ms; `asking` = the open question, absent on old hosts) and `work` (one bot_work row of bot `b`, with `steered`). Expected: `needsYou` = BotRecords::needs_you(\"b\") with the plan-question rule, each item with the chat that asks (`askingChatId`: the plan chat itself or a child under it), that chat's `asking.requestId` (null on old rows) and `offline` (its host is not in `online`: shown as \"Waiting for its device\"); `steps` = BotWork::settled_steps on the same rule; `indicators` = effective_indicator per session row (an open question never ages out). The Rust runner is crates/proto/tests/plan_asks_vectors.rs; the iPhone twin and the Worker run these too.",
+  "now": 1795600000000,
+  "cases": [
+    {
+      "name": "permission prompt in the step session, run live", "case": "a",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795599995000, "asking": {"requestId": "r1", "askedAt": 1795599980000, "permission": "escalate"}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "running", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [{"chatId": "s1", "workId": "w1", "askingChatId": "s1", "requestId": "r1", "offline": false}], "steps": ["asking"], "indicators": {"s1": "awaitingInput"}}
+    },
+    {
+      "name": "ask_user question in the step session, run live", "case": "b",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795599995000, "asking": {"requestId": "r1", "askedAt": 1795599980000}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "running", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [{"chatId": "s1", "workId": "w1", "askingChatId": "s1", "requestId": "r1", "offline": false}], "steps": ["asking"], "indicators": {"s1": "awaitingInput"}}
+    },
+    {
+      "name": "a late heartbeat no longer hides the question", "case": "a/b other device",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795599940000, "asking": {"requestId": "r1", "askedAt": 1795599910000, "permission": "network"}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "running", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [{"chatId": "s1", "workId": "w1", "askingChatId": "s1", "requestId": "r1", "offline": false}], "steps": ["asking"], "indicators": {"s1": "awaitingInput"}}
+    },
+    {
+      "name": "old host without asking: fresh awaitingInput row still counts", "case": "fallback",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795599990000}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "running", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [{"chatId": "s1", "workId": "w1", "askingChatId": "s1", "requestId": null, "offline": false}], "steps": ["asking"], "indicators": {"s1": "awaitingInput"}}
+    },
+    {
+      "name": "old host without asking: a stale row ages out as before", "case": "fallback",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795599954000}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "asking", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [], "steps": ["running"], "indicators": {"s1": "none"}}
+    },
+    {
+      "name": "sync subagent asks: its question is mirrored into the step session", "case": "c",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false},
+        {"id": "k1", "deviceId": "mac", "archived": false, "child": {"parentChatId": "s1"}}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795599995000, "asking": {"requestId": "m1", "askedAt": 1795599980000, "askedBy": "reviewer", "fromChatId": "k1"}},
+        {"chatId": "k1", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795599995000, "asking": {"requestId": "r1", "askedAt": 1795599980000}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "running", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [{"chatId": "s1", "workId": "w1", "askingChatId": "s1", "requestId": "m1", "offline": false}], "steps": ["asking"], "indicators": {"s1": "awaitingInput", "k1": "awaitingInput"}}
+    },
+    {
+      "name": "async subagent asks after the step session's run ended or was reaped", "case": "d′",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false},
+        {"id": "k1", "deviceId": "mac", "archived": false, "child": {"parentChatId": "s1"}}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795597600000, "asking": {"requestId": "m1", "askedAt": 1795597600000, "askedBy": "reviewer", "fromChatId": "k1"}},
+        {"chatId": "k1", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795599992000, "asking": {"requestId": "r1", "askedAt": 1795597600000}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "running", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [{"chatId": "s1", "workId": "w1", "askingChatId": "s1", "requestId": "m1", "offline": false}], "steps": ["asking"], "indicators": {"s1": "awaitingInput", "k1": "awaitingInput"}}
+    },
+    {
+      "name": "a child chat's question without a mirror in the step session", "case": "c/d′ child",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false},
+        {"id": "k1", "deviceId": "mac", "archived": false, "child": {"parentChatId": "s1"}}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "idle", "startedAt": 1795596400000, "updatedAt": 1795599400000},
+        {"chatId": "k1", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795599992000, "asking": {"requestId": "r1", "askedAt": 1795599980000}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "asking", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [{"chatId": "s1", "workId": "w1", "askingChatId": "k1", "requestId": "r1", "offline": false}], "steps": ["asking"], "indicators": {"s1": "none", "k1": "awaitingInput"}}
+    },
+    {
+      "name": "a grandchild's question two levels down", "case": "c nested",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false},
+        {"id": "k1", "deviceId": "mac", "archived": false, "child": {"parentChatId": "s1"}},
+        {"id": "k2", "deviceId": "mac", "archived": false, "child": {"parentChatId": "k1"}}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "working", "startedAt": 1795596400000, "updatedAt": 1795599995000},
+        {"chatId": "k1", "deviceId": "mac", "status": "working", "startedAt": 1795596400000, "updatedAt": 1795599995000},
+        {"chatId": "k2", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795599995000, "asking": {"requestId": "r1", "askedAt": 1795599980000}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "running", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [{"chatId": "s1", "workId": "w1", "askingChatId": "k2", "requestId": "r1", "offline": false}], "steps": ["asking"], "indicators": {"s1": "working", "k1": "working", "k2": "awaitingInput"}}
+    },
+    {
+      "name": "own question open across an engine restart: row Idle, question kept", "case": "e1",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "idle", "startedAt": 1795596400000, "updatedAt": 1795599700000, "asking": {"requestId": "r1", "askedAt": 1795599600000, "permission": "escalate"}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "running", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [{"chatId": "s1", "workId": "w1", "askingChatId": "s1", "requestId": "r1", "offline": false}], "steps": ["asking"], "indicators": {"s1": "awaitingInput"}}
+    },
+    {
+      "name": "forwarded question dead after a restart: the host resolved the mirror", "case": "e2",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false},
+        {"id": "k1", "deviceId": "mac", "archived": false, "child": {"parentChatId": "s1"}}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "idle", "startedAt": 1795596400000, "updatedAt": 1795599700000},
+        {"chatId": "k1", "deviceId": "mac", "status": "idle", "startedAt": 1795596400000, "updatedAt": 1795599700000}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "asking", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [], "steps": ["running"], "indicators": {"s1": "none", "k1": "none"}}
+    },
+    {
+      "name": "step session's host offline with its question open", "case": "f",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mini", "archived": false}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mini", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795598200000, "asking": {"requestId": "r1", "askedAt": 1795598200000, "permission": "access"}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "running", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [{"chatId": "s1", "workId": "w1", "askingChatId": "s1", "requestId": "r1", "offline": true}], "steps": ["asking"], "indicators": {"s1": "awaitingInput"}}
+    },
+    {
+      "name": "old host offline: a stale row ages out as before", "case": "f fallback",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mini", "archived": false}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mini", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795598200000}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "running", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [], "steps": ["running"], "indicators": {"s1": "none"}}
+    },
+    {
+      "name": "a session the plan steered asks: the current step is Asking", "case": "g",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false},
+        {"id": "x1", "deviceId": "mac", "archived": false}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "idle", "startedAt": 1795596400000, "updatedAt": 1795599400000},
+        {"chatId": "x1", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795599995000, "asking": {"requestId": "r1", "askedAt": 1795599980000}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "done", "sessions": ["s1"]}, {"id": "2", "title": "Step 2", "state": "running"}, {"id": "3", "title": "Step 3", "state": "pending"}], "steered": ["x1"]},
+      "expect": {"needsYou": [{"chatId": "x1", "workId": "w1", "askingChatId": "x1", "requestId": "r1", "offline": false}], "steps": ["done", "asking", "pending"], "indicators": {"s1": "none", "x1": "awaitingInput"}}
+    },
+    {
+      "name": "second question while the first is open: the row names the newest", "case": "h",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false},
+        {"id": "k1", "deviceId": "mac", "archived": false, "child": {"parentChatId": "s1"}}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795599995000, "asking": {"requestId": "m2", "askedAt": 1795599997000, "askedBy": "tester", "fromChatId": "k1"}},
+        {"chatId": "k1", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795599995000, "asking": {"requestId": "r7", "askedAt": 1795599997000}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "asking", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [{"chatId": "s1", "workId": "w1", "askingChatId": "s1", "requestId": "m2", "offline": false}], "steps": ["asking"], "indicators": {"s1": "awaitingInput", "k1": "awaitingInput"}}
+    },
+    {
+      "name": "answered: the step goes back to Running", "case": "answered",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "working", "startedAt": 1795596400000, "updatedAt": 1795599997000}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "asking", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [], "steps": ["running"], "indicators": {"s1": "working"}}
+    },
+    {
+      "name": "an archived step session has ended: no question", "case": "ended",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": true}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "idle", "startedAt": 1795596400000, "updatedAt": 1795599400000, "asking": {"requestId": "r1", "askedAt": 1795599980000}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "running", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [], "steps": ["running"], "indicators": {"s1": "awaitingInput"}}
+    },
+    {
+      "name": "an archived child chat has ended: no question", "case": "ended child",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false},
+        {"id": "k1", "deviceId": "mac", "archived": true, "child": {"parentChatId": "s1"}}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "idle", "startedAt": 1795596400000, "updatedAt": 1795599400000},
+        {"chatId": "k1", "deviceId": "mac", "status": "idle", "startedAt": 1795596400000, "updatedAt": 1795599400000, "asking": {"requestId": "r1", "askedAt": 1795599980000}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "running", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [], "steps": ["running"], "indicators": {"s1": "none", "k1": "awaitingInput"}}
+    },
+    {
+      "name": "the plan ended but its session still asks: still listed", "case": "ended work",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "idle", "startedAt": 1795596400000, "updatedAt": 1795599400000, "asking": {"requestId": "r1", "askedAt": 1795599980000}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "done", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "done", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [{"chatId": "s1", "workId": "w1", "askingChatId": "s1", "requestId": "r1", "offline": false}], "steps": ["done"], "indicators": {"s1": "awaitingInput"}}
+    },
+    {
+      "name": "a child of a chat the plan neither started nor steered: not the plan's", "case": "outside",
+      "online": ["mac"],
+      "chats": [
+        {"id": "s1", "deviceId": "mac", "archived": false},
+        {"id": "y1", "deviceId": "mac", "archived": false},
+        {"id": "k9", "deviceId": "mac", "archived": false, "child": {"parentChatId": "y1"}}
+      ],
+      "sessions": [
+        {"chatId": "s1", "deviceId": "mac", "status": "working", "startedAt": 1795596400000, "updatedAt": 1795599995000},
+        {"chatId": "k9", "deviceId": "mac", "status": "awaitingInput", "startedAt": 1795596400000, "updatedAt": 1795599995000, "asking": {"requestId": "r1", "askedAt": 1795599980000}}
+      ],
+      "work": {"id": "w1", "botId": "b", "title": "Plan", "chatId": "workspace-chat", "state": "running", "createdAt": 1795592800000, "steps": [{"id": "1", "title": "Step 1", "state": "running", "sessions": ["s1"]}]},
+      "expect": {"needsYou": [], "steps": ["running"], "indicators": {"s1": "working", "k9": "awaitingInput"}}
+    }
+  ]
+}

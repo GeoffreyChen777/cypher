@@ -307,6 +307,22 @@ pub(super) fn session_state(
             SessionState::NotStarted("It has not run yet.".into())
         };
     };
+    // An open question on the row asks whatever its status says: a run
+    // that died under it leaves the row Idle, and it is still the owner's
+    // to answer (docs/design/plan-asks.md, e1).
+    if row.asking.is_some()
+        && row.status != SessionStatus::Working
+        && let Some((request_id, questions)) = pending_input(entries)
+    {
+        return if commands.answered.contains(&request_id) {
+            SessionState::Working
+        } else {
+            SessionState::Asking {
+                request_id,
+                questions,
+            }
+        };
+    }
     match row.status {
         SessionStatus::Working => SessionState::Working,
         SessionStatus::AwaitingInput => match pending_input(entries) {
@@ -391,6 +407,24 @@ fn permission_words(kind: PermissionPromptKind) -> &'static str {
         PermissionPromptKind::Tool => "use a tool that asks first",
     }
 }
+
+/// Note `session_id` on the work's steered sessions, once, newest kept
+/// when the list is full.
+pub(super) fn record_steered(work: &mut BotWork, session_id: &str) {
+    if work.steered.iter().any(|id| id == session_id) {
+        return;
+    }
+    if work.steered.len() >= p::STEERED_MAX {
+        work.steered.remove(0);
+    }
+    work.steered.push(session_id.to_string());
+}
+
+/// Added to `wait_for_session`'s answer for a question on a device that is
+/// offline: it stays open, and the owner sees it as waiting for its device.
+pub(super) const OFFLINE_ASK: &str = "\n\nIts device is offline right now: the question \
+     stays open and your owner sees it under Needs you as waiting for its device. It can \
+     be answered once the device is back; wait again or do other steps meanwhile.";
 
 /// `wait_for_session`'s answer. `read_before`: the thread was already
 /// handed this question and has waited on its owner's answer since.
@@ -613,6 +647,12 @@ impl Bots {
                     },
                     command_author::PLAN,
                 )?;
+                // A session it steers but didn't start: its questions are
+                // the plan's too (Needs you, the step), though steering it
+                // again still needs the owner (`may_drive`).
+                if !work.session_ids().any(|id| id == session.id) {
+                    self.edit_work(&work.id, |w| record_steered(w, &session.id))?;
+                }
                 self.log(
                     &view.bot.id,
                     ActivityKind::SessionSteered,
@@ -780,6 +820,7 @@ impl Bots {
         let instruction_len = instruction.trim().chars().count();
         let now = p::now_ms();
         let mut work = BotWork {
+            steered: Vec::new(),
             id: new_id(),
             bot_id: view.bot.id.clone(),
             title: title.to_string(),
@@ -1698,14 +1739,21 @@ impl Bots {
                         lock(&self.inner.work.asked).remove(&key);
                     }
                 }
-                return Ok(render_wait(
+                let mut out = render_wait(
                     &session.id,
                     title(&session),
                     &state,
                     last_answer(&entries).as_deref(),
                     true,
                     read_before,
-                ));
+                );
+                if matches!(state, SessionState::Asking { .. })
+                    && let Some(row) = &row
+                    && !self.inner.workspace.device_online(&row.device_id)
+                {
+                    out.push_str(OFFLINE_ASK);
+                }
+                return Ok(out);
             }
             tokio::select! {
                 () = cancelled.cancelled() => {}
@@ -2106,6 +2154,7 @@ mod state_tests {
             recovery: None,
             progress: None,
             notice: None,
+            asking: None,
         }
     }
 
@@ -2208,6 +2257,66 @@ mod state_tests {
                 },
             ],
         )]
+    }
+
+    /// plan-asks e1: a run died under its question, the row is Idle, and the
+    /// question is still open (on the row and in the doc): Asking, not
+    /// Finished. Without `asking` an Idle row stays Finished (old hosts).
+    #[test]
+    fn an_idle_row_with_an_open_question_is_asking() {
+        let issued = Commands {
+            latest: Some(10_000),
+            any: true,
+            ..Default::default()
+        };
+        let mut idle = row(SessionStatus::Idle, 11_000);
+        let entries = asking(true);
+        assert_eq!(
+            session_state(Some(&idle), &issued, &entries, 12_000),
+            SessionState::Finished,
+            "an old host's idle row"
+        );
+        idle.asking = Some(p::SessionAsk {
+            request_id: "req-1".into(),
+            asked_at: 10_500,
+            permission: Some(PermissionPromptKind::Escalate),
+            asked_by: None,
+            from_chat_id: None,
+        });
+        assert!(matches!(
+            session_state(Some(&idle), &issued, &entries, 12_000),
+            SessionState::Asking { request_id, .. } if request_id == "req-1"
+        ));
+        let answered = Commands {
+            answered: ["req-1".to_string()].into_iter().collect(),
+            ..issued_clone(&issued)
+        };
+        assert_eq!(
+            session_state(Some(&idle), &answered, &entries, 12_000),
+            SessionState::Working,
+            "answered; the fallback turn hasn't started yet"
+        );
+    }
+
+    #[test]
+    fn steered_sessions_are_recorded_once_and_bounded() {
+        let mut work: BotWork = serde_json::from_value(serde_json::json!({
+            "id": "w", "botId": "b", "title": "Plan", "chatId": "c", "createdAt": 0
+        }))
+        .unwrap();
+        record_steered(&mut work, "x");
+        record_steered(&mut work, "x");
+        assert_eq!(work.steered, ["x"]);
+        for i in 0..p::STEERED_MAX {
+            record_steered(&mut work, &format!("s{i}"));
+        }
+        assert_eq!(work.steered.len(), p::STEERED_MAX);
+        assert_eq!(work.steered.first().map(String::as_str), Some("s0"));
+        assert!(work.plan_chat_ids().contains(&"s0"));
+        assert!(
+            work.session_ids().next().is_none(),
+            "steering never makes it the plan's own"
+        );
     }
 
     #[test]

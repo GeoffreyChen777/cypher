@@ -264,11 +264,8 @@ pub(super) fn work_mark(work: &BotWork, ticker: gpui::EntityId, theme: &Theme) -
     };
     match plan_phase(work) {
         PlanPhase::Starting => ring_mark(RingState::Waiting, progress, ticker, theme),
-        PlanPhase::Running
-            if work
-                .current_step()
-                .is_some_and(|(_, step)| step.state == StepState::Asking) =>
-        {
+        // Any step asking (steps can run side by side): amber.
+        PlanPhase::Running if work.steps.iter().any(|s| s.state == StepState::Asking) => {
             ring_mark(RingState::Asking, progress, ticker, theme)
         }
         PlanPhase::Running => ring_mark(RingState::Running, progress, ticker, theme),

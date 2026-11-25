@@ -62,7 +62,9 @@ enum PushItem: Equatable, Sendable {
     /// A peer's answer awaiting review (exchange id).
     case review(String)
     /// One of the workspace's hidden threads asking (its chat id): a plan's
-    /// work thread, a routine's thread or a project routine's session.
+    /// work thread, a routine's thread or a project routine's session; or a
+    /// session one of its plans started, for its own question or one in a
+    /// subagent's chat under it.
     case asking(String)
 
     /// nil for a kind this build doesn't know: the tap opens the workspace.

@@ -25,6 +25,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         recovery: None,
         progress: None,
         notice: None,
+        asking: None,
     }
 }
 

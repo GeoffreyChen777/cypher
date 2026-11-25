@@ -273,21 +273,8 @@ final class WorkspaceStore: WorkspaceData {
 
         var rows: [String: SessionRow] = [:]
         for row in doc.overlayRows(kind: "sessions") {
-            let f = row.fields
-            guard let chatId = f["chatId"]?.stringValue,
-                let deviceId = f["deviceId"]?.stringValue,
-                let statusStr = f["status"]?.stringValue,
-                let status = SessionStatus(rawValue: statusStr)
-            else { continue }
-            rows[chatId] = SessionRow(
-                chatId: chatId, deviceId: deviceId, status: status,
-                startedAt: f["startedAt"]?.int64Value,
-                updatedAt: f["updatedAt"]?.int64Value ?? 0,
-                subagents: SubagentProjection.snapshot(f["subagents"]),
-                contextUsage: ContextUsage(f["contextUsage"]),
-                recovery: RecoveryProgress(f["recovery"]),
-                progress: RunProgress(f["progress"]),
-                notice: SessionNotice(f["notice"]))
+            guard let session = SessionRow(fields: row.fields) else { continue }
+            rows[session.chatId] = session
         }
         sessions = rows
         projectWorkspaces()

@@ -296,6 +296,16 @@ impl WorkspaceHost {
         lock(&self.inner.room).take();
     }
 
+    /// Whether `device_id` reaches the room now: this device always, a
+    /// peer while its presence heartbeat is fresh. A plan question on an
+    /// offline device waits for it (docs/design/plan-asks.md).
+    pub fn device_online(&self, device_id: &str) -> bool {
+        device_id == self.inner.config.device_id
+            || lock(&self.inner.presence_seen)
+                .get(device_id)
+                .is_some_and(|at| now_ms().saturating_sub(*at) < presence::PRESENCE_FRESH_MS)
+    }
+
     /// Wire the "peer came back" signal (its presence heartbeats resumed) to a
     /// callback — the engine points this at `LinkCache::reset_cooldown`.
     pub fn set_peer_alive_hook(&self, hook: PeerAliveHook) {

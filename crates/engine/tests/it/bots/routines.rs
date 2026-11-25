@@ -1331,6 +1331,7 @@ async fn the_workspace_chat_runs_deletes_and_stops_what_the_owner_could() {
     // Stop running work.
     let now = p::now_ms();
     let work = p::BotWork {
+        steered: Vec::new(),
         id: "w1".into(),
         bot_id: bot.id.clone(),
         title: "Fix the build".into(),

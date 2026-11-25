@@ -528,6 +528,9 @@ final class DemoDataset {
                 self.simulateTurn(store: store, chatId: chatId, prompt: prompt, isSteer: isSteer, comments: comments)
             }
         }
+        store.demoInputAnswered = { [weak self] requestId in
+            self?.answerPlanAsk(chatId: chatId, requestId: requestId)
+        }
         stores[chatId] = store
         refreshRecoveryShowcase(chatId)
         if chatId == Self.runProgressChatId { playRunProgressStory() }
@@ -908,7 +911,8 @@ final class DemoDataset {
         default:
             // The context recovery showcase, a workspace's chat or thread,
             // or a freshly minted chat (empty).
-            return recoveryTranscript(for: chatId, now: now) ?? workspaceChatTranscript(for: chatId, now: now) ?? []
+            return recoveryTranscript(for: chatId, now: now) ?? workspaceChatTranscript(for: chatId, now: now)
+                ?? planAsksTranscript(for: chatId, now: now) ?? []
         }
     }
 
@@ -1339,7 +1343,7 @@ final class DemoDataset {
             isError: outcome == .blocked || outcome == .denied, resolved: true)
     }
 
-    private static func prompt(
+    static func prompt(
         _ id: String, _ title: String, options: [String], kind: String?, call: String?, resolved: Bool = true
     ) -> MessagePart {
         .input(
@@ -1352,12 +1356,12 @@ final class DemoDataset {
             resolved: resolved)
     }
 
-    private static let escalateOptions = ["Run once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"]
-    private static let accessOptions = ["Allow once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"]
+    static let escalateOptions = ["Run once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"]
+    static let accessOptions = ["Allow once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"]
     private static let sshStatus = "ssh deploy@web 'systemctl status app --no-pager'"
     private static let push = "git push --force origin release/0.3.49"
 
-    private static func escalateTitle(_ command: String, purpose: String, pattern: String, reason: String) -> String {
+    static func escalateTitle(_ command: String, purpose: String, pattern: String, reason: String) -> String {
         """
         Run this command outside the sandbox?
 
