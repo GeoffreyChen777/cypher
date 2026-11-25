@@ -167,13 +167,88 @@ struct PermissionRequest: Equatable {
             }
         }
     }
+
+    /// How long a broader approval lasts, read off the extension's labels
+    /// (`core.ts` `HUMAN`, `TASK`, `DOMAIN_ONCE`, `ALWAYS_IN`).
+    enum Grant: Equatable {
+        /// This command, this task, this chat.
+        case scoped
+        /// Always, everywhere or in a project: kept as a rule.
+        case lasting
+
+        init(_ label: String) {
+            self = label.hasPrefix("Always") ? .lasting : .scoped
+        }
+    }
+
+    /// One option as a card shows it: the narrowest approval as the
+    /// prominent capsule, every other option as a round glass icon button
+    /// with a short name under it — none folded away.
+    struct ShownOption: Equatable {
+        /// Its place in the prompt's options (`permission-option-<index>`).
+        let index: Int
+        /// The label sent back, and what VoiceOver reads.
+        let label: String
+        let role: OptionRole
+        let symbol: String
+        /// The short name under the icon.
+        let caption: String
+
+        var prominent: Bool { role == .primary }
+        /// A refusal: a destructive button, painted red.
+        var destructive: Bool { role == .deny || role == .stop }
+
+        init(index: Int, label: String, role: OptionRole) {
+            self.index = index
+            self.label = label
+            self.role = role
+            switch role {
+            case .primary:
+                symbol = "checkmark"
+                caption = label
+            case .secondary:
+                symbol = Grant(label) == .lasting ? "checkmark.shield.fill" : "checkmark.shield"
+                caption = Self.caption(label)
+            case .deny:
+                symbol = "xmark"
+                caption = label
+            case .stop:
+                symbol = "stop.fill"
+                caption = "Stop"
+            }
+        }
+
+        /// A broader approval's name without what every approval says:
+        /// "Allow for this chat" is "This chat", "Always allow" "Always".
+        private static func caption(_ label: String) -> String {
+            for prefix in ["Allow for ", "Allow "] where label.hasPrefix(prefix) && label.count > prefix.count {
+                let rest = label.dropFirst(prefix.count)
+                return rest.prefix(1).uppercased() + rest.dropFirst()
+            }
+            if label.hasSuffix(" allow") { return String(label.dropLast(" allow".count)) }
+            return label
+        }
+    }
+
+    /// A card's options in the order it sets them, leading to trailing: the
+    /// prompt's own order read from the far end — Deny and stop, Deny, the
+    /// broadest approval … the narrowest — so the primary approval comes
+    /// last, the refusals lead and the broadest grant sits away from the
+    /// primary. Every option is there.
+    static func shownOptions(_ options: [String]) -> [ShownOption] {
+        let roles = roles(options)
+        let shown = options.enumerated().reversed().map {
+            ShownOption(index: $0.offset, label: $0.element, role: roles[$0.offset])
+        }
+        return shown.filter { !$0.prominent } + shown.filter(\.prominent)
+    }
 }
 
 /// The card: a shield header, the question, the facts, then the options.
 /// Embedded in a card of its own (a Needs you item's), it draws no frame,
 /// header or question (the card's head and title say them): the facts on
-/// plates concentric with the card, then the options as one row of system
-/// glass buttons (needs.rs `asking_content`).
+/// plates concentric with the card, then every option on screen as system
+/// glass buttons (`PermissionOptionRow`; needs.rs `asking_content`).
 struct PermissionPanel: View {
     enum Style {
         /// Over the composer: its own card.
@@ -430,94 +505,63 @@ extension View {
     }
 }
 
-/// A permission prompt's options in a card (needs.rs `folded_options`), as
-/// one row of equal glass buttons: the refusal, the rest under More, the
-/// narrowest approval last and prominent. Every option keeps its label —
-/// the broader approvals ("Allow for this chat", "Always allow") and Deny
-/// and stop sit, named, in More's menu rather than folding to bare icons.
-/// Where the row can't hold them at one width (a large text size), the
-/// same buttons stack, the narrowest approval first.
+/// A permission prompt's options in a card, all of them on screen: the
+/// refusals and the broader approvals as round glass icon buttons, each
+/// named under it, and the narrowest approval last as the prominent capsule
+/// filling the rest of the line (`PermissionRequest.shownOptions`). Where
+/// one line can't hold them (a narrow phone, a large text size), the icons
+/// spread evenly across the card, on as many lines as they need, and the
+/// capsule takes the line under them — nothing folds into a menu, nothing
+/// clips.
 struct PermissionOptionRow: View {
     let options: [String]
     var enabled = true
     let choose: (String) -> Void
 
-    private typealias Option = (index: Int, label: String, role: PermissionRequest.OptionRole)
-
     var body: some View {
-        let roles = PermissionRequest.roles(options)
-        let all: [Option] = options.enumerated().map { ($0.offset, $0.element, roles[$0.offset]) }
-        let primary = all.filter { $0.role == .primary }
-        let broader = all.filter { $0.role == .secondary }
-        let deny = all.filter { $0.role == .deny }
-        let stop = all.filter { $0.role == .stop }
-        // The row's refusal is Deny (Deny and stop where there is no Deny);
-        // the rest of the refusals go under More with the broader approvals.
-        let refusal = Array((deny + stop).prefix(1))
-        let more = broader + (deny + stop).dropFirst()
-        NeedsCardButtonRow {
-            ForEach(refusal, id: \.index) { button($0) }
-            if more.count == 1 {
-                ForEach(more, id: \.index) { button($0) }
-            } else if !more.isEmpty {
-                menu(more)
+        let shown = PermissionRequest.shownOptions(options)
+        let icons = shown.filter { !$0.prominent }
+        let primary = shown.filter(\.prominent)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: Theme.iconButtonGap) {
+                ForEach(icons, id: \.index) { icon($0) }
+                ForEach(primary, id: \.index) { capsule($0) }
             }
-            ForEach(primary, id: \.index) { button($0) }
-        } stacked: {
-            ForEach(primary, id: \.index) { button($0) }
-            if more.count == 1 {
-                ForEach(more, id: \.index) { button($0) }
-            } else if !more.isEmpty {
-                menu(more)
+            VStack(alignment: .leading, spacing: NeedsCardMetrics.buttonGap) {
+                IconOptionGrid {
+                    ForEach(icons, id: \.index) { icon($0) }
+                }
+                ForEach(primary, id: \.index) { capsule($0) }
             }
-            ForEach(refusal, id: \.index) { button($0) }
         }
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.5)
     }
 
-    private func kind(_ role: PermissionRequest.OptionRole) -> NeedsCardButtonKind {
-        switch role {
-        case .primary: .primary
-        case .secondary, .deny: .secondary
-        case .stop: .destructive
-        }
-    }
-
-    private func button(_ option: Option) -> some View {
-        Button(role: option.role == .stop ? .destructive : nil) {
+    private func icon(_ option: PermissionRequest.ShownOption) -> some View {
+        GlassIconOption(
+            symbol: option.symbol, label: option.label, caption: option.caption,
+            tone: option.destructive ? .destructive : .ink
+        ) {
             choose(option.label)
-        } label: {
-            NeedsCardButtonLabel(title: option.label, kind: kind(option.role))
         }
-        .needsCardButtonStyle(prominent: option.role == .primary)
-        .accessibilityLabel(option.label)
         .accessibilityIdentifier("permission-option-\(option.index)")
     }
 
-    /// More: the broader approvals, narrowest first, then the refusals
-    /// the row has no room for.
-    private func menu(_ options: [Option]) -> some View {
-        let approvals = options.filter { $0.role == .secondary || $0.role == .primary }
-        let refusals = options.filter { $0.role == .deny || $0.role == .stop }
-        return Menu {
-            ForEach(approvals, id: \.index) { option in
-                Button(option.label) { choose(option.label) }
-                    .accessibilityIdentifier("permission-option-\(option.index)")
-            }
-            if !approvals.isEmpty, !refusals.isEmpty { Divider() }
-            ForEach(refusals, id: \.index) { option in
-                Button(option.label, role: option.role == .stop ? .destructive : nil) {
-                    choose(option.label)
-                }
-                .accessibilityIdentifier("permission-option-\(option.index)")
-            }
+    /// The narrowest approval: a prominent glass capsule as tall as the
+    /// icons' circles, as wide as the line leaves it.
+    private func capsule(_ option: PermissionRequest.ShownOption) -> some View {
+        Button {
+            choose(option.label)
         } label: {
-            NeedsCardButtonLabel(title: "More")
+            NeedsCardButtonLabel(title: option.label, kind: .primary)
+                .lineLimit(1)
+                .frame(minHeight: Theme.iconButtonSize - 2 * Theme.iconButtonGlassPadding)
+                .padding(.horizontal, 6)
         }
-        .needsCardButtonStyle(prominent: false)
-        .accessibilityLabel("More options")
-        .accessibilityHint(options.map(\.label).joined(separator: ", "))
-        .accessibilityIdentifier("permission-more")
+        .needsCardButtonStyle(prominent: true)
+        .frame(maxWidth: .infinity)
+        .accessibilityLabel(option.label)
+        .accessibilityIdentifier("permission-option-\(option.index)")
     }
 }

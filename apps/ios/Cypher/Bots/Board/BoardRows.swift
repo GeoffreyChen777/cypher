@@ -6,6 +6,14 @@
 
 import SwiftUI
 
+/// A list row's leading gutter: the mark's width and the gap after it.
+enum BoardRowMetrics {
+    static let mark: CGFloat = 18
+    static let markGap: CGFloat = 10
+    /// Where a row's text starts.
+    static let textInset = mark + markGap
+}
+
 /// A list row: a mark in the leading gutter, the title, a muted sub-line,
 /// and a trailing note. `extra` sits under the sub-line.
 struct BoardRow<Mark: View, Extra: View>: View {
@@ -21,9 +29,9 @@ struct BoardRow<Mark: View, Extra: View>: View {
     @ViewBuilder var extra: Extra
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
+        HStack(alignment: .firstTextBaseline, spacing: BoardRowMetrics.markGap) {
             mark
-                .frame(width: 18)
+                .frame(width: BoardRowMetrics.mark)
                 .alignmentGuide(.firstTextBaseline) { [markLift] in $0[VerticalAlignment.center] + markLift }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -126,9 +134,16 @@ struct StepMark: View {
 /// A Needs you row: what it is, what it needs, and when.
 struct NeedRowView: View {
     let row: BoardNeedRow
+    /// Two where the row's decisions take the end of its line.
+    var titleLines = 1
+    /// The time at the sub-line's start rather than after the title: where
+    /// the decisions stand beside the row and the title needs the room.
+    var timeInSub = false
 
     var body: some View {
-        BoardRow(title: row.title, sub: row.sub, trailing: row.at.map { BotTime.ago($0) }) {
+        let ago = row.at.map { BotTime.ago($0) }
+        let sub = timeInSub ? [ago ?? "", row.sub].filter { !$0.isEmpty }.joined(separator: " · ") : row.sub
+        BoardRow(title: row.title, sub: sub, trailing: timeInSub ? nil : ago, titleLines: titleLines) {
             BoardGlyph(symbol: row.symbol, color: Theme.warning)
         }
     }

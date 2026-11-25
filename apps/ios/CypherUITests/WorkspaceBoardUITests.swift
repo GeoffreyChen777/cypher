@@ -27,6 +27,39 @@ final class WorkspaceBoardUITests: XCTestCase {
         capture(app, "approval-approved")
     }
 
+    func testARowsIconButtonsDecideInPlaceWithoutOpeningTheRow() {
+        let app = board("overview")
+        let approve = app.buttons["row-approve-approval:approval-staging"]
+        XCTAssertTrue(approve.waitForHittable(timeout: Self.launch), "Approve is a button on the row")
+        XCTAssertTrue(app.buttons["row-decline-approval:approval-staging"].isHittable, "so is Decline")
+        approve.tap()
+        // Decided where it stands: the row leaves Needs you and the board
+        // stays on the overview (the tap didn't open the approval).
+        XCTAssertTrue(approve.wait(until: "exists == false", timeout: 15), "the approved row leaves Needs you")
+        XCTAssertFalse(
+            app.descendants(matching: .any)["approval-status"].waitForExistence(timeout: 3),
+            "the icon's tap is the button's alone, not the row's")
+        XCTAssertTrue(app.descendants(matching: .any)["board-needs-header"].exists)
+        capture(app, "row-approved")
+    }
+
+    func testAPermissionCardShowsEveryOptionAsAButton() {
+        let app = XCUIApplication.launchDemo([
+            "-demo-needs", "-route", "bot:bot-atlas", "-sheet", "board:asking:work-deps:chat-atlas-w6",
+        ])
+        let primary = app.buttons["permission-option-0"]
+        XCTAssertTrue(primary.waitForHittable(timeout: Self.launch))
+        XCTAssertEqual(primary.label, "Run once")
+        // Allow for this chat, Always allow, Deny, Deny and stop: each on
+        // screen, none behind a menu.
+        for index in 1...4 {
+            XCTAssertTrue(app.buttons["permission-option-\(index)"].isHittable, "option \(index) is on screen")
+        }
+        XCTAssertEqual(app.buttons["permission-option-4"].label, "Deny and stop")
+        XCTAssertFalse(app.buttons["permission-more"].exists, "no More menu")
+        capture(app, "permission-options")
+    }
+
     func testReviewingAnAnswerEditsAndSendsIt() {
         let app = board("exchange:ex-review")
         let answer = app.textViews["exchange-answer"]

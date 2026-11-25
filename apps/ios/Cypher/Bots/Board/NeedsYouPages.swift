@@ -9,22 +9,25 @@
 import SwiftUI
 
 /// One Needs you row in a list: it opens its page (the workspace's own
-/// question opens its chat), and approvals and plans decide in place.
+/// question opens its chat), and approvals and plans decide in place —
+/// Decline and Approve as round glass icon buttons at the row's end (under
+/// it at an accessibility text size), and again on a swipe or a long press.
 struct NeedsYouRowLink: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openBotChat) private var openChat
+    @Environment(\.dynamicTypeSize) private var typeSize
     let row: BoardNeedRow
     let actions: BotActionRunner
 
     var body: some View {
         Group {
             if let page = BotPage.settling(row.item) {
-                NavigationLink(value: page) { NeedRowView(row: row) }
+                NavigationLink(value: page) { label }
             } else {
                 Button {
                     if case .chat(let chatId) = row.item { openChat?(chatId) }
                 } label: {
-                    NeedRowView(row: row)
+                    label
                 }
                 .tint(Theme.text)
             }
@@ -43,6 +46,42 @@ struct NeedsYouRowLink: View {
                 Button(decision.title, systemImage: decision.symbol, role: decision.role) {
                     actions.run(decision.perform)
                 }
+            }
+        }
+    }
+
+    /// The row, and its decisions after it. The buttons carry their own
+    /// style, so the list takes a tap on one for the button's alone, not
+    /// the row's.
+    @ViewBuilder
+    private var label: some View {
+        let decisions = decisions
+        if decisions.isEmpty {
+            NeedRowView(row: row)
+        } else {
+            let layout =
+                typeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: Theme.iconButtonGap))
+                : AnyLayout(HStackLayout(alignment: .center, spacing: Theme.iconButtonGap))
+            layout {
+                NeedRowView(row: row, titleLines: 2, timeInSub: !typeSize.isAccessibilitySize)
+                HStack(spacing: Theme.iconButtonGap) {
+                    // Decline first, Approve at the end: the order of the
+                    // card's buttons.
+                    ForEach(decisions.reversed(), id: \.title) { decision in
+                        GlassIconButton(
+                            symbol: decision.symbol, label: decision.title,
+                            tone: decision.role == .destructive ? .destructive : .prominent
+                        ) {
+                            actions.run(decision.perform)
+                        }
+                        .accessibilityIdentifier(
+                            "row-\(decision.role == .destructive ? "decline" : "approve")-\(row.id)")
+                    }
+                }
+                .disabled(actions.busy)
+                // Under the row's text, in line with its title.
+                .padding(.leading, typeSize.isAccessibilitySize ? BoardRowMetrics.textInset : 0)
             }
         }
     }

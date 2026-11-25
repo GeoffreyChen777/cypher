@@ -119,6 +119,25 @@ enum Theme {
     static let cardInsetRadius: CGFloat = cardRadius - cardPad
     /// Between cards on a page.
     static let cardGap: CGFloat = 20
+    /// A round glass icon button (a decision in a card or a row): the
+    /// glass circle's diameter, which is its hit target too (at least
+    /// 44pt), and its symbol's size.
+    static let iconButtonSize: CGFloat = 44
+    static let iconButtonSymbol: CGFloat = 17
+    /// What system glass adds around a regular-size button's label on
+    /// each side; a label `iconButtonSize` less twice this makes the
+    /// button `iconButtonSize` tall.
+    static let iconButtonGlassPadding: CGFloat = 7
+    /// An icon button with its name under it: the column it stands in (it
+    /// grows with the caption's text size), and the gap to the name.
+    static let iconOptionColumn: CGFloat = 60
+    static let iconOptionCaptionGap: CGFloat = 5
+    /// The largest text size an icon button's name follows (a tab bar's
+    /// rule): larger, a long press shows the option large instead.
+    static let iconCaptionLargestType = DynamicTypeSize.xxxLarge
+    /// Between two icon buttons, and between a row's last one and what
+    /// follows.
+    static let iconButtonGap: CGFloat = 8
 }
 
 // MARK: - Fonts

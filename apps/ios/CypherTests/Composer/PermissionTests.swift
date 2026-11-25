@@ -89,6 +89,67 @@ final class PermissionTests: XCTestCase {
             [.primary, .secondary, .secondary, .deny, .stop])
     }
 
+    func testACardShowsEveryOptionWithTheNarrowestApprovalLastAndProminent() {
+        let options = ["Run once", "Allow for this chat", "Always allow", "Deny", "Deny and stop"]
+        let shown = PermissionRequest.shownOptions(options)
+        XCTAssertEqual(
+            shown.map(\.label), ["Deny and stop", "Deny", "Always allow", "Allow for this chat", "Run once"])
+        XCTAssertEqual(Set(shown.map(\.index)), Set(options.indices), "no option is dropped or folded away")
+        XCTAssertEqual(shown.map(\.index), [4, 3, 2, 1, 0], "each keeps its permission-option index")
+        XCTAssertEqual(shown.filter(\.prominent).map(\.label), ["Run once"])
+        XCTAssertEqual(shown.last?.prominent, true)
+    }
+
+    func testEachOptionGetsTheSymbolAndToneOfItsKind() {
+        let shown = PermissionRequest.shownOptions([
+            "Allow once", "Allow for this command", "Allow for this task", "Allow for this chat", "Always allow",
+            "Always in webapp", "Deny", "Deny and stop",
+        ])
+        let byLabel = Dictionary(uniqueKeysWithValues: shown.map { ($0.label, $0) })
+        func check(_ label: String, _ symbol: String, _ caption: String, destructive: Bool, line: UInt = #line) {
+            let option = byLabel[label]
+            XCTAssertEqual(option?.symbol, symbol, label, line: line)
+            XCTAssertEqual(option?.caption, caption, label, line: line)
+            XCTAssertEqual(option?.destructive, destructive, label, line: line)
+        }
+        check("Deny", "xmark", "Deny", destructive: true)
+        check("Deny and stop", "stop.fill", "Stop", destructive: true)
+        check("Allow for this command", "checkmark.shield", "This command", destructive: false)
+        check("Allow for this task", "checkmark.shield", "This task", destructive: false)
+        check("Allow for this chat", "checkmark.shield", "This chat", destructive: false)
+        check("Always allow", "checkmark.shield.fill", "Always", destructive: false)
+        check("Always in webapp", "checkmark.shield.fill", "Always in webapp", destructive: false)
+        XCTAssertEqual(byLabel["Allow once"]?.role, .primary)
+        XCTAssertEqual(byLabel["Allow once"]?.prominent, true)
+        XCTAssertEqual(shown.filter(\.prominent).count, 1, "one prominent option")
+        XCTAssertEqual(shown.last?.label, "Allow once")
+    }
+
+    func testAPromptWithOnlyRefusalsShowsThemAllWithNothingProminent() {
+        let shown = PermissionRequest.shownOptions(["Deny", "Deny and stop"])
+        XCTAssertEqual(shown.map(\.label), ["Deny and stop", "Deny"])
+        XCTAssertFalse(shown.contains(where: \.prominent))
+        XCTAssertTrue(shown.allSatisfy(\.destructive))
+    }
+
+    func testWrappedIconOptionsFillAnEvenGrid() {
+        // Four 60 pt options with 8 pt between: one line from 264 pt.
+        XCTAssertEqual(IconOptionGrid.columns(fitting: 311, item: 60, spacing: 8), 4)
+        XCTAssertEqual(IconOptionGrid.columns(fitting: 264, item: 60, spacing: 8), 4)
+        XCTAssertEqual(IconOptionGrid.columns(fitting: 263, item: 60, spacing: 8), 3)
+        XCTAssertEqual(IconOptionGrid.columns(fitting: 130, item: 60, spacing: 8), 2)
+        // Never none, however narrow.
+        XCTAssertEqual(IconOptionGrid.columns(fitting: 30, item: 60, spacing: 8), 1)
+        XCTAssertEqual(IconOptionGrid.columns(fitting: .infinity, item: 60, spacing: 8), 1)
+        // The options are shared out evenly between the lines they need.
+        XCTAssertEqual(IconOptionGrid.balanced(count: 4, columns: 4), 4)
+        XCTAssertEqual(IconOptionGrid.balanced(count: 4, columns: 3), 2, "two and two, not three and one")
+        XCTAssertEqual(IconOptionGrid.balanced(count: 5, columns: 4), 3)
+        XCTAssertEqual(IconOptionGrid.balanced(count: 5, columns: 2), 2)
+        XCTAssertEqual(IconOptionGrid.balanced(count: 3, columns: 1), 1)
+        XCTAssertEqual(IconOptionGrid.balanced(count: 2, columns: 6), 2)
+    }
+
     func testPermissionsLeadAgentModesAndPickALevel() {
         let commands = SlashMenu.withComposerCommands(
             [SlashCommand(name: "goal"), SlashCommand(name: "compact")], permissions: true)
