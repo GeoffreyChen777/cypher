@@ -212,6 +212,21 @@ never change its result; the Edge can already withhold entries from a poll.
 | Effort | M: two rooms, one route, sync crate, engine, iOS |
 | Measure after | M2 for TrustRoom, `type=http`: 14.9k a day → about 1.1k; each engine still on an old version adds 1,344 (M5 shows whose) |
 
+Built on branch `cypher/do-cost-cuts` (2026-11-25), as designed, with these choices:
+
+- `state.trust` goes only to a `trust`-capable hello, like the frame (old clients would
+  ignore the field, but nothing needs it).
+- RegistryRoom keeps the largest length it was told; a late retry with an older length is
+  dropped. TrustRoom pushes its current length on every attempt.
+- Both room-to-room routes answer 404 when the user header is present.
+- Engine: the workspace host reports its registry session through a trust hook
+  (`WorkspaceHost::set_trust_hook`), replayed when the hook is set, after the first join
+  and after a lagged event pump, so a missed event only leaves the 60 s cadence. A failed
+  read keeps the existing 10 s → 300 s backoff.
+- iOS: a failed read retries after 60 s even while heads are carried. A phone that is not
+  in the group holds an empty chain, so any head reads at once (no more than today).
+- Not done: the staged check (needs a Worker deploy).
+
 ### B1: bot inbox, acknowledged nudges
 
 The room already nudges the host's DeviceRoom when an entry is queued
