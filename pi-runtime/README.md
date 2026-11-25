@@ -117,6 +117,24 @@ those of a process that was killed first
 recorded; your own Claude Code sessions in the same directory are untouched,
 and files left by Runtimes before this change stay.
 
+The deletion must not race the `claude` child. After an interrupt, Claude Code
+still appends its interrupt records while it stops; when pi exited first, that
+write recreated the deleted file as a small stub, the bridge's pointer then
+named boundaries the stub lacks, and every later turn of that chat failed with
+"Session boundary … is absent from the transcript" (seen 2026-11-25). So the
+bridge now tracks each query's Claude Code child until it exits and lists the
+live ones in the manifest. pi's shutdown waits up to 1.5 s (inside the engine's
+3 s kill grace) for the children being stopped to exit. A child still running
+at exit keeps the manifest in place, and the next bridge's sweep deletes the
+files again once no listed child is alive (60 s at most, in case a pid was
+reused). Separately, a pointer whose transcript exists but lacks an anchor the
+turn relies on (a stub, a truncated or edited file, a line that no longer
+parses) is handled like a missing file: the bridge drops the pointer, imports
+Pi's history and logs `stale-transcript` to `agent/claude-bridge-diag.log`.
+That turn runs without the prompt cache. Upstream's own unit test that expects
+a malformed line to throw fails under this patch on purpose; every other
+upstream unit test passes.
+
 Claude Code stores a session's system prompt in its file on the first query
 and keeps it on every resume, whatever prompt it is given. So when Pi's prompt
 changes mid-chat (`/explain` or `/orchestrate on` in a running chat), the
