@@ -171,18 +171,13 @@ struct NeedsYouItemCard: View {
             card {
                 if !row.sub.isEmpty { NeedsCardCopy(text: row.sub, lines: 3) }
             } actions: {
-                NeedsCardDecisions(
-                    refusals: [],
-                    approvals: [BotDecision(title: "Answer in the chat", role: .primary) { openChat?(chatId) }])
+                NeedsCardButton(title: "Answer in the chat") { openChat?(chatId) }
             }
         case .review(let id):
             card {
                 EmptyView()
             } actions: {
-                HStack {
-                    Spacer(minLength: 0)
-                    NeedsCardLinkButton(title: "Review the answer", page: .exchange(id))
-                }
+                NeedsCardLinkButton(title: "Review the answer", page: .exchange(id))
             }
         }
     }
@@ -299,35 +294,25 @@ struct AskingCard: View {
                     NeedsCardNote(text: note(request))
                 }
             } actions: {
-                HStack {
-                    Spacer(minLength: 0)
-                    BotCardButton(title: "Answer in the session", role: .primary) { openChat?(chat.id) }
-                        .accessibilityIdentifier("asking-open")
-                }
+                NeedsCardButton(title: "Answer in the session") { openChat?(chat.id) }
+                    .accessibilityIdentifier("asking-open")
             }
         }
     }
 
-    /// A question's answers as buttons: on one line when they fit, else
-    /// one under another.
+    /// A question's answers as glass buttons, none weightier than another:
+    /// on one line of equal buttons when they fit, else one under another.
     private func options(_ request: Request, _ question: UserInputQuestion) -> some View {
         let options = Array(question.options.enumerated())
-        func button(_ ix: Int, _ option: String, fill: Bool) -> some View {
-            NeedsCardOutlineButton(title: option, fill: fill) {
-                respond(request.requestId, [UserInputAnswer(questionId: question.id, labels: [option])])
-            }
-            .disabled(!canAnswer)
-            .accessibilityIdentifier("asking-option-\(ix)")
-        }
-        return ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                ForEach(options, id: \.offset) { ix, option in button(ix, option, fill: false) }
-                Spacer(minLength: 0)
-            }
-            VStack(spacing: 8) {
-                ForEach(options, id: \.offset) { ix, option in button(ix, option, fill: true) }
+        return NeedsCardButtonRow {
+            ForEach(options, id: \.offset) { ix, option in
+                NeedsCardButton(title: option) {
+                    respond(request.requestId, [UserInputAnswer(questionId: question.id, labels: [option])])
+                }
+                .accessibilityIdentifier("asking-option-\(ix)")
             }
         }
+        .disabled(!canAnswer)
     }
 
     private func note(_ request: Request) -> String {
@@ -410,29 +395,30 @@ struct ApprovalPage: View {
                 }
             }
             if work != nil || thread != nil {
-                BotCardLabel(title: "From")
-                VStack(alignment: .leading, spacing: 0) {
-                    if let work {
-                        NavigationLink(value: BotPage.workItem(work.id)) {
-                            BoardRow(title: singleLine(work.title), sub: work.phaseLine()) { WorkMark(work: work) }
-                                .cardLinkRow()
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("approval-work")
-                    }
-                    if work != nil, thread != nil { CardDivider() }
-                    if thread != nil {
-                        NavigationLink(value: BotThreadLink(chatId: approval.threadChatId)) {
-                            BoardRow(title: "Open session", sub: "Where it asked, read-only") {
-                                BoardGlyph(symbol: "bubble.left.and.text.bubble.right")
+                BotCardSection(title: "From") {
+                    VStack(alignment: .leading, spacing: 0) {
+                        if let work {
+                            NavigationLink(value: BotPage.workItem(work.id)) {
+                                BoardRow(title: singleLine(work.title), sub: work.phaseLine()) { WorkMark(work: work) }
+                                    .cardLinkRow()
                             }
-                            .cardLinkRow()
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("approval-work")
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("approval-thread")
+                        if work != nil, thread != nil { CardDivider() }
+                        if thread != nil {
+                            NavigationLink(value: BotThreadLink(chatId: approval.threadChatId)) {
+                                BoardRow(title: "Open session", sub: "Where it asked, read-only") {
+                                    BoardGlyph(symbol: "bubble.left.and.text.bubble.right")
+                                }
+                                .cardLinkRow()
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("approval-thread")
+                        }
                     }
+                    .needsCard(padding: 0)
                 }
-                .needsCard(padding: 0)
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -546,26 +532,29 @@ struct AskingPage: View {
             if let store {
                 let recent = recentMessages(store.entries)
                 if !recent.isEmpty {
-                    BotCardLabel(title: "Latest in the session")
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(recent.enumerated()), id: \.offset) { ix, message in
-                            if ix > 0 { CardDivider() }
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(message.fromWorkspace ? (model.bot(id: botId)?.name ?? "Workspace") : "Session")
+                    BotCardSection(title: "Latest in the session") {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(recent.enumerated()), id: \.offset) { ix, message in
+                                if ix > 0 { CardDivider() }
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(
+                                        message.fromWorkspace ? (model.bot(id: botId)?.name ?? "Workspace") : "Session"
+                                    )
                                     .font(Theme.sans(12, weight: .medium, relativeTo: .caption))
                                     .foregroundStyle(Theme.textMuted)
-                                Text(message.text)
-                                    .font(Theme.sans(14, relativeTo: .body))
-                                    .foregroundStyle(Theme.text)
-                                    .lineLimit(6)
-                                    .fixedSize(horizontal: false, vertical: true)
+                                    Text(message.text)
+                                        .font(Theme.sans(14, relativeTo: .body))
+                                        .foregroundStyle(Theme.text)
+                                        .lineLimit(6)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, NeedsCardMetrics.pad)
+                                .padding(.vertical, 11)
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, NeedsCardMetrics.pad)
-                            .padding(.vertical, 11)
                         }
+                        .needsCard(padding: 0)
                     }
-                    .needsCard(padding: 0)
                 }
             }
         }

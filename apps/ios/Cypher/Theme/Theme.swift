@@ -28,6 +28,14 @@ enum Theme {
     static let sheetPanel = adaptive(light: .white, dark: grey(0x20))
     /// Inset-grouped list cells: one step off the shell surface.
     static let groupedRow = adaptive(light: .white, dark: grey(0x26))
+    /// An iOS grouped page (systemGroupedBackground's role): the shell
+    /// surface, so a page of cards matches the app's inset-grouped lists.
+    static let groupedBackground = surface
+    /// A card on a grouped page (secondarySystemGroupedBackground's role).
+    static let groupedCard = groupedRow
+    /// A plate inside a card — a command, a list of facts
+    /// (tertiarySystemGroupedBackground's role): one step off the card.
+    static let groupedInset = adaptive(light: neutral(0.952), dark: grey(0x33))
     /// Hover/pressed wash for interactive rows (ink at low alpha).
     static let elementHover = whiteAlpha(0.06)
     /// Active/selected wash.
@@ -101,6 +109,16 @@ enum Theme {
     static let codeScale: CGFloat = 0.86
     static let bubbleRadius: CGFloat = 16
     static let panelRadius: CGFloat = 10
+    /// A card on a grouped page, as iOS 26 rounds an inset-grouped list's
+    /// section (continuous corners).
+    static let cardRadius: CGFloat = 26
+    /// A card's inner padding.
+    static let cardPad: CGFloat = 16
+    /// A plate inside a card, concentric with it: the card's radius less
+    /// the padding that insets the plate.
+    static let cardInsetRadius: CGFloat = cardRadius - cardPad
+    /// Between cards on a page.
+    static let cardGap: CGFloat = 20
 }
 
 // MARK: - Fonts
