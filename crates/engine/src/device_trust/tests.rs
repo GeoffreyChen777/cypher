@@ -8,11 +8,15 @@ use super::*;
 struct FakeEdge {
     entries: Mutex<Vec<TrustEntry>>,
     mailboxes: Mutex<HashMap<(String, String), serde_json::Value>>,
+    /// Chain reads served (`GET /trust/chain`).
+    reads: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
 impl TrustEdge for FakeEdge {
     async fn chain(&self) -> Result<Vec<TrustEntry>, String> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(lock(&self.entries).clone())
     }
 
@@ -491,4 +495,104 @@ async fn launch_records_count_from_full_control_members_and_the_host_itself() {
     assert!(!a.trust.trusts_record("dev-b", &by_b));
     assert!(b.trust.trusts_record("dev-b", &by_b));
     assert!(b.trust.trusts_record("dev-a", &by_a));
+}
+
+// ── chain-head pushes pace the background sync (T1, docs/design/do-cost.md) ──
+
+fn reads(edge: &FakeEdge) -> usize {
+    edge.reads.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A founded device whose background sync has run once; returns the reads so far.
+async fn background_device(edge: &Arc<FakeEdge>) -> (Device, usize) {
+    let a = device("dev-a", edge);
+    a.trust.spawn_sync(None);
+    until(|| a.trust.status().state == TrustState::Paired).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let baseline = reads(edge);
+    (a, baseline)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_head_that_differs_reads_the_chain_within_a_second() {
+    let edge = Arc::new(FakeEdge::default());
+    let (a, base) = background_device(&edge).await;
+    a.trust.registry_signal(RegistryTrust::Joined);
+    a.trust.registry_signal(RegistryTrust::Head(1));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        reads(&edge),
+        base,
+        "a head equal to the local chain reads nothing"
+    );
+    a.trust.registry_signal(RegistryTrust::Head(2));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(reads(&edge), base + 1, "one read for the moved head");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_joined_session_carrying_heads_waits_for_the_safety_poll() {
+    let edge = Arc::new(FakeEdge::default());
+    let (a, base) = background_device(&edge).await;
+    a.trust.registry_signal(RegistryTrust::Joined);
+    a.trust.registry_signal(RegistryTrust::Head(1));
+    tokio::time::sleep(SAFETY - Duration::from_secs(5)).await;
+    assert_eq!(reads(&edge), base, "no poll while heads are pushed");
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert_eq!(reads(&edge), base + 1, "the safety poll");
+    tokio::time::sleep(SAFETY - Duration::from_secs(10)).await;
+    assert_eq!(reads(&edge), base + 1);
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert_eq!(reads(&edge), base + 2, "safety cadence holds");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_disconnect_brings_the_next_read_within_a_minute() {
+    let edge = Arc::new(FakeEdge::default());
+    let (a, base) = background_device(&edge).await;
+    a.trust.registry_signal(RegistryTrust::Joined);
+    a.trust.registry_signal(RegistryTrust::Head(1));
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    assert_eq!(reads(&edge), base);
+    a.trust.registry_signal(RegistryTrust::Left);
+    tokio::time::sleep(RESYNC - Duration::from_secs(1)).await;
+    assert_eq!(reads(&edge), base);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(reads(&edge), base + 1, "read 60 s after the disconnect");
+    // Still not joined: the plain cadence.
+    tokio::time::sleep(RESYNC).await;
+    assert_eq!(reads(&edge), base + 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rejoin_whose_head_matches_cancels_the_pending_read() {
+    let edge = Arc::new(FakeEdge::default());
+    let (a, base) = background_device(&edge).await;
+    a.trust.registry_signal(RegistryTrust::Joined);
+    a.trust.registry_signal(RegistryTrust::Head(1));
+    a.trust.registry_signal(RegistryTrust::Left);
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    a.trust.registry_signal(RegistryTrust::Joined);
+    a.trust.registry_signal(RegistryTrust::Head(1));
+    tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+    assert_eq!(reads(&edge), base, "the rejoin's head matched");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_session_without_heads_keeps_the_minute_cadence() {
+    // A Worker that predates chain-head pushes: joins, never reports a head.
+    let edge = Arc::new(FakeEdge::default());
+    let (a, base) = background_device(&edge).await;
+    a.trust.registry_signal(RegistryTrust::Joined);
+    for n in 1..=3 {
+        tokio::time::sleep(RESYNC + Duration::from_millis(500)).await;
+        assert_eq!(reads(&edge), base + n);
+    }
+    // A carrying session that drops back to a rejoin without heads (a
+    // Worker rollback) returns to the minute too.
+    a.trust.registry_signal(RegistryTrust::Head(1));
+    a.trust.registry_signal(RegistryTrust::Left);
+    a.trust.registry_signal(RegistryTrust::Joined);
+    tokio::time::sleep(RESYNC + Duration::from_secs(1)).await;
+    assert_eq!(reads(&edge), base + 4);
 }

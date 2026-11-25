@@ -18,7 +18,7 @@ use cypher_proto::{
 };
 
 use bot_edge::FakeHub;
-use support::wait_for;
+use support::{wait_for, wait_for_within};
 
 type Runs = Arc<Mutex<Vec<(RunRequest, Option<cypher_harness::BotRunEnv>)>>>;
 
@@ -53,33 +53,8 @@ fn harness(runs: Runs) -> support::TestHarness {
 
 async fn side(hub: &Arc<FakeHub>, user: &str, owner: &str, bot_name: &str) -> Side {
     let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().join("data");
-    std::fs::create_dir_all(&data).unwrap();
-    let device = format!("dev-{user}");
-    std::fs::write(data.join("device-id"), &device).unwrap();
-    let runs = Runs::default();
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(harness(runs.clone())));
-    let core = support::test_engine(|| {
-        EngineCore::assemble(&data, Arc::new(registry), HarnessId::Pi, None)
-    });
-    // A project the bot reads, and one the connection will hide.
-    for space in ["sp-billing", "sp-secret"] {
-        let path = dir.path().join(space);
-        std::fs::create_dir_all(&path).unwrap();
-        core.workspace
-            .create_space(space, &core.device_id, path.to_str().unwrap(), None, false)
-            .unwrap();
-    }
-    let owner = Arc::new(Mutex::new(cypher_engine::bots::Owner {
-        name: owner.to_string(),
-        avatar_url: None,
-    }));
-    let profile = owner.clone();
-    core.bots
-        .set_owner(Arc::new(move || Some(profile.lock().unwrap().clone())));
-    core.bots.attach_network(hub.client(user));
-    hub.register_device(&device, user, core.bots.clone());
+    std::fs::create_dir_all(dir.path().join("data")).unwrap();
+    let (core, runs, owner) = engine(hub, &dir, user, owner);
     let client = cypher_rpc::memory_client(core.rpc_service());
     let bot: Bot = serde_json::from_value(
         client
@@ -102,6 +77,62 @@ async fn side(hub: &Arc<FakeHub>, user: &str, owner: &str, bot_name: &str) -> Si
         owner,
         _dir: dir,
     }
+}
+
+/// `side`'s engine stopped and started again on the same data.
+async fn restart(hub: &Arc<FakeHub>, side: Side, user: &str, owner: &str) -> Side {
+    let Side {
+        core, bot, _dir, ..
+    } = side;
+    core.shutdown().await;
+    drop(core);
+    let (core, runs, owner) = engine(hub, &_dir, user, owner);
+    Side {
+        core,
+        bot,
+        runs,
+        owner,
+        _dir,
+    }
+}
+
+/// One user's engine on `dir`, signed in to `hub`, its spaces made.
+fn engine(
+    hub: &Arc<FakeHub>,
+    dir: &tempfile::TempDir,
+    user: &str,
+    owner: &str,
+) -> (EngineCore, Runs, Arc<Mutex<cypher_engine::bots::Owner>>) {
+    let data = dir.path().join("data");
+    let device = format!("dev-{user}");
+    std::fs::write(data.join("device-id"), &device).unwrap();
+    let runs = Runs::default();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(harness(runs.clone())));
+    let core = support::test_engine(|| {
+        EngineCore::assemble(&data, Arc::new(registry), HarnessId::Pi, None)
+    });
+    // A project the bot reads, and one the connection will hide.
+    for space in ["sp-billing", "sp-secret"] {
+        let path = dir.path().join(space);
+        if path.exists() {
+            continue; // a restart: the spaces are there
+        }
+        std::fs::create_dir_all(&path).unwrap();
+        core.workspace
+            .create_space(space, &core.device_id, path.to_str().unwrap(), None, false)
+            .unwrap();
+    }
+    let owner = Arc::new(Mutex::new(cypher_engine::bots::Owner {
+        name: owner.to_string(),
+        avatar_url: None,
+    }));
+    let profile = owner.clone();
+    core.bots
+        .set_owner(Arc::new(move || Some(profile.lock().unwrap().clone())));
+    core.bots.attach_network(hub.client(user));
+    hub.register_device(&device, user, core.bots.clone());
+    (core, runs, owner)
 }
 
 async fn call(core: &EngineCore, method: &str, params: serde_json::Value) -> serde_json::Value {
@@ -900,4 +931,123 @@ async fn a_review_text_over_its_cap_is_refused_not_cut() {
     let decided = row(&core).review.expect("the decision");
     assert!(decided.send);
     assert_eq!(decided.text, Some(whole));
+}
+
+// ── B1: pulled on nudges (docs/design/do-cost.md) ──────────────────────────
+//
+// The cadence is scaled down: `poll` stands for the minute poll, `safety`
+// for the 15 min safety poll, so seconds here stand for many minutes.
+
+const POLL: std::time::Duration = std::time::Duration::from_millis(100);
+const SAFETY: std::time::Duration = std::time::Duration::from_secs(3600);
+/// Fifteen `POLL`s, debounce included: "15 minutes" of minute polls.
+const QUIET: std::time::Duration = std::time::Duration::from_millis(2_000);
+
+async fn scaled_pair(push: bool) -> (Arc<FakeHub>, Side, Side, String) {
+    let hub = FakeHub::new();
+    hub.set_push(push);
+    let alice = side(&hub, "alice", "Alice", "Billing bot").await;
+    let bob = side(&hub, "bob", "Bob", "Release bot").await;
+    for side in [&alice, &bob] {
+        side.core.bots.set_pull_cadence(POLL, SAFETY);
+    }
+    let connection = connect(&alice, &bob).await;
+    (hub, alice, bob, connection)
+}
+
+/// Bob's bot asks Alice's straight at the Edge, as Bob's engine does.
+async fn bob_asks(hub: &Arc<FakeHub>, connection: &str, exchange_id: &str) {
+    use cypher_engine::bots::BotEdge;
+    let room = hub.room_named("Release bot").expect("bob's room");
+    hub.client("bob")
+        .ask(
+            &room,
+            &cypher_proto::AskRequest {
+                exchange_id: exchange_id.into(),
+                connection_id: connection.into(),
+                text: "Is billing green?".into(),
+            },
+        )
+        .await
+        .expect("ask");
+}
+
+fn has_incoming(side: &Side, exchange_id: &str) -> bool {
+    exchanges(side, ExchangeDirection::Incoming)
+        .iter()
+        .any(|e| e.id == exchange_id)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_room_is_pulled_on_nudges_not_every_minute() {
+    let (hub, alice, _bob, connection) = scaled_pair(true).await;
+    let room = hub.room_named("Billing bot").unwrap();
+    // Settle what connecting set off, then: no nudge, no pull.
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    let before = hub.inbox_pulls(&room);
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(
+        hub.inbox_pulls(&room),
+        before,
+        "a busy push room went unpulled without a nudge"
+    );
+
+    // A nudge: pulled at once.
+    alice.core.bots.bots_nudged(room.clone());
+    wait_for_within(
+        || hub.inbox_pulls(&room) == before + 1,
+        "the nudged pull",
+        std::time::Duration::from_secs(2),
+    )
+    .await;
+
+    // A question whose nudge is lost waits for the room's repeat.
+    hub.lose_nudges(true);
+    bob_asks(&hub, &connection, "ex-lost-1").await;
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    assert!(!has_incoming(&alice, "ex-lost-1"), "pulled without a nudge");
+    assert_eq!(hub.pending_asks(&room), 1);
+    alice.core.bots.bots_nudged(room.clone()); // the BotRoom's repeat at 15 s
+    wait_for(
+        || has_incoming(&alice, "ex-lost-1"),
+        "the repeated nudge's pull",
+    )
+    .await;
+
+    // Another lost nudge, found when the DeviceRoom socket rejoins.
+    bob_asks(&hub, &connection, "ex-lost-2").await;
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    assert!(!has_incoming(&alice, "ex-lost-2"), "pulled without a nudge");
+    alice.core.bots.host_relay_joined();
+    wait_for(|| has_incoming(&alice, "ex-lost-2"), "the pull on rejoin").await;
+    assert_eq!(hub.pending_asks(&room), 0, "both acknowledged");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_room_without_push_is_still_pulled_every_minute() {
+    let (hub, _alice, _bob, connection) = scaled_pair(false).await;
+    let room = hub.room_named("Billing bot").unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    let before = hub.inbox_pulls(&room);
+    tokio::time::sleep(QUIET).await;
+    let polls = hub.inbox_pulls(&room) - before;
+    // A pass every POLL + the 300 ms debounce: four or five in QUIET.
+    assert!(polls >= 3, "{polls} polls in {QUIET:?}");
+
+    // A lost nudge is found by the poll, as with an older Worker today.
+    hub.lose_nudges(true);
+    bob_asks(&hub, &connection, "ex-polled").await;
+    wait_for(|| has_incoming(&_alice, "ex-polled"), "the polled question").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_start_pulls_every_room() {
+    let (hub, alice, _bob, connection) = scaled_pair(true).await;
+    let room = hub.room_named("Billing bot").unwrap();
+    hub.lose_nudges(true);
+    bob_asks(&hub, &connection, "ex-while-down").await;
+    let alice = restart(&hub, alice, "alice", "Alice").await;
+    alice.core.bots.set_pull_cadence(POLL, SAFETY);
+    wait_for(|| has_incoming(&alice, "ex-while-down"), "the start's pull").await;
+    assert_eq!(hub.pending_asks(&room), 0);
 }

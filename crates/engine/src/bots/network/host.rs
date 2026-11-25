@@ -2,8 +2,12 @@
 //!
 //! Each pass acts on the owner's edits (revoke a connection or an invite,
 //! send or decline a reviewed answer), then pulls the rooms that are due: a
-//! room its DeviceRoom nudged, and every room with live connections or
-//! questions waiting once a minute. An entry is acknowledged only after it
+//! room its DeviceRoom nudged, every room at engine start and after the
+//! DeviceRoom host socket (re)joined, and every room with live connections
+//! or questions waiting once [`Cadence`] says so: every 15 min when its last
+//! page said `push` (the room repeats a nudge until it is acknowledged,
+//! docs/design/do-cost.md B1), every minute otherwise (an older Worker, whose
+//! nudges are best effort). An entry is acknowledged only after it
 //! is written to the registry rows (or handed to a peer thread), so a crash
 //! between the two replays it, and every handler is idempotent.
 
@@ -22,8 +26,35 @@ use crate::EngineError;
 use crate::bots::notice::run_request;
 use crate::util::{lock, new_id};
 
-/// How often a room with live connections or waiting questions is pulled.
+/// How often a room with live connections or waiting questions is pulled
+/// when its page does not say `push`.
 const PULL_EVERY: Duration = Duration::from_secs(60);
+/// How often such a room is pulled when its page says `push`: a safety net
+/// under the room's own repeats of unacknowledged nudges.
+const PULL_SAFETY: Duration = Duration::from_secs(15 * 60);
+
+/// How often rooms are pulled without a nudge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Cadence {
+    pub poll: Duration,
+    pub safety: Duration,
+}
+
+impl Default for Cadence {
+    fn default() -> Self {
+        Self {
+            poll: PULL_EVERY,
+            safety: PULL_SAFETY,
+        }
+    }
+}
+
+impl Cadence {
+    /// How long a room may go unpulled without a nudge.
+    pub(super) fn every(self, push: bool) -> Duration {
+        if push { self.safety } else { self.poll }
+    }
+}
 /// Coalesces bursts of record changes into one pass.
 const DEBOUNCE: Duration = Duration::from_millis(300);
 /// How long a peer question may run before it is declined.
@@ -38,18 +69,30 @@ impl Bots {
         let mut records = self.inner.workspace.watch_bot_records();
         let cancel = self.hosts_cancelled();
         let task = tokio::spawn(async move {
-            let mut first = true;
+            // Engine start pulls every room, once a pass has an Edge to ask.
+            let mut start = true;
             loop {
                 // Hold the service only for a pass, so a dropped engine ends
                 // the loop instead of being kept alive by it.
                 let Some(inner) = weak.upgrade() else { break };
-                Bots { inner }.network_pass(first).await;
-                first = false;
+                let rejoined = inner
+                    .network
+                    .rejoined
+                    .swap(false, std::sync::atomic::Ordering::SeqCst);
+                let poll = lock(&inner.network.cadence).poll;
+                let ran = Bots { inner }.network_pass(start || rejoined).await;
+                if ran {
+                    start = false;
+                } else if rejoined {
+                    network
+                        .rejoined
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = network.wake.notified() => {}
                     changed = records.changed() => if changed.is_err() { break },
-                    _ = tokio::time::sleep(PULL_EVERY) => {}
+                    _ = tokio::time::sleep(poll) => {}
                 }
                 tokio::time::sleep(DEBOUNCE).await;
             }
@@ -57,10 +100,11 @@ impl Bots {
         self.keep_host_task(task);
     }
 
-    /// One pass; `all` pulls every networked room (engine start, tests).
-    pub(super) async fn network_pass(&self, all: bool) {
+    /// One pass; `all` pulls every networked room (engine start, a
+    /// DeviceRoom join, tests). `false` when there is no Edge to ask.
+    pub(super) async fn network_pass(&self, all: bool) -> bool {
         if !self.has_edge() {
-            return;
+            return false;
         }
         let me = self.device_id().to_string();
         let bots: Vec<Bot> = self
@@ -75,6 +119,7 @@ impl Bots {
         let due: std::collections::HashSet<String> =
             std::mem::take(&mut *lock(&self.inner.network.due));
         let records = self.inner.workspace.read_bot_records();
+        let cadence = *lock(&self.inner.network.cadence);
         for bot in &bots {
             let Some(room) = self.room_of(&bot.id) else {
                 continue;
@@ -92,9 +137,10 @@ impl Bots {
                         && e.direction == ExchangeDirection::Outgoing
                         && !is_settled(e.state)
                 });
+            let every = cadence.every(lock(&self.inner.network.push).contains(&room));
             let stale = lock(&self.inner.network.pulled)
                 .get(&room)
-                .is_none_or(|at| at.elapsed() >= PULL_EVERY);
+                .is_none_or(|at| at.elapsed() >= every);
             if (due.contains(&room) || all || (busy && stale))
                 && let Err(err) = self.pull_room(bot, &room).await
             {
@@ -103,6 +149,7 @@ impl Bots {
             self.resume_incoming(bot);
         }
         self.expire_stale(&bots);
+        true
     }
 
     /// Questions the Edge has expired by now (7 days after they were sent)
@@ -241,6 +288,14 @@ impl Bots {
         let _one_at_a_time = self.inner.network.pulls.lock().await;
         lock(&self.inner.network.pulled).insert(room.to_string(), Instant::now());
         let page = edge.inbox(room).await.map_err(net)?;
+        {
+            let mut push = lock(&self.inner.network.push);
+            if page.push {
+                push.insert(room.to_string());
+            } else {
+                push.remove(room);
+            }
+        }
         let mut ack = AckRequest::default();
         let mut incoming = Vec::new();
         for frame in page.entries {

@@ -48,7 +48,7 @@ Client→server:
 
 | frame | shape |
 |---|---|
-| hello | `{t:"hello", cursor: number\|null, device}` — must be first |
+| hello | `{t:"hello", cursor: number\|null, device, caps?: ["trust"]}` — must be first; `caps` names the optional server frames the client understands |
 | push | `{t:"push", batch, ops: [Op]}` |
 | presence | `{t:"presence", at}` |
 | probe | `{t:"probe"}` |
@@ -57,11 +57,12 @@ Server→client:
 
 | frame | shape |
 |---|---|
-| state | `{t:"state", seq, full, rows, gcFloor, presence}` — hello reply; `full=false` ⇒ rows are the `seq > cursor` delta |
+| state | `{t:"state", seq, full, rows, gcFloor, presence, trust?: {length}}` — hello reply; `full=false` ⇒ rows are the `seq > cursor` delta; `trust` (the user's trust chain length) only for a `trust`-capable hello when the room knows it |
 | rows | `{t:"rows", seq, rows}` — merged full rows for every touched row, broadcast to all sockets |
 | ack | `{t:"ack", batch, seq, applied}` |
 | presence | `{t:"presence", device, at}` |
 | probe-ok | `{t:"probe-ok", seq}` |
+| trust | `{t:"trust", length}` — the user's trust chain grew; only to sockets whose hello declared `caps: ["trust"]`, because clients redial on a frame type they do not know. A hint: devices still read and verify the chain (docs/design/do-cost.md, T1) |
 
 `Op = {kind, id, op: "upsert"|"update"|"delete", set?: {field: value|null}, hlc, clocks?}`
 `Row = {kind, id, seq, deleted, delHlc?, fields, clocks}`

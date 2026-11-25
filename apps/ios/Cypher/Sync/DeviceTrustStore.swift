@@ -126,6 +126,57 @@ struct KeychainTrustKeyStore: TrustKeyStore {
     }
 }
 
+/// When the phone reads the trust chain next (T1, docs/design/do-cost.md),
+/// the same rules as the engine's background sync (device_trust.rs):
+/// every minute, or every 15 minutes while the joined registry session
+/// carries chain heads; at once when a head differs from the local chain; a
+/// minute after the session ends, unless a rejoin's head matches. So the
+/// phone is never more than a minute without either a joined session that
+/// carries heads or a chain read. The head is a hint only: the read still
+/// verifies the chain and adopts only an extension of the phone's own.
+struct TrustSyncPacer {
+    static let resync: Duration = .seconds(60)
+    static let safety: Duration = .seconds(15 * 60)
+
+    typealias Instant = ContinuousClock.Instant
+
+    private(set) var due: Instant
+    /// The joined registry session has reported a head.
+    private(set) var carried = false
+    private var lastSync: Instant?
+
+    init(due: Instant) { self.due = due }
+
+    /// A read finished. A failed one is retried within the minute even while
+    /// heads are carried: the change it was fetching may be the one pushed.
+    mutating func synced(at now: Instant, ok: Bool = true) {
+        guard ok else {
+            due = now + Self.resync
+            return
+        }
+        lastSync = now
+        due = now + (carried ? Self.safety : Self.resync)
+    }
+
+    mutating func joined(at now: Instant) { dropCarried(at: now) }
+
+    mutating func left(at now: Instant) { dropCarried(at: now) }
+
+    mutating func head(_ length: UInt64, local: UInt64, at now: Instant) {
+        carried = true
+        if length != local {
+            due = now
+        } else if let lastSync {
+            due = lastSync + Self.safety
+        }
+    }
+
+    private mutating func dropCarried(at now: Instant) {
+        carried = false
+        due = min(due, now + Self.resync)
+    }
+}
+
 @MainActor
 @Observable
 final class DeviceTrustStore {
@@ -159,6 +210,9 @@ final class DeviceTrustStore {
     @ObservationIgnored private var groupExists = false
     @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var joinTask: Task<Void, Never>?
+    @ObservationIgnored private var pacer = TrustSyncPacer(due: ContinuousClock.now)
+    /// The background loop's current wait; cancelled to re-plan at once.
+    @ObservationIgnored private var sleeper: Task<Void, Never>?
 
     init(
         deviceId: String, deviceName: String, userId: String, edge: TrustEdge,
@@ -262,25 +316,64 @@ final class DeviceTrustStore {
         project()
     }
 
-    /// Sync now and every minute while the app runs.
+    /// Sync now, then every minute while the app runs — every 15 minutes
+    /// while the registry session pushes chain heads, and at once when a
+    /// pushed head differs from the phone's chain (TrustSyncPacer).
     func start() {
         guard syncTask == nil else { return }
+        pacer = TrustSyncPacer(due: ContinuousClock.now)
         syncTask = Task { [weak self] in
-            while !Task.isCancelled {
-                await self?.sync()
-                try? await Task.sleep(for: .seconds(60))
+            // The store is held only for each step, never across the wait.
+            while !Task.isCancelled, let sleeper = await self?.syncStep() {
+                await sleeper.value
             }
         }
+    }
+
+    /// Read the chain if it is due, then arm the wait for the next read; a
+    /// registry signal cancels the wait to re-plan.
+    private func syncStep() async -> Task<Void, Never> {
+        if ContinuousClock.now >= pacer.due {
+            let ok = await sync()
+            pacer.synced(at: ContinuousClock.now, ok: ok)
+        }
+        let due = pacer.due
+        let sleeper = Task { _ = try? await Task.sleep(until: due, clock: .continuous) }
+        self.sleeper = sleeper
+        return sleeper
+    }
+
+    // MARK: Registry session (chain-head pushes, T1)
+
+    /// The registry session joined; until it reports a head it carries none.
+    func registryJoined() { replan { $0.joined(at: $1) } }
+
+    /// The registry session ended: read the chain within a minute.
+    func registryLeft() { replan { $0.left(at: $1) } }
+
+    /// The joined registry session reported the chain length.
+    func registryHead(_ length: UInt64) {
+        let local = UInt64(chain.entries.count)
+        replan { $0.head(length, local: local, at: $1) }
+    }
+
+    private func replan(_ change: (inout TrustSyncPacer, ContinuousClock.Instant) -> Void) {
+        change(&pacer, ContinuousClock.now)
+        sleeper?.cancel()
     }
 
     func stop() {
         syncTask?.cancel()
         syncTask = nil
+        sleeper?.cancel()
+        sleeper = nil
         joinTask?.cancel()
         joinTask = nil
     }
 
-    func sync() async {
+    /// One chain read; `false` when the server could not be read.
+    @discardableResult
+    func sync() async -> Bool {
         do {
             let remote = try await edge.chain()
             if !chain.entries.isEmpty {
@@ -302,7 +395,9 @@ final class DeviceTrustStore {
             conflict = true
         } catch {
             if phase == .unknown { self.error = "Couldn't reach the server: \(error.localizedDescription)" }
+            return false
         }
+        return true
     }
 
     // MARK: Joining

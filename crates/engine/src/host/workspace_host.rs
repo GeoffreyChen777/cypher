@@ -170,6 +170,8 @@ struct WorkspaceHostInner {
     /// word (see `launch_config`).
     launch: Mutex<Option<LaunchHook>>,
     notification_event: Mutex<Option<NotificationEventHook>>,
+    /// Where the registry session's chain-head reports go (device trust).
+    trust_hook: Mutex<Option<TrustHook>>,
     /// Deaf-socket tripwire state — see `check_presence_deafness`.
     presence_watch: Mutex<PresenceWatch>,
 }
@@ -177,6 +179,9 @@ struct WorkspaceHostInner {
 /// "This peer is alive" callback (device id) — see `WorkspaceHost::set_peer_alive_hook`.
 pub type PeerAliveHook = Arc<dyn Fn(&str) + Send + Sync>;
 pub type NotificationEventHook = Arc<dyn Fn(&Session) + Send + Sync>;
+/// Registry session join/leave and chain-head reports — see
+/// `WorkspaceHost::set_trust_hook`.
+pub type TrustHook = Arc<dyn Fn(crate::device_trust::RegistryTrust) + Send + Sync>;
 /// Given a chat id and its row's config, the config its runs launch with —
 /// `doc_host`'s signed launch records under "Only paired devices".
 pub type LaunchHook = Arc<dyn Fn(&str, Option<ChatConfig>) -> Option<ChatConfig> + Send + Sync>;
@@ -242,6 +247,7 @@ impl WorkspaceHost {
                 peer_alive: Mutex::new(None),
                 launch: Mutex::new(None),
                 notification_event: Mutex::new(None),
+                trust_hook: Mutex::new(None),
                 presence_watch: Mutex::new(PresenceWatch::default()),
             }),
         };
@@ -319,6 +325,15 @@ impl WorkspaceHost {
 
     pub fn set_notification_event_hook(&self, hook: NotificationEventHook) {
         *lock(&self.inner.notification_event) = Some(hook);
+    }
+
+    /// Report the registry session to device trust: joins, leaves and the
+    /// chain heads it carries (T1, docs/design/do-cost.md). The current
+    /// session is reported at once, so a hook set after the join still
+    /// learns it.
+    pub fn set_trust_hook(&self, hook: TrustHook) {
+        *lock(&self.inner.trust_hook) = Some(hook);
+        self.inner.report_trust_session();
     }
 
     pub fn notify_session_event(&self, session: &Session) {

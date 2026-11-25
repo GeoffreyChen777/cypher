@@ -39,6 +39,10 @@ const POLL: Duration = Duration::from_secs(2);
 /// Background re-sync cadence: how long a policy or removal made on another
 /// device can take to reach this one when nothing else prompts a sync.
 const RESYNC: Duration = Duration::from_secs(60);
+/// Background re-sync while the registry session pushes chain heads (T1,
+/// docs/design/do-cost.md): changes arrive as [`RegistryTrust::Head`], so
+/// this only bounds how long a lost push can go unnoticed.
+const SAFETY: Duration = Duration::from_secs(15 * 60);
 /// A client the host doesn't recognise triggers at most one refresh per this.
 const MISS_REFRESH: Duration = Duration::from_secs(15);
 
@@ -51,6 +55,27 @@ pub trait TrustEdge: Send + Sync + 'static {
     async fn put(&self, mailbox: &str, slot: &str, body: serde_json::Value) -> Result<(), String>;
     async fn get(&self, mailbox: &str, slot: &str) -> Result<Option<serde_json::Value>, String>;
     async fn delete(&self, mailbox: &str) -> Result<(), String>;
+}
+
+/// What the workspace registry session tells the background sync about
+/// chain-head pushes. The head is a hint only: a sync still reads the chain
+/// over HTTPS, verifies it and accepts only an extension of its own, so a
+/// wrong or missing hint can delay a sync, never change its result.
+///
+/// The background sync runs every [`RESYNC`] unless the joined session has
+/// reported a head, then every [`SAFETY`]; so a device is never more than
+/// [`RESYNC`] without either a joined session that carries heads or a chain
+/// read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryTrust {
+    /// The registry session (re)joined. Until it reports a head, it does not
+    /// carry them (a Worker without chain-head pushes never does).
+    Joined,
+    /// The joined session reported the chain length (its `state`, or a push
+    /// after an append).
+    Head(u64),
+    /// The registry session ended.
+    Left,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -262,6 +287,9 @@ struct Inner {
     last_miss_refresh: Mutex<Option<Instant>>,
     pairing_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     background: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// [`RegistryTrust`] signals for the background sync (`spawn_sync`).
+    registry_tx: tokio::sync::mpsc::UnboundedSender<RegistryTrust>,
+    registry_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<RegistryTrust>>>,
 }
 
 #[derive(Clone)]
@@ -330,6 +358,7 @@ impl DeviceTrust {
             })
             .unwrap_or_default();
         let (changes, _) = watch::channel(0);
+        let (registry_tx, registry_rx) = tokio::sync::mpsc::unbounded_channel();
         Ok(Self {
             inner: Arc::new(Inner {
                 device_id: device_id.to_string(),
@@ -347,42 +376,97 @@ impl DeviceTrust {
                 last_miss_refresh: Mutex::new(None),
                 pairing_task: Mutex::new(None),
                 background: Mutex::new(None),
+                registry_tx,
+                registry_rx: Arc::new(tokio::sync::Mutex::new(registry_rx)),
             }),
         })
     }
 
-    /// Sync now, then every [`RESYNC`] and whenever credentials change.
+    /// Feed the background sync what the registry session reports.
+    pub fn registry_signal(&self, signal: RegistryTrust) {
+        let _ = self.inner.registry_tx.send(signal);
+    }
+
+    fn chain_len(&self) -> u64 {
+        lock(&self.inner.state).chain.entries().len() as u64
+    }
+
+    /// Sync now, then every [`RESYNC`] ([`SAFETY`] while the registry
+    /// session carries chain heads), whenever credentials change, and as soon
+    /// as a reported head differs from the local chain (see
+    /// [`RegistryTrust`]).
     pub fn spawn_sync(&self, token: Option<Arc<dyn TokenSource>>) {
         let weak = Arc::downgrade(&self.inner);
+        let registry_rx = self.inner.registry_rx.clone();
         let mut token_changes = token.as_ref().and_then(|token| token.subscribe());
         let task = tokio::spawn(async move {
+            // A replaced task releases the receiver when it is aborted.
+            let mut signals = registry_rx.lock_owned().await;
             let mut delay = Duration::from_secs(5);
+            // The joined registry session has reported a head.
+            let mut carried = false;
+            let mut due = tokio::time::Instant::now();
+            let mut last_ok: Option<tokio::time::Instant> = None;
+            let mut failing = false;
             loop {
-                let Some(inner) = weak.upgrade() else { return };
-                let trust = DeviceTrust { inner };
-                let ok = match trust.sync().await {
-                    Ok(()) => true,
-                    Err(err) => {
-                        tracing::debug!(error = %err, "trust: sync failed");
-                        false
-                    }
-                };
-                drop(trust);
-                let wait = if ok {
-                    delay = Duration::from_secs(5);
-                    RESYNC
-                } else {
-                    delay = (delay * 2).min(Duration::from_secs(300));
-                    delay
-                };
                 tokio::select! {
-                    _ = tokio::time::sleep(wait) => {}
-                    _ = async {
-                        match token_changes.as_mut() {
-                            Some(changes) => { let _ = changes.changed().await; }
-                            None => std::future::pending::<()>().await,
+                    _ = tokio::time::sleep_until(due) => {
+                        let Some(inner) = weak.upgrade() else { return };
+                        let trust = DeviceTrust { inner };
+                        let ok = match trust.sync().await {
+                            Ok(()) => true,
+                            Err(err) => {
+                                tracing::debug!(error = %err, "trust: sync failed");
+                                false
+                            }
+                        };
+                        drop(trust);
+                        let now = tokio::time::Instant::now();
+                        if ok {
+                            delay = Duration::from_secs(5);
+                            failing = false;
+                            last_ok = Some(now);
+                            due = now + if carried { SAFETY } else { RESYNC };
+                        } else {
+                            delay = (delay * 2).min(Duration::from_secs(300));
+                            failing = true;
+                            due = now + delay;
                         }
-                    } => {}
+                    }
+                    signal = signals.recv() => {
+                        let Some(signal) = signal else { return };
+                        let now = tokio::time::Instant::now();
+                        match signal {
+                            RegistryTrust::Head(length) => {
+                                carried = true;
+                                let Some(inner) = weak.upgrade() else { return };
+                                let local = DeviceTrust { inner }.chain_len();
+                                if length != local {
+                                    tracing::debug!(length, local, "trust: chain head moved; syncing");
+                                    due = now;
+                                } else if !failing && let Some(at) = last_ok {
+                                    // In step: the head now carries changes.
+                                    due = at + SAFETY;
+                                }
+                            }
+                            RegistryTrust::Joined | RegistryTrust::Left => {
+                                carried = false;
+                                due = due.min(now + RESYNC);
+                            }
+                        }
+                    }
+                    changed = async {
+                        match token_changes.as_mut() {
+                            Some(changes) => changes.changed().await.is_ok(),
+                            None => std::future::pending::<bool>().await,
+                        }
+                    } => {
+                        if changed {
+                            due = tokio::time::Instant::now();
+                        } else {
+                            token_changes = None; // the source is gone
+                        }
+                    }
                 }
             }
         });

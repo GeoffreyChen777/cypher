@@ -72,7 +72,10 @@ const ROOM_ROUTES: readonly RoomRoute[] = [
     guard: (orgId, auth) => (auth.orgId === orgId ? undefined : json({ error: "forbidden" }, 403)),
     subs: [
       { path: ["notifications", /^(?:settings|activity|event|register|unregister)$/], exact: true },
-      { path: ["ws"], websocket: true, search: (url) => `?${deviceParam(url).replace(/^&/, "")}` },
+      // `org` lets the room name itself (`reg1/{org}/{user}`) when it
+      // subscribes to the user's TrustRoom for chain-head pushes (T1,
+      // docs/design/do-cost.md). The id already matched ID_RE.
+      { path: ["ws"], websocket: true, search: (url, orgId) => `?org=${orgId}${deviceParam(url)}` },
       { path: ["stats"], methods: ["GET"] },
       // Repair/inspection read: the full current row table.
       { path: ["rows"], methods: ["GET"], search: "keep" },

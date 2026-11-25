@@ -6,8 +6,10 @@
 //! folder (`<store>/bots-network/<bot id>.json`). The host engine keeps the
 //! registry rows (connections, invites, exchanges, activity) and talks to
 //! the Edge through [`BotEdge`]: it pulls a room's inbox when the room
-//! nudges this device's DeviceRoom, and every minute while the bot has live
-//! connections or questions waiting ([`host`]). Peer questions run in the
+//! nudges this device's DeviceRoom, at engine start and on every DeviceRoom
+//! join, and while the bot has live connections or questions waiting every
+//! 15 min from a room whose page says `push` (it repeats unacknowledged
+//! nudges), every minute from one that does not ([`host`]). Peer questions run in the
 //! connection's hidden peer thread with read tools only, through the bot
 //! scope ∩ the connection scope.
 //!
@@ -70,6 +72,13 @@ pub(super) struct Network {
     due: std::sync::Mutex<HashSet<String>>,
     /// When each room was last pulled.
     pulled: std::sync::Mutex<HashMap<String, Instant>>,
+    /// Rooms whose last inbox page said `push`.
+    push: std::sync::Mutex<HashSet<String>>,
+    /// The DeviceRoom host socket (re)joined: pull every room on the next
+    /// pass.
+    rejoined: std::sync::atomic::AtomicBool,
+    /// How often rooms are pulled without a nudge.
+    cadence: std::sync::Mutex<host::Cadence>,
     /// `ask_bot` calls waiting on an answer, by exchange id.
     waiters: std::sync::Mutex<HashMap<String, oneshot::Sender<BotExchange>>>,
     /// Incoming questions being answered right now, by exchange id.
@@ -112,6 +121,26 @@ impl Bots {
     /// A `bots` nudge from this device's DeviceRoom: pull that room.
     pub fn bots_nudged(&self, room_id: String) {
         lock(&self.inner.network.due).insert(room_id);
+        self.inner.network.wake.notify_one();
+    }
+
+    /// This device's DeviceRoom host socket (re)joined: a nudge sent while it
+    /// was away, or into a socket that had died unseen, may be lost, so pull
+    /// every room.
+    pub fn host_relay_joined(&self) {
+        self.inner
+            .network
+            .rejoined
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.inner.network.wake.notify_one();
+    }
+
+    /// Pull rooms without a nudge every `poll` (rooms whose page does not say
+    /// `push`) or every `safety` (rooms whose page does) instead of 60 s and
+    /// 15 min. For tests, which cannot wait minutes.
+    #[doc(hidden)]
+    pub fn set_pull_cadence(&self, poll: Duration, safety: Duration) {
+        *lock(&self.inner.network.cadence) = host::Cadence { poll, safety };
         self.inner.network.wake.notify_one();
     }
 

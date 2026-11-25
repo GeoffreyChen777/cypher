@@ -187,4 +187,96 @@ final class RegistryClientLifecycleTests: XCTestCase {
         XCTAssertEqual(log.count("disconnected"), 0)
         XCTAssertNil(transport.sockets[1].closeCode)
     }
+
+    // MARK: Chain-head pushes (T1, docs/design/do-cost.md)
+
+    func testHelloDeclaresTheTrustCapability() async {
+        let socket = await open()
+        let hello = socket.sentStrings.first { $0.contains(#""t":"hello""#) } ?? ""
+        XCTAssertTrue(hello.contains(#""caps":["trust"]"#), hello)
+    }
+
+    func testStateTrustAndTrustFramesBecomeTrustEvents() async {
+        let socket = await open()
+        socket.deliver(.string(#"{"t":"state","seq":1,"full":true,"rows":[],"trust":{"length":3}}"#))
+        await eventually { log.events.contains("trust(length: 3)") }
+        let connected = log.events.firstIndex(of: "connected")
+        let head = log.events.firstIndex(of: "trust(length: 3)")
+        XCTAssertNotNil(connected)
+        XCTAssertLessThan(connected ?? .max, head ?? .min, "joined before the head")
+        socket.deliver(.string(#"{"t":"trust","length":4}"#))
+        await eventually { log.events.contains("trust(length: 4)") }
+        XCTAssertNil(socket.closeCode, "a known frame keeps the session")
+    }
+
+    func testAStateWithoutTrustReportsNoHead() async {
+        // An older Worker: no `state.trust`, so DeviceTrustStore keeps polling.
+        let socket = await open()
+        await join(socket)
+        await settle()
+        XCTAssertFalse(log.events.contains { $0.hasPrefix("trust") }, "\(log.events)")
+    }
+
+    // MARK: Hedged first poll (C1, docs/design/do-cost.md)
+
+    /// A client whose rows pulls are counted; `cursor` nil is a registry that
+    /// never synced.
+    private func countingClient(cursor: UInt64?) -> (RegistryClient, PullCount) {
+        let pulls = PullCount()
+        let log = log
+        let client = RegistryClient(
+            device: "phone",
+            urlProvider: { URL(string: "wss://edge.test/registry/org/ws") },
+            rowsRequest: { _ in
+                pulls.add()
+                return nil
+            },
+            pushRequest: { nil },
+            delegate: .init(
+                helloCursor: { cursor }, takePushable: { [] }, resetPushable: {},
+                acknowledge: { _, _ in }, event: { log.append($0) }),
+            transport: transport, clock: clock)
+        return (client, pulls)
+    }
+
+    private static let firstPollNs = RoomSocketLifecycle<RegistryClient>.Timing().firstPollNs
+
+    func testAWarmStartPollsOnlyOnceTheHedgeHasPassed() async {
+        let (warm, pulls) = countingClient(cursor: 7)
+        await warm.start()
+        await eventually { transport.last?.sentStrings.contains { $0.contains(#""t":"hello""#) } == true }
+        await eventually("first poll never armed") { clock.hasSleeper(lasting: Self.firstPollNs) }
+        await settle()
+        XCTAssertEqual(pulls.value, 0, "no pull beside the dial")
+        clock.advance(nanoseconds: Self.firstPollNs)
+        await eventually("an unanswered hello gets its pull at 1.5 s") { pulls.value == 1 }
+        await warm.stop()
+    }
+
+    func testAJoinInsideTheHedgeNeverPolls() async {
+        let (warm, pulls) = countingClient(cursor: 7)
+        await warm.start()
+        await eventually { transport.last?.sentStrings.contains { $0.contains(#""t":"hello""#) } == true }
+        await join(transport.sockets[0])
+        await eventually("first poll never armed") { clock.hasSleeper(lasting: Self.firstPollNs) }
+        clock.advance(nanoseconds: Self.firstPollNs)
+        await settle()
+        XCTAssertEqual(pulls.value, 0)
+        await warm.stop()
+    }
+
+    func testAColdStartPollsAtOnce() async {
+        let (cold, pulls) = countingClient(cursor: nil)
+        await cold.start()
+        await eventually("a registry that never synced pulls beside its dial") { pulls.value == 1 }
+        await cold.stop()
+    }
+}
+
+/// Counts HTTPS rows pulls from any isolation.
+final class PullCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func add() { lock.withLock { count += 1 } }
 }

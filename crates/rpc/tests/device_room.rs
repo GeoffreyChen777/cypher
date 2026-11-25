@@ -53,6 +53,8 @@ struct RelayState {
     /// Behave like an edge from before the supersede notice: a replaced host
     /// socket tells the clients nothing.
     silent_supersede: bool,
+    /// Client sockets accepted so far (each one a dial, a billed upgrade).
+    client_dials: usize,
 }
 
 impl RelayState {
@@ -97,6 +99,10 @@ impl FakeRelay {
 
     fn edge_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
+    }
+
+    fn client_dials(&self) -> usize {
+        self.state.lock().expect("lock").client_dials
     }
 
     fn host_connected(&self) -> bool {
@@ -180,6 +186,7 @@ async fn handle_socket(stream: tokio::net::TcpStream, state: Arc<Mutex<RelayStat
             }
             st.host = Some(tx.clone());
         } else {
+            st.client_dials += 1;
             st.clients.insert(conn_id.clone(), tx.clone());
         }
     }
@@ -756,6 +763,20 @@ async fn bot_nudges_reach_their_own_callback() {
     );
 }
 
+#[tokio::test]
+async fn every_host_join_is_reported() {
+    let relay = FakeRelay::start().await;
+    let joins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = joins.clone();
+    let config = relay_config(&relay.edge_url(), 100).with_on_join(Arc::new(move || {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+    let on_nudge: cypher_rpc::NudgeHandler = Arc::new(|_| {});
+    let _host = HostRelay::spawn(config, TestService::new("host-a"), on_nudge);
+    relay.wait_host_connected().await;
+    wait_until(|| joins.load(std::sync::atomic::Ordering::SeqCst) == 1).await;
+}
+
 /// Live-edge variant: run the same host+client path through a real DeviceRoom DO.
 /// `CYPHER_EDGE_WS=http://127.0.0.1:26640 cargo test -p cypher-rpc -- --ignored live_edge`
 /// (dev-mode edge; CYPHER_EDGE_TOKEN defaults to a fixed dev user id).
@@ -1309,4 +1330,121 @@ async fn an_open_session_ends_when_its_device_is_removed() {
         .err()
         .expect("and it cannot reconnect");
     assert!(err.to_string().contains("isn't paired"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// D1: the dial cooldown follows presence
+// ---------------------------------------------------------------------------
+
+/// Scaled 1:100: 50 ms base, the 60 s network cap as 600 ms, the 10 min
+/// offline cap as 6 s.
+const SCALED_OFFLINE_CAP: Duration = Duration::from_secs(6);
+
+fn scaled_cache(
+    edge_url: &str,
+    presence_fresh: Arc<std::sync::atomic::AtomicBool>,
+) -> Arc<LinkCache> {
+    let mut config = LinkCacheConfig::new(edge_url, Arc::new(StaticToken("test-user".into())));
+    config.cooldown_base = Duration::from_millis(50);
+    config.cooldown_max = Duration::from_millis(600);
+    config.cooldown_offline_max = SCALED_OFFLINE_CAP;
+    config.probe_timeout = Duration::from_millis(1_500);
+    config.dial_retry_spacing = Duration::from_millis(20);
+    let links = LinkCache::new(config);
+    links.set_presence_check(Arc::new(move |_: &str| {
+        presence_fresh.load(Ordering::SeqCst)
+    }));
+    links
+}
+
+/// Ask for `device` every 20 ms for `window`, like a caller stuck on a dead
+/// peer.
+async fn keep_asking(links: &Arc<LinkCache>, device: &str, window: Duration) {
+    let until = tokio::time::Instant::now() + window;
+    while tokio::time::Instant::now() < until {
+        let _ = links.client(device).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_hostless_room_with_stale_presence_is_dialed_at_most_four_times_in_the_offline_cap() {
+    let relay = FakeRelay::start().await;
+    let links = scaled_cache(&relay.edge_url(), Arc::new(false.into()));
+
+    // The first failure keeps its three attempts (the host's rejoin window).
+    assert!(links.client("dev-a").await.is_err());
+    assert_eq!(relay.client_dials(), 3);
+
+    // "10 minutes" of asking: one more single dial after the first short
+    // cooldown, then the offline cap holds.
+    keep_asking(
+        &links,
+        "dev-a",
+        SCALED_OFFLINE_CAP - Duration::from_millis(300),
+    )
+    .await;
+    assert_eq!(
+        relay.client_dials(),
+        4,
+        "3 + 1, then held at the offline cap"
+    );
+    let Err(err) = links.client("dev-a").await else {
+        panic!("still hostless")
+    };
+    assert!(err.to_string().contains("backing off"), "got: {err}");
+
+    // Its presence returns: the very next call dials at once.
+    links.reset_cooldown("dev-a");
+    let service = TestService::new("host-a");
+    let _host = HostRelay::spawn(relay_config(&relay.edge_url(), 100), service, noop_nudge());
+    relay.wait_host_connected().await;
+    let client = links.client("dev-a").await.expect("dials after presence");
+    assert_eq!(
+        client
+            .call("Echo", serde_json::json!({}))
+            .await
+            .expect("echo")["host"],
+        "host-a"
+    );
+}
+
+#[tokio::test]
+async fn a_hostless_room_whose_presence_is_fresh_keeps_the_short_cap() {
+    // The relay says hostless but presence says alive (a broken host socket):
+    // today's ladder, three attempts per sequence, capped at the network cap.
+    let relay = FakeRelay::start().await;
+    let links = scaled_cache(&relay.edge_url(), Arc::new(true.into()));
+    keep_asking(&links, "dev-a", Duration::from_secs(3)).await;
+    // Sequences at 0, 50, 150, 350, 750 ms, then every 600 ms: about 8.
+    assert!(
+        relay.client_dials() >= 18,
+        "expected today's cadence, saw {} dials",
+        relay.client_dials()
+    );
+}
+
+#[tokio::test]
+async fn a_network_error_keeps_the_short_cap() {
+    // Accept TCP and drop it: the upgrade fails, and the relay never answered.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let edge_url = format!("http://{}", listener.local_addr().expect("addr"));
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let counted = accepts.clone();
+    let server = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            counted.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+        }
+    });
+    let links = scaled_cache(&edge_url, Arc::new(false.into()));
+    assert!(links.client("dev-a").await.is_err());
+    assert_eq!(accepts.load(Ordering::SeqCst), 3, "three attempts");
+    keep_asking(&links, "dev-a", Duration::from_secs(3)).await;
+    let dials = accepts.load(Ordering::SeqCst);
+    assert!(
+        dials >= 18,
+        "network errors stay at the short cap, saw {dials} dials"
+    );
+    server.abort();
 }

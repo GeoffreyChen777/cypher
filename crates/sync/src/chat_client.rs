@@ -728,6 +728,8 @@ impl ChatClient {
             http_sync_again: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_sync_tx: sync_tx.clone(),
             http_sync_rx: sync_rx,
+            hedge: crate::hedge::Hedge::default(),
+            stalled: false,
         };
         let task = tokio::spawn(actor.run(ready_tx));
 

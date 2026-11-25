@@ -118,6 +118,127 @@ size or 30 more always-on engines at the new per-engine cost.
 
 If pings are billed (M1), add about 1.0M to every "Billed" row and K1 removes it again.
 
+### Measured on the branch (2026-11-25)
+
+A local before/after run of the four built options (T1, B1, C1, D1): before = origin/main
+`13a396ec`, after = branch `cypher/do-cost-cuts` at `0b773f7b`. No live Cloudflare.
+
+Method:
+
+- Each side ran its own Edge from its own worktree under `wrangler dev` (local workerd,
+  `AUTH_MODE=dev`, its own port and `--persist-to` directory) and its own headless engines
+  built from the same worktree (`--features development`, mock harness). Nothing was shared.
+- Counting: a measurement-only wrangler config whose entry module re-exports the Edge and
+  wraps each Durable Object class so that `fetch` (split into WebSocket upgrade and plain
+  HTTP), `alarm` and `webSocketMessage` log one line each; the Worker itself is unchanged and
+  the wrapper is not in the repository. Billed = HTTP + upgrades + alarms + WebSocket
+  messages / 20, as in [Billing rules](#billing-rules). Auto-answered `ping`s never reach
+  `webSocketMessage`, so they are not counted, as assumed there.
+- Scenario, the same on both sides: two engines signed in as two users (`alice@org-a`,
+  `bob@org-b`), one bot on each and a live bot connection between them (the e2e-bots
+  setup), so both hosts have a connected bot room. Then (a) **idle 25 min**, in real time;
+  (b) **actions**: a chat run in a bot chat, a trust change ("Only paired devices" on, then
+  off: two chain appends), a bot question B → A answered by A's mock harness; (c) **a forced
+  reconnect**: a Worker reload, which drops every socket at once (2 registry, 5 chat and 2
+  DeviceRoom host sockets); (d) **a dead peer**: a second device of alice's joins once and
+  stops; a minute later alice's first engine calls it (`ListHarnesses` with
+  `targetDeviceId`), once, then 146 s later 18 more times 20 s apart.
+- No production constant was changed or compressed. The 15 min intervals were observed,
+  not simulated; with one 25 min window each side's count depends on where the safety
+  read falls, so the per-day lines below use the observed interval.
+
+Idle, 25 min, two engines, both with a connected bot room:
+
+| Class | Before: HTTP / upgrades / alarms / WS msgs | Before billed | After: HTTP / upgrades / alarms / WS msgs | After billed |
+|---|---|---:|---|---:|
+| RegistryRoom | 0 / 0 / 0 / 202 | 10.1 | 0 / 0 / 0 / 202 | 10.1 |
+| ChatRoom | 0 / 0 / 0 / 2 | 0.1 | 0 / 0 / 0 / 2 | 0.1 |
+| TrustRoom | 50 / 0 / 0 / 0 | 50 | 4 / 0 / 0 / 0 | 4 |
+| DeviceRoom | 0 | 0 | 0 | 0 |
+| BotRoom | 50 / 0 / 0 / 0 | 50 | 2 / 0 / 0 / 0 | 2 |
+| PushDevice | 0 | 0 | 0 | 0 |
+| **Total** | | **110.2** | | **16.2** |
+
+RegistryRoom's messages are presence beats (200: one per 15 s per engine) and two 900 s
+quiet probes; neither option touches them. After: the chain reads came 15:00 apart
+(14:25:15, 14:40:15 UTC) and the inbox pulls 15:05 apart (14:14:11 rejoin pull, 14:29:16),
+both engines together.
+
+Per engine-day, idle, extrapolated from the cadences:
+
+| Line | Before | After | Doc's model |
+|---|---:|---:|---|
+| TrustRoom chain reads | 1,440 | 96 | 1,440 → about 96 safety polls (T1) |
+| BotRoom inbox pulls, per connected bot room | 1,440 | 96 | 1,440 → about 96 (B1) |
+| RegistryRoom presence + probe messages | 5,856 (293 billed) | 5,856 (293 billed) | 172,800 beats, 8,640 billed a month: unchanged |
+| **Billed, one engine with one connected bot** | **about 3,180** | **about 490** | |
+
+Actions (chat run, two trust appends, one bot question; 2.7–2.8 min):
+
+| Class | Before billed | After billed | Difference |
+|---|---:|---:|---|
+| RegistryRoom | 2.1 | 4.2 | +2 HTTP `/trust-head` (TrustRoom → RegistryRoom, one per append) |
+| ChatRoom | 10.5 | 10.4 | same requests (3 upgrades, 3 `POST /rows`, 3 `GET /rows`, 1 `/checkpoint`) |
+| TrustRoom | 10 | 5 | 2 appends either way; before 8 minute-poll reads, after 3 reads (the one after the first append came in the same second as the append) |
+| DeviceRoom | 2 | 4 | +2 `/nudge`: B1 nudges progress states (`/peer/state`) |
+| BotRoom | 15 | 13 | the same exchange (ask, state, answer, acks); before 6 inbox pulls (polls), after 3 (nudged) |
+| **Total** | **39.6** | **36.6** | |
+
+Forced reconnect, the 20 s after the Worker reload (C1):
+
+| | Before | After |
+|---|---|---|
+| Upgrades | 9 | 9 |
+| `GET /rows` beside the dial | 2 registry + 5 chat | 0 |
+| BotRoom inbox pulls | 0 | 2 (B1's pull on a DeviceRoom rejoin, one per host) |
+| Other | 2 TrustRoom minute polls that fell in the window | none |
+| Billed | 18.7 | 11.7 |
+
+Every socket that dropped had a current copy, so every hedged pull was avoided: one HTTP
+request per reconnected socket, as the model counts. B1 adds one pull per push room per host
+rejoin, a cost the model did not list; it is small beside the 1,344 polls a day it removes.
+
+Dead peer (D1), DeviceRoom requests caused by the calls:
+
+| | Before (9.1 min) | After (8.4 min) |
+|---|---:|---:|
+| Dials (upgrades) | 27 | 4 |
+| Messages on them (the probe frame) | 27 | 4 |
+| Relay status probes (`GET /status`) | 4 | 0 |
+| Billed | 32.4 | 4.2 |
+| Steady state | 3 dials every 65 s (15:07:33, 15:08:38, 15:09:43, 15:10:47) | 3 dials, then 1, then the 600 s cooldown (next due after the run) |
+| Per day for one caller stuck on the dead peer | about 4,000 upgrades | 144 |
+
+The doc's 4,019 → 144 a day holds. Both sides' first call dialed three times; the
+after side's second sequence was one dial and its third would have come 600 s later.
+The after side was reloaded in the middle of its calls (two host upgrades, not counted
+above); that does not reset a dial cooldown.
+
+A pitfall this run hit: the before binary was first built from a copy of the after
+worktree's `target/`, and Cargo kept the after `cypher-rpc` and `cypher-proto` because the
+baseline sources were older than the copied artifacts. Its idle, action and reconnect
+numbers are valid (T1, B1 and C1 live in `cypher-sync` and `cypher-engine`, which were
+rebuilt from the baseline), but its first dead-peer run already had D1's 600 s cap. The
+D1 numbers above are from a rerun after touching the baseline sources and rebuilding; for
+the next such run, touch the sources of the changed crates after copying `target/`.
+
+What this run cannot show:
+
+- The real traffic mix: how many chats, phones and bots each user has, how often sockets
+  drop, and how often a caller asks for a dead peer. The per-day lines above are per engine
+  and per connected bot; the 30-day target in [Target](#target) still rests on the Nov 17–23
+  counts.
+- iOS: no phone or simulator joined; the iOS halves of T1 and C1 are covered by their unit
+  tests only.
+- The B1 nudge ladder never ran (0 alarms on both sides: every nudge was acknowledged), and
+  the T1 retry alarm never ran (every push reached its registry). Their unit and workerd
+  tests cover them.
+- Single-device trust groups only: a removal pushed to another device's engine, and the
+  60 s rule after a registry disconnect, were not driven here.
+- Production incidents (request storms, the Nov 6–11 kind), Cloudflare's sampling, and
+  whether text `ping` bills (M1): local workerd answers pings without an invocation, like
+  production, so they are absent from both columns.
+
 ### At 10× devices
 
 Billed requests per 30 days per unit:
@@ -212,6 +333,21 @@ never change its result; the Edge can already withhold entries from a poll.
 | Effort | M: two rooms, one route, sync crate, engine, iOS |
 | Measure after | M2 for TrustRoom, `type=http`: 14.9k a day → about 1.1k; each engine still on an old version adds 1,344 (M5 shows whose) |
 
+Built on branch `cypher/do-cost-cuts` (2026-11-25), as designed, with these choices:
+
+- `state.trust` goes only to a `trust`-capable hello, like the frame (old clients would
+  ignore the field, but nothing needs it).
+- RegistryRoom keeps the largest length it was told; a late retry with an older length is
+  dropped. TrustRoom pushes its current length on every attempt.
+- Both room-to-room routes answer 404 when the user header is present.
+- Engine: the workspace host reports its registry session through a trust hook
+  (`WorkspaceHost::set_trust_hook`), replayed when the hook is set, after the first join
+  and after a lagged event pump, so a missed event only leaves the 60 s cadence. A failed
+  read keeps the existing 10 s → 300 s backoff.
+- iOS: a failed read retries after 60 s even while heads are carried. A phone that is not
+  in the group holds an empty chain, so any head reads at once (no more than today).
+- Not done: the staged check (needs a Worker deploy).
+
 ### B1: bot inbox, acknowledged nudges
 
 The room already nudges the host's DeviceRoom when an entry is queued
@@ -241,6 +377,36 @@ marks ride the poll.
 | Effort | S–M: one room, one engine file, one wire field |
 | Measure after | M2 for BotRoom: `http` 3.8–4.9k a day → under 0.5k; `alarm` stays near 0 (a rising alarm count means nudges are being lost) |
 
+Built on branch `cypher/do-cost-cuts` (2026-11-25), as designed, with these choices:
+
+- Ladder: the first repeat 15 s after the nudge, then 30 s, then 60 s eleven times (the
+  "60 s, then every 60 s ten times"), then every 15 min; it gives up after 109 repeats
+  (about a day), so a room whose host never acknowledges (a bot moved off the device)
+  stops costing alarms. The next entry starts it over. State is two `meta` keys
+  (`renudge_at`, `renudge_step`).
+- Outcomes: `{queued: true}` ends the ladder (DeviceRoom replay); `{delivered: true}`, a
+  thrown call or a 5xx arms it; a 4xx (the DeviceRoom has no owner yet, or another
+  owner) ends it, since repeating cannot help and the host pulls everything when it first
+  joins.
+- The ack that leaves `pull()` empty clears the ladder and re-arms the alarm, so a nudge
+  that was acknowledged in time costs no alarm. The alarm is now set to the exact
+  earliest deadline (expiry or repeat) and deleted when there is none.
+- Progress: `/peer/state` nudges the asking host only when the state changed, which
+  includes the `delivered` mark the answering host's ack sends. Same `bots` nudge kind,
+  so old engines see nothing new.
+- Engine: the push flag is per room, from its last page. The rejoin pull needs a new
+  callback, `HostRelayConfig::with_on_join` (`crates/rpc/src/device_room/relay.rs`),
+  fired on every host connect; the next pass then pulls every room, like engine start.
+  The start pull now waits for a pass that has an Edge. The loop still wakes every 60 s
+  for owner edits; only the pull is gated by the 15 min safety.
+- Tests: six workerd cases drive a BotRoom with fake DeviceRoom answers and a mocked
+  clock (`apps/edge/test/workerd/bot-room.workerd.test.ts`, "BotRoom nudge repeats").
+  Engine cases use a scaled cadence (`Bots::set_pull_cadence`, 100 ms for the minute,
+  1 h for the safety) and a fake Edge that can drop nudges and answer with or without
+  `push` (`crates/engine/tests/it/bots/network.rs`, B1 section).
+- No iOS code pulls the bot inbox.
+- Not done: the staged check (needs a Worker deploy and two engines).
+
 ### C1: hedged HTTPS pull on connect
 
 Every registry and chat connect starts an HTTPS pull at the same instant as the WebSocket
@@ -266,6 +432,62 @@ poll wake after 1.5 s instead of 0, the 20 s cadence while not joined unchanged.
 | Old clients | Client-only; the Edge is untouched |
 | Effort | S: two actors and the iOS lifecycle |
 | Measure after | M3: `/rows` and `/checkpoint` requests per hour on RegistryRoom and ChatRoom fall to about 5% of the upgrade count; M2: ChatRoom `http` per `clientDisconnected` session falls from about 2.3 to about 1.1 |
+
+Built on branch `cypher/do-cost-cuts` (2026-11-25), with these choices:
+
+- One small type, `crates/sync/src/hedge.rs` (`HEDGE_DELAY` 1.5 s), used by both actors.
+  A connect after the client's start or after a joined session dropped arms the hedge; the
+  next dial starts it; `state` cancels it. "Joined" is the `state` answer, so a chat
+  backfill that is still running on a live socket does not also pull.
+- Pull at once, unchanged or added: dial failure and timeout; a session that never got
+  `state`; a local write waiting (registry `pending_len`, chat outbox) at start or at the
+  drop; a nudge or a re-run request during the dial or backoff (each such pull stands in
+  for the hedge). Added beyond the design: **a cold start** (registry doc with no cursor and
+  generation 0, chat with cursor 0) pulls beside its first dial, so a never-synced copy shows
+  its first rows as fast as before; and **a reconnect after a stalled socket** (probe
+  deadline; for chat also push-ACK, row-repair and backfill deadlines and exhausted gap
+  repairs) pulls at once, since that socket was open but not delivering. Only the
+  start of a client that synced before and the reconnect after an ordinary drop hedge.
+- iOS: `RoomSocketLifecycle.start` sends a `.startPoll` wake at once, which pulls only for a
+  cold copy (registry `helloCursor() == nil`, chat `cursor() == 0`); the first `.poll`
+  comes after `Timing.firstPollNs` (1.5 s), then every 20 s while not joined, as before.
+  iOS has no reconnect pull to remove.
+- Tests: registry against the mock (a TCP port that never answers the upgrade, a new
+  `MockRegistryServer::set_state_delay`), `crates/sync/tests/registry_transport.rs`; chat
+  against channel pipes with paused time, `crates/sync/src/chat_client/tests/recovery.rs`
+  (C1 section); iOS `RegistryClientLifecycleTests` (hedged first poll).
+
+Cold-open measurement (`crates/sync/examples/cold_open.rs`, 20 opens per row, before =
+`5a9804e2`, after = this change). Method: the real `RegistryClient` and `ChatClient` against
+in-process servers (`MockRegistryServer`, a two-row chat frame server) on this Mac. The
+network is modelled: the socket goes through a proxy that holds a new connection for 2 RTT
+(TCP and TLS) and delays each chunk by RTT/2 each way; the HTTPS pull answers after 1 RTT
+(a warm connection). Time from opening the client to its first remote row, median in ms
+(p90 within 2% except where noted):
+
+| Copy | WebSocket | RTT | Registry before → after | Chat before → after |
+|---|---|---|---|---|
+| cold | works | 50 ms | 54 → 54 | 52 → 52 |
+| cold | works | 150 ms | 154 → 154 | 152 → 152 |
+| cold | stalled | 50 / 150 ms | 54 → 54 / 155 → 154 | 53 → 53 / 153 → 153 |
+| warm (new rows since) | works | 0 ms | 3 → 11 | 2 → 12 |
+| warm | works | 50 ms | 54 → 211 | 52 → 273 |
+| warm | works | 150 ms | 154 → 613 | 152 → 772 |
+| warm | stalled | 50 ms | 54 → 1,568 | 53 → 1,564 |
+| warm | stalled | 150 ms | 154 → 1,656 | 154 → 1,657 |
+| either | refused | 50 / 150 ms | unchanged (54, 154–159) | unchanged (52, 152–154) |
+
+Reading: a cold open is unchanged in every case (the cold rule). A blocked or stalled socket
+costs 1.5 s, as the design said. On a healthy network a warm copy now waits for the socket,
+which in this model is 3 RTT slower than the warm pull for the registry (TCP, TLS, upgrade,
+then `state`) and about 4.4 RTT for chat (plus the rows request): +0.16 s / +0.22 s at
+50 ms, +0.46 s / +0.62 s at 150 ms. The design's +0.1–0.2 s assumed the pull wins by one or
+two round trips; it holds here only up to about 50 ms RTT. The warm case only matters when
+rows changed while the client was away: its local copy is on screen at once. If that delay
+shows in use, the cheaper lever is a shorter hedge for warm starts, not dropping C1 (the
+saving comes from reconnects, where nobody waits).
+
+Not done: the staged check in a development instance (20 opens with the real Edge).
 
 ### D1: peer dial cooldown that follows presence
 
@@ -295,6 +517,36 @@ host's own rejoin window (`crates/rpc/src/device_room/relay.rs:176-178`).
 | Old clients | Client-only |
 | Effort | S |
 | Measure after | M2 for DeviceRoom: `http` and the `clientDisconnected` count return to the Nov 17–20 level (about 300 a day) |
+
+Built on branch `cypher/do-cost-cuts` (2026-11-25), with these choices:
+
+- `LinkCacheConfig::cooldown_offline_max` (600 s). A dial whose last attempt met the
+  relay's own `host_offline` (the readiness probe's link closed with that code, or a sealed
+  link's handshake got it) counts as "offline" when the peer's presence is stale; the engine
+  installs the check with `LinkCache::set_presence_check`, pointing at
+  `WorkspaceHost::device_online` (presence or a relay status probe seen within 45 s).
+  Without a check, presence counts as stale.
+- After an offline failure the next sequence is one dial. **Deviation:** the second offline
+  failure in a row goes straight to 600 s rather than doubling up to it: a doubling ladder
+  from 5 s dials 3 + 6 times in the first 10 minutes, so the design's own test (≤ 4 dials in
+  10 min) needs the jump. The first failure keeps three attempts and 5 s whatever the
+  cause. Network errors and failures while presence is fresh keep today's 5 s → 60 s
+  ladder, three attempts each.
+- Reset, unchanged: `reset_cooldown` (the presence "came back" hook, which a relay status
+  probe answering alive also feeds through `presence_seen`), a system wake and a token
+  change clear the state. The failure streak now decays 10 min after its cooldown *ended*
+  (before: after the last failure), so waiting out the 600 s cooldown does not restart the
+  ladder at three attempts.
+- The engine's presence hook now holds the cache weakly (the cache holds the workspace for
+  the presence check).
+- Tests: `crates/rpc/tests/device_room.rs` ("D1" section) against the fake relay, scaled
+  1:100 in real time (the relay is real sockets and the cooldown uses `std::time::Instant`,
+  so paused time does not apply): 3 dials on the first failure and 4 in the offline cap;
+  presence return dials at once and reaches the host; fresh presence and network errors
+  keep the short cap (≥ 18 dials in 3 s).
+- iOS: `DeviceRelayClient.call` retries 3 times within one call and keeps no cooldown
+  across calls, so there is no ladder to change; a phone caller asking a dead peer pays 3
+  upgrades per call. Not changed (it needs a presence source on the phone too).
 
 ### N1: settle chats the Edge called hidden
 

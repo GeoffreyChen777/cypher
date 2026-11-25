@@ -34,8 +34,8 @@ mod tests;
 mod trust;
 
 pub use frames::{DeviceFrameHeader, decode_device_frame, encode_device_frame};
-pub use links::{DeviceLink, LinkCache, LinkCacheConfig};
-pub use relay::{HostRelay, HostRelayConfig};
+pub use links::{DeviceLink, LinkCache, LinkCacheConfig, PresenceCheck};
+pub use relay::{HostRelay, HostRelayConfig, JoinHandler};
 pub use trust::{
     CHANNEL_FAILED, HANDSHAKE_FAILED, NOISE_KIND, NoTrust, PeerTrust, RECEIVE_ONLY, SECURE_KIND,
     UNTRUSTED_DEVICE,

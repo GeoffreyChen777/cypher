@@ -8,6 +8,8 @@ declare global {
       DEVICE_ROOMS: DurableObjectNamespace;
       AUTH_MODE: string;
       TRUST: DurableObjectNamespace;
+      TRUST_ROOMS: DurableObjectNamespace;
+      REGISTRY_ROOMS: DurableObjectNamespace;
     }
   }
 }

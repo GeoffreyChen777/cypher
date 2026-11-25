@@ -18,7 +18,11 @@ export default defineConfig({
           // cross-room BotRoom tests.
           BOT_ROOMS: { className: "BotRoom", useSQLite: true },
           DEVICE_ROOMS: { className: "DeviceRoom", useSQLite: true },
-          TRUST: { className: "TrustRoom", useSQLite: true }
+          TRUST: { className: "TrustRoom", useSQLite: true },
+          // Chain-head pushes between the two rooms (T1): the production
+          // binding names, which each room reads from its env.
+          TRUST_ROOMS: { className: "TrustRoom", useSQLite: true },
+          REGISTRY_ROOMS: { className: "RegistryRoom", useSQLite: true }
         }
       }
     })
