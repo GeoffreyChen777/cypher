@@ -155,6 +155,43 @@ impl AppState {
         }
     }
 
+    /// Every chat by parent, for [`Self::plan_question_in`]: build it once
+    /// per pass over many chats.
+    pub fn chat_tree(&self) -> cypher_proto::view::ChatTree<'_> {
+        cypher_proto::view::ChatTree::new(&self.chats)
+    }
+
+    /// The question open in `chat_id` or a child chat under it, on the rule
+    /// every Needs you reads (docs/design/plan-asks.md): the row's open
+    /// question, whatever its age, offline when its host is; an old host's
+    /// row by its fresh status. An answer being sent reads as answered.
+    pub fn plan_question_in(
+        &self,
+        tree: &cypher_proto::view::ChatTree<'_>,
+        chat_id: &str,
+        now: DateTime<Utc>,
+    ) -> Option<cypher_proto::view::PlanQuestion> {
+        if self.send_pending(chat_id, now) {
+            return None;
+        }
+        cypher_proto::view::plan_question(
+            tree,
+            chat_id,
+            |id| self.session_for(id),
+            |device| self.device_online(device, now),
+            now,
+        )
+    }
+
+    /// [`Self::plan_question_in`] for one chat.
+    pub fn plan_question(
+        &self,
+        chat_id: &str,
+        now: DateTime<Utc>,
+    ) -> Option<cypher_proto::view::PlanQuestion> {
+        self.plan_question_in(&self.chat_tree(), chat_id, now)
+    }
+
     /// Does the selected space's folder have git? Drives the branch picker and
     /// the diff sidebar (owner-stamped, synced — no RPC).
     pub fn selected_space_git(&self) -> bool {
@@ -206,6 +243,7 @@ impl AppState {
     /// never do, as nothing in the main UI would show (or clear) them. A
     /// session a workspace started counts while it waits on an answer.
     pub fn attention_count(&self, now: DateTime<Utc>) -> usize {
+        let tree = self.chat_tree();
         self.chats
             .iter()
             .filter(|c| c.is_user_facing() || c.is_workspace_session())
@@ -214,12 +252,13 @@ impl AppState {
                 Some(id) => self.space_row(id).is_some(),
             })
             .filter(|chat| {
-                let status = self.display_status_for(chat, now);
-                // A workspace's session counts only while it asks: what it
+                // A workspace's session counts only while it asks (it or a
+                // subagent under it; the plan-question rule): what it
                 // finished is its workspace's to report.
                 let counts = if chat.is_workspace_session() {
-                    status == ChatIndicator::AwaitingInput
+                    self.plan_question_in(&tree, &chat.id, now).is_some()
                 } else {
+                    let status = self.display_status_for(chat, now);
                     matches!(
                         status,
                         ChatIndicator::AwaitingInput

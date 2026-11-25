@@ -2569,6 +2569,142 @@ fn needs_you_counts_records_and_worker_questions_across_bots() {
     assert_eq!(bots::started_by_mark(&state, "plain"), None);
 }
 
+/// docs/design/plan-asks.md on the desktop: a plan's question reaches Needs
+/// you, the logo count and the Dock badge on one rule, whatever the step
+/// session's row age, from a subagent's child chat, from a session the plan
+/// steered, and on an offline device (shown as waiting for it); an archived
+/// chat has ended. The shared vectors cover the rule itself.
+#[test]
+fn plan_questions_reach_needs_you_on_the_shared_rule() {
+    use cypher_proto::{SessionStatus, StepState, WorkState, WorkStep};
+    let now = Utc::now();
+    let mut state = AppState::new();
+    state.local_device_id = Some("dev".into());
+    state.apply_bots(vec![test_bot("ann")]);
+    let child_of = |id: &str, parent: &str| {
+        let mut chat = test_chat(id, false);
+        chat.child = Some(cypher_proto::ChildChat {
+            parent_chat_id: parent.into(),
+            parent_run_id: format!("run-{id}"),
+            agent: "planner".into(),
+            task: "Plan".into(),
+            mode: cypher_proto::SubagentRunMode::Async,
+            tool_call_id: None,
+            profile: cypher_proto::ChildAgentProfile {
+                system_prompt: String::new(),
+                tools: vec![],
+                model: None,
+                thinking: None,
+            },
+        });
+        chat
+    };
+    let started = |id: &str| {
+        let mut chat = test_chat(id, false);
+        chat.started_by = Some(cypher_proto::ChatStartedBy {
+            bot_id: "ann".into(),
+            work_id: Some("run".into()),
+        });
+        chat.last_message_at = Some(now);
+        chat
+    };
+    let mut remote = started("remote");
+    remote.device_id = "mini".into();
+    state.apply_chats(vec![
+        test_bot_chat("ann"),
+        started("stale"),
+        started("parent"),
+        child_of("kid", "parent"),
+        remote,
+        test_chat("steered", false),
+        test_chat("ended", true),
+    ]);
+    state.apply_devices(vec![cypher_proto::Device {
+        id: "mini".into(),
+        name: "Mac mini".into(),
+        platform: "macos".into(),
+        last_seen_at: Some(now - chrono::Duration::minutes(10)),
+        created_at: None,
+        version: None,
+    }]);
+    let mut work = crate::test_fixtures::bot_work("run", "ann");
+    work.state = WorkState::Running;
+    work.steps = vec![WorkStep {
+        id: "1".into(),
+        title: "Step".into(),
+        project: None,
+        detail: None,
+        state: StepState::Running,
+        sessions: vec![
+            "stale".into(),
+            "parent".into(),
+            "remote".into(),
+            "ended".into(),
+        ],
+        note: None,
+        started_at: None,
+        ended_at: None,
+        session_choice: Default::default(),
+    }];
+    work.steered = vec!["steered".into()];
+    state.apply_bot_records(cypher_proto::BotRecords {
+        work: vec![work],
+        ..Default::default()
+    });
+    let ask = |id: &str| cypher_proto::SessionAsk {
+        request_id: format!("r-{id}"),
+        asked_at: 0,
+        permission: None,
+        asked_by: None,
+        from_chat_id: None,
+    };
+    let row =
+        |chat: &str, device: &str, status, age_min: i64, asking: bool| cypher_proto::Session {
+            chat_id: chat.into(),
+            device_id: device.into(),
+            status,
+            updated_at: now - chrono::Duration::minutes(age_min),
+            asking: asking.then(|| ask(chat)),
+            ..crate::test_fixtures::session()
+        };
+    state.apply_sessions(vec![
+        // (d′/e1) its row is 40 minutes old, Idle, the question still open.
+        row("stale", "dev", SessionStatus::Idle, 40, true),
+        // (c) only the subagent's child chat asks.
+        row("parent", "dev", SessionStatus::Idle, 5, false),
+        row("kid", "dev", SessionStatus::AwaitingInput, 0, true),
+        // (f) its device went offline with the question open.
+        row("remote", "mini", SessionStatus::AwaitingInput, 30, true),
+        // (g) a session the plan steered.
+        row("steered", "dev", SessionStatus::AwaitingInput, 0, true),
+        // An archived chat asks nothing.
+        row("ended", "dev", SessionStatus::Idle, 1, true),
+    ]);
+    let ann = state.bots[0].clone();
+    let asked: Vec<String> = bots::bot_needs(&state, &ann, now)
+        .into_iter()
+        .filter_map(|need| match need {
+            bots::Need::Record(cypher_proto::NeedsYou::Asking { chat_id, .. }) => Some(chat_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked, ["stale", "parent", "remote", "steered"]);
+    assert_eq!(bots::needs_you_count(&state, now), 4);
+    let q = |id: &str| state.plan_question(id, now).expect(id);
+    assert_eq!(
+        q("parent").chat_id,
+        "kid",
+        "the card reads the child's question"
+    );
+    assert!(!q("parent").offline);
+    assert!(q("remote").offline, "waiting for its device");
+    assert!(state.plan_question("ended", now).is_none());
+    // The Dock badge: the workspace's sessions that ask and are unseen,
+    // the child's question counted on its session (the steered one is an
+    // ordinary session and was seen).
+    assert_eq!(state.attention_count(now), 3);
+}
+
 // ---- The workspace chat's dock (docs/features/files.md "Workspace chats") ----
 
 use crate::shell::bots::PanelItem;
