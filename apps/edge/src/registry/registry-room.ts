@@ -38,7 +38,14 @@ interface SocketState {
   device: string;
   /** Set once a valid hello established the session. */
   ready?: boolean;
+  /** The hello declared `caps: ["trust"]`: this client understands the
+   * `trust` frame. Clients without it redial on an unknown frame type, so
+   * they must never be sent one. */
+  trust?: boolean;
 }
+
+/** Hello capability: chain-head pushes (T1, docs/design/do-cost.md). */
+const CAP_TRUST = "trust";
 
 interface WireOp extends Op {}
 
@@ -69,6 +76,8 @@ export class RegistryRoom implements DurableObject {
    * `setAlarm` bills one row written and almost every call from a push path
    * re-sets the instant already scheduled. */
   private scheduledAlarm?: number | null;
+  /** A TrustRoom subscription is in flight (one per instance at a time). */
+  private trustSubscribing?: Promise<void>;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -170,6 +179,7 @@ export class RegistryRoom implements DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/trust-head") return this.trustHead(request);
     const userId = request.headers.get(AUTH_USER_HEADER);
     if (!userId) return json({ error: "unauthenticated" }, 401);
     if (url.pathname.startsWith("/notifications/")) {
@@ -178,6 +188,12 @@ export class RegistryRoom implements DurableObject {
 
     if (url.pathname === "/ws") {
       const device = url.searchParams.get("device") ?? "";
+      // The room's own name, for its TrustRoom subscription. Written once.
+      const org = url.searchParams.get("org") ?? "";
+      if (org !== "") {
+        const self = `reg1/${org}/${userId}`;
+        if (this.getMeta("self") !== self) this.setMeta("self", self);
+      }
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1]);
       const state: SocketState = { userId, device };
@@ -330,7 +346,10 @@ export class RegistryRoom implements DurableObject {
       state.device = frame.device;
     }
     state.ready = true;
+    state.trust = Array.isArray(frame.caps) && frame.caps.includes(CAP_TRUST);
     ws.serializeAttachment(state);
+    const trustLength = state.trust ? this.trustLength() : undefined;
+    if (state.trust && trustLength === undefined) this.subscribeTrust(state.userId);
     const seq = this.seq();
     const gcFloor = this.gcFloor();
     // A cursor from before the tombstone-GC horizon may have missed purged
@@ -345,8 +364,74 @@ export class RegistryRoom implements DurableObject {
       full,
       gcFloor,
       rows,
-      presence: Object.fromEntries(this.presence)
+      presence: Object.fromEntries(this.presence),
+      ...(trustLength === undefined ? {} : { trust: { length: trustLength } })
     });
+  }
+
+  // ── trust chain head (T1) ─────────────────────────────────────────────────
+
+  private trustLength(): number | undefined {
+    const raw = this.getMeta("trustLength");
+    return raw === undefined ? undefined : Number(raw);
+  }
+
+  /** Store a chain length and tell every capable ready socket. Lengths only
+   * grow, so a late retry carrying an older length is dropped. */
+  private applyTrustLength(length: number): void {
+    const known = this.trustLength();
+    if (known !== undefined && length <= known) return;
+    this.setMeta("trustLength", String(length));
+    for (const socket of this.ctx.getWebSockets()) {
+      const socketState = socket.deserializeAttachment() as SocketState | null;
+      if (!socketState?.ready || !socketState.trust) continue;
+      send(socket, { t: "trust", length });
+    }
+  }
+
+  /** Subscribe at the user's TrustRoom and learn the current length. Once per
+   * room (the length then stays in `meta`), again after `/reset`. */
+  private subscribeTrust(userId: string): void {
+    const trustRooms = this.env.TRUST_ROOMS;
+    const self = this.getMeta("self");
+    if (!trustRooms || !self || this.trustSubscribing) return;
+    const run = async () => {
+      try {
+        const response = await trustRooms
+          .get(trustRooms.idFromName(`t1/${userId}`))
+          .fetch(`https://trust/head?subscribe=${encodeURIComponent(self)}`);
+        if (!response.ok) return;
+        const body = (await response.json()) as { length?: unknown };
+        if (typeof body.length === "number" && Number.isInteger(body.length) && body.length >= 0) {
+          this.applyTrustLength(body.length);
+        }
+      } catch {
+        /* the next capable hello retries; clients keep polling meanwhile */
+      } finally {
+        this.trustSubscribing = undefined;
+      }
+    };
+    this.trustSubscribing = run();
+    this.ctx.waitUntil(this.trustSubscribing);
+  }
+
+  /** `POST /trust-head {length}` from the user's TrustRoom. Room-to-room
+   * only: the Worker stamps the user header on everything it forwards, so a
+   * request carrying it came from a client and is refused. */
+  private async trustHead(request: Request): Promise<Response> {
+    if (request.headers.get(AUTH_USER_HEADER)) return json({ error: "not found" }, 404);
+    if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
+    let length: unknown;
+    try {
+      length = ((await request.json()) as { length?: unknown }).length;
+    } catch {
+      length = undefined;
+    }
+    if (typeof length !== "number" || !Number.isInteger(length) || length < 0) {
+      return json({ error: "bad_length" }, 400);
+    }
+    this.applyTrustLength(length);
+    return json({ ok: true });
   }
 
   private handlePush(ws: WebSocket, state: SocketState, frame: Record<string, unknown>): void {

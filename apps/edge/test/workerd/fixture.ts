@@ -8,6 +8,7 @@ export { DeviceRoom } from "../../src/device/device-room";
 export class TestLogRoom extends DurableObject {}
 
 export { TrustRoom } from "../../src/trust/trust-room";
+export { RegistryRoom } from "../../src/registry/registry-room";
 
 export default {
   fetch(): Response {
