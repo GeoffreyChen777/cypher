@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   active, askingThreadOf, attends, botIdOf, chatAttention, defaultNotificationSettings, narrower, needsOwner, needsStamp,
-  notificationDecision, parseActivity, parseSettings, type Activity, type Notice
+  notificationDecision, parseActivity, parseSettings, questionOf, askingStatus, startedByOf, type Activity, type Notice
 } from "./notifications-model";
+import planAsks from "../../../../protocol/vectors/plan-asks-v1.json";
 const now = 1_000_000;
 const notice = (kind: Notice["kind"] = "completed"): Notice => ({
   id: crypto.randomUUID(), chatId: "chat", projectId: "project", child: false,
@@ -134,5 +135,37 @@ describe("what a workspace waits on (its Needs you card)", () => {
     expect(needsStamp("botWork", { createdAt: 5 })).toBe(5);
     expect(needsStamp("botExchanges", { askedAt: 7, createdAt: 5 })).toBe(7);
     expect(needsStamp("botApprovals", {})).toBeUndefined();
+  });
+});
+describe("a session row's open question (protocol/vectors/plan-asks-v1.json)", () => {
+  type VectorRow = { chatId: string; status: string; asking?: { requestId: string; fromChatId?: string } };
+  type Vector = { name: string; sessions: VectorRow[]; expect: { indicators: Record<string, string> } };
+  const cases = (planAsks as unknown as { cases: Vector[] }).cases;
+  it("reads every vector row as the shared rule does: an open question awaits input whatever its status", () => {
+    expect(cases.length).toBeGreaterThanOrEqual(15);
+    for (const vector of cases) {
+      for (const row of vector.sessions) {
+        const question = questionOf(row.asking);
+        expect(question?.requestId, vector.name).toBe(row.asking?.requestId);
+        expect(question?.fromChatId, vector.name).toBe(row.asking?.fromChatId);
+        // An open question never ages out (the indicator says so too); a
+        // row of an old host keeps its status.
+        if (row.asking) {
+          expect(askingStatus(row.status, question), vector.name).toBe("awaitingInput");
+          expect(vector.expect.indicators[row.chatId] ?? "awaitingInput", vector.name).toBe("awaitingInput");
+        } else {
+          expect(askingStatus(row.status, question), vector.name).toBe(row.status);
+        }
+      }
+    }
+  });
+  it("is lenient: a malformed question is no question, never a failure", () => {
+    for (const value of [undefined, null, "r1", 3, [], {}, { requestId: "" }, { requestId: 7 }, { askedAt: 1 }]) {
+      expect(questionOf(value)).toBeUndefined();
+    }
+    expect(questionOf({ requestId: "r1", fromChatId: "../x" })).toEqual({ requestId: "r1" });
+    expect(startedByOf({ startedBy: { botId: "ws", workId: "w" } })).toBe("ws");
+    expect(startedByOf({ startedBy: { botId: "a b" } })).toBeUndefined();
+    expect(startedByOf({})).toBeUndefined();
   });
 });
