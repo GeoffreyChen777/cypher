@@ -756,6 +756,20 @@ async fn bot_nudges_reach_their_own_callback() {
     );
 }
 
+#[tokio::test]
+async fn every_host_join_is_reported() {
+    let relay = FakeRelay::start().await;
+    let joins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = joins.clone();
+    let config = relay_config(&relay.edge_url(), 100).with_on_join(Arc::new(move || {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+    let on_nudge: cypher_rpc::NudgeHandler = Arc::new(|_| {});
+    let _host = HostRelay::spawn(config, TestService::new("host-a"), on_nudge);
+    relay.wait_host_connected().await;
+    wait_until(|| joins.load(std::sync::atomic::Ordering::SeqCst) == 1).await;
+}
+
 /// Live-edge variant: run the same host+client path through a real DeviceRoom DO.
 /// `CYPHER_EDGE_WS=http://127.0.0.1:26640 cargo test -p cypher-rpc -- --ignored live_edge`
 /// (dev-mode edge; CYPHER_EDGE_TOKEN defaults to a fixed dev user id).

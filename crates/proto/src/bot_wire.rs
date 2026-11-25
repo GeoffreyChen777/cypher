@@ -278,6 +278,11 @@ pub struct StateRequest {
 pub struct InboxPage {
     #[serde(default)]
     pub entries: Vec<BotFrame>,
+    /// The room repeats a nudge until the host acknowledges, so the host
+    /// may pull it on nudges and a slow safety poll instead of every minute
+    /// (docs/design/do-cost.md B1). Absent from Workers that predate it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub push: bool,
 }
 
 /// `POST /bots/:id/ack`: what the host has written down. `asks` names
@@ -401,6 +406,19 @@ mod tests {
                 case.code
             );
         }
+    }
+
+    #[test]
+    fn the_inbox_page_says_push_only_when_the_room_does() {
+        let old: InboxPage = serde_json::from_str(r#"{"entries":[]}"#).unwrap();
+        assert!(!old.push);
+        let new: InboxPage =
+            serde_json::from_str(r#"{"entries":[],"push":true,"later":1}"#).unwrap();
+        assert!(new.push);
+        assert_eq!(
+            serde_json::to_string(&InboxPage::default()).unwrap(),
+            r#"{"entries":[]}"#
+        );
     }
 
     #[test]

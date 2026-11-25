@@ -38,7 +38,14 @@ pub struct HostRelayConfig {
     /// Called with the bot room id of every bot network nudge; `None`
     /// skips them like any unknown stream kind.
     pub on_bots_nudge: Option<NudgeHandler>,
+    /// Called each time the host socket (re)joins the DeviceRoom: what was
+    /// nudged while it was away, or into a socket that died unseen, may be
+    /// waiting.
+    pub on_join: Option<JoinHandler>,
 }
+
+/// See [`HostRelayConfig::on_join`].
+pub type JoinHandler = Arc<dyn Fn() + Send + Sync>;
 
 impl HostRelayConfig {
     pub fn new(
@@ -53,7 +60,14 @@ impl HostRelayConfig {
             retry: Duration::from_secs(5),
             trust: Arc::new(NoTrust),
             on_bots_nudge: None,
+            on_join: None,
         }
+    }
+
+    /// Call `handler` on every host join.
+    pub fn with_on_join(mut self, handler: JoinHandler) -> Self {
+        self.on_join = Some(handler);
+        self
     }
 
     /// Hand bot network nudges to `handler`.
@@ -110,6 +124,7 @@ impl HostRelay {
                             &service,
                             &on_nudge,
                             config.on_bots_nudge.as_ref(),
+                            config.on_join.as_ref(),
                             &config.trust,
                             &config.device_id,
                         );
@@ -253,6 +268,7 @@ async fn host_session(
     service: &Arc<dyn RpcService>,
     on_nudge: &NudgeHandler,
     on_bots_nudge: Option<&NudgeHandler>,
+    on_join: Option<&JoinHandler>,
     trust: &Arc<dyn PeerTrust>,
     device_id: &str,
 ) -> Result<(), RpcError> {
@@ -260,6 +276,9 @@ async fn host_session(
         .await
         .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
     tracing::info!("device-room: host connected");
+    if let Some(on_join) = on_join {
+        on_join();
+    }
     let (mut sink, mut stream) = ws.split();
     // All writers (per-conn pumps) funnel through one outbound queue → one socket writer.
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(256);
