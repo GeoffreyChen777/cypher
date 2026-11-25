@@ -145,6 +145,9 @@ struct SessionRow: Hashable {
     /// A long turn's narrated progress (entities.rs `progress`): the status
     /// strip's progress bar. Belongs to one turn; a settled row drops it.
     var progress: RunProgress? = nil
+    /// The latest extension notice (entities.rs `notice`): the status
+    /// strip's quiet line while it is live.
+    var notice: SessionNotice? = nil
 }
 
 /// entities.rs `ContextUsage`: tokens in the context window, of its size.

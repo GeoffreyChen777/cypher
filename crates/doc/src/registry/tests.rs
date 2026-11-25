@@ -334,6 +334,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         throughput: None,
         recovery: None,
         progress: None,
+        notice: None,
     }
 }
 
@@ -708,6 +709,44 @@ fn session_progress_syncs_and_clears_with_the_turn() {
     let mut docs = [&mut a, &mut b];
     server_round(&mut server, &mut seq, &mut docs);
     assert_eq!(b.read_sessions().unwrap()[0].progress, None);
+}
+
+/// An extension notice rides the host's row to its peers (every device's
+/// status strip), keeps riding the settle write, and a malformed one reads
+/// as none without costing the row.
+#[test]
+fn session_notice_syncs_and_reads_leniently() {
+    let notice = cypher_proto::SessionNotice {
+        level: cypher_proto::NoticeLevel::Warning,
+        text: "Claude rate limit warning: 58% used (seven_day)".into(),
+        at: ts(3_400),
+    };
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let (mut server, mut seq) = (HashMap::new(), 0);
+    let mut working = session("chat-1", "dev-a", SessionStatus::Working);
+    working.notice = Some(notice.clone());
+    a.upsert_session(&working).unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    assert_eq!(b.read_sessions().unwrap()[0].notice, Some(notice.clone()));
+
+    let mut idle = session("chat-1", "dev-a", SessionStatus::Idle);
+    idle.notice = Some(notice.clone());
+    a.upsert_session(&idle).unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    assert_eq!(b.read_sessions().unwrap()[0].notice, Some(notice));
+
+    let raw: super::rows::RawSession = serde_json::from_value(json!({
+        "chatId": "chat-1",
+        "deviceId": "dev-a",
+        "status": "idle",
+        "updatedAt": 1,
+        "notice": {"level": "shout", "text": 3},
+    }))
+    .unwrap();
+    assert_eq!(Session::from(raw).notice, None);
 }
 
 /// A context recovery under way rides the host's row to its peers (the

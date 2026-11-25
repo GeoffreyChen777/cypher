@@ -41,6 +41,8 @@ struct SessionView: View {
     @State private var connectionRetry = 0
     /// The progress card, opened by tapping the working strip's bar.
     @State private var showingProgress = false
+    /// The extension notice dismissed in this view: chat id + its arrival.
+    @State private var dismissedNotice: (chat: String, at: Int64)?
     @State private var workspaceDestination: WorkspaceDestination?
     @State private var actions = SessionActions()
     /// The entry a fork / restart is in flight for (its strip button spins).
@@ -1033,7 +1035,10 @@ struct SessionView: View {
     /// spinner + what it is doing; Errored shows "Run failed"; the strip
     /// always reserves its height so the composer never shifts. A long turn's
     /// narrated progress (render.rs's trailer bar) fills the rest of the row
-    /// with its bar and percentage; a tap opens its stages.
+    /// with its bar and percentage; a tap opens its stages. An extension's
+    /// latest notice (a rate-limit warning, compact) shows in faint ink for
+    /// 90 s where the strip is otherwise quiet, dismissable, and after the
+    /// elapsed time while a turn works without a bar.
     private func statusStrip(chat: Chat, store: SessionStore, status: SessionStatus?) -> some View {
         let transportReady =
             model.demo != nil || (model.connected && model.deviceOnline(chat.deviceId) && store.connected)
@@ -1052,10 +1057,18 @@ struct SessionView: View {
             let recovery =
                 status == .working
                 ? nil : sessionRow(chat: chat)?.recovery.flatMap { $0.isLive(now: now) ? $0 : nil }
-            // Every state but a quiet, connected session draws something here.
-            let showing = connection != .ready || status == .working || status == .errored || recovery != nil
             let progress =
                 connection == .ready && recovery == nil && status == .working ? sessionRow(chat: chat)?.progress : nil
+            // An extension's latest notice (a rate-limit warning): a quiet
+            // line where the strip is otherwise quiet, after the elapsed
+            // time while a turn works without a progress bar.
+            let notice =
+                connection == .ready && recovery == nil && status != .errored && progress == nil
+                ? shownNotice(chat: chat, now: now) : nil
+            // Every state but a quiet, connected session draws something here.
+            let showing =
+                connection != .ready || status == .working || status == .errored || recovery != nil
+                || notice != nil
             HStack(spacing: 6) {
                 if connection != .ready {
                     SessionConnectionIndicator(
@@ -1091,6 +1104,14 @@ struct SessionView: View {
                             .foregroundStyle(Theme.textFaint)
                             .monospacedDigit()
                             .fixedSize()
+                        if let notice {
+                            Text(notice.displayText)
+                                .font(Theme.sans(11))
+                                .foregroundStyle(Theme.textFaint)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .accessibilityIdentifier("session-notice")
+                        }
                         if let progress {
                             RunProgressBar(progress: progress)
                                 .frame(minWidth: 40, maxWidth: .infinity)
@@ -1107,7 +1128,28 @@ struct SessionView: View {
                             .font(Theme.sans(11))
                             .foregroundStyle(Theme.danger)
                     default:
-                        EmptyView()
+                        if let notice {
+                            Text(notice.displayText)
+                                .font(Theme.sans(11))
+                                .foregroundStyle(Theme.textFaint)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .accessibilityIdentifier("session-notice")
+                            Button {
+                                dismissedNotice = (chat.id, notice.at)
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundStyle(Theme.textFaint)
+                                    .frame(width: 22, height: 22)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Dismiss")
+                            .accessibilityIdentifier("session-notice-dismiss")
+                        } else {
+                            EmptyView()
+                        }
                     }
                 }
             }
@@ -1127,6 +1169,14 @@ struct SessionView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 16)  // the capsule on the composer's edge, its text on the composer's
         }
+    }
+
+    /// The chat's extension notice the strip shows at `now`: live and not
+    /// dismissed here (a newer one shows again).
+    private func shownNotice(chat: Chat, now: Int64) -> SessionNotice? {
+        guard let notice = sessionRow(chat: chat)?.notice, notice.isLive(now: now) else { return nil }
+        if let dismissed = dismissedNotice, dismissed.chat == chat.id, dismissed.at == notice.at { return nil }
+        return notice
     }
 
     private func sessionRow(chat: Chat) -> SessionRow? {
