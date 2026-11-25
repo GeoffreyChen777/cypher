@@ -129,6 +129,8 @@ actor RegistryClient {
         case .reconnect: if gen == life.generation { connect() }
         case .timer: await presenceTick(gen: gen)
         case .poll: if life.shouldPoll { await pullSync() }
+        // A registry that never synced has nothing to show: pull beside the dial.
+        case .startPoll: if life.shouldPoll, await delegate.helloCursor() == nil { await pullSync() }
         }
     }
 

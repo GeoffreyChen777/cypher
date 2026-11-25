@@ -22,6 +22,11 @@ enum RoomSocketWake: Sendable {
     case timer(Int)
     /// The HTTPS fallback interval elapsed.
     case poll
+    /// The client started: poll now only if the local copy never synced (a
+    /// cold open). Otherwise the first `.poll` comes after
+    /// `Timing.firstPollNs`, so a socket that joins in time makes no HTTPS
+    /// request at all (C1, docs/design/do-cost.md).
+    case startPoll
 }
 
 /// Owned by one client actor and only used on it: the async methods are
@@ -39,6 +44,8 @@ final class RoomSocketLifecycle<Owner: Actor> {
         var backoffBaseMs = 250
         var backoffCapMs = 30_000
         var httpPollNs: UInt64 = 20_000_000_000
+        /// The first fallback poll after `start` (C1: the dial's hedge).
+        var firstPollNs: UInt64 = 1_500_000_000
     }
 
     /// The client-specific parts. Each closure is handed the owner, so none
@@ -101,19 +108,23 @@ final class RoomSocketLifecycle<Owner: Actor> {
 
     // MARK: Session
 
-    /// Reopens after `stop()` and starts the fallback poll: one `.poll` wake
-    /// now, then one per interval.
+    /// Reopens after `stop()` and starts the fallback poll: a `.startPoll`
+    /// wake now, the first `.poll` after `Timing.firstPollNs`, then one per
+    /// interval.
     func start(owner: Owner) {
         closed = false
         pollTask?.cancel()
         let hooks = hooks
         let clock = clock
+        let first = timing.firstPollNs
         let interval = timing.httpPollNs
         pollTask = Task { [weak owner] in
-            guard let first = owner else { return }
-            await hooks.wake(first, .poll, 0)
+            guard let starting = owner else { return }
+            await hooks.wake(starting, .startPoll, 0)
+            var wait = first
             while !Task.isCancelled {
-                await clock.sleep(nanoseconds: interval)
+                await clock.sleep(nanoseconds: wait)
+                wait = interval
                 guard let owner, !Task.isCancelled else { return }
                 await hooks.wake(owner, .poll, 0)
             }

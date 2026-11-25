@@ -165,6 +165,8 @@ actor ChatRoomClient {
         // A socket mid-catch-up has proven the room answers: a pull now would
         // only fetch the same rows over a link that is already the bottleneck.
         case .poll: if life.shouldPoll, backfillProgressAt == nil { await pullSync() }
+        // A cold chat has nothing to show: its pull runs beside the dial.
+        case .startPoll: if life.shouldPoll, await delegate.cursor() == 0 { await pullSync() }
         }
     }
 
