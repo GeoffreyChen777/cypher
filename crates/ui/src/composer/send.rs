@@ -78,7 +78,9 @@ impl Composer {
                                     })
                                     .collect::<Vec<_>>()
                                     .join("\n");
-                                question_slash_owner(&questions, &text).map(str::to_string)
+                                let known = self.known_commands(cx);
+                                question_slash_owner(&questions, &text, known.as_deref())
+                                    .map(str::to_string)
                             })
                     };
                     let pick_only = questions.first().is_some_and(wizard_pick_only);
@@ -338,7 +340,9 @@ impl Composer {
     /// The checks that block a send before anything is staged or cleared:
     /// on `Err` the draft, comments and attachments all stay put.
     fn validate_send(&self, text: &str, take_draft: bool, cx: &App) -> Result<(), SharedString> {
-        if !text.trim_start().starts_with('/')
+        let known = self.known_commands(cx);
+        let known = known.as_deref();
+        if crate::slash_command::slash_command(text, known).is_none()
             && let Some(id) = self.pickers.read(cx).unavailable_pi_model(cx)
         {
             return Err(format!(
@@ -353,13 +357,13 @@ impl Composer {
         // surface) and session references are a main-surface feature, so the
         // block is main-only.
         if matches!(self.transport, ComposerTransport::Main) {
-            if take_draft && block_slash_with_comments(!self.comments.is_empty(), text) {
+            if take_draft && block_slash_with_comments(!self.comments.is_empty(), text, known) {
                 return Err(
                     "Comments can't be sent with a slash command — remove the /command or the comments first."
                         .into(),
                 );
             }
-            if block_slash_with_session_refs(text) {
+            if block_slash_with_session_refs(text, known) {
                 return Err(
                     "Session references can't be sent with a slash command — remove the /command or the references first."
                         .into(),
@@ -372,7 +376,7 @@ impl Composer {
             if session_send_cap_exceeded(text) {
                 return Err("Up to 3 session references per message — remove one first.".into());
             }
-            if block_slash_with_issue_refs(text) {
+            if block_slash_with_issue_refs(text, known) {
                 return Err(
                     "Issue and pull request references can't be sent with a slash command — remove the /command or the references first."
                         .into(),

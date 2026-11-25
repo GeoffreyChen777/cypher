@@ -2,6 +2,7 @@
 //! mode, draft comments and session references.
 
 use super::*;
+use crate::slash_command::{CommandNames, slash_command};
 use crate::widgets::text_input::{INPUT_LINE_HEIGHT, TEXTAREA_MAX, TEXTAREA_MIN, TEXTAREA_PAD_V};
 
 /// Expanded actions row: `pt-1` (4) + h-8 picker chips (32 — the tallest
@@ -372,21 +373,25 @@ impl DraftComment {
 /// Whether a send must be blocked because comments are pending on a slash
 /// command: comments ride only the next NORMAL Run/Steer — a slash command
 /// would be misrouted by the harness's command interception.
-pub fn block_slash_with_comments(has_comments: bool, text: &str) -> bool {
-    has_comments && text.trim_start().starts_with('/')
+pub fn block_slash_with_comments(
+    has_comments: bool,
+    text: &str,
+    known: Option<&CommandNames>,
+) -> bool {
+    has_comments && slash_command(text, known).is_some()
 }
 
 /// Whether a send must be blocked because the prompt references sessions on a
 /// slash command: session references load and ride ONLY a normal Run/Steer's
 /// effective prompt — a slash command would be misrouted by the harness's
 /// command interception, just like comments.
-pub fn block_slash_with_session_refs(text: &str) -> bool {
-    text.trim_start().starts_with('/') && !session_ref_chat_ids(text).is_empty()
+pub fn block_slash_with_session_refs(text: &str, known: Option<&CommandNames>) -> bool {
+    slash_command(text, known).is_some() && !session_ref_chat_ids(text).is_empty()
 }
 
 /// The issue-reference twin of [`block_slash_with_session_refs`].
-pub fn block_slash_with_issue_refs(text: &str) -> bool {
-    text.trim_start().starts_with('/') && !issue_refs(text).is_empty()
+pub fn block_slash_with_issue_refs(text: &str, known: Option<&CommandNames>) -> bool {
+    slash_command(text, known).is_some() && !issue_refs(text).is_empty()
 }
 
 /// Merge comments restored after a queue failure: the snapshot taken at send

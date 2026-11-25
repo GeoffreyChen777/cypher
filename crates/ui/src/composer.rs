@@ -285,23 +285,14 @@ fn slash_badge(theme: &Theme, badge: crate::composer::slash_menu::Badge) -> gpui
         .child(SharedString::from(badge.label))
 }
 
-/// The leading `/command` token of a whole-prompt slash send, if any.
-/// Used to restyle settings-style extension menus (not agent questions).
-pub fn slash_command_label(text: &str) -> Option<&str> {
-    let t = text.trim();
-    if !t.starts_with('/') || t.starts_with("//") {
-        return None;
-    }
-    let cmd = t.split_whitespace().next().unwrap_or(t);
-    (cmd.len() >= 2).then_some(cmd)
-}
-
 /// The slash command a question belongs to: the one that started the turn
-/// (`last_user_text`), unless the question is a permission prompt — that one
-/// is the permission extension's, whatever the turn is running.
+/// (`last_user_text`, read with the host's catalog `known`), unless the
+/// question is a permission prompt — that one is the permission extension's,
+/// whatever the turn is running.
 pub fn question_slash_owner<'a>(
     questions: &[cypher_proto::UserInputQuestion],
     last_user_text: &'a str,
+    known: Option<&crate::slash_command::CommandNames>,
 ) -> Option<&'a str> {
     if questions
         .first()
@@ -309,7 +300,7 @@ pub fn question_slash_owner<'a>(
     {
         return None;
     }
-    slash_command_label(last_user_text)
+    crate::slash_command::slash_command(last_user_text, known)
 }
 
 /// Slash-command completion state: like [`MentionState`] but the

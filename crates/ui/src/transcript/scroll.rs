@@ -862,10 +862,13 @@ impl Transcript {
     pub(super) fn sync(&mut self, cx: &mut Context<Self>) {
         // Cheap gate first: every tile's context notifies on unrelated list
         // frames too; the rows only depend on what the revision covers.
-        let (revision, memory_cards, plan_calls) = {
+        let (revision, memory_cards, plan_calls, known_commands) = {
             let s = self.state.read(cx);
             let memory_cards = super::memory_card::MemoryCards::of(&s.bot_records);
             let plan_calls = super::bot_plan::PlanCalls::of(&s.bot_records);
+            let known_commands = s
+                .selected_chat_row()
+                .and_then(|chat| crate::slash_command::KnownCommands::of_chat(cx, chat));
             let revision = (
                 s.transcript_revision(),
                 s.selected_chat.clone(),
@@ -877,8 +880,12 @@ impl Transcript {
                     s.selected_bot().map(|bot| bot.id.as_str()),
                 ),
                 memory_cards.key,
+                // A catalog is replaced, never edited: its address keys it.
+                known_commands
+                    .as_ref()
+                    .map_or(0, |known| Arc::as_ptr(known) as usize),
             );
-            (revision, memory_cards, plan_calls)
+            (revision, memory_cards, plan_calls, known_commands)
         };
         if self.synced_revision.as_ref() == Some(&revision) {
             return;
@@ -888,6 +895,7 @@ impl Transcript {
         self.synced_revision = Some(revision);
         self.memory_cards = memory_cards;
         self.plan_calls = plan_calls;
+        self.known_commands = known_commands;
         let (selected, entries, echoes, steers) = {
             let s = self.state.read(cx);
             let echoes: Vec<(SessionMessageEntry, bool)> = s
@@ -1032,12 +1040,15 @@ impl Transcript {
         tool_call_limit: u32,
     ) -> Vec<Row> {
         let mut new_rows: Vec<Row> = Vec::new();
+        let known = self.known_commands.clone();
+        let known = known.as_deref();
         let mut after_slash_command = false;
         for entry in entries {
             if entry.role == MessageRole::User {
-                after_slash_command = user_entry_is_slash_command(entry);
+                after_slash_command = user_entry_is_slash_command(entry, known);
             }
             let mut rows = self.rows_for(entry, false, steers.contains(&entry.id));
+            mark_command_rows(&mut rows, known);
             if after_slash_command && entry.role != MessageRole::User {
                 rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
             }
@@ -1049,9 +1060,10 @@ impl Transcript {
         }
         for (echo, pending) in echoes {
             if echo.role == MessageRole::User {
-                after_slash_command = user_entry_is_slash_command(echo);
+                after_slash_command = user_entry_is_slash_command(echo, known);
             }
             let mut rows = self.rows_for(echo, *pending, steers.contains(&echo.id));
+            mark_command_rows(&mut rows, known);
             if after_slash_command && echo.role != MessageRole::User {
                 rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
             }

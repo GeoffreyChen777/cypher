@@ -1282,18 +1282,78 @@ fn slash_command_rows_are_not_searchable() {
     entry.role = MessageRole::User;
     entry.status = None;
     entry.parts = vec![text_part("t0", "/model opus")];
-    let rows = rows_for_entry(&entry, false, &mut parse);
+    let mut rows = rows_for_entry(&entry, false, &mut parse);
+    mark_command_rows(&mut rows, None);
     let RowKind::User {
         text,
         mentions,
         attachments,
+        command,
         ..
     } = &rows[0].kind
     else {
         panic!("expected a user row");
     };
-    assert!(renders_as_command_chip(text, mentions, attachments));
+    assert!(*command);
+    assert!(renders_as_command_chip(text, mentions, attachments, None));
     assert_eq!(row_match_count(&rows[0], "model"), 0);
+}
+
+/// One user prompt's row, marked under `known` as `build_rows` marks it.
+fn marked_user_row(text: &str, known: Option<&crate::slash_command::CommandNames>) -> Row {
+    let mut entry = assistant("u1", MessageStatus::Complete, vec![]);
+    entry.role = MessageRole::User;
+    entry.status = None;
+    entry.parts = vec![text_part("t0", text)];
+    let mut rows = rows_for_entry(&entry, false, &mut parse);
+    mark_command_rows(&mut rows, known);
+    rows.remove(0)
+}
+
+fn is_command_row(row: &Row) -> bool {
+    matches!(row.kind, RowKind::User { command: true, .. })
+}
+
+#[test]
+fn messages_that_only_start_with_a_slash_stay_bubbles() {
+    // Paths, a lone slash and non-ASCII after it are messages to the model:
+    // a bubble with searchable text, not a command chip.
+    for (text, query) in [
+        ("/Users/me/x.png 是什么", "是什么"),
+        ("/ 这个呢", "这个"),
+        ("/ hi", "hi"),
+        ("/中文", "中文"),
+        ("/tmp/a", "tmp"),
+        ("/foo.bar", "foo"),
+        ("//x", "x"),
+    ] {
+        let row = marked_user_row(text, None);
+        assert!(!is_command_row(&row), "{text}");
+        assert!(row_match_count(&row, query) > 0, "{text}");
+    }
+    for text in ["/goal ship it", "/compact", "/fast on", "/skill:review x"] {
+        assert!(is_command_row(&marked_user_row(text, None)), "{text}");
+    }
+}
+
+#[test]
+fn the_host_catalog_decides_once_it_has_loaded() {
+    let known = crate::slash_command::CommandNames::from_names(["goal", "subagent-config"]);
+    assert!(is_command_row(&marked_user_row("/goal x", Some(&known))));
+    assert!(is_command_row(&marked_user_row(
+        "/subagent-config",
+        Some(&known)
+    )));
+    // Command-shaped, but the host offers no such command: pi sends it to
+    // the model, so it is a bubble.
+    let unknown = marked_user_row("/notacommand x", Some(&known));
+    assert!(!is_command_row(&unknown));
+    assert!(row_match_count(&unknown, "notacommand") > 0);
+    // Before the catalog loads it reads as a command; the catalog arriving
+    // moves the row's version, so the list re-splices and re-measures it.
+    let before = marked_user_row("/notacommand x", None);
+    assert!(is_command_row(&before));
+    assert_ne!(before.version, unknown.version);
 }
 
 #[test]

@@ -355,7 +355,7 @@ struct NewSessionView: View {
     private func loadReferences(_ prompt: String) async -> [SessionReference]? {
         let refIds = Mentions.sessionRefIds(in: prompt)
         guard !refIds.isEmpty else { return [] }
-        if prompt.hasPrefix("/") {
+        if SlashCommandText.isCommand(prompt) {
             attachError = "Session references accompany a normal message, not a slash command."
             return nil
         }
