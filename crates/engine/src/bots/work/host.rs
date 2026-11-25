@@ -100,25 +100,15 @@ async fn changed<T>(rx: &mut tokio::sync::watch::Receiver<T>) {
     }
 }
 
-/// The steps' states with `asking(session)` applied: a running step whose
-/// session waits on an answer is Asking, and back to Running once none
-/// does. `None` when nothing changes.
+/// The steps' states with `asking(session)` applied
+/// ([`BotWork::settled_steps`]: a running step whose sessions, or a steered
+/// session for the current step, wait on an answer is Asking, and back to
+/// Running once none does). `None` when nothing changes.
 pub(super) fn settle_steps(
     work: &BotWork,
     asking: impl Fn(&str) -> bool,
 ) -> Option<Vec<StepState>> {
-    let states: Vec<StepState> = work
-        .steps
-        .iter()
-        .map(|step| {
-            let waiting = step.sessions.iter().any(|id| asking(id));
-            match step.state {
-                StepState::Running if waiting => StepState::Asking,
-                StepState::Asking if !waiting => StepState::Running,
-                other => other,
-            }
-        })
-        .collect();
+    let states = work.settled_steps(asking);
     let changed = states
         .iter()
         .zip(&work.steps)
@@ -681,10 +671,14 @@ impl Bots {
             };
             return self.settle_work(bot, work, error, last);
         }
+        // The plan-question rule every Needs you reads (plan-asks.md): the
+        // chat or a child chat under it has an open question, whatever its
+        // row's age; a question on an offline device still asks.
+        let chats = ws.read_chats()?;
+        let tree = p::view::ChatTree::new(&chats);
+        let now = chrono::Utc::now();
         let asking = |id: &str| {
-            sessions
-                .get(id)
-                .is_some_and(|s| s.status == SessionStatus::AwaitingInput)
+            p::view::plan_question(&tree, id, |c| sessions.get(c), |_| true, now).is_some()
         };
         if let Some(states) = settle_steps(work, asking) {
             self.edit_work(&work.id, |w| {

@@ -1444,21 +1444,19 @@ async fn the_agent_socket_serves_only_local_subagent_calls() {
     }
 }
 
-/// CHARACTERISATION of a plan-asks miss (docs/design/plan-asks.md, case d).
-/// An async subagent asks after its parent's run has ended (the parent's
-/// persistent session parks when its turn is done and is reaped 30 minutes
-/// later). The question is mirrored into the parent and the parent's row is
-/// held at awaiting input, but nothing refreshes that row any more: there is
-/// no run, so no heartbeat. Desktop, iOS and the plan's Needs you all gate
-/// "asking" on a row fresher than `SESSION_STALE_MS`, so the question drops
-/// out of Needs you after 45 s while it is still open and answerable. The
-/// child's own row stays fresh, but Needs you never looks at child chats.
-///
-/// Asserts today's behaviour; the fix (step 2) flips the marked assertions.
+/// docs/design/plan-asks.md, case d′: an async subagent asks after its
+/// parent's run has ended (the parent's persistent session parks when its
+/// turn is done and is reaped 30 minutes later). The question is mirrored
+/// into the parent, and the parent's row carries it (`asking`) while it is
+/// open, so it reads as asking however old the row gets: nothing has to
+/// heartbeat it. The child's question is the plan's through the parent
+/// either way (`ChatTree::question`). Answered from the parent (Needs you),
+/// the answer reaches the subagent and both rows stop asking.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "characterisation of the plan-asks miss (docs/design/plan-asks.md); slow, ~50 s"]
-async fn a_question_forwarded_into_an_ended_parent_goes_stale_today() {
-    use cypher_proto::view::{Indicator, SESSION_STALE_MS, effective_indicator};
+async fn a_question_forwarded_into_an_ended_parent_stays_asking() {
+    use cypher_proto::view::{
+        ChatTree, Indicator, SESSION_STALE_MS, effective_indicator, plan_question,
+    };
 
     let rig = asking_rig();
     let core = &rig.core;
@@ -1488,43 +1486,172 @@ async fn a_question_forwarded_into_an_ended_parent_goes_stale_today() {
     .await;
 
     let child_id = start(core, "run-1", PARENT).await.expect("start ok");
-    support::wait_for_some("forwarded question", || open_question(core, PARENT)).await;
+    let (mirror_id, _) =
+        support::wait_for_some("forwarded question", || open_question(core, PARENT)).await;
     support::wait_for(
-        || support::status(core, PARENT) == Some(SessionStatus::AwaitingInput),
-        "parent held at awaiting input",
+        || {
+            core.sessions
+                .session_status(PARENT)
+                .is_some_and(|s| s.status == SessionStatus::AwaitingInput && s.asking.is_some())
+        },
+        "parent held at awaiting input, with the question on its row",
     )
     .await;
-    let asked_at = core
-        .sessions
-        .session_status(PARENT)
-        .expect("parent row")
-        .updated_at;
-
-    // Past the staleness window, the question still open.
-    tokio::time::sleep(Duration::from_millis(SESSION_STALE_MS as u64 + 5_000)).await;
-    assert!(
-        open_question(core, PARENT).is_some(),
-        "the forwarded question is still open"
-    );
     let parent = core.sessions.session_status(PARENT).expect("parent row");
-    assert_eq!(parent.status, SessionStatus::AwaitingInput);
-    // Step 2 flips these two: the row (or whatever clients read) must keep
-    // saying "asking" while the question is open.
+    let ask = parent.asking.clone().expect("asking");
+    assert_eq!(ask.request_id, mirror_id);
+    assert_eq!(ask.from_chat_id.as_deref(), Some(child_id.as_str()));
+    assert_eq!(ask.asked_by.as_deref(), Some("planner"));
     assert_eq!(
-        parent.updated_at, asked_at,
-        "today nothing refreshes the held parent row"
+        ask.permission,
+        Some(cypher_proto::PermissionPromptKind::Access)
     );
+    // The durable row (what every other device reads) carries it too.
+    let durable = core
+        .workspace
+        .read_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.chat_id == PARENT)
+        .expect("durable parent row");
     assert_eq!(
-        effective_indicator(Some(&parent), chrono::Utc::now()),
-        Indicator::None,
-        "so every client reads the parent as not asking"
+        durable.asking.as_ref().map(|a| &a.request_id),
+        Some(&mirror_id)
     );
-    // The child's run is alive and heartbeats its own row.
+
+    // Read long after the row was last written, as a client would once
+    // nothing heartbeats it: still asking.
+    let later = parent.updated_at + chrono::Duration::milliseconds(SESSION_STALE_MS * 40);
+    assert_eq!(
+        effective_indicator(Some(&parent), later),
+        Indicator::AwaitingInput
+    );
+    let chats = core.workspace.read_chats().unwrap();
+    let tree = ChatTree::new(&chats);
+    let rows = core.workspace.read_sessions().unwrap();
+    let q = plan_question(
+        &tree,
+        PARENT,
+        |id| rows.iter().find(|r| r.chat_id == id),
+        |_| true,
+        later,
+    )
+    .expect("a plan question under the step session");
+    assert_eq!(q.chat_id, PARENT, "the mirror in the parent answers for it");
+    // The child's own row carries its own question, not a mirror.
     let child = core.sessions.session_status(&child_id).expect("child row");
+    let child_ask = child.asking.expect("child asking");
+    assert_eq!(child_ask.from_chat_id, None);
+
+    // Answered from the parent (what Needs you sends): the subagent gets it.
+    core.doc_host
+        .queue_command(PARENT, answer_to(mirror_id, "list"))
+        .expect("answer in parent");
+    let answers =
+        support::wait_for_some("child answered", || rig.answered.lock().unwrap().clone()).await;
+    assert_eq!(answers[0].labels, ["list"]);
+    support::wait_for(
+        || {
+            let rows = core.workspace.read_sessions().unwrap();
+            has_resolved_question(core, PARENT)
+                && rows.iter().all(|r| r.asking.is_none())
+                && support::status(core, PARENT) == Some(SessionStatus::Idle)
+        },
+        "question resolved; neither row asks; parent back to idle",
+    )
+    .await;
+    core.shutdown().await;
+}
+
+/// docs/design/plan-asks.md, case e2 (and e1's own half): the engine died
+/// with a subagent's question mirrored into a step session and its own
+/// question open. The mirror's forward was memory, so the subagent can never
+/// get an answer: boot recovery resolves it and ends the awaiting-input
+/// hold. The session's own question stays open (answerable through the
+/// dead-run fallback) and stays on its row.
+#[tokio::test(flavor = "multi_thread")]
+async fn boot_recovery_resolves_dead_mirrors_and_keeps_own_questions() {
+    let rig = asking_rig();
+    let core = &rig.core;
+    let question = |asked_by: Option<&str>| cypher_proto::UserInputQuestion {
+        id: "q1".into(),
+        header: "Which?".into(),
+        question: "Which layout?".into(),
+        options: vec!["grid".into(), "list".into()],
+        multi_select: false,
+        permission: None,
+        asked_by: asked_by.map(Into::into),
+    };
+    let handle = core.doc_host.open(PARENT).expect("parent doc");
+    for (id, asked_by) in [("own-1", None), ("mirror-1", Some("planner"))] {
+        let mut entry = support::message_entry(
+            &format!("msg-{id}"),
+            cypher_doc::MessageRole::Assistant,
+            "",
+            "dev-a",
+            Some(cypher_doc::MessageStatus::Complete),
+        );
+        entry.parts = vec![cypher_doc::MessagePart::Input {
+            id: id.into(),
+            request_id: id.into(),
+            questions: vec![question(asked_by)],
+            resolved: false,
+        }];
+        handle.doc().push_message(&entry).expect("push question");
+    }
+    // The row the previous engine left: held at awaiting input on the mirror.
+    let device = core.workspace.device_id().to_string();
+    let row = cypher_proto::Session {
+        chat_id: PARENT.into(),
+        device_id: device,
+        status: SessionStatus::AwaitingInput,
+        started_at: None,
+        updated_at: chrono::Utc::now() - chrono::Duration::minutes(30),
+        subagents: Vec::new(),
+        context_usage: None,
+        throughput: None,
+        recovery: None,
+        progress: None,
+        notice: None,
+        asking: Some(cypher_proto::SessionAsk {
+            request_id: "mirror-1".into(),
+            asked_at: 1,
+            permission: None,
+            asked_by: Some("planner".into()),
+            from_chat_id: Some("gone-child".into()),
+        }),
+    };
+    core.workspace.record_session(&row);
+
+    let fixed = core
+        .sessions
+        .recover_open_questions(&Default::default())
+        .expect("recovery");
+    assert_eq!(fixed, 1);
+    let parts: Vec<(String, bool)> = support::entries(core, PARENT)
+        .iter()
+        .flat_map(|e| e.parts.iter())
+        .filter_map(|p| match p {
+            cypher_doc::MessagePart::Input {
+                request_id,
+                resolved,
+                ..
+            } => Some((request_id.clone(), *resolved)),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        effective_indicator(Some(&child), chrono::Utc::now()),
-        Indicator::AwaitingInput,
-        "the child row is fresh, but no Needs you reads child chats"
+        parts,
+        vec![("own-1".into(), false), ("mirror-1".into(), true)]
     );
+    let row = core
+        .workspace
+        .read_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.chat_id == PARENT)
+        .expect("parent row");
+    assert_eq!(row.status, SessionStatus::Idle);
+    assert_eq!(row.asking.map(|a| a.request_id).as_deref(), Some("own-1"));
     core.shutdown().await;
 }

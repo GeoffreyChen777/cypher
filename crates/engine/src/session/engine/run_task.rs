@@ -882,12 +882,27 @@ impl<'r> RunLoop<'r> {
             } => {
                 inner.remember_harness_session(chat_id, session_id, self.scope.run_cwd);
             }
-            AgentEvent::InputRequested { .. } => {
+            AgentEvent::InputRequested {
+                request_id,
+                questions,
+            } => {
                 // Known-id guaranteed: the unknown-id twin was dropped in
-                // `should_drop`, before the parked gate.
+                // `should_drop`, before the parked gate. The row carries the
+                // question itself, not only the status (plan-asks.md).
+                inner.open_ask(
+                    chat_id,
+                    cypher_proto::SessionAsk {
+                        request_id: request_id.clone(),
+                        asked_at: crate::util::now_ms(),
+                        permission: super::ask_permission(questions),
+                        asked_by: None,
+                        from_chat_id: None,
+                    },
+                );
                 inner.set_status(chat_id, SessionStatus::AwaitingInput, false);
             }
-            AgentEvent::InputResolved { .. } => {
+            AgentEvent::InputResolved { request_id } => {
+                inner.close_ask(chat_id, request_id);
                 inner.set_status(chat_id, SessionStatus::Working, false);
             }
             // Lands on the segment with its next sync or finish (a steer
@@ -1061,6 +1076,9 @@ impl<'r> RunLoop<'r> {
                 let _ = tx.send(Vec::new());
             }
         }
+        // ...and its parts are resolved below: the row stops asking them.
+        inner.close_own_asks(chat_id);
+        inner.sync_asking(chat_id);
         let message_status = match status {
             DoneStatus::Interrupted => MessageStatus::Aborted,
             DoneStatus::Completed | DoneStatus::Errored => MessageStatus::Complete,

@@ -299,3 +299,40 @@ async fn a_transition_is_never_held_back_by_an_ignored_signature() {
     );
     assert_eq!(lock(&sent).last().unwrap().status, SessionStatus::Idle);
 }
+
+/// plan-asks h: a second question while the row already awaits input is an
+/// event of its own (a new request id), and its heartbeats are not.
+#[tokio::test(start_paused = true)]
+async fn a_new_question_is_reported_without_a_status_change() {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let record = sent.clone();
+    let hook = reporter(Arc::new(move |session| {
+        lock(&record).push(session);
+        Box::pin(async { Reply::Delivered })
+    }));
+    let ask = |id: &str| cypher_proto::SessionAsk {
+        request_id: id.into(),
+        asked_at: 1,
+        permission: None,
+        asked_by: None,
+        from_chat_id: None,
+    };
+    let mut current = session();
+    current.status = SessionStatus::AwaitingInput;
+    current.asking = Some(ask("r1"));
+    hook(&current);
+    settle().await;
+    current.updated_at += chrono::Duration::seconds(10);
+    hook(&current);
+    settle().await;
+    assert_eq!(lock(&sent).len(), 1, "a heartbeat of the same question");
+    current.asking = Some(ask("r2"));
+    hook(&current);
+    settle().await;
+    let sent = lock(&sent);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(
+        sent[1].asking.as_ref().map(|a| a.request_id.as_str()),
+        Some("r2")
+    );
+}

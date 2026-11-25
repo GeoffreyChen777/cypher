@@ -697,17 +697,16 @@ async fn steer_after_restart_dispatches_new_turn_with_resume() {
     core.shutdown().await;
 }
 
-/// CHARACTERISATION of a plan-asks miss (docs/design/plan-asks.md, case e1).
-/// A run dies (kill -9) while its permission prompt is open. By design the
-/// question stays answerable after the restart: the doc keeps the unresolved
-/// input part (the composer still shows it) and `RespondInput`'s dead-run
-/// fallback answers it as a new turn. But boot recovery leaves the session
-/// row `Idle`, and every reader of "asking" reads the row: Needs you, the
-/// badges and iOS drop the question, and a plan's `wait_for_session` reports
-/// the session as finished. Asserts today's behaviour; the fix (step 2)
-/// flips the marked assertion.
+/// docs/design/plan-asks.md, case e1: a run dies (kill -9) while its
+/// permission prompt is open. The question stays answerable after the
+/// restart: the doc keeps the unresolved input part (the composer still
+/// shows it) and `RespondInput`'s dead-run fallback answers it as a new
+/// turn. Boot recovery puts the question back on the session row
+/// (`asking`), so the row reads as asking although it is `Idle` (Needs you,
+/// the badges, iOS, a plan's `wait_for_session`); answering it (from Needs
+/// you or the composer) runs the next turn and the row stops asking.
 #[tokio::test]
-async fn a_question_open_across_a_crash_is_not_asking_after_recovery_today() {
+async fn a_question_open_across_a_crash_is_still_asking_after_recovery() {
     use cypher_proto::view::{Indicator, effective_indicator};
 
     let tmp = tempfile::tempdir().unwrap();
@@ -803,14 +802,54 @@ async fn a_question_open_across_a_crash_is_not_asking_after_recovery_today() {
         })
     });
     assert!(open, "the question survives the crash: {entries:#?}");
-    // Step 2 flips this: the row must keep saying "asking".
     let row = core.sessions.session_status(CHAT).expect("session row");
     assert_eq!(row.status, cypher_proto::SessionStatus::Idle);
-    assert_ne!(
-        effective_indicator(Some(&row), chrono::Utc::now()),
+    let ask = row.asking.clone().expect("the row keeps the open question");
+    assert_eq!(ask.request_id, "req-1");
+    assert_eq!(
+        ask.permission,
+        Some(cypher_proto::PermissionPromptKind::Escalate)
+    );
+    assert_eq!(ask.from_chat_id, None);
+    assert_eq!(
+        effective_indicator(Some(&row), chrono::Utc::now() + chrono::Duration::hours(1)),
         Indicator::AwaitingInput,
-        "today recovery leaves the row idle, so no reader sees the open question"
+        "an open question never ages out"
     );
     assert!(requests.lock().unwrap().is_empty(), "no auto-resume");
+
+    // Answered (Needs you sends the same command): the dead-run fallback
+    // runs the answer as the next turn, and the row stops asking.
+    // (The fallback rebuilds the run from the chat row, which this
+    // manufactured crash never wrote.)
+    core.workspace
+        .create_chat(CHAT, None, Some("dev-crash"), None, Some("/tmp".into()))
+        .expect("chat row");
+    core.doc_host
+        .queue_command(
+            CHAT,
+            cypher_doc::SessionCommandPayload::RespondInput {
+                request_id: "req-1".into(),
+                answers: vec![cypher_proto::UserInputAnswer {
+                    question_id: "q1".into(),
+                    labels: vec!["Allow".into()],
+                }],
+            },
+        )
+        .expect("answer");
+    wait_for(
+        || !requests.lock().unwrap().is_empty(),
+        "the answer runs as a turn",
+    )
+    .await;
+    wait_for(
+        || {
+            core.sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.asking.is_none())
+        },
+        "the row stops asking",
+    )
+    .await;
     core.shutdown().await;
 }

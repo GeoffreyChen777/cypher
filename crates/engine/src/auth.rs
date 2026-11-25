@@ -881,6 +881,8 @@ impl Auth {
                     "status": run.status,
                     "updatedAt": run.updated_at,
                 })).collect::<Vec<_>>(),
+                // The open question (plan-asks.md §6); absent while none.
+                "asking": session.asking,
             }))
             .send()
             .await

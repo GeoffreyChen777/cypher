@@ -1,6 +1,7 @@
 # Plan questions and Needs you
 
-Status: investigation (step 1 of 2), 2026-11-25. Step 2 makes the fix in §5.
+Status: investigation (step 1 of 2) and fix (step 2), 2026-11-25. §5 is the plan; §6 the
+wire shape; §7 what step 2 changed where it differs from §5.
 
 Owner's report: a workspace plan starts sessions in a project; when such a session asks
 something, the question sometimes never reaches the workspace's **Needs you**, so the
@@ -279,3 +280,42 @@ edges; Rust runner `crates/proto/tests/plan_asks_vectors.rs`).
   (`askingChatId`). An archived chat has ended: it asks nothing and hides its subtree.
   Needs you lists each `plan_chat_ids()` chat whose `question` is some, also after the
   work ended (as before).
+
+## 7. Step 2: engine and desktop, and where they differ from §5
+
+- **Engine rows.** `Inner::open_asks` (chat → open questions, oldest first) feeds every
+  row write (`write_status`, `sync_asking`): `RunLoop::record` opens one on
+  `InputRequested` and closes it on `InputResolved`; `forward_input` opens the mirror on
+  the root (`fromChatId`, `askedBy`), `retire_forward` closes it; a second question while
+  the root is already held rewrites the row (`hold_awaiting_input` → `sync_asking`), so a
+  new `requestId` is a real write (h). `on_done` closes the run's own questions (their
+  parts are resolved there). The dead-run answer fallback and the orphaned-mirror path in
+  `execute_respond_input` close theirs (`SessionsEngine::input_closed`).
+- **Boot.** `recover_stale` reopens a crashed run's own questions before it writes the
+  row `Idle`, so the row keeps `asking` (e1); then `recover_open_questions` rebuilds every
+  other row of this device that still says it asks: dead mirrors are resolved in the doc
+  and the hold ends (e2). Differs from §5 in two places: a question is *resolved* instead
+  of kept when the crashed turn is auto-resumed (the resumed turn asks again), and in a
+  **child chat** (its subagent run was the parent's tool call, which died too; answering
+  it would start an orphan child turn).
+- **Coordinator.** `session_state`: a row with `asking` and an unresolved part in the doc
+  is `Asking` whatever its status (Idle after a crash is no longer `Finished`).
+  `wait_for_session` appends "its device is offline…" when the row's host has no fresh
+  presence (`WorkspaceHost::device_online`, 45 s like the room's presence). It still
+  reads only the session's own doc: a child's question reaches it through the mirror,
+  which every live forward writes.
+- **Work host.** `settle_steps` is `BotWork::settled_steps` on `plan_question` (the chat or a
+  child under it, row age ignored, offline counts as asking). Steered sessions mark the
+  current step (§6).
+- **Notifications.** `Signature` includes `asking.requestId`, and the event body carries
+  `asking`. The host still reports the child's row and the root's mirror separately;
+  reporting a forwarded question once is the Worker's (skip a child whose question a
+  root's `asking.fromChatId` names).
+- **Desktop.** `AppState::plan_question[_in]` (shared rule, presence from
+  `device_online`, an answer being sent reads as answered) drives `chat_asking` →
+  `bot_needs` → Needs you, the logo count and the picker; `attention_count` counts a
+  workspace session while it (or a child) asks; routines' `job_asking` too. The Needs you
+  card reads and answers the question in the chat that asks (a child chat when there is
+  no mirror), and says "Waiting for its device" in place of the time when the host is
+  offline. The work row's ring and "Waiting on you" turn amber when any step asks, not
+  only the first running one.

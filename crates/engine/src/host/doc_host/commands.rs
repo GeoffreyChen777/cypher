@@ -390,6 +390,7 @@ impl DocHost {
                 tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                     "orphaned subagent question resolve failed");
             }
+            sessions.input_closed(chat_id, request_id);
             return Ok((
                 SessionCommandStatus::Rejected,
                 Some("the subagent's question is no longer pending".into()),
@@ -418,6 +419,7 @@ impl DocHost {
             tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                 "orphaned input resolve failed");
         }
+        sessions.input_closed(chat_id, request_id);
         let harness = self.harness_for_request(chat_id, &request);
         sessions
             .dispatch_augmented(chat_id, harness, request, None, None)
