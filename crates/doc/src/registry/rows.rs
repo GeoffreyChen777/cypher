@@ -304,6 +304,10 @@ pub(crate) struct RawSession {
     /// Parsed leniently like `context_usage`.
     #[serde(default)]
     progress: Option<serde_json::Value>,
+    /// The latest extension notice; absent otherwise and on old writers.
+    /// Parsed leniently like `context_usage`.
+    #[serde(default)]
+    notice: Option<serde_json::Value>,
 }
 
 impl From<RawSession> for Session {
@@ -326,6 +330,9 @@ impl From<RawSession> for Session {
                 .and_then(|value| serde_json::from_value(value).ok()),
             progress: raw
                 .progress
+                .and_then(|value| serde_json::from_value(value).ok()),
+            notice: raw
+                .notice
                 .and_then(|value| serde_json::from_value(value).ok()),
         }
     }

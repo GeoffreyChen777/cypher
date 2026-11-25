@@ -387,6 +387,12 @@ pub struct Session {
     /// or newly started turn drops it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<RunProgress>,
+    /// The latest extension notice ([`crate::AgentEvent::Notice`]): the
+    /// status strip's quiet line while it is live. Transient run state —
+    /// never transcript content; a new notice replaces it, and a turn that
+    /// starts after it expired drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<crate::SessionNotice>,
 }
 
 /// A cheap model's reading of how far a long turn has got. An estimate for
