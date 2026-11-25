@@ -247,13 +247,18 @@ struct FileCardRow: View {
     let detail: String
     var trailing: Trailing = .none
 
-    @ScaledMetric(relativeTo: .subheadline) private var well = FileCardMetrics.well
+    @ScaledMetric(relativeTo: .subheadline) private var scaledWell = FileCardMetrics.well
+    @ScaledMetric(relativeTo: .subheadline) private var scaledIcon: CGFloat = 15
+
+    /// The well and its glyph grow with the text, up to a size that still
+    /// leaves the name room.
+    private var well: CGFloat { min(scaledWell, 48) }
+    private var icon: CGFloat { min(scaledIcon, 22) }
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: symbol)
-                .font(.system(size: 15, weight: .regular))
-                .imageScale(.medium)
+                .font(.system(size: icon, weight: .regular))
                 .foregroundStyle(.secondary)
                 .frame(width: well, height: well)
                 .background(
@@ -276,7 +281,7 @@ struct FileCardRow: View {
                 EmptyView()
             case .open:
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: min(scaledIcon * 0.8, 17), weight: .semibold))
                     .foregroundStyle(.tertiary)
                     .padding(.trailing, 6)
             case .play:
