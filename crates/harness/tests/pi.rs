@@ -16,8 +16,8 @@ use cypher_harness::{
     RunProfile, SteerMessage,
 };
 use cypher_proto::{
-    AgentEvent, AnsweredModel, BotOrigin, DoneStatus, HarnessId, ReasoningLevel, RunRequest,
-    SteeringMode, ToolCall,
+    AgentEvent, AnsweredModel, BotOrigin, DoneStatus, HarnessId, NoticeLevel, ReasoningLevel,
+    RunRequest, SteeringMode, ToolCall,
 };
 
 /// The session file the fake pi reports by default: it now derives its
@@ -1102,10 +1102,15 @@ async fn happy_path_maps_deltas_tools_errors_and_settles_completed() {
     );
 
     // Extension error surfaces; the fire-and-forget notify never reaches the
-    // input bridge.
+    // input bridge, and mid-turn it is a Notice, not reply text.
     assert!(events.contains(&AgentEvent::Error {
         message: "boom".into()
     }));
+    assert!(events.contains(&AgentEvent::Notice {
+        level: NoticeLevel::Info,
+        text: "hi".into()
+    }));
+    assert!(!events.contains(&AgentEvent::TextDelta { text: "hi".into() }));
     assert!(
         !events
             .iter()
@@ -1287,6 +1292,55 @@ async fn no_agent_activity_settles_with_done_completed_carrying_notify_text() {
             Some(fixture_session_file()),
         )
     );
+}
+
+#[tokio::test]
+async fn notify_during_a_model_turn_is_a_notice_not_reply_text() {
+    // A command's own notify (before the agent starts) is its output; once
+    // the model runs, an extension's notify is a Notice: no TextDelta, not
+    // in Done's result. Error notifies stay Error events.
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&harness(), request("/goal scenario:turn-notice"), controls).await;
+    assert!(
+        events.contains(&AgentEvent::TextDelta {
+            text: "Goal set.".into()
+        }),
+        "{events:?}"
+    );
+    let notices: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Notice { level, text } => Some((*level, text.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        notices,
+        vec![
+            (
+                NoticeLevel::Warning,
+                "Claude rate limit warning: 58% used (seven_day)"
+            ),
+            (NoticeLevel::Info, "bridge info"),
+        ]
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "Goal set.Answer.");
+    assert!(events.contains(&AgentEvent::Error {
+        message: "bridge failed".into()
+    }));
+    let result = events.iter().find_map(|e| match e {
+        AgentEvent::Done { result, .. } => Some(result.clone()),
+        _ => None,
+    });
+    assert_eq!(result, Some(Some("Answer.".into())));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
 
 #[tokio::test]

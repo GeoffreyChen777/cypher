@@ -2993,3 +2993,52 @@ fn a_late_peer_answer_reads_as_an_attributed_answer() {
     assert!(rows.len() > 1, "the answer follows as text rows");
     assert!(!rows.iter().any(|r| matches!(r.kind, RowKind::User { .. })));
 }
+
+// ---- extension notices an older harness streamed into the reply ----
+
+#[test]
+fn reply_notice_parts_render_nothing_and_glued_ones_are_stripped() {
+    let notice = "Claude rate limit warning: 57% used (seven_day)";
+    // A whole part that is the notice: no row at all.
+    let only = assistant(
+        "n-only",
+        MessageStatus::Complete,
+        vec![text_part("t0", notice)],
+    );
+    assert!(rows_for_entry(&only, false, &mut parse).is_empty());
+    // Glued onto the reply (the fold appended it with no separator): the
+    // reply renders as if it never had it.
+    let glued = assistant(
+        "n-glued",
+        MessageStatus::Complete,
+        vec![
+            text_part("t0", &format!("{notice}Let me look.")),
+            tool_part("tool", "ls"),
+            text_part("t2", &format!("Done.\n{notice}")),
+        ],
+    );
+    let cleaned = without_reply_notices(&glued).expect("notices stripped");
+    let texts: Vec<&str> = cleaned
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, vec!["Let me look.", "Done."]);
+    assert_eq!(
+        message_copy_text(&glued).as_deref(),
+        Some("Let me look.\n\nDone.")
+    );
+    // Quoted inside a reply: untouched.
+    let quoted = assistant(
+        "n-quoted",
+        MessageStatus::Complete,
+        vec![text_part(
+            "t0",
+            &format!("The bridge prints `{notice}` near the cap."),
+        )],
+    );
+    assert!(without_reply_notices(&quoted).is_none());
+}

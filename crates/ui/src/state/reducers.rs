@@ -56,6 +56,7 @@ impl AppState {
             throughput: None,
             recovery: None,
             progress: None,
+            notice: None,
         };
         if let Some(existing) = self
             .sessions
@@ -529,6 +530,18 @@ impl AppState {
     /// explains it) instead of the 0.65 sending veil forever.
     pub fn echo_pending(&self, message_id: &str) -> bool {
         self.command_status_for(message_id) != Some(CommandSendStatus::Failed)
+    }
+
+    /// Hide the chat's current notice here (a newer one shows again).
+    pub fn dismiss_notice(&mut self, chat_id: &str) {
+        let Some(at) = self
+            .session_for(chat_id)
+            .and_then(|s| s.notice.as_ref())
+            .map(|n| n.at)
+        else {
+            return;
+        };
+        self.dismissed_notices.insert(chat_id.to_owned(), at);
     }
 
     pub fn begin_upload_progress(

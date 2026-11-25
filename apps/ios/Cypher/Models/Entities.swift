@@ -145,6 +145,9 @@ struct SessionRow: Hashable {
     /// A long turn's narrated progress (entities.rs `progress`): the status
     /// strip's progress bar. Belongs to one turn; a settled row drops it.
     var progress: RunProgress? = nil
+    /// The latest extension notice (entities.rs `notice`): the status
+    /// strip's quiet line while it is live.
+    var notice: SessionNotice? = nil
 }
 
 /// entities.rs `ContextUsage`: tokens in the context window, of its size.
@@ -365,6 +368,10 @@ struct MessageEntry: Identifiable, Hashable {
     /// Explicit sender intent from the durable command ledger, not a claim
     /// that the agent has consumed the instruction (or a new wire field).
     var isSteer = false
+    /// schema.rs `comments`: the comments that rode a user prompt (the
+    /// Comment feature), drawn over its bubble. Absent on old rows, old
+    /// writers and every prompt sent without comments.
+    var comments: [MessageComment] = []
     /// schema.rs `models`: the models that answered an assistant entry,
     /// distinct and in the order they first answered. Only Pi writes it.
     var models: [AnsweredModel] = []
@@ -704,6 +711,9 @@ struct PendingSend {
     var text: String
     var at: Int64
     var isSteer = false
+    /// The comments the send carries, read back from its agent prompt
+    /// (`MessageComment.fromAgentPrompt`), as the host's entry will store them.
+    var comments: [MessageComment] = []
 }
 
 // MARK: - Folder browsing (add-space palette data)

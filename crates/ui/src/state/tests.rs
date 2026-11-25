@@ -2850,3 +2850,42 @@ fn presence_window() {
     // Clock skew (future) counts as online.
     assert!(device_online(Some(now + TimeDelta::seconds(30)), now));
 }
+
+#[test]
+fn notice_shows_while_live_until_dismissed_and_a_newer_one_shows_again() {
+    let mut state = AppState::new();
+    let at = Utc::now();
+    let notice = |text: &str, at| cypher_proto::SessionNotice {
+        level: cypher_proto::NoticeLevel::Warning,
+        text: text.into(),
+        at,
+    };
+    state.sessions.push(Session {
+        notice: Some(notice(
+            "Claude rate limit warning: 58% used (seven_day)",
+            at,
+        )),
+        ..crate::test_fixtures::session()
+    });
+    assert_eq!(
+        state.shown_notice("chat", at).map(|n| n.display_text()),
+        Some("Claude: 58% of weekly limit".to_owned())
+    );
+    // Expired: gone without any other change.
+    let ttl = TimeDelta::seconds(cypher_proto::NOTICE_TTL_SECS);
+    assert!(state.shown_notice("chat", at + ttl).is_none());
+    // Dismissed: gone here.
+    state.dismiss_notice("chat");
+    assert!(state.shown_notice("chat", at).is_none());
+    // A newer notice replaces it and shows again.
+    let later = at + TimeDelta::seconds(5);
+    state.sessions[0].notice = Some(notice(
+        "Claude rate limit warning: 60% used (seven_day)",
+        later,
+    ));
+    assert_eq!(
+        state.shown_notice("chat", later).map(|n| n.display_text()),
+        Some("Claude: 60% of weekly limit".to_owned())
+    );
+    assert!(state.shown_notice("other", later).is_none());
+}

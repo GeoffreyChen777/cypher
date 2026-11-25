@@ -6,7 +6,8 @@
 //! - **A scripted reply.** A prompt holding `[mock:script]<json>[/mock:script]`
 //!   is answered with the steps the JSON lists, in order, instead of the
 //!   harness's stock reply. A step is one of
-//!   `{"text": "…"}`, `{"think": "…"}`,
+//!   `{"text": "…"}`, `{"think": "…"}`, `{"notice": "…"}` (an extension's
+//!   warning notice, the status strip's line),
 //!   `{"tool": {"id": "…", "call": <ToolCall>, "output": "…", "error": false}}`
 //!   (the call, then its result), `{"ask": [<UserInputQuestion>, …]}` (the
 //!   run waits for the answer, a permission prompt included) and
@@ -71,6 +72,10 @@ fn parse(value: &Value) -> Result<Vec<ScriptStep>, String> {
         match kind.as_str() {
             "text" => steps.push(ScriptStep::Event(AgentEvent::TextDelta { text: text()? })),
             "think" => steps.push(ScriptStep::Event(AgentEvent::ReasoningDelta {
+                text: text()?,
+            })),
+            "notice" => steps.push(ScriptStep::Event(AgentEvent::Notice {
+                level: cypher_proto::NoticeLevel::Warning,
                 text: text()?,
             })),
             "hold" => steps.push(ScriptStep::Hold(text()?)),

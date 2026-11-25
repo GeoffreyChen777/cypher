@@ -96,7 +96,7 @@ final class SteerBubbleTests: XCTestCase {
         XCTAssertNil(optimistic.timestamp)
         XCTAssertNotNil(confirmed.timestamp)
         for row in [optimistic, confirmed] {
-            guard case .user(let text, let isSteer, _) = row.kind else { return XCTFail("Missing bubble") }
+            guard case .user(let text, let isSteer, _, _) = row.kind else { return XCTFail("Missing bubble") }
             XCTAssertEqual(text, "Continue")
             XCTAssertTrue(isSteer)
         }
@@ -117,7 +117,7 @@ final class SteerBubbleTests: XCTestCase {
                 edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
                 userId: "test", orgId: "test", deviceId: "phone", deviceName: "Phone"), offline: true)
         var received: (String, Bool)?
-        store.demoResponder = { received = ($0, $1) }
+        store.demoResponder = { prompt, isSteer, _ in received = (prompt, isSteer) }
         XCTAssertTrue(store.sendSteer(prompt: "Continue"))
         XCTAssertEqual(received?.0, "Continue")
         XCTAssertEqual(received?.1, true)

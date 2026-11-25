@@ -1,0 +1,29 @@
+{
+  "about": "Extension notices (crates/proto/src/notice.rs): `compact` is the status strip's reading of a notice (compact_notice); `strip` is what a transcript text part reads as once notices an older harness streamed into the reply are dropped (strip_reply_notices; expect null = the part is untouched, \"\" = the whole part goes). The iPhone twin (apps/ios/Cypher/Session/NoticeText.swift, NoticeTextTests) runs these too.",
+  "compact": [
+    { "name": "weekly", "text": "Claude rate limit warning: 58% used (seven_day)", "expect": "Claude: 58% of weekly limit" },
+    { "name": "five hour", "text": "Claude rate limit warning: 80% used (five_hour)", "expect": "Claude: 80% of 5-hour limit" },
+    { "name": "weekly opus", "text": "Claude rate limit warning: 91% used (seven_day_opus)", "expect": "Claude: 91% of weekly Opus limit" },
+    { "name": "weekly sonnet", "text": "Claude rate limit warning: 75% used (seven_day_sonnet)", "expect": "Claude: 75% of weekly Sonnet limit" },
+    { "name": "unknown window keeps its raw name", "text": "Claude rate limit warning: 5% used (overage)", "expect": "Claude: 5% of overage limit" },
+    { "name": "empty window", "text": "Claude rate limit warning: 58% used ()", "expect": "Claude: 58% of limit" },
+    { "name": "no window", "text": "Claude rate limit warning: 58% used", "expect": "Claude: 58% of limit" },
+    { "name": "trailing newline", "text": "Claude rate limit warning: 58% used (seven_day)\n", "expect": "Claude: 58% of weekly limit" },
+    { "name": "other notice keeps its first line", "text": "Claude bridge: 2 tool handler(s) still waiting\nprovider may be stuck", "expect": "Claude bridge: 2 tool handler(s) still waiting" },
+    { "name": "not the pattern", "text": "Claude rate limit warning: lots used", "expect": "Claude rate limit warning: lots used" },
+    { "name": "extra text after the pattern", "text": "Claude rate limit warning: 58% used (seven_day) soon", "expect": "Claude rate limit warning: 58% used (seven_day) soon" }
+  ],
+  "strip": [
+    { "name": "whole part", "text": "Claude rate limit warning: 57% used (seven_day)", "expect": "" },
+    { "name": "whole part, trailing whitespace", "text": "Claude rate limit warning: 57% used (seven_day)  \n", "expect": "" },
+    { "name": "glued before the reply", "text": "Claude rate limit warning: 57% used (seven_day)Let me look.", "expect": "Let me look." },
+    { "name": "own line before the reply", "text": "Claude rate limit warning: 57% used (seven_day)\nLet me look.", "expect": "Let me look." },
+    { "name": "glued after the reply", "text": "Done.Claude rate limit warning: 57% used (seven_day)", "expect": "Done." },
+    { "name": "own line after the reply", "text": "Done.\nClaude rate limit warning: 57% used (seven_day)\n", "expect": "Done." },
+    { "name": "two in a row", "text": "Claude rate limit warning: 57% used (seven_day)Claude rate limit warning: 60% used (seven_day)Hi", "expect": "Hi" },
+    { "name": "quoted inside the reply", "text": "The bridge says \"Claude rate limit warning: 57% used (seven_day)\" near the cap.", "expect": null },
+    { "name": "inside a sentence", "text": "A Claude rate limit warning: 57% used (seven_day) B", "expect": null },
+    { "name": "plain reply", "text": "Plain reply.", "expect": null },
+    { "name": "prefix without a number", "text": "Claude rate limit warning: % used", "expect": null }
+  ]
+}

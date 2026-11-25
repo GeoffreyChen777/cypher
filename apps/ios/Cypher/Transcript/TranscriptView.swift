@@ -845,10 +845,10 @@ struct TranscriptView: View {
     private func rowContent(_ row: TranscriptRow) -> some View {
         Group {
             switch row.kind {
-            case .user(let text, let isSteer, let recovery):
+            case .user(let text, let isSteer, let recovery, let comments):
                 UserBubble(
                     text: text, pending: row.timestamp == nil,
-                    isSteer: isSteer, recovery: recovery,
+                    isSteer: isSteer, recovery: recovery, comments: comments,
                     deviceId: store.hostDeviceId ?? "")
 
             case .prose(let blocks, let streaming):
