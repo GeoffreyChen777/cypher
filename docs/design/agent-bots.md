@@ -397,6 +397,12 @@ owner and waits for their answer (§6.7). Nothing stalls silently.
   once; called again on the same open question it holds until the owner answers, so the
   plan stays running (its step asking) instead of ending as failed the moment a worker
   asks, and goes on from the answer. The plan's time limit (§6.6) bounds the wait.
+- **Plan questions and Needs you.** As built, a worker's question reaches Needs you only
+  while it is asked in a step session itself (a subagent's through its mirror in the
+  step session) and that session's row was refreshed in the last 45 s, so a question
+  outlives its listing when the run behind it ends, its device goes offline or the
+  engine restarts, while the work row and `wait_for_session` still say it is asking.
+  Every case, its root cause and the one-rule fix: [plan-asks.md](plan-asks.md).
 - **The brief** (`bots/work/text.rs`) carries the plan with step ids, projects and
   devices, the instruction verbatim in quotes, and what the thread may do in plain words.
   Its memory joins it with the memory track.

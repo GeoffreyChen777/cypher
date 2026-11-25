@@ -1443,3 +1443,88 @@ async fn the_agent_socket_serves_only_local_subagent_calls() {
         );
     }
 }
+
+/// CHARACTERISATION of a plan-asks miss (docs/design/plan-asks.md, case d).
+/// An async subagent asks after its parent's run has ended (the parent's
+/// persistent session parks when its turn is done and is reaped 30 minutes
+/// later). The question is mirrored into the parent and the parent's row is
+/// held at awaiting input, but nothing refreshes that row any more: there is
+/// no run, so no heartbeat. Desktop, iOS and the plan's Needs you all gate
+/// "asking" on a row fresher than `SESSION_STALE_MS`, so the question drops
+/// out of Needs you after 45 s while it is still open and answerable. The
+/// child's own row stays fresh, but Needs you never looks at child chats.
+///
+/// Asserts today's behaviour; the fix (step 2) flips the marked assertions.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "characterisation of the plan-asks miss (docs/design/plan-asks.md); slow, ~50 s"]
+async fn a_question_forwarded_into_an_ended_parent_goes_stale_today() {
+    use cypher_proto::view::{Indicator, SESSION_STALE_MS, effective_indicator};
+
+    let rig = asking_rig();
+    let core = &rig.core;
+    core.doc_host
+        .queue_command(PARENT, pi_run("delegate it"))
+        .expect("parent run");
+    support::wait_for(
+        || {
+            support::status(core, PARENT) == Some(SessionStatus::Working)
+                && rig.release.lock().unwrap().is_some()
+        },
+        "parent turn running",
+    )
+    .await;
+    // The turn ends and the harness stream closes: the parent's run is gone,
+    // as after the idle reaper.
+    let feed = rig.release.lock().unwrap().take().expect("parent feed");
+    let _ = feed.send(done_ok());
+    drop(feed);
+    support::wait_for(
+        || {
+            support::status(core, PARENT) == Some(SessionStatus::Idle)
+                && !core.sessions.has_run(PARENT)
+        },
+        "parent run ended",
+    )
+    .await;
+
+    let child_id = start(core, "run-1", PARENT).await.expect("start ok");
+    support::wait_for_some("forwarded question", || open_question(core, PARENT)).await;
+    support::wait_for(
+        || support::status(core, PARENT) == Some(SessionStatus::AwaitingInput),
+        "parent held at awaiting input",
+    )
+    .await;
+    let asked_at = core
+        .sessions
+        .session_status(PARENT)
+        .expect("parent row")
+        .updated_at;
+
+    // Past the staleness window, the question still open.
+    tokio::time::sleep(Duration::from_millis(SESSION_STALE_MS as u64 + 5_000)).await;
+    assert!(
+        open_question(core, PARENT).is_some(),
+        "the forwarded question is still open"
+    );
+    let parent = core.sessions.session_status(PARENT).expect("parent row");
+    assert_eq!(parent.status, SessionStatus::AwaitingInput);
+    // Step 2 flips these two: the row (or whatever clients read) must keep
+    // saying "asking" while the question is open.
+    assert_eq!(
+        parent.updated_at, asked_at,
+        "today nothing refreshes the held parent row"
+    );
+    assert_eq!(
+        effective_indicator(Some(&parent), chrono::Utc::now()),
+        Indicator::None,
+        "so every client reads the parent as not asking"
+    );
+    // The child's run is alive and heartbeats its own row.
+    let child = core.sessions.session_status(&child_id).expect("child row");
+    assert_eq!(
+        effective_indicator(Some(&child), chrono::Utc::now()),
+        Indicator::AwaitingInput,
+        "the child row is fresh, but no Needs you reads child chats"
+    );
+    core.shutdown().await;
+}

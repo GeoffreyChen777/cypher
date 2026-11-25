@@ -2370,6 +2370,65 @@ mod tests {
         assert_eq!(records.started_by("s1").unwrap().0.id, "run");
     }
 
+    /// CHARACTERISATION of two plan-asks misses (docs/design/plan-asks.md).
+    /// Today a plan's question reaches Needs you only when it is a session
+    /// listed in `step.sessions` AND the caller's `asking` says so, and
+    /// every caller (desktop `chat_asking`, iOS `sessionAsking`) answers
+    /// from a session row fresher than `SESSION_STALE_MS`. So (1) a question
+    /// open in a subagent's child chat under a step session is never listed
+    /// (only its mirror in the root is, and only while the root's row is
+    /// fresh), and (2) a step session whose row stopped being refreshed (its
+    /// run ended with a forwarded question held, its host offline) drops out
+    /// although its question is still open. The fix (step 2) flips both.
+    #[test]
+    fn plan_questions_outside_fresh_step_rows_are_missed_today() {
+        use crate::view::{Indicator, SESSION_STALE_MS, effective_indicator};
+        let mut records = BotRecords::default();
+        let mut work: BotWork = serde_json::from_value(serde_json::json!({
+            "id": "w", "botId": "b", "title": "Plan", "instruction": "",
+            "state": "running", "chatId": "c", "createdAt": 0,
+            "steps": [{ "id": "1", "title": "Step", "state": "asking",
+                         "sessions": ["step-session"] }]
+        }))
+        .unwrap();
+        work.steps[0].state = StepState::Asking;
+        records.work = vec![work];
+
+        // (1) The subagent's child chat asks; the step session itself not.
+        let child_asking = |chat: &str| chat == "child-of-step-session";
+        assert!(
+            records.needs_you("b", child_asking).is_empty(),
+            "today: a child chat's open question is not a plan question"
+        );
+
+        // (2) The step session's row says awaiting input but was last
+        // written 46 s ago; its question is still open in the chat doc.
+        let now = Utc::now();
+        let row = crate::Session {
+            chat_id: "step-session".into(),
+            device_id: "host".into(),
+            status: crate::SessionStatus::AwaitingInput,
+            started_at: None,
+            updated_at: now - Duration::milliseconds(SESSION_STALE_MS + 1_000),
+            subagents: Vec::new(),
+            context_usage: None,
+            throughput: None,
+            recovery: None,
+            progress: None,
+            notice: None,
+        };
+        let asking = |chat: &str| {
+            chat == row.chat_id && effective_indicator(Some(&row), now) == Indicator::AwaitingInput
+        };
+        assert!(
+            records.needs_you("b", asking).is_empty(),
+            "today: a stale row hides a plan question that is still open"
+        );
+        // The step itself still reads Asking: the work host settles steps
+        // on the raw row status, with no staleness gate.
+        assert_eq!(records.work[0].steps[0].state, StepState::Asking);
+    }
+
     #[test]
     fn routine_approvals_need_the_owner_only_while_the_run_is_waiting() {
         let mut routine: BotRoutine = serde_json::from_value(serde_json::json!({
