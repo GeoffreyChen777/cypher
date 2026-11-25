@@ -307,24 +307,30 @@ fn local(path: &str, format: Format, context: &Context) -> Source {
 /// when it is outside every root the chat may read.
 pub fn local_candidates(path: &str, context: &Context) -> Result<Vec<Candidate>, String> {
     let home = context.home.map(|home| home.trim_end_matches('/'));
-    let absolute = |path: &str| -> Option<String> {
+    // `~` expands only to land inside a root: with the host's home known it
+    // is that folder; unknown, `~` stays the head of the path and matches
+    // roots written the same way. Either way the path is resolved first and
+    // then checked against the roots, so a `..` that climbs out of every
+    // root (or above an unknown home) reads nothing.
+    let absolute = |path: &str| -> Option<Place> {
         if path == "~" || path.starts_with("~/") {
             let rest = &path[1..];
             return Some(match home {
-                Some(home) => normalize(&format!("{home}{rest}")),
-                // Unknown home: `~` stays the head of the path, and matches
-                // roots written the same way.
-                None => format!("~{}", normalize(rest).trim_end_matches('/')),
+                Some(home) => Place::At(normalize(&format!("{home}{rest}"))),
+                None => tilde_place(rest, path),
             });
         }
-        path.starts_with('/').then(|| normalize(path))
+        path.starts_with('/').then(|| Place::At(normalize(path)))
     };
     let roots: Vec<String> = context
         .roots
         .iter()
-        .filter_map(|root| absolute(root))
+        .filter_map(|root| match absolute(root)? {
+            Place::At(root) => Some(root),
+            Place::Above(_) => None,
+        })
         .collect();
-    let mut tries: Vec<String> = Vec::new();
+    let mut tries: Vec<Place> = Vec::new();
     if let Some(full) = absolute(path) {
         tries.push(full);
     } else {
@@ -332,13 +338,22 @@ pub fn local_candidates(path: &str, context: &Context) -> Result<Vec<Candidate>,
             .cwd
             .and_then(absolute)
             .into_iter()
-            .chain(roots.iter().cloned());
+            .chain(roots.iter().cloned().map(Place::At));
         for base in bases {
-            tries.push(normalize_keeping_home(&format!("{base}/{path}")));
+            tries.push(match base {
+                Place::At(base) => match base.strip_prefix('~') {
+                    Some(rest) => tilde_place(&format!("{rest}/{path}"), &format!("{base}/{path}")),
+                    None => Place::At(normalize(&format!("{base}/{path}"))),
+                },
+                Place::Above(base) => Place::Above(format!("{base}/{path}")),
+            });
         }
     }
     let mut candidates: Vec<Candidate> = Vec::new();
     for full in &tries {
+        let Place::At(full) = full else {
+            continue;
+        };
         let inner = roots
             .iter()
             .filter_map(|root| inside(full, root).map(|rel| (root, rel)))
@@ -354,9 +369,39 @@ pub fn local_candidates(path: &str, context: &Context) -> Result<Vec<Candidate>,
         }
     }
     if candidates.is_empty() {
-        return Err(tries.into_iter().next().unwrap_or_else(|| path.to_owned()));
+        return Err(tries
+            .into_iter()
+            .next()
+            .map_or_else(|| path.to_owned(), Place::into_path));
     }
     Ok(candidates)
+}
+
+/// Where a local path resolved to.
+enum Place {
+    /// An absolute path, `.` and `..` folded (or `~/…` under an unknown
+    /// home).
+    At(String),
+    /// Above an unknown home (`~/../x`): nowhere a root can hold. Kept as
+    /// written for the error line.
+    Above(String),
+}
+
+impl Place {
+    fn into_path(self) -> String {
+        match self {
+            Place::At(path) | Place::Above(path) => path,
+        }
+    }
+}
+
+/// `~` + `rest` under an unknown home: folded, unless a `..` climbs above
+/// the `~` (then `written` is where it pointed).
+fn tilde_place(rest: &str, written: &str) -> Place {
+    match fold(rest) {
+        Some(folded) => Place::At(format!("~{}", folded.trim_end_matches('/'))),
+        None => Place::Above(written.to_owned()),
+    }
 }
 
 /// `full` relative to `root` when inside it.
@@ -372,15 +417,8 @@ fn inside(full: &str, root: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// [`normalize`], keeping an unexpanded `~` head.
-fn normalize_keeping_home(path: &str) -> String {
-    match path.strip_prefix('~') {
-        Some(rest) => format!("~{}", normalize(rest)),
-        None => normalize(path),
-    }
-}
-
-/// An absolute path with `.` and `..` folded away and no trailing slash.
+/// An absolute path with `.` and `..` folded away and no trailing slash
+/// (a `..` at `/` stays at `/`, as the file system does).
 fn normalize(path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for part in path.split('/') {
@@ -393,6 +431,22 @@ fn normalize(path: &str) -> String {
         }
     }
     format!("/{}", parts.join("/"))
+}
+
+/// [`normalize`] of a path under a head that is not `/` (an unknown `~`):
+/// `None` when a `..` climbs above that head.
+fn fold(path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    Some(format!("/{}", parts.join("/")))
 }
 
 /// `a.png:12`, `a.png:12-20` or `a.png:12:5` → `a.png`.

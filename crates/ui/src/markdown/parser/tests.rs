@@ -768,6 +768,16 @@ fn image(src: &str, alt: &str) -> Block {
     Block::Image {
         src: src.into(),
         alt: alt.into(),
+        caption: true,
+    }
+}
+
+/// An image whose alt the text around it already says: no caption.
+fn said_image(src: &str, alt: &str) -> Block {
+    Block::Image {
+        src: src.into(),
+        alt: alt.into(),
+        caption: false,
     }
 }
 
@@ -799,7 +809,8 @@ fn an_image_in_a_sentence_follows_its_paragraph() {
         "See the chart above."
     );
     assert!(runs.iter().all(|run| run.style.link.is_none()));
-    assert_eq!(parsed[1], image("out/chart.png", "the chart"));
+    // The sentence says the alt, so the image doesn't caption it again.
+    assert_eq!(parsed[1], said_image("out/chart.png", "the chart"));
     // Both carry the paragraph's range: one source block.
     let tree = parse_full("See ![the chart](out/chart.png) above.\n");
     assert_eq!(tree.blocks[0].range, tree.blocks[1].range);
@@ -812,7 +823,7 @@ fn images_in_lists_quotes_and_headings_stay_with_them() {
         panic!("{parsed:?}");
     };
     assert!(matches!(items[0][0], Block::Paragraph { .. }));
-    assert_eq!(items[0][1], image("a.png", "a"));
+    assert_eq!(items[0][1], said_image("a.png", "a"));
     let parsed = blocks("> ![q](q.jpg)\n");
     assert_eq!(
         parsed,
@@ -822,7 +833,7 @@ fn images_in_lists_quotes_and_headings_stay_with_them() {
     );
     let parsed = blocks("## Result ![r](r.svg)\n");
     assert!(matches!(parsed[0], Block::Heading { .. }));
-    assert_eq!(parsed[1], image("r.svg", "r"));
+    assert_eq!(parsed[1], said_image("r.svg", "r"));
 }
 
 #[test]

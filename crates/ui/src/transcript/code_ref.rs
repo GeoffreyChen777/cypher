@@ -495,8 +495,10 @@ impl Transcript {
             }
         };
         let task_key = key.clone();
+        let home = super::images::chat_home(self.state.read(cx));
         let task = cx.spawn_in(window, async move |this, cx| {
-            let (resolution, read) = resolve(&engine, &contexts, &task_key.path, cx).await;
+            let (resolution, read) =
+                resolve(&engine, &contexts, &task_key.path, home.as_deref(), cx).await;
             finish_resolution(this, task_key, resolution, read, cx);
         });
         self.code_refs.resolutions.insert(
@@ -1145,18 +1147,22 @@ fn ending_in(wanted: &str, matches: Vec<FileSearchMatch>) -> Vec<String> {
 /// each granted project (an absolute path only in the root it lies in),
 /// and searches them all; its resolved paths are absolute
 /// ([`roots::join`]). A successful read comes back with the resolution.
+/// A `~` path expands with the host's `home` when known, then resolves like
+/// an absolute one: only inside the roots ([`links::expand_tilde`]).
 async fn resolve(
     engine: &EngineHandle,
     contexts: &LinkContexts,
     path: &str,
+    home: Option<&str>,
     cx: &mut AsyncWindowContext,
 ) -> (
     Resolution,
     Option<(String, Result<FileSnapshot, SharedString>)>,
 ) {
-    if path.starts_with('~') {
+    let Some(path) = links::expand_tilde(path, home) else {
         return (Resolution::Outside(path.to_owned()), None);
-    }
+    };
+    let path = path.as_str();
     let tries = match lookup_order(contexts, path) {
         Ok(tries) => tries,
         Err(resolution) => return (resolution, None),

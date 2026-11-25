@@ -158,7 +158,7 @@ impl Transcript {
         let on_this_device = state
             .selected_chat_row()
             .is_some_and(|chat| state.local_device_id.as_deref() == Some(chat.device_id.as_str()));
-        let home = on_this_device.then(|| std::env::var("HOME").ok()).flatten();
+        let home = super::images::chat_home(state);
         let cwd = state.selected_chat_row().and_then(|chat| chat.cwd.clone());
         let (Ok(contexts), Some(engine)) = (contexts, engine) else {
             return Task::ready(Err("not connected to the session's files".into()));

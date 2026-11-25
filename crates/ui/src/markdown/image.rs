@@ -214,7 +214,7 @@ fn land(key: Key, loaded: Result<Loaded, SharedString>, cx: &mut App) {
 pub fn sources(block: &Block) -> Vec<(&str, &str)> {
     fn walk<'a>(block: &'a Block, out: &mut Vec<(&'a str, &'a str)>) {
         match block {
-            Block::Image { src, alt } => out.push((src, alt)),
+            Block::Image { src, alt, .. } => out.push((src, alt)),
             Block::BlockQuote { children } => children.iter().for_each(|b| walk(b, out)),
             Block::List { items, .. } => items.iter().flatten().for_each(|b| walk(b, out)),
             _ => {}
@@ -269,13 +269,14 @@ pub fn label(src: &str, alt: &str) -> String {
         .to_owned()
 }
 
-/// An image block: the preview with its caption, the neutral box while it
-/// loads, or a line saying why it can't show.
-pub fn render(src: &str, alt: &str, ctx: BlockCtx) -> AnyElement {
+/// An image block: the preview with its caption (when `caption`: the text
+/// it stood in did not say its alt already), the neutral box while it loads,
+/// or a line saying why it can't show.
+pub fn render(src: &str, alt: &str, caption: bool, ctx: BlockCtx) -> AnyElement {
     let BlockCtx {
         ix, opts, theme, ..
     } = ctx;
-    let caption = (!alt.trim().is_empty()).then(|| {
+    let caption = (caption && !alt.trim().is_empty()).then(|| {
         div()
             .text_size(px(12.0))
             .line_height(px(16.0))

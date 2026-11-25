@@ -223,28 +223,58 @@ enum ImageSource {
         return fileExtension(path[path.index(after: slash)...])
     }
 
+    /// Where a local path resolved to (desktop image_source.rs `Place`): an
+    /// absolute path (or `~/…` under an unknown home), or above an unknown
+    /// home (`~/../x`), which no root can hold — kept as written.
+    private enum Place {
+        case at(String)
+        case above(String)
+
+        var path: String {
+            switch self {
+            case .at(let path), .above(let path): return path
+            }
+        }
+    }
+
+    /// `~` expands only to land inside a root: with the host's home known it
+    /// is that folder; unknown, `~` stays the head of the path and matches
+    /// roots written the same way. The path is resolved first and then
+    /// checked against the roots, so a `..` that climbs out of every root
+    /// (or above an unknown home) reads nothing.
     private static func local(_ path: String, format: Format, _ context: Context) -> Kind {
         let home = context.home.map { trimTrailingSlashes($0) }
-        func absolute(_ path: String) -> String? {
+        func absolute(_ path: String) -> Place? {
             if path == "~" || path.hasPrefix("~/") {
                 let rest = String(path.dropFirst())
-                if let home { return normalize(home + rest) }
-                // Unknown home: `~` stays the head of the path, and matches
-                // roots written the same way.
-                return "~" + trimTrailingSlashes(normalize(rest))
+                if let home { return .at(normalize(home + rest)) }
+                return tildePlace(rest, written: path)
             }
-            return path.hasPrefix("/") ? normalize(path) : nil
+            return path.hasPrefix("/") ? .at(normalize(path)) : nil
         }
-        let roots = context.roots.compactMap(absolute)
-        var tries: [String] = []
+        let roots: [String] = context.roots.compactMap {
+            if case .at(let root) = absolute($0) { return root }
+            return nil
+        }
+        var tries: [Place] = []
         if let full = absolute(path) {
             tries.append(full)
         } else {
-            let bases = (context.cwd.flatMap(absolute).map { [$0] } ?? []) + roots
-            for base in bases { tries.append(normalizeKeepingHome("\(base)/\(path)")) }
+            let bases = (context.cwd.flatMap(absolute).map { [$0] } ?? []) + roots.map { Place.at($0) }
+            for base in bases {
+                switch base {
+                case .at(let base) where base.hasPrefix("~"):
+                    tries.append(tildePlace("\(base.dropFirst())/\(path)", written: "\(base)/\(path)"))
+                case .at(let base):
+                    tries.append(.at(normalize("\(base)/\(path)")))
+                case .above(let base):
+                    tries.append(.above("\(base)/\(path)"))
+                }
+            }
         }
         var candidates: [Candidate] = []
-        for full in tries {
+        for place in tries {
+            guard case .at(let full) = place else { continue }
             // The innermost root holding it (the last of the longest).
             var best: (root: String, rel: String)?
             for root in roots {
@@ -256,8 +286,15 @@ enum ImageSource {
                 if !candidates.contains(candidate) { candidates.append(candidate) }
             }
         }
-        if candidates.isEmpty { return .outside(path: tries.first ?? path) }
+        if candidates.isEmpty { return .outside(path: tries.first?.path ?? path) }
         return .local(candidates: candidates, format: format)
+    }
+
+    /// `~` + `rest` under an unknown home: folded, unless a `..` climbs
+    /// above the `~` (then `written` is where it pointed).
+    private static func tildePlace(_ rest: String, written: String) -> Place {
+        guard let folded = fold(rest) else { return .above(written) }
+        return .at("~" + trimTrailingSlashes(folded))
     }
 
     /// `full` relative to `root` when inside it.
@@ -268,11 +305,6 @@ enum ImageSource {
         return String(full.dropFirst(root.count + 1))
     }
 
-    /// `normalize`, keeping an unexpanded `~` head.
-    private static func normalizeKeepingHome(_ path: String) -> String {
-        path.hasPrefix("~") ? "~" + normalize(String(path.dropFirst())) : normalize(path)
-    }
-
     /// An absolute path with `.` and `..` folded away and no trailing slash.
     static func normalize(_ path: String) -> String {
         var parts: [Substring] = []
@@ -280,6 +312,20 @@ enum ImageSource {
             switch part {
             case ".": continue
             case "..": _ = parts.popLast()
+            default: parts.append(part)
+            }
+        }
+        return "/" + parts.joined(separator: "/")
+    }
+
+    /// `normalize` of a path under a head that is not `/` (an unknown `~`):
+    /// nil when a `..` climbs above that head.
+    private static func fold(_ path: String) -> String? {
+        var parts: [Substring] = []
+        for part in path.split(separator: "/", omittingEmptySubsequences: true) {
+            switch part {
+            case ".": continue
+            case "..": if parts.popLast() == nil { return nil }
             default: parts.append(part)
             }
         }

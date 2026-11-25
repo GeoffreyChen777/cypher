@@ -214,6 +214,82 @@
       }
     },
     {
+      "name": "tilde with a known home climbing out of the roots is outside",
+      "src": "~/proj/../../etc/a.png",
+      "cwd": "/Users/me/proj",
+      "roots": [
+        "/Users/me/proj"
+      ],
+      "home": "/Users/me",
+      "expect": {
+        "kind": "outside",
+        "path": "/Users/etc/a.png"
+      }
+    },
+    {
+      "name": "tilde with a known home resolves before the roots check",
+      "src": "~/a/../b/x.png",
+      "cwd": "/Users/me/b",
+      "roots": [
+        "/Users/me/b"
+      ],
+      "home": "/Users/me",
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/Users/me/b",
+            "path": "x.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "tilde climbing above an unknown home is outside",
+      "src": "~/../x.png",
+      "cwd": "~",
+      "roots": [
+        "~"
+      ],
+      "expect": {
+        "kind": "outside",
+        "path": "~/../x.png"
+      }
+    },
+    {
+      "name": "a relative path climbing above an unknown home is outside",
+      "src": "../../x.png",
+      "cwd": "~/proj",
+      "roots": [
+        "~/proj",
+        "~"
+      ],
+      "expect": {
+        "kind": "outside",
+        "path": "~/proj/../../x.png"
+      }
+    },
+    {
+      "name": "a relative path under an unknown home stays inside",
+      "src": "../shared/x.png",
+      "cwd": "~/proj",
+      "roots": [
+        "~/proj",
+        "~"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "~",
+            "path": "shared/x.png"
+          }
+        ]
+      }
+    },
+    {
       "name": "file:// URL",
       "src": "file:///w/proj/shots/a.png",
       "cwd": "/w/proj",

@@ -17,12 +17,17 @@ use gpui::{
     div, img, prelude::*, px,
 };
 
+use super::ToolItem;
 use crate::files::{FilesContext, LinkContexts};
 use crate::markdown::image::{self, ImageUi, Key, Loaded, Origin, Shown};
 use crate::markdown::image_source::{self, Format, MAX_BYTES, Rejection, Source};
 use crate::markdown::parser::Block;
+use cypher_proto::ToolCall;
 
 use super::Transcript;
+
+/// The side of a tool row's image thumbnail.
+const THUMB_SIDE: f32 = 22.0;
 
 /// The viewer's state: which image, at which zoom.
 #[derive(Clone)]
@@ -119,10 +124,7 @@ impl Transcript {
         let state = self.state.read(cx);
         let contexts = crate::files::link_contexts(state);
         let engine = state.engine().cloned();
-        let home = state
-            .selected_chat_row()
-            .filter(|chat| state.local_device_id.as_deref() == Some(chat.device_id.as_str()))
-            .and_then(|_| std::env::var("HOME").ok());
+        let home = chat_home(state);
         let cwd = state.selected_chat_row().and_then(|chat| chat.cwd.clone());
         let roots: Vec<String> = match &contexts {
             Ok(contexts) => contexts.contexts.iter().map(|c| c.root.clone()).collect(),
@@ -202,6 +204,58 @@ impl Transcript {
                 Task::ready(Err("unsupported".into()))
             }
         }
+    }
+
+    /// The thumbnail on a tool row whose call read or wrote an image
+    /// ([`tool_image`]): requested here, shown once loaded, nothing while it
+    /// loads or when it can't be shown. A click opens the viewer (a local
+    /// SVG opens as a page).
+    pub(super) fn tool_thumbnail(
+        &self,
+        tool: &ToolItem,
+        row_id: &SharedString,
+        id: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let src = tool_image(tool)?;
+        let key = Key {
+            scope: self.image_scope(cx),
+            src: SharedString::from(src.to_owned()),
+        };
+        let row = row_id.clone();
+        image::request(
+            key.clone(),
+            cx,
+            |cx| self.load_image(src, cx),
+            move |this: &mut Self, cx| this.remeasure_row(&row, cx),
+        );
+        let Shown::Ready(loaded) = image::lookup(&key) else {
+            return None;
+        };
+        let on_open = self.image_ui(cx).on_open;
+        let name: SharedString = src.rsplit('/').next().unwrap_or(src).to_owned().into();
+        Some(
+            div()
+                .id(SharedString::from(format!("{id}-thumb")))
+                .size(px(THUMB_SIDE))
+                .flex_none()
+                .rounded(px(4.0))
+                .overflow_hidden()
+                .border_1()
+                .border_color(crate::kit::theme::hairline(0.1))
+                .bg(crate::kit::theme::ink(0.035))
+                .cursor_pointer()
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    on_open(key.clone(), name.clone(), window, cx);
+                })
+                .child(
+                    img(loaded.image.clone())
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The viewer over the transcript, when an image is open.
@@ -395,6 +449,42 @@ fn svg_page(key: &Key, alt: &str) -> Option<crate::markdown::artifact::ArtifactO
     })
 }
 
+/// The home folder of the selected chat's host, for `~` in the paths its
+/// replies name: known only when that host is this device. A `~` path still
+/// reads only inside the chat's roots ([`image_source::local_candidates`]).
+pub(super) fn chat_home(state: &crate::state::AppState) -> Option<String> {
+    state
+        .selected_chat_row()
+        .filter(|chat| state.local_device_id.as_deref() == Some(chat.device_id.as_str()))
+        .and_then(|_| std::env::var("HOME").ok())
+        .filter(|home| home.starts_with('/'))
+}
+
+/// The image a finished call read or wrote (a `readFile` of a png, a
+/// screenshot saved with `writeFile`), which its row shows as a thumbnail.
+/// The doc keeps no tool result's image bytes (the harness passes text
+/// only), so the file is read again through the chat's roots, like an image
+/// a reply names ([`Transcript::load_image`]); one outside them shows none.
+pub(super) fn tool_image(tool: &ToolItem) -> Option<&str> {
+    if !tool.resolved || tool.is_error {
+        return None;
+    }
+    let path = match &tool.call {
+        ToolCall::ReadFile { path } | ToolCall::WriteFile { path, .. } => path,
+        _ => return None,
+    };
+    // Whether the path names an image file at all: any root will do here.
+    let any_root = image_source::Context {
+        roots: &["/"],
+        ..Default::default()
+    };
+    matches!(
+        image_source::classify(path, &any_root),
+        Source::Local { .. }
+    )
+    .then_some(path.as_str())
+}
+
 /// The context of `root` among the chat's, the path in it, and the path its
 /// link handler opens (a workspace chat's are absolute).
 pub(super) fn locate(
@@ -419,20 +509,35 @@ fn too_large() -> SharedString {
     format!("too large (over {} MB)", MAX_BYTES / (1024 * 1024)).into()
 }
 
-/// GET an `https://` image, at most [`MAX_BYTES`].
+/// Redirects one image load follows before giving up.
+const MAX_REDIRECTS: usize = 5;
+
+/// GET an `https://` image, at most [`MAX_BYTES`]. Redirects are followed
+/// here, hop by hop, so each target passes the same check as the first
+/// address ([`checked_url`]): a redirect to plain `http://` (or one carrying
+/// credentials) fails like any other load error.
 async fn fetch(http: Arc<dyn HttpClient>, url: &str) -> Result<Vec<u8>, SharedString> {
     use futures::AsyncReadExt as _;
-    let parsed = url::Url::parse(url).map_err(|_| SharedString::from("network error"))?;
-    if parsed.scheme() != "https" {
-        return Err("not loaded over insecure http".into());
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err("not loaded: the address carries credentials".into());
-    }
-    let mut response = http
-        .get(parsed.as_str(), ().into(), true)
-        .await
-        .map_err(|_| SharedString::from("network error"))?;
+    let mut current = checked_url(url::Url::parse(url).ok())?;
+    let mut hops = 0;
+    let mut response = loop {
+        let response = http
+            .get(current.as_str(), ().into(), false)
+            .await
+            .map_err(|_| SharedString::from("network error"))?;
+        if !response.status().is_redirection() {
+            break response;
+        }
+        hops += 1;
+        if hops > MAX_REDIRECTS {
+            return Err("network error (too many redirects)".into());
+        }
+        let location = response
+            .headers()
+            .get(gpui::http_client::http::header::LOCATION)
+            .and_then(|value| value.to_str().ok());
+        current = redirect_target(&current, location)?;
+    };
     if !response.status().is_success() {
         return Err(format!("network error ({})", response.status().as_u16()).into());
     }
@@ -447,6 +552,25 @@ async fn fetch(http: Arc<dyn HttpClient>, url: &str) -> Result<Vec<u8>, SharedSt
         return Err(too_large());
     }
     Ok(body)
+}
+
+/// Where a redirect from `from` goes: its `Location`, resolved against
+/// `from`, and checked like the first address.
+fn redirect_target(from: &url::Url, location: Option<&str>) -> Result<url::Url, SharedString> {
+    let location = location.ok_or_else(|| SharedString::from("network error (bad redirect)"))?;
+    checked_url(from.join(location).ok())
+}
+
+/// An address an image may load from: `https://`, without credentials.
+fn checked_url(url: Option<url::Url>) -> Result<url::Url, SharedString> {
+    let url = url.ok_or_else(|| SharedString::from("network error"))?;
+    if url.scheme() != "https" {
+        return Err("not loaded over insecure http".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("not loaded: the address carries credentials".into());
+    }
+    Ok(url)
 }
 
 /// Check the bytes are a supported image and measure it, off the UI thread.
@@ -522,6 +646,137 @@ mod tests {
         assert_eq!(
             measure(b"%PDF-1.7".to_vec(), Origin::Inline).err().unwrap(),
             "unsupported format"
+        );
+    }
+
+    #[test]
+    fn finished_reads_and_writes_of_images_get_a_thumbnail() {
+        let item = |call: ToolCall, resolved: bool, is_error: bool| ToolItem {
+            call,
+            is_error,
+            resolved,
+            detail: None,
+            invocation: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            depth: 0,
+            permission: None,
+            blocked_first: false,
+        };
+        let read = |path: &str| ToolCall::ReadFile { path: path.into() };
+        let write = |path: &str| ToolCall::WriteFile {
+            path: path.into(),
+            content: None,
+        };
+        let done = |call| tool_image_owned(&item(call, true, false));
+        assert_eq!(
+            done(read("/w/shots/a.png")).as_deref(),
+            Some("/w/shots/a.png")
+        );
+        assert_eq!(done(read("shots/B.JPEG")).as_deref(), Some("shots/B.JPEG"));
+        assert_eq!(
+            done(write("~/out/chart.svg")).as_deref(),
+            Some("~/out/chart.svg")
+        );
+        // Not an image file, not a file call, a URL: none.
+        assert_eq!(done(read("src/main.rs")), None);
+        assert_eq!(done(read("notes.pdf")), None);
+        assert_eq!(done(read("https://x.dev/a.png")), None);
+        assert_eq!(
+            done(ToolCall::EditFile {
+                path: "a.png".into(),
+                old_string: None,
+                new_string: None
+            }),
+            None
+        );
+        // Still running, or failed: none.
+        assert_eq!(tool_image(&item(read("a.png"), false, false)), None);
+        assert_eq!(tool_image(&item(read("a.png"), true, true)), None);
+    }
+
+    fn tool_image_owned(tool: &ToolItem) -> Option<String> {
+        tool_image(tool).map(str::to_owned)
+    }
+
+    #[test]
+    fn redirects_are_checked_like_the_first_address() {
+        let from = url::Url::parse("https://img.example/a/chart.png").unwrap();
+        let hop =
+            |location: &str| redirect_target(&from, Some(location)).map(|url| url.to_string());
+        assert_eq!(
+            hop("https://cdn.example/x.png").unwrap(),
+            "https://cdn.example/x.png"
+        );
+        // Relative and scheme-relative targets resolve against the page.
+        assert_eq!(hop("../b.png").unwrap(), "https://img.example/b.png");
+        assert_eq!(
+            hop("//cdn.example/c.png").unwrap(),
+            "https://cdn.example/c.png"
+        );
+        // A downgrade fails like any other load error.
+        assert_eq!(
+            hop("http://img.example/a/chart.png").err().unwrap(),
+            "not loaded over insecure http"
+        );
+        assert_eq!(
+            hop("HTTP://img.example/x.png").err().unwrap(),
+            "not loaded over insecure http"
+        );
+        assert!(hop("file:///etc/passwd").is_err());
+        assert!(hop("data:image/png;base64,AAAA").is_err());
+        assert_eq!(
+            hop("https://me:secret@img.example/x.png").err().unwrap(),
+            "not loaded: the address carries credentials"
+        );
+        assert!(redirect_target(&from, None).is_err());
+    }
+
+    #[test]
+    fn a_downgrading_redirect_fails_the_load() {
+        use gpui::http_client::{AsyncBody, FakeHttpClient, Response};
+        let http = FakeHttpClient::create(|request| async move {
+            let path = request.uri().path().to_owned();
+            let response = match path.as_str() {
+                "/up.png" => Response::builder()
+                    .status(302)
+                    .header("location", "/final.png")
+                    .body(AsyncBody::default()),
+                "/down.png" => Response::builder()
+                    .status(301)
+                    .header("location", "http://img.example/final.png")
+                    .body(AsyncBody::default()),
+                "/loop.png" => Response::builder()
+                    .status(307)
+                    .header("location", "/loop.png")
+                    .body(AsyncBody::default()),
+                _ => Response::builder()
+                    .status(200)
+                    .body(AsyncBody::from(b"\x89PNG\r\n\x1a\nbytes".to_vec())),
+            };
+            Ok(response.unwrap())
+        });
+        let http: Arc<dyn HttpClient> = http;
+        let run = |url: &str| futures::executor::block_on(fetch(http.clone(), url));
+        assert!(
+            run("https://img.example/up.png")
+                .unwrap()
+                .starts_with(b"\x89PNG")
+        );
+        assert_eq!(
+            run("https://img.example/down.png").err().unwrap(),
+            "not loaded over insecure http"
+        );
+        assert!(
+            run("https://img.example/loop.png")
+                .err()
+                .unwrap()
+                .contains("too many redirects")
+        );
+        assert_eq!(
+            run("http://img.example/up.png").err().unwrap(),
+            "not loaded over insecure http"
         );
     }
 

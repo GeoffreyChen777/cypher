@@ -837,8 +837,9 @@ impl Transcript {
         let detail = paint.detail;
         let invocation = paint.invocation;
         let key = SharedString::from(format!("{row_id}#d{ix}"));
+        let thumb = self.tool_thumbnail(tool, row_id, &key, cx);
         if detail.is_none() && invocation.is_none() {
-            return tool_chip(tool, theme, cx.entity_id());
+            return tool_chip(tool, thumb, theme, cx.entity_id());
         }
         let affordance = paint.affordance;
         let affordance_h = if affordance.is_some() {
@@ -913,7 +914,7 @@ impl Transcript {
                         group.toggled_at = Some(Instant::now());
                         cx.notify();
                     }))
-                    .child(chip_header(tool, open, theme, cx.entity_id())),
+                    .child(chip_header(tool, thumb, open, theme, cx.entity_id())),
             );
         // The body stays mounted while the close tween shrinks over it.
         // Invocation first (what was asked), then output/diff (what

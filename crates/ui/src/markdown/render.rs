@@ -476,7 +476,7 @@ pub fn render_block(
             rows,
             align,
         } => render_table(header, rows, align, ctx, window),
-        Block::Image { src, alt } => super::image::render(src, alt, ctx),
+        Block::Image { src, alt, caption } => super::image::render(src, alt, *caption, ctx),
         Block::FilePreview { src, kind } => super::file_card::render(src, *kind, ctx),
         Block::Rule => div()
             .h(px(1.0))

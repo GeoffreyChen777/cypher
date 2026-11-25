@@ -99,11 +99,14 @@ pub enum Block {
     },
     Rule,
     /// An image ([`super::image_source`]): a Markdown image, set after the
-    /// paragraph it stood in (whose sentence keeps the alt text), or a
-    /// paragraph that was only an image path. `alt` is the caption.
+    /// paragraph, heading or table it stood in, or a paragraph that was only
+    /// an image path. `alt` names it (viewer, error line); it is said once:
+    /// `caption` is false when the text the image stood in kept it (the
+    /// sentence reads on), true when the image was all that text said.
     Image {
         src: String,
         alt: String,
+        caption: bool,
     },
     /// A paragraph that was only a path to a file with a preview
     /// ([`super::file_preview::file_line`]): a table, PDF page, video frame
@@ -482,7 +485,7 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
                 level: heading_level(level),
                 runs: parse_inline_container(cur, &InlineStyle::default()),
             }];
-            out.extend(image_blocks(cur.images.drain(taken..)));
+            out.extend(image_blocks(cur.images.drain(taken..), false));
             out
         }
         Tag::CodeBlock(kind) => {
@@ -566,7 +569,7 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
                 .collect();
             let taken = cur.images.len();
             let mut out = vec![parse_table(cur, align)];
-            out.extend(image_blocks(cur.images.drain(taken..)));
+            out.extend(image_blocks(cur.images.drain(taken..), false));
             out
         }
         Tag::HtmlBlock => {
@@ -649,6 +652,7 @@ fn paragraph_blocks(
             return vec![Block::Image {
                 alt: src.clone(),
                 src,
+                caption: true,
             }];
         }
         if let Some(src) = super::file_preview::file_line(source)
@@ -669,17 +673,23 @@ fn paragraph_blocks(
     let said: String = runs.iter().map(|run| squeeze(&run.text)).collect();
     let alts: String = images.iter().map(|(_, alt)| squeeze(alt)).collect();
     let mut out = Vec::new();
-    if said != alts {
+    // The sentence keeps the alt text; the images then carry no caption, so
+    // it is said once. A paragraph of nothing but images is dropped and the
+    // images caption themselves.
+    let kept = said != alts;
+    if kept {
         out.push(Block::Paragraph { runs });
     }
-    out.extend(image_blocks(images));
+    out.extend(image_blocks(images, !kept));
     out
 }
 
-fn image_blocks(images: impl IntoIterator<Item = (String, String)>) -> Vec<Block> {
+/// The image blocks for images written in a text; `caption` when that text
+/// is not shown (its alt texts were all it said).
+fn image_blocks(images: impl IntoIterator<Item = (String, String)>, caption: bool) -> Vec<Block> {
     images
         .into_iter()
-        .map(|(src, alt)| Block::Image { src, alt })
+        .map(|(src, alt)| Block::Image { src, alt, caption })
         .collect()
 }
 
