@@ -86,6 +86,22 @@ pub(super) fn owner_words(rpc: &EngineRpc, params: Value) -> Result<RpcReply, Rp
     RpcReply::value(&serde_json::json!({ "words": words }))
 }
 
+/// The level a chat's run is held to now (`PermissionLevel`): what the
+/// engine last gave its live process, else what its next run launches with.
+/// The run's permission extension asks before it takes a level above the
+/// one it runs at, so its level file alone can't raise it.
+pub(super) fn permission_level(rpc: &EngineRpc, params: Value) -> Result<RpcReply, RpcError> {
+    let p: OwnerWordsParams = parse_params(params)?;
+    if p.chat_id.chars().count() > 256 {
+        return Err(RpcError::BadParams("chatId too long".into()));
+    }
+    let level = rpc
+        .sessions
+        .live_level(&p.chat_id)
+        .map(|level| level.wire());
+    RpcReply::value(&serde_json::json!({ "level": level }))
+}
+
 pub(super) fn watch_agent_events(rpc: &EngineRpc, params: Value) -> Result<RpcReply, RpcError> {
     let p: WatchAgentEventsParams = parse_params(params)?;
     if p.chat_id.chars().count() > 256 {

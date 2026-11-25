@@ -129,7 +129,7 @@ pub const PERMISSION_LEVELS: [PermissionLevel; 3] = [
         level: SandboxLevel::DangerFullAccess,
         value: "full",
         label: "Full access",
-        description: "No checks and no sandbox",
+        description: "No sandbox or review; only the riskiest actions still ask",
     },
 ];
 

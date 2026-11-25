@@ -167,7 +167,10 @@ final class BotStoreTests: XCTestCase {
         XCTAssertEqual(op.kind, "botWork")
         XCTAssertEqual(op.id, "w1")
         XCTAssertEqual(op.op, .update)
-        XCTAssertEqual(Set(op.set?.keys ?? [:].keys), ["decision"])
+        // Approving confirms the level it runs at (bots.rs `ResolveBotPlan`):
+        // a row from before levels, Edit project.
+        XCTAssertEqual(Set(op.set?.keys ?? [:].keys), ["decision", "level"])
+        XCTAssertEqual(op.set?["level"], .string("workspace-write"))
         guard case .object(let decision) = op.set?["decision"] else { return XCTFail("no decision") }
         XCTAssertEqual(decision["approve"], .bool(true))
         XCTAssertNotNil(decision["at"]?.int64Value)

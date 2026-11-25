@@ -120,6 +120,12 @@ struct PermissionLevel: Equatable {
 
     static let fullAccess = "danger-full-access"
 
+    /// Whether it allows more than `other` (agent.rs `above`).
+    func isAbove(_ other: PermissionLevel) -> Bool {
+        let rank = { (level: PermissionLevel) in Self.all.firstIndex(of: level) ?? 1 }
+        return rank(self) > rank(other)
+    }
+
     /// The level a chat runs at; an unknown value reads as the default.
     static func of(sandbox: String?) -> PermissionLevel {
         all.first { $0.sandbox == sandbox } ?? all[1]

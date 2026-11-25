@@ -306,11 +306,74 @@ impl<'a> Launch<'a> {
 }
 
 fn permission_level(level: SandboxLevel) -> &'static str {
-    match level {
-        SandboxLevel::ReadOnly => "read-only",
-        SandboxLevel::WorkspaceWrite => "workspace-write",
-        SandboxLevel::DangerFullAccess => "danger-full-access",
-    }
+    level.wire()
+}
+
+/// Where a chat's live permission level is kept for its running Pi
+/// (`extensions/cypher-permissions/level.ts` `levelFile`): under the agent
+/// directory's `cypher-permissions/`, which is the permission system's own
+/// (config.ts `permissionSystemPatterns`): outside every sandbox's writable
+/// roots, and on the floor for a file tool or a command that would write
+/// it. The extension re-reads it before each decision, and takes a level
+/// above the one it runs at only once the engine confirms it
+/// (`PermissionLevel` on the agent socket), so a forged file can lower a
+/// run's level but never raise it.
+pub fn level_file(agent_dir: &std::path::Path, chat_id: &str) -> PathBuf {
+    let safe: String = chat_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    agent_dir
+        .join("cypher-permissions")
+        .join("levels")
+        .join(format!("{safe}.json"))
+}
+
+/// Whether the Runtime whose Pi package is `package_dir` (`<runtime>/pi`)
+/// ships a permission extension that follows [`level_file`]: its
+/// `extensions/cypher-permissions/level.ts`. An older Runtime's never reads
+/// the file.
+pub fn follows_live_levels(package_dir: &std::path::Path) -> bool {
+    package_dir.parent().is_some_and(|runtime| {
+        runtime
+            .join("extensions")
+            .join("cypher-permissions")
+            .join("level.ts")
+            .is_file()
+    })
+}
+
+/// Write `level` as `chat_id`'s live level ([`level_file`]), whole or not
+/// at all (a temporary file renamed over it).
+pub fn write_level_file(
+    agent_dir: &std::path::Path,
+    chat_id: &str,
+    level: SandboxLevel,
+) -> std::io::Result<()> {
+    let path = level_file(agent_dir, chat_id);
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("level file has no folder"))?;
+    std::fs::create_dir_all(dir)?;
+    let body = serde_json::json!({
+        "level": level.wire(),
+        "at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64),
+    });
+    let temporary = dir.join(format!(
+        ".{}.{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("level"),
+        std::process::id()
+    ));
+    std::fs::write(&temporary, format!("{body}\n"))?;
+    std::fs::rename(&temporary, &path)
 }
 
 /// Resolve the pi CLI: `PI_EXECUTABLE` override, then the shared CLI resolver
@@ -488,6 +551,16 @@ impl PiHarness {
         launch: Launch<'_>,
     ) -> Result<(Child, crate::process::StderrTail), HarnessError> {
         let mut cmd = self.spawn_command_with_config(cwd, host, append_prompt, launch)?;
+        // The live level starts as the one it launches with: a file a
+        // previous run of the chat left says nothing about this one.
+        if let (Some(agent_dir), Some(chat_id), Some(level)) = (
+            self.agent_dir.as_deref(),
+            host.chat_id.as_deref().filter(|id| !id.is_empty()),
+            launch.sandbox,
+        ) && let Err(err) = write_level_file(agent_dir, chat_id, level)
+        {
+            tracing::warn!(chat = %chat_id, error = %err, "could not write the live level file");
+        }
         let exe = cmd.as_std().get_program().to_string_lossy().into_owned();
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -512,5 +585,44 @@ impl PiHarness {
             });
         }
         Ok((child, stderr_tail))
+    }
+}
+
+#[cfg(test)]
+mod level_tests {
+    use super::*;
+
+    #[test]
+    fn a_live_level_is_written_where_the_extension_reads_it() {
+        let root = tempfile::tempdir().unwrap();
+        let agent = root.path().join("agent");
+        // The extension's `levelFile`: the same folder and the same name.
+        assert_eq!(
+            level_file(&agent, "chat/../x y"),
+            agent.join("cypher-permissions/levels/chat_.._x_y.json")
+        );
+        let runtime = root.path().join("runtime");
+        let harness = PiHarness::new(root.path().join("sessions"))
+            .with_runtime_environment(&agent, runtime.join("pi"));
+        // A Runtime whose extension doesn't follow the file: nothing to tell.
+        assert!(!harness.apply_level("c-1", SandboxLevel::DangerFullAccess));
+        assert!(!level_file(&agent, "c-1").exists());
+        std::fs::create_dir_all(runtime.join("extensions/cypher-permissions")).unwrap();
+        std::fs::write(runtime.join("extensions/cypher-permissions/level.ts"), "").unwrap();
+        assert!(harness.apply_level("c-1", SandboxLevel::DangerFullAccess));
+        let read = |chat: &str| -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(level_file(&agent, chat)).unwrap()).unwrap()
+        };
+        assert_eq!(read("c-1")["level"], "danger-full-access");
+        assert!(harness.apply_level("c-1", SandboxLevel::WorkspaceWrite));
+        assert_eq!(read("c-1")["level"], "workspace-write");
+        // Nothing but the file is left in its folder.
+        let names: Vec<_> = std::fs::read_dir(agent.join("cypher-permissions/levels"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["c-1.json"]);
+        // No agent directory of its own: no file it would read.
+        assert!(!PiHarness::new(root.path().join("s2")).apply_level("c-1", SandboxLevel::ReadOnly));
     }
 }

@@ -71,6 +71,51 @@ pub enum SandboxLevel {
     DangerFullAccess,
 }
 
+impl SandboxLevel {
+    /// Strictest first.
+    pub const ALL: [SandboxLevel; 3] = [
+        SandboxLevel::ReadOnly,
+        SandboxLevel::WorkspaceWrite,
+        SandboxLevel::DangerFullAccess,
+    ];
+
+    /// Its wire name (`read-only`, `workspace-write`, `danger-full-access`),
+    /// which is also what `CYPHER_PERMISSION_LEVEL` carries.
+    pub fn wire(self) -> &'static str {
+        match self {
+            SandboxLevel::ReadOnly => "read-only",
+            SandboxLevel::WorkspaceWrite => "workspace-write",
+            SandboxLevel::DangerFullAccess => "danger-full-access",
+        }
+    }
+
+    /// The name a person sees (docs/design/permission-control.md §4).
+    pub fn label(self) -> &'static str {
+        match self {
+            SandboxLevel::ReadOnly => "Ask before edits",
+            SandboxLevel::WorkspaceWrite => "Edit project",
+            SandboxLevel::DangerFullAccess => "Full access",
+        }
+    }
+
+    /// Whether it allows more than `other`.
+    pub fn above(self, other: SandboxLevel) -> bool {
+        let rank = |level: SandboxLevel| Self::ALL.iter().position(|l| *l == level);
+        rank(self) > rank(other)
+    }
+
+    /// A level from its wire name or the permission extension's own
+    /// (`read-only`, `standard`, `full-access`).
+    pub fn parse(text: &str) -> Option<SandboxLevel> {
+        match text.trim() {
+            "read-only" => Some(SandboxLevel::ReadOnly),
+            "workspace-write" | "standard" => Some(SandboxLevel::WorkspaceWrite),
+            "danger-full-access" | "full-access" => Some(SandboxLevel::DangerFullAccess),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SteeringMode {

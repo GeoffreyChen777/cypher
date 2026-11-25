@@ -7,7 +7,7 @@ pub mod edge;
 pub mod relay;
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -37,7 +37,12 @@ pub struct TestHarness {
     steering: bool,
     reasoning: &'static [ReasoningLevel],
     run: Box<RunFn>,
+    live_levels: Option<LiveLevels>,
 }
+
+/// The levels a harness was told to apply to live runs, in order:
+/// (chat id, level).
+pub type LiveLevels = Arc<Mutex<Vec<(String, SandboxLevel)>>>;
 
 impl TestHarness {
     pub fn new(
@@ -54,7 +59,14 @@ impl TestHarness {
             steering: false,
             reasoning: &[ReasoningLevel::Medium],
             run: Box::new(run),
+            live_levels: None,
         }
+    }
+
+    /// Apply levels to live runs (as Pi does), recording each into `log`.
+    pub fn live_levels(mut self, log: LiveLevels) -> Self {
+        self.live_levels = Some(log);
+        self
     }
 
     /// Replays `events` on every run.
@@ -97,6 +109,13 @@ impl Harness for TestHarness {
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
+    }
+    fn apply_level(&self, chat_id: &str, level: SandboxLevel) -> bool {
+        let Some(log) = &self.live_levels else {
+            return false;
+        };
+        log.lock().unwrap().push((chat_id.to_string(), level));
+        true
     }
     async fn run(
         &self,
@@ -151,7 +170,7 @@ pub fn feed_harness(
     confirm_steers: bool,
 ) -> (TestHarness, mpsc::UnboundedSender<AgentEvent>) {
     let (feed_tx, feed_rx) = mpsc::unbounded_channel();
-    let feed = std::sync::Mutex::new(Some(feed_rx));
+    let feed = Mutex::new(Some(feed_rx));
     let main_prompt = main_prompt.to_string();
     let harness = TestHarness::new(HarnessId::Mock, "Feed", move |request, mut controls| {
         if request.prompt != main_prompt {

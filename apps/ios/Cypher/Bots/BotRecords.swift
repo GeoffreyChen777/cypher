@@ -138,6 +138,18 @@ struct BotWork: Codable, Hashable, Identifiable, Sendable {
     var bodyRev: String?
     /// The same for `result` (`planBodies[id].result`).
     var resultRev: String?
+    /// Owner-written: the permission level the owner chose (`sandbox`
+    /// values, PermissionLevel), on the card or while it runs. nil: the
+    /// proposal's stands.
+    var level: String?
+    /// The level the card offers: the workspace's default unless the
+    /// owner's own words asked for another (`levelQuote`).
+    var proposedLevel: String?
+    /// The owner's words, verbatim, a proposal cited for a level above the
+    /// workspace's default.
+    var levelQuote: String?
+    /// The level the host last gave the plan's sessions.
+    var appliedLevel: String?
 
     var isLive: Bool { state == .proposed || state == .running }
 
@@ -159,6 +171,18 @@ struct BotWork: Codable, Hashable, Identifiable, Sendable {
             $0 == workspace ? nil : $0
         }
     }
+
+    /// The level it runs at (bot_records.rs `effective_level`): the
+    /// owner's choice, else the proposal's, else (rows from before levels)
+    /// Edit project.
+    var effectiveLevel: PermissionLevel { PermissionLevel.of(sandbox: level ?? proposedLevel) }
+
+    /// The level its sessions were last given (`level_in_effect`).
+    var levelInEffect: PermissionLevel { PermissionLevel.of(sandbox: appliedLevel) }
+
+    /// The owner's choice is still on its way to the running sessions (its
+    /// host is offline, or hasn't acted yet).
+    var levelPending: Bool { state == .running && effectiveLevel != levelInEffect }
 
     /// Awaiting the owner's approval: proposed, and nobody decided yet.
     var awaitingApproval: Bool { state == .proposed && decision == nil }
@@ -216,6 +240,7 @@ extension BotWork {
         case id, botId, title, instruction, summary, steps, state, chatId, toolCallId, threadChatId
         case createdAt, startedAt, endedAt, result, decision, stopRequestedAt
         case timeLimitMinutes, timeAddedMinutes, coordinatorChoice, bodyRev, resultRev
+        case level, proposedLevel, levelQuote, appliedLevel
     }
 
     init(from decoder: Decoder) throws {
@@ -242,6 +267,12 @@ extension BotWork {
             ((try? c.decodeIfPresent(SessionChoice.self, forKey: .coordinatorChoice)) ?? nil) ?? SessionChoice()
         bodyRev = try c.decodeIfPresent(String.self, forKey: .bodyRev)
         resultRev = try c.decodeIfPresent(String.self, forKey: .resultRev)
+        // Absent on rows from before levels; a value this app can't read
+        // stays as it is (and reads as Edit project).
+        level = (try? c.decodeIfPresent(String.self, forKey: .level)) ?? nil
+        proposedLevel = (try? c.decodeIfPresent(String.self, forKey: .proposedLevel)) ?? nil
+        levelQuote = (try? c.decodeIfPresent(String.self, forKey: .levelQuote)) ?? nil
+        appliedLevel = (try? c.decodeIfPresent(String.self, forKey: .appliedLevel)) ?? nil
         closeSteps()
     }
 }
@@ -747,13 +778,15 @@ enum ActivityKind: String, Hashable, Sendable {
     case sessionStarted, sessionSteered, sessionAnswered, sessionStopped, worktreeCreated
     case noteWritten, routineRan, taskRan, approvalAsked
     case peerAsked, peerAnswered, connectionAdded, connectionRevoked
+    /// The owner changed a plan's permission level.
+    case planLevelChanged
     /// A kind from a newer engine.
     case other
 
     var group: ActivityGroup {
         switch self {
         case .planProposed, .planApproved, .planCancelled, .workFinished, .workFailed, .workStopped,
-            .approvalAsked, .other:
+            .approvalAsked, .planLevelChanged, .other:
             return .plans
         case .sessionStarted, .sessionSteered, .sessionAnswered, .sessionStopped, .worktreeCreated:
             return .sessions

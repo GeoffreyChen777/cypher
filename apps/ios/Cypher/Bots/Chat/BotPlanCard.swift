@@ -74,6 +74,23 @@ struct BotPlanCard: View {
                         .padding(.horizontal, 14)
                         .padding(.bottom, 10)
                 }
+                // The level it will run at, picked before approving; a
+                // level the plan asked for cites the owner's own words.
+                VStack(alignment: .leading, spacing: 6) {
+                    PlanLevelPicker(level: work.effectiveLevel) { level in
+                        act { try await $0.setWorkLevel(workId: work.id, level: level.sandbox) }
+                    }
+                    .disabled(busy)
+                    if let quote = work.levelQuote?.trimmingCharacters(in: .whitespacesAndNewlines), !quote.isEmpty {
+                        Text("“\(quote)”")
+                            .font(Theme.sans(12.5, relativeTo: .footnote))
+                            .foregroundStyle(Theme.textMuted)
+                            .lineLimit(2)
+                            .accessibilityIdentifier("plan-level-quote")
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
                 BotCardRule()
                 VStack(alignment: .leading, spacing: 8) {
                     if let error {

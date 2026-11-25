@@ -301,6 +301,10 @@ pub struct AppState {
     /// Every bot record: plans, notes, routines, tasks, activity, approvals
     /// and the network (the Botboard's cards).
     pub bot_records: cypher_proto::BotRecords,
+    /// Permission levels picked on plans still to approve, by work id,
+    /// until Approve confirms one ([`crate::plan_level`]); the card and
+    /// the plan's page share them.
+    pub plan_level_picks: HashMap<String, cypher_proto::SandboxLevel>,
     /// The project the new-session canvas mints into. Healed by
     /// [`Self::apply_spaces`] when the row vanishes; selecting a chat implies
     /// its project.
@@ -556,6 +560,7 @@ impl AppState {
             sessions: Vec::new(),
             bots: Vec::new(),
             bot_records: Default::default(),
+            plan_level_picks: HashMap::new(),
             selected_space: None,
             no_project: false,
             scratch_pending: false,

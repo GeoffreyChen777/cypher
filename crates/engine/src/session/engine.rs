@@ -47,6 +47,7 @@ use crate::util::{new_id, now_ms};
 
 use crate::util::lock;
 
+mod live_level;
 mod recovery;
 mod run_task;
 mod steer;
@@ -814,19 +815,9 @@ impl SessionsEngine {
         // The chat's permission level is its launch config's (the row's, or
         // under "Only paired devices" its signed record's), whatever request
         // this turn was rebuilt from (a remembered one predates a change).
-        if let Some(config) = self
-            .inner
-            .workspace()
-            .and_then(|ws| ws.launch_config(chat_id))
-        {
-            request.sandbox = config.sandbox;
-        }
         // A bot thread's level is the engine's, never the row's: any owner
         // device may write the row (docs/design/agent-bots.md §4.4).
-        if let Some(ws) = self.inner.workspace()
-            && let Ok(Some(chat)) = ws.chat(chat_id)
-            && let Some(level) = crate::bots::profile::run_sandbox(&ws, &chat)
-        {
+        if let Some(level) = self.run_level(chat_id) {
             request.sandbox = level;
         }
         // A parked process launched with other model settings or another

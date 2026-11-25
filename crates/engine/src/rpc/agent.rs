@@ -3,8 +3,8 @@
 //! Agents are spawned with the engine's keyless `agent.sock` (see
 //! `cypher_rpc`'s `local` module) rather than the keyed `engine.sock`. Here
 //! they reach only the calls the bundled extensions make — subagents,
-//! language detection, a workspace run's bot tools, memory and the owner's
-//! own words for the permission check — and only on this
+//! language detection, a workspace run's bot tools, memory, and the owner's
+//! own words and the run's level for the permission check — and only on this
 //! device: an agent that follows
 //! injected instructions cannot open terminals, change settings, or queue
 //! work in chats that run elsewhere.
@@ -96,7 +96,9 @@ impl RpcService for AgentRpc {
                 self.require_local_child(&params)?
             }
             methods::BOT_TOOL => self.require_local_bot_chat(&params)?,
-            methods::MEMORY_TOOL | methods::OWNER_WORDS => self.require_local_chat(&params)?,
+            methods::MEMORY_TOOL | methods::OWNER_WORDS | methods::PERMISSION_LEVEL => {
+                self.require_local_chat(&params)?
+            }
             other => return Err(RpcError::UnknownMethod(other.to_string())),
         }
         self.inner.handle(method, params).await

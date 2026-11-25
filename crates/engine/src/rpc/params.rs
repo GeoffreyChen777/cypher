@@ -442,8 +442,24 @@ pub(super) enum MutateParams {
     #[serde(rename_all = "camelCase")]
     SetBotPaused { bot_id: String, paused: bool },
     /// Approve or cancel a proposed plan (its host starts the work).
+    /// `level`: the permission level picked on the card as it is approved
+    /// (absent: the one it was proposed at).
     #[serde(rename_all = "camelCase")]
-    ResolveBotPlan { work_id: String, approve: bool },
+    ResolveBotPlan {
+        work_id: String,
+        approve: bool,
+        #[serde(default)]
+        level: Option<cypher_proto::SandboxLevel>,
+    },
+    /// The owner's choice of a live plan's permission level: before it is
+    /// approved, or while it runs (its host gives it to every session it
+    /// started, its coordinating session and the ones it starts next).
+    /// Owner-only: a Mutate, never a bot tool, refused on the agent socket.
+    #[serde(rename_all = "camelCase")]
+    SetBotWorkLevel {
+        work_id: String,
+        level: cypher_proto::SandboxLevel,
+    },
     /// Stop running work and every session it started.
     #[serde(rename_all = "camelCase")]
     StopBotWork { work_id: String },
