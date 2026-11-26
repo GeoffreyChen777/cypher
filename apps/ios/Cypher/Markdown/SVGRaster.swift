@@ -229,12 +229,7 @@ struct SVGPreview<Fallback: View>: View {
                             FileReferenceChip.wash.swiftUI
                         }
                     }
-                    .clipShape(RoundedRectangle(cornerRadius: InlineImageBlock.radius))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: InlineImageBlock.radius)
-                            .strokeBorder(FileReferenceChip.hairline.swiftUI, lineWidth: 1)
-                    )
-                    .contentShape(RoundedRectangle(cornerRadius: InlineImageBlock.radius))
+                    .previewPicture()
             }
             .buttonStyle(.plain)
             .onGeometryChange(for: CGFloat.self) {

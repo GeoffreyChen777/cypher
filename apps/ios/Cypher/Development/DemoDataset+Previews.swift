@@ -1,7 +1,8 @@
 // Demo chat for previews in a reply (`-demo -route chat:chat-previews`): a
 // pull request, an issue and a commit ref with their cards, and one ref the
 // host doesn't know; file previews of a CSV, a TSV, a PDF, a video, an HTML
-// page and an SVG in the demo checkout (WorkspaceBrowserSession's demo
+// page and an SVG in the demo checkout (the PDFs: five pages as a row of
+// two and "+3", one page shown like an image) (WorkspaceBrowserSession's demo
 // files), one missing file, and an image captioned once.
 
 import UIKit
@@ -57,6 +58,10 @@ extension DemoDataset {
             `notes/report.pdf`
 
             <notes/demo.mp4>
+
+            The one-page summary:
+
+            `notes/summary.pdf`
 
             The status page prototype and the topology diagram:
 
@@ -129,9 +134,10 @@ extension DemoDataset {
 
         """
 
-    /// `notes/report.pdf`: five Letter pages drawn here (the preview shows
-    /// three, then "2 more pages").
-    static func reportPDF() -> Data {
+    /// `notes/report.pdf`: five Letter pages drawn here (on a phone the
+    /// preview shows two side by side and "+3"); `notes/summary.pdf` is its
+    /// first page alone (shown like an image, cropped to 4:5).
+    static func reportPDF(pages: Int = 5) -> Data {
         let page = CGRect(x: 0, y: 0, width: 612, height: 792)
         let title: [NSAttributedString.Key: Any] = [
             .font: UIFont.systemFont(ofSize: 26, weight: .bold), .foregroundColor: UIColor.black,
@@ -162,7 +168,7 @@ extension DemoDataset {
                 UIColor(white: 0.88, alpha: 1).setFill()
                 UIRectFill(CGRect(x: 56, y: 500 + CGFloat(line) * 22, width: line % 3 == 2 ? 320 : 500, height: 9))
             }
-            for heading in ["Method", "Appendix A: runs", "Appendix B: regions", "Appendix C: logs"] {
+            for heading in ["Method", "Appendix A: runs", "Appendix B: regions", "Appendix C: logs"].prefix(pages - 1) {
                 context.beginPage()
                 (heading as NSString).draw(at: CGPoint(x: 56, y: 64), withAttributes: title)
                 for line in 0..<20 {

@@ -209,10 +209,17 @@ final class FilePreviewTests: XCTestCase {
         let file = try XCTUnwrap(loaded.file)
         XCTAssertEqual(file.lastPathComponent, "paper.pdf")
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
-        // Drawn for a column: each page that many pixels wide at its aspect.
-        let result = await PDFPageImages().draw(file, count: 2, pixelWidth: 768)
+        // Drawn for a row: each page its own width in pixels, at its aspect.
+        let images = PDFPageImages()
+        let result = await images.draw(file, pixelWidths: [768, 400])
         let drawn = try XCTUnwrap(result)
-        XCTAssertEqual(drawn.images.map(\.size), [CGSize(width: 768, height: 384), CGSize(width: 768, height: 384)])
+        XCTAssertEqual(drawn.images.map(\.size), [CGSize(width: 768, height: 384), CGSize(width: 400, height: 200)])
+        XCTAssertTrue(drawn.covers([700, 400]))
+        XCTAssertFalse(drawn.covers([768, 401]))
+        XCTAssertFalse(drawn.covers([768, 400, 100]))
+        // A narrower drawing doesn't replace the kept one.
+        _ = await images.draw(file, pixelWidths: [300, 300])
+        XCTAssertEqual(images.cached(file)?.pixelWidths, [768, 400])
         host.files["broken.pdf"] = Data("not a pdf".utf8)
         let broken = await FilePreviewLoader().load("broken.pdf", kind: .pdf, files: host.images())
         XCTAssertEqual(broken.failure, .unreadable)
@@ -254,9 +261,12 @@ final class FilePreviewTests: XCTestCase {
         ).get()
         XCTAssertEqual(report.pages, 5)
         guard case .pages(let sizes) = report.body else { return XCTFail("\(report.body)") }
-        // Three of five shown, the rest counted.
-        XCTAssertEqual(sizes.count, 3)
-        XCTAssertEqual(PreviewSize.morePagesLabel(PreviewSize.pdfPages(5).more), "2 more pages")
+        // The first four pages' sizes, for the row: a phone column fits two
+        // Letter pages side by side, the other three counted on the badge.
+        XCTAssertEqual(sizes.count, PreviewSize.pdfRowMax)
+        let row = PreviewSize.pdfRow(column: 343, aspects: sizes.map { $0.width / $0.height }, pages: 5)
+        XCTAssertEqual(row.shown, 2)
+        XCTAssertEqual(row.badge, "+3")
         for path in ["notes/screenshot.png", "notes/banner.png"] {
             let data = try XCTUnwrap(WorkspaceBrowserSession.demoBytes(path), path)
             XCTAssertNotNil(UIImage(data: data), path)

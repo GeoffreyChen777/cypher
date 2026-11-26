@@ -32,7 +32,10 @@ final class PreviewSizeTests: XCTestCase {
             let crop = try XCTUnwrap(caps["crop"] as? [String: Any], file)
             XCTAssertEqual(try number(crop["width"], file), PreviewSize.crop.width, file)
             XCTAssertEqual(try number(crop["height"], file), PreviewSize.crop.height, file)
-            XCTAssertEqual((caps["pdfPages"] as? NSNumber)?.intValue, PreviewSize.pdfPages, file)
+            let row = try XCTUnwrap(caps["pdfRow"] as? [String: Any], file)
+            XCTAssertEqual((row["maxPages"] as? NSNumber)?.intValue, PreviewSize.pdfRowMax, file)
+            XCTAssertEqual(try number(row["minPageWidth"], file), PreviewSize.pdfPageMin, file)
+            XCTAssertEqual(try number(row["gap"], file), PreviewSize.pdfGap, file)
         }
     }
 
@@ -56,21 +59,63 @@ final class PreviewSizeTests: XCTestCase {
         }
     }
 
-    func testSharedPDFPages() throws {
+    func testSharedPDFRows() throws {
         for file in Self.files {
-            let cases = try XCTUnwrap(try sizing(file)["pdf"] as? [[String: Any]], file)
-            XCTAssertGreaterThanOrEqual(cases.count, 5, file)
+            let cases = try XCTUnwrap(try sizing(file)["pdfRow"] as? [[String: Any]], file)
+            XCTAssertGreaterThanOrEqual(cases.count, 8, file)
             for v in cases {
                 let name = "\(file): \(try XCTUnwrap(v["name"] as? String))"
                 let pages = try XCTUnwrap((v["pages"] as? NSNumber)?.intValue, name)
+                let aspects = try XCTUnwrap(v["aspects"] as? [NSNumber], name).map { CGFloat($0.doubleValue) }
                 let expect = try XCTUnwrap(v["expect"] as? [String: Any], name)
-                let (shown, more) = PreviewSize.pdfPages(pages)
-                XCTAssertEqual(shown, (expect["shown"] as? NSNumber)?.intValue, name)
-                XCTAssertEqual(more, (expect["more"] as? NSNumber)?.intValue, name)
-                XCTAssertEqual(PreviewSize.morePagesLabel(more), expect["label"] as? String, name)
-                if !(expect["label"] is String) { XCTAssertTrue(expect["label"] is NSNull, name) }
+                let row = PreviewSize.pdfRow(column: try number(v["column"], name), aspects: aspects, pages: pages)
+                XCTAssertEqual(row.shown, (expect["shown"] as? NSNumber)?.intValue, name)
+                XCTAssertEqual(row.height, try number(expect["height"], name), accuracy: 0.01, name)
+                let widths = try XCTUnwrap(expect["widths"] as? [NSNumber], name)
+                XCTAssertEqual(widths.count, row.shown, name)
+                for (page, width) in zip(row.pages, widths) {
+                    XCTAssertEqual(page.width, CGFloat(width.doubleValue), accuracy: 0.01, name)
+                    XCTAssertEqual(page.height, try number(expect["height"], name), accuracy: 0.01, name)
+                }
+                XCTAssertEqual(row.pages.first?.cropped ?? false, try XCTUnwrap(expect["cropped"] as? Bool, name), name)
+                XCTAssertEqual(
+                    row.pages.first?.contentHeight ?? 0, try number(expect["contentHeight"], name), accuracy: 0.01,
+                    name)
+                XCTAssertEqual(row.hidden, (expect["hidden"] as? NSNumber)?.intValue, name)
+                XCTAssertEqual(row.badge, expect["badge"] as? String, name)
+                if !(expect["badge"] is String) { XCTAssertTrue(expect["badge"] is NSNull, name) }
             }
         }
+    }
+
+    func testARowFillsTheColumnExactly() {
+        let letter: CGFloat = 612 / 792
+        for column: CGFloat in [300, 343, 402, 480, 600, 640, 900] {
+            let row = PreviewSize.pdfRow(column: column, aspects: [letter, 1 / letter, letter, 2], pages: 9)
+            guard row.shown >= 2 else { continue }
+            let total = row.pages.reduce(0) { $0 + $1.width } + CGFloat(row.shown - 1) * PreviewSize.pdfGap
+            XCTAssertEqual(total, column, accuracy: 0.01, "\(column)")
+            XCTAssertTrue(row.pages.allSatisfy { $0.width >= PreviewSize.pdfPageMin - 0.01 }, "\(column)")
+        }
+    }
+
+    /// Pages drawn for a column stay sharp in any narrower one, where fewer,
+    /// wider pages may show.
+    func testDrawnPagesStaySharpInAnyNarrowerColumn() {
+        let aspects: [CGFloat] = [612 / 792, 792 / 612, 612 / 792, 1]
+        let drawn = PreviewSize.pdfDrawWidths(column: 768, aspects: aspects, pages: 7)
+        XCTAssertEqual(drawn.count, 4)
+        XCTAssertEqual(drawn[0], 768)
+        for column in stride(from: CGFloat(100), through: 768, by: 7) {
+            let row = PreviewSize.pdfRow(column: column, aspects: aspects, pages: 7)
+            for (page, width) in zip(row.pages, drawn) {
+                XCTAssertLessThanOrEqual(page.width, width + 0.01, "\(column)")
+            }
+        }
+        XCTAssertEqual(PreviewSize.pdfDrawWidths(column: 600, aspects: aspects, pages: 1), [600])
+        XCTAssertTrue(PreviewSize.pdfDrawWidths(column: 600, aspects: [], pages: 3).isEmpty)
+        // A non-positive aspect ends the known ones.
+        XCTAssertEqual(PreviewSize.pdfRow(column: 640, aspects: [0.77, 0, 0.77], pages: 3).shown, 1)
     }
 
     /// An SVG draws column wide at the screen's scale, and a tall one only
@@ -120,9 +165,23 @@ final class PreviewSizeTests: XCTestCase {
         let fitted = host.sizeThatFits(in: CGSize(width: 343, height: 10_000))
         XCTAssertEqual(fitted.width, 343, accuracy: 0.5)
         XCTAssertEqual(fitted.height, expected.height, accuracy: 0.5)
-        let page = UIHostingController(
-            rootView: PreviewFrame(natural: natural, crops: false) { Color.red }.frame(width: 343))
-        XCTAssertEqual(
-            page.sizeThatFits(in: CGSize(width: 343, height: 10_000)).height, expected.contentHeight, accuracy: 0.5)
+    }
+
+    /// A PDF's row is the column wide and the row's height; each page gets
+    /// its frame side by side, and a page past the shown ones no room.
+    @MainActor
+    func testPDFRowLaysOutByTheRule() throws {
+        let letter: CGFloat = 612 / 792
+        let aspects = [letter, letter, letter, letter]
+        let expected = PreviewSize.pdfRow(column: 343, aspects: aspects, pages: 5)
+        XCTAssertEqual(expected.shown, 2)
+        let host = UIHostingController(
+            rootView: PDFRowLayout(aspects: aspects, pages: 5) {
+                ForEach(0..<4, id: \.self) { _ in Color.red }
+            }
+            .frame(width: 343))
+        let fitted = host.sizeThatFits(in: CGSize(width: 343, height: 10_000))
+        XCTAssertEqual(fitted.width, 343, accuracy: 0.5)
+        XCTAssertEqual(fitted.height, expected.height, accuracy: 0.5)
     }
 }

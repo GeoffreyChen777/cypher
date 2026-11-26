@@ -359,7 +359,7 @@ final class WorkspaceBrowserSession {
             .init(name: "latency.csv", isDir: false), .init(name: "regions.tsv", isDir: false),
             .init(name: "report.pdf", isDir: false), .init(name: "demo.mp4", isDir: false),
             .init(name: "prototype.html", isDir: false), .init(name: "screenshot.png", isDir: false),
-            .init(name: "banner.png", isDir: false),
+            .init(name: "banner.png", isDir: false), .init(name: "summary.pdf", isDir: false),
         ],
     ]
 
@@ -409,11 +409,13 @@ final class WorkspaceBrowserSession {
     }
 
     /// The demo checkout's binary files: small generated PNGs (an icon, a
-    /// phone screenshot, a wide banner), a five-page PDF drawn here and the
+    /// phone screenshot, a wide banner), a five-page and a one-page PDF drawn
+    /// here and the
     /// bundled three-second clip.
     static func demoBytes(_ path: String) -> Data? {
         switch path {
         case "notes/report.pdf": return DemoDataset.reportPDF()
+        case "notes/summary.pdf": return DemoDataset.reportPDF(pages: 1)
         case "notes/screenshot.png": return demoScreenshot()
         case "notes/banner.png": return demoBanner()
         case "notes/demo.mp4":

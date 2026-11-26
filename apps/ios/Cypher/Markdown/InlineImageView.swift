@@ -10,7 +10,8 @@ import SwiftUI
 import UIKit
 
 /// The block preview: the column's width, at most 4:5 tall (cropped from the
-/// top), with rounded corners and its alt text as a small caption under it.
+/// top), clipped to its rounded frame under a hairline edge
+/// (`previewPicture`), and its alt text as a small caption under it.
 struct InlineImageBlock: View {
     let src: String
     let alt: String
@@ -18,7 +19,7 @@ struct InlineImageBlock: View {
     /// in already says it (MDBlock.image).
     var caption = true
 
-    static let radius: CGFloat = 8
+    static let radius = PreviewSize.radius
 
     @Environment(\.transcriptImageFiles) private var files
     @State private var outcome: Result<LoadedImage, ImageLoadError>?
@@ -89,12 +90,7 @@ struct InlineImageBlock: View {
                 PreviewFrame(natural: Self.natural(image.pixelSize, bitmap)) {
                     ImageBitmapView(image: bitmap)
                 }
-                .clipShape(RoundedRectangle(cornerRadius: Self.radius))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Self.radius)
-                        .strokeBorder(FileReferenceChip.hairline.swiftUI, lineWidth: 1)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: Self.radius))
+                .previewPicture()
             }
             .buttonStyle(.plain)
             .accessibilityLabel(alt.isEmpty ? "Image" : alt)
@@ -118,10 +114,10 @@ struct InlineImageBlock: View {
     }
 
     private var placeholder: some View {
-        RoundedRectangle(cornerRadius: Self.radius)
+        RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
             .fill(FileReferenceChip.wash.swiftUI)
             .overlay(
-                RoundedRectangle(cornerRadius: Self.radius)
+                RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
                     .strokeBorder(FileReferenceChip.hairline.swiftUI, lineWidth: 1)
             )
             .overlay { ProgressView().controlSize(.small) }

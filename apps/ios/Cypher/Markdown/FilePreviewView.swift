@@ -1,15 +1,18 @@
 // A file preview in a reply (MDBlock.filePreview, desktop file_card.rs): a
 // paragraph that is only a path to a csv/tsv, pdf, video or html file. A
-// table shows its first rows, a PDF its first pages stacked and a video a
-// frame with a play mark, both the card's full width (PreviewSize.swift:
-// a frame taller than 4:5 is cropped, keeping its top; pages never are),
-// an html page a full-width card naming it. Tapping opens the file where
-// it shows best: the table in Files, the PDF in a PDF viewer, the video in
-// the player, the page in the artifact viewer. Anything that can't show
-// reads as the same card saying why.
+// table shows its first rows in a card; a PDF its first pages side by side
+// in one row and a video a frame with a play mark, each exactly the
+// column's width like an image (PreviewSize.swift: a frame taller than 4:5
+// is cropped, keeping its top; pages in a row never are), its name and
+// detail under it; an html page a full-width card naming it. Tapping opens
+// the file where it shows best: the table in Files, the PDF in a PDF
+// viewer, the video in the player, the page in the artifact viewer.
+// Anything that can't show reads as the same card saying why.
 //
-// The look is the system's: a grouped-background card with no outline, the
-// preview inset on it with the concentric inner radius, neutral ink.
+// The look is the system's: a grouped-background card with no outline, a
+// table inset on it with the concentric inner radius, neutral ink. A
+// visual preview isn't inset on a card (that made it narrower than an
+// image): it is a picture rounded under a hairline edge (`previewPicture`).
 
 import AVKit
 import PDFKit
@@ -26,8 +29,6 @@ enum FileCardMetrics {
     static let maxWidth: CGFloat = 420
     /// The icon well in the footer row, inset by `padding` too.
     static let well: CGFloat = 34
-    /// Space between a PDF's stacked pages.
-    static let pageGap: CGFloat = 8
 }
 
 extension FilePreview.Kind {
@@ -117,7 +118,7 @@ struct FilePreviewBlock: View {
             .accessibilityHint(openWorkspace != nil ? "Opens the file" : "")
         case .frame(let image):
             button(open: { open(loaded) }) {
-                FileCard(fills: true) {
+                VisualPreview {
                     VideoFrame(image: image)
                     FileCardRow(
                         symbol: kind.symbol, title: loaded.name, detail: loaded.detail,
@@ -128,11 +129,9 @@ struct FilePreviewBlock: View {
             .accessibilityHint("Plays the video")
         case .pages(let sizes):
             button(open: { open(loaded) }) {
-                FileCard(fills: true) {
+                VisualPreview {
                     if let file = loaded.file {
-                        PDFPageStack(
-                            file: file, pages: sizes,
-                            more: PreviewSize.morePagesLabel(PreviewSize.pdfPages(loaded.pages ?? sizes.count).more))
+                        PDFPageRow(file: file, sizes: sizes, pages: loaded.pages ?? sizes.count)
                     }
                     FileCardRow(symbol: kind.symbol, title: loaded.name, detail: loaded.detail)
                 }
@@ -219,7 +218,7 @@ extension LoadedFilePreview: Identifiable {
 // MARK: - Card
 
 /// The grouped card: its content inset by `FileCardMetrics.padding`, the
-/// rows stacked without gaps beyond that. A visual preview's card `fills`
+/// rows stacked without gaps beyond that. An html page's card `fills`
 /// the column; the rest stop at `FileCardMetrics.maxWidth`.
 struct FileCard<Content: View>: View {
     var fills = false
@@ -236,6 +235,21 @@ struct FileCard<Content: View>: View {
             in: RoundedRectangle(cornerRadius: FileCardMetrics.radius, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: FileCardMetrics.radius, style: .continuous))
+    }
+}
+
+/// A visual preview (a video's frame, a PDF's pages) and the row naming it
+/// under it, not on a card: the picture is exactly the column's width, as
+/// an image is.
+struct VisualPreview<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: FileCardMetrics.padding) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 }
 
@@ -392,51 +406,47 @@ struct FileTableView: View {
 
 // MARK: - Thumbnails
 
-/// A PDF's first pages stacked, each the card's width at its own aspect
-/// (never cropped), drawn for that width at the screen's scale; then, when
-/// it has more, a row counting them (the card opens the file).
-struct PDFPageStack: View {
+/// A PDF's first pages side by side in one row filling the column
+/// (`PreviewSize.pdfRow`): one height, never cropped, each rounded on white
+/// under a hairline edge; a single page shows like an image (cropped to 4:5,
+/// its top kept). Pages left over are a neutral "+N" badge on the last
+/// shown one. Each page is drawn at the widest it gets in any column up to
+/// this one (`PreviewSize.pdfDrawWidths`) at the screen's scale, so it stays
+/// sharp. A tap on any page opens the file (the enclosing button).
+struct PDFPageRow: View {
     let file: URL
-    /// The shown pages' sizes in points.
-    let pages: [CGSize]
-    let more: String?
+    /// The first pages' sizes in points (`PreviewSize.pdfRowMax` at most).
+    let sizes: [CGSize]
+    /// The document's page count.
+    let pages: Int
 
-    /// Drawings are made for the width rounded up to this, so a small change
-    /// in the column doesn't draw them again.
+    /// Drawings are made for the column rounded up to this, so a small change
+    /// in it doesn't draw them again.
     static let widthStep: CGFloat = 128
 
     @Environment(\.displayScale) private var displayScale
     @State private var width: CGFloat = 0
     @State private var drawn: PDFPageImages.Drawn?
 
-    private var pixelWidth: CGFloat {
-        guard width > 0 else { return 0 }
-        return (width / Self.widthStep).rounded(.up) * Self.widthStep * displayScale
+    private var aspects: [CGFloat] { sizes.map { $0.width / $0.height } }
+
+    /// Each page's drawing width in pixels.
+    private var pixelWidths: [CGFloat] {
+        guard width > 0 else { return [] }
+        let column = (width / Self.widthStep).rounded(.up) * Self.widthStep
+        return PreviewSize.pdfDrawWidths(column: column, aspects: aspects, pages: pages)
+            .map { ($0 * displayScale).rounded(.up) }
     }
 
     var body: some View {
         let shown = drawn ?? PDFPageImages.shared.cached(file)
-        VStack(spacing: FileCardMetrics.pageGap) {
-            ForEach(Array(pages.enumerated()), id: \.offset) { index, size in
-                PreviewFrame(natural: size, crops: false) {
-                    if let images = shown?.images, index < images.count {
-                        Image(uiImage: images[index])
-                            .resizable()
-                            .interpolation(.high)
-                    } else {
-                        Color.white
-                    }
-                }
-                .background(Color.white)
-                .clipShape(RoundedRectangle(cornerRadius: FileCardMetrics.innerRadius, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: FileCardMetrics.innerRadius, style: .continuous)
-                        .strokeBorder(FileReferenceChip.hairline.swiftUI, lineWidth: 1)
-                )
-                .accessibilityHidden(true)
-            }
-            if let more {
-                MorePagesRow(label: more)
+        let row = PreviewSize.pdfRow(column: width, aspects: aspects, pages: pages)
+        PDFRowLayout(aspects: aspects, pages: pages) {
+            ForEach(Array(sizes.enumerated()), id: \.offset) { index, size in
+                PDFPageTile(
+                    image: shown.flatMap { index < $0.images.count ? $0.images[index] : nil },
+                    aspect: size.width / size.height,
+                    badge: index == row.shown - 1 ? row.badge : nil)
             }
         }
         .onGeometryChange(for: CGFloat.self) {
@@ -444,11 +454,10 @@ struct PDFPageStack: View {
         } action: {
             width = $0
         }
-        .task(id: pixelWidth) {
-            let target = pixelWidth
-            guard target > 0, (shown?.pixelWidth ?? 0) < target || (shown?.images.count ?? 0) < pages.count
-            else { return }
-            let result = await PDFPageImages.shared.draw(file, count: pages.count, pixelWidth: target)
+        .task(id: pixelWidths) {
+            let targets = pixelWidths
+            guard !targets.isEmpty, !(shown?.covers(targets) ?? false) else { return }
+            let result = await PDFPageImages.shared.draw(file, pixelWidths: targets)
             guard !Task.isCancelled, let result else { return }
             drawn = result
         }
@@ -456,30 +465,53 @@ struct PDFPageStack: View {
     }
 }
 
-/// "2 more pages" under a PDF's shown pages.
-struct MorePagesRow: View {
-    let label: String
+/// One page of a PDF's row: white, the page drawn its frame's width from
+/// the top (a single tall page is cut off below), rounded under a hairline
+/// edge, with the row's "+N" badge when it is the last shown page.
+struct PDFPageTile: View {
+    let image: UIImage?
+    /// The page's width / height.
+    let aspect: CGFloat
+    let badge: String?
 
     var body: some View {
-        // The symbol takes the text's font, so it grows with Dynamic Type.
-        HStack(spacing: 6) {
-            Image(systemName: "doc.on.doc")
-            Text(label)
-        }
-        .font(Theme.sans(12.5, relativeTo: .caption))
-        .foregroundStyle(.secondary)
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 9)
-        .background(
-            Color(uiColor: .tertiarySystemFill),
-            in: RoundedRectangle(cornerRadius: FileCardMetrics.innerRadius, style: .continuous)
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("pdf-more-pages")
+        Color.white
+            .overlay(alignment: .top) {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                        .aspectRatio(aspect, contentMode: .fill)
+                }
+            }
+            .previewPicture()
+            .overlay(alignment: .bottomTrailing) {
+                if let badge {
+                    PDFMorePagesBadge(label: badge)
+                        .padding(8)
+                }
+            }
     }
 }
 
-/// A video's frame, the card's width (a portrait one cropped to 4:5,
+/// "+3" on a PDF's last shown page: neutral ink on any page, light or dark
+/// mode (the page is always white).
+struct PDFMorePagesBadge: View {
+    let label: String
+
+    var body: some View {
+        Text(label)
+            .font(Theme.sans(12, weight: .semibold, relativeTo: .caption))
+            .monospacedDigit()
+            .foregroundStyle(.white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 2)
+            .background(Color.black.opacity(0.6), in: Capsule())
+            .accessibilityIdentifier("pdf-more-pages")
+    }
+}
+
+/// A video's frame, the column's width (a portrait one cropped to 4:5,
 /// keeping its top), with a play mark on a material.
 struct VideoFrame: View {
     let image: UIImage
@@ -500,7 +532,7 @@ struct VideoFrame: View {
                 .environment(\.colorScheme, .dark)
                 .accessibilityHidden(true)
         }
-        .clipShape(RoundedRectangle(cornerRadius: FileCardMetrics.innerRadius, style: .continuous))
+        .previewPicture()
     }
 }
 

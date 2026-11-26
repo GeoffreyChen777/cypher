@@ -16,8 +16,9 @@ final class LoadedFilePreview: @unchecked Sendable {
         case table(FilePreview.Table)
         /// A video's frame.
         case frame(UIImage)
-        /// A PDF's first pages (`PreviewSize.pdfPages` at most): each one's
-        /// size in points, drawn for the column from `file`.
+        /// A PDF's first pages (`PreviewSize.pdfRowMax` at most), as many as
+        /// its widest row shows: each one's size in points, drawn for the
+        /// column from `file`.
         case pages([CGSize])
         /// An html or svg page: its `<title>` and source (the artifact viewer).
         case page(title: String?, code: String)
@@ -253,9 +254,12 @@ final class FilePreviewLoader {
                 return .failure(.unreadable)
             }
             let file = copy(data, name: name)
-            let shown = PreviewSize.pdfPages(document.pageCount).shown
-            let pages = (0..<shown).compactMap { document.page(at: $0).map(PDFPageImages.size) }
-                .filter { $0.width > 0 && $0.height > 0 }
+            // Up to the first page with no size: the row needs each shown
+            // page's aspect, in order.
+            let pages = Array(
+                (0..<min(document.pageCount, PreviewSize.pdfRowMax))
+                    .map { document.page(at: $0).map(PDFPageImages.size) ?? .zero }
+                    .prefix { $0.width > 0 && $0.height > 0 })
             return .success(
                 LoadedFilePreview(
                     kind: kind, name: name, size: size, body: file != nil && !pages.isEmpty ? .pages(pages) : .plain,
@@ -296,20 +300,28 @@ final class FilePreviewLoader {
     }
 }
 
-/// A PDF's shown pages drawn on white for a column: `pixelWidth` wide each,
-/// at its own aspect. The widest drawing of each file is kept, so a row
-/// scrolled back in shows it at once; a wider column draws it again.
+/// A PDF's shown pages drawn on white for a column: each page its own width
+/// in pixels (`PreviewSize.pdfDrawWidths`), at its own aspect. One drawing
+/// of each file is kept (a new one replaces it unless it already covers
+/// the new one), so a row scrolled back in shows it at once; a wider column
+/// draws it again.
 @MainActor
 final class PDFPageImages {
     static let shared = PDFPageImages()
 
     final class Drawn: @unchecked Sendable {
-        let pixelWidth: CGFloat
+        /// Each page's drawn width in pixels.
+        let pixelWidths: [CGFloat]
         let images: [UIImage]
 
-        init(pixelWidth: CGFloat, images: [UIImage]) {
-            self.pixelWidth = pixelWidth
+        init(pixelWidths: [CGFloat], images: [UIImage]) {
+            self.pixelWidths = pixelWidths
             self.images = images
+        }
+
+        /// Every page asked for is drawn at least as wide as asked.
+        func covers(_ widths: [CGFloat]) -> Bool {
+            images.count >= widths.count && zip(pixelWidths, widths).allSatisfy { $0 >= $1 }
         }
     }
 
@@ -317,30 +329,35 @@ final class PDFPageImages {
     private var inFlight: [String: Task<Drawn?, Never>] = [:]
 
     init() {
-        // Three Letter pages for a phone column are ~35 MB of pixels.
+        // A row of Letter pages for a phone column is ~10–20 MB of pixels.
         drawn.countLimit = 16
         drawn.totalCostLimit = 160 * 1024 * 1024
     }
 
     func cached(_ file: URL) -> Drawn? { drawn.object(forKey: file as NSURL) }
 
-    /// The first `count` pages of `file`, `pixelWidth` wide.
-    func draw(_ file: URL, count: Int, pixelWidth: CGFloat) async -> Drawn? {
-        if let hit = cached(file), hit.pixelWidth >= pixelWidth, hit.images.count >= count { return hit }
-        let key = "\(file.path)\u{1}\(Int(pixelWidth))"
+    /// The first pages of `file`, page i `pixelWidths[i]` wide (as many
+    /// pages as widths).
+    func draw(_ file: URL, pixelWidths: [CGFloat]) async -> Drawn? {
+        if let hit = cached(file), hit.covers(pixelWidths) { return hit }
+        let key = "\(file.path)\u{1}" + pixelWidths.map { String(Int($0)) }.joined(separator: ",")
         let task =
             inFlight[key]
             ?? Task.detached(priority: .userInitiated) { () -> Drawn? in
                 guard let document = PDFDocument(url: file) else { return nil }
-                let images = (0..<min(count, document.pageCount)).compactMap {
-                    document.page(at: $0).flatMap { Self.image($0, pixelWidth: pixelWidth) }
+                var images: [UIImage] = []
+                for (index, width) in pixelWidths.enumerated() where index < document.pageCount {
+                    guard let image = document.page(at: index).flatMap({ Self.image($0, pixelWidth: width) })
+                    else { break }
+                    images.append(image)
                 }
-                return images.isEmpty ? nil : Drawn(pixelWidth: pixelWidth, images: images)
+                return images.isEmpty
+                    ? nil : Drawn(pixelWidths: Array(pixelWidths.prefix(images.count)), images: images)
             }
         inFlight[key] = task
         let result = await task.value
         inFlight[key] = nil
-        if let result, (cached(file)?.pixelWidth ?? 0) < result.pixelWidth {
+        if let result, !(cached(file)?.covers(result.pixelWidths) ?? false) {
             let bytes = result.images.reduce(0) { $0 + Int($1.size.width * $1.size.height * $1.scale * $1.scale) * 4 }
             drawn.setObject(result, forKey: file as NSURL, cost: bytes)
         }
