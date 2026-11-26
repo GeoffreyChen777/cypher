@@ -77,6 +77,23 @@ pub fn resolve(path: &str, cwd: &str) -> Result<String, String> {
     }
 }
 
+/// `path` with a leading `~` or `~/` expanded to `home`, the host's home
+/// folder; other paths as they are. `None` for a `~` path when the home is
+/// not known (another device) and for `~user` forms. Expanding grants
+/// nothing: the result still goes through [`resolve`] against the chat's
+/// roots, and outside them it reads nothing.
+pub fn expand_tilde(path: &str, home: Option<&str>) -> Option<String> {
+    if !path.starts_with('~') {
+        return Some(path.to_owned());
+    }
+    let rest = path.strip_prefix('~')?;
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return None;
+    }
+    let home = home.filter(|home| home.starts_with('/'))?;
+    Some(format!("{}{rest}", home.trim_end_matches('/')))
+}
+
 /// An absolute path with `.` and `..` folded away and no trailing slash.
 fn normalize(path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
@@ -246,5 +263,29 @@ mod tests {
             Err("/repo/other/a.rs".into())
         );
         assert_eq!(resolve("/etc/hosts", cwd), Err("/etc/hosts".into()));
+    }
+
+    #[test]
+    fn tilde_expands_then_resolves_only_inside_the_roots() {
+        let home = Some("/Users/me/");
+        let open =
+            |path: &str| expand_tilde(path, home).map(|full| resolve(&full, "/Users/me/proj"));
+        assert_eq!(open("~/proj/src/a.rs"), Some(Ok("src/a.rs".into())));
+        assert_eq!(open("~/proj"), Some(Ok(String::new())));
+        // Expanded, but outside the checkout: nothing reads.
+        assert_eq!(
+            open("~/.ssh/id_rsa"),
+            Some(Err("/Users/me/.ssh/id_rsa".into()))
+        );
+        assert_eq!(
+            open("~/proj/../../other/a.rs"),
+            Some(Err("/Users/other/a.rs".into()))
+        );
+        // `~user` and an unknown home don't expand.
+        assert_eq!(expand_tilde("~root/a.rs", home), None);
+        assert_eq!(expand_tilde("~/proj/a.rs", None), None);
+        assert_eq!(expand_tilde("~/a.rs", Some("relative")), None);
+        assert_eq!(expand_tilde("src/a.rs", None), Some("src/a.rs".into()));
+        assert_eq!(expand_tilde("~", home), Some("/Users/me".into()));
     }
 }

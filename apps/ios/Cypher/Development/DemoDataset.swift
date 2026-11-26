@@ -153,6 +153,21 @@ final class DemoDataset {
                 config: claude, lastMessagePreview: "Changed the greeting in Example.swift.",
                 lastMessageAt: now - 1_700_000, createdAt: now - 1_800_000,
                 spaceId: cypher.id, lastSeenAt: now - 1_700_000),
+            // Images in a reply: from the checkout, a data URI, an SVG, a
+            // chip's and a tool row's thumbnails, and two that can't show.
+            Chat(
+                id: "chat-images", deviceId: "dev-mac", title: "Icon and diagram previews",
+                archived: false, cwd: cypher.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "Here is the icon.",
+                lastMessageAt: now - 1_650_000, createdAt: now - 1_750_000,
+                spaceId: cypher.id, lastSeenAt: now - 1_650_000),
+            // Git refs in a reply: PR, issue and commit cards.
+            Chat(
+                id: Self.previewsChatId, deviceId: "dev-mac", title: "Relay work and measurements",
+                archived: false, cwd: cypher.path, branch: "main", checkoutId: nil,
+                config: claude, lastMessagePreview: "PR #71 carries the relay fix.",
+                lastMessageAt: now - 1_550_000, createdAt: now - 1_600_000,
+                spaceId: cypher.id, lastSeenAt: now - 1_550_000),
             // Code in prose: inline code, chips, CJK, a list and a code block.
             codeTypesettingChat(spaceId: cypher.id, cwd: cypher.path, config: claude, now: now),
             // Comments sent with a prompt, over its bubble.
@@ -333,6 +348,45 @@ final class DemoDataset {
                 }
             }
         }
+    }
+
+    /// Images in a reply (`-demo -route chat:chat-images`): read from the
+    /// demo checkout (`notes/icon.png`, `notes/diagram.svg`), a data URI, a
+    /// chip and a tool row with thumbnails, a missing file and plain http.
+    private static func imagesTranscript(now: Int64) -> [MessageEntry] {
+        let dataURI =
+            "data:image/png;base64,"
+            + (WorkspaceBrowserSession.demoBytes("notes/icon.png")?.base64EncodedString() ?? "")
+        let reply = """
+            Here is the icon ![The demo icon](notes/icon.png) as the checkout has it, and the same bytes inline:
+
+            ![Inline copy](\(dataURI))
+
+            `notes/diagram.svg`
+
+            A phone screenshot is taller than 4:5, so it shows its top; a wide banner keeps its shape:
+
+            ![Phone screenshot](notes/screenshot.png)
+
+            ![Release banner](notes/banner.png)
+
+            The chip `notes/icon.png` carries a thumbnail. These two can't show: \
+            ![Missing shot](shots/missing.png) ![Insecure](http://example.com/a.png)
+            """
+        return [
+            MessageEntry(
+                id: "m1", role: .user,
+                parts: [.text(id: "t0", text: "Show me the app icon and the diagram.")],
+                createdAt: now - 1_750_000, deviceId: "ios-demo", status: .complete),
+            MessageEntry(
+                id: "m2", role: .assistant,
+                parts: [
+                    .tool(
+                        id: "c1", call: RenderToolCall(tag: "readFile", fields: ["path": "notes/icon.png"]),
+                        isError: false, resolved: true),
+                    .text(id: "t0", text: reply),
+                ], createdAt: now - 1_650_000, deviceId: "dev-mac", status: .complete),
+        ]
     }
 
     /// Replies over the tool call cap (`ToolCallCap`): twelve calls in one
@@ -904,6 +958,10 @@ final class DemoDataset {
             return messageCommentsTranscript(now: now)
         case "chat-tools":
             return longToolRuns(now: now)
+        case "chat-images":
+            return imagesTranscript(now: now)
+        case Self.previewsChatId:
+            return previewsTranscript(now: now)
         case "chat-permissions-story":
             return permissionStory(now: now)
         case "chat-permissions-card":

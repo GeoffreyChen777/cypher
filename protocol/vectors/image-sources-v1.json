@@ -1,0 +1,1334 @@
+{
+  "version": 1,
+  "description": "Image sources in chat replies, shared by the desktop (crates/ui/src/markdown/image_source.rs) and iOS. `max_bytes`: the most bytes one image may be (fetched, read through the engine, or decoded from a data URI); larger shows an error placeholder. `formats`: the supported file extensions (matched in any case) and their media types; anything else is not an image and stays a link or a file chip. `cases`: classify `src` (a Markdown image destination, or the path of an image-only paragraph) given the chat's folder `cwd`, the `roots` it may read in lookup order (a session: its checkout; a workspace's own chat: its folder, then each project) and, when known, the host's `home` (absent: `~` stays the head of paths and matches roots written with `~`). `expect.kind`: `local` (`mime` from the extension; `candidates` = where to read it through the engine, in order, each a `root` from `roots` (as normalized) and the `path` relative to it; the first that exists wins: a relative path is tried from `cwd`, then from each root, each resolved try mapped to the innermost root holding it, duplicates dropped); `outside` (`path` = the first resolved absolute path, or the source as written when there is no folder: not readable, shows an error); `remote` (`url` as written; https only, no cookies or credentials; a URL whose last path segment has a non-image extension is `not_image`, one without an extension is fetched and its bytes decide); `data` (`mime`; base64 only); `rejected` (`reason`: `insecure` for plain http, `unsupported` for a non-base64 data URI); `not_image`. Local paths: `file://` (optionally `localhost`) and `cypher-file:` prefixes are stripped, `?query` and `#fragment` dropped, percent-escapes decoded, a trailing `:12`, `:12-20` or `:12:5` line suffix dropped, `.`/`..` folded. `lines`: `line` is a whole reply paragraph's Markdown source; `src` is the image source it shows as a block preview, or null. A paragraph qualifies when, trimmed, it is one token with no whitespace, bare, in backticks or in <…> (bare tokens must not contain * [ ] ( ) < > ` !), that classifies (with no context) as `local` or `outside`, or as `remote` with an image extension.",
+  "max_bytes": 20971520,
+  "formats": {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "svg": "image/svg+xml"
+  },
+  "cases": [
+    {
+      "name": "relative: the chat folder first, then each root",
+      "src": "shots/a.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj",
+        "/w/lib"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/a.png"
+          },
+          {
+            "root": "/w/lib",
+            "path": "shots/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "relative: falls back from a sub-folder cwd to the root",
+      "src": "out/b.jpg",
+      "cwd": "/w/proj/app",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/jpeg",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "app/out/b.jpg"
+          },
+          {
+            "root": "/w/proj",
+            "path": "out/b.jpg"
+          }
+        ]
+      }
+    },
+    {
+      "name": "relative: dot segments fold",
+      "src": "./shots/../a.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "relative: ../ may climb into another root",
+      "src": "../lib/icons/x.svg",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj",
+        "/w/lib"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/svg+xml",
+        "candidates": [
+          {
+            "root": "/w/lib",
+            "path": "icons/x.svg"
+          }
+        ]
+      }
+    },
+    {
+      "name": "relative: climbing out of every root is outside",
+      "src": "../../etc/a.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "outside",
+        "path": "/etc/a.png"
+      }
+    },
+    {
+      "name": "relative: no folder at all is outside, as written",
+      "src": "shots/a.png",
+      "expect": {
+        "kind": "outside",
+        "path": "shots/a.png"
+      }
+    },
+    {
+      "name": "absolute inside a root",
+      "src": "/w/lib/img/c.webp",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj",
+        "/w/lib"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/webp",
+        "candidates": [
+          {
+            "root": "/w/lib",
+            "path": "img/c.webp"
+          }
+        ]
+      }
+    },
+    {
+      "name": "absolute: only the innermost root holding it",
+      "src": "/w/proj/sub/d.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj",
+        "/w/proj/sub"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj/sub",
+            "path": "d.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "absolute outside every root",
+      "src": "/tmp/shot.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj",
+        "/w/lib"
+      ],
+      "expect": {
+        "kind": "outside",
+        "path": "/tmp/shot.png"
+      }
+    },
+    {
+      "name": "tilde expands with the host's home",
+      "src": "~/proj/a.png",
+      "cwd": "/Users/me/proj",
+      "roots": [
+        "/Users/me/proj"
+      ],
+      "home": "/Users/me",
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/Users/me/proj",
+            "path": "a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "tilde without a known home matches roots written with ~",
+      "src": "~/proj/a.png",
+      "cwd": "~/proj",
+      "roots": [
+        "~/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "~/proj",
+            "path": "a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "tilde outside the roots",
+      "src": "~/Desktop/a.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "outside",
+        "path": "~/Desktop/a.png"
+      }
+    },
+    {
+      "name": "tilde with a known home climbing out of the roots is outside",
+      "src": "~/proj/../../etc/a.png",
+      "cwd": "/Users/me/proj",
+      "roots": [
+        "/Users/me/proj"
+      ],
+      "home": "/Users/me",
+      "expect": {
+        "kind": "outside",
+        "path": "/Users/etc/a.png"
+      }
+    },
+    {
+      "name": "tilde with a known home resolves before the roots check",
+      "src": "~/a/../b/x.png",
+      "cwd": "/Users/me/b",
+      "roots": [
+        "/Users/me/b"
+      ],
+      "home": "/Users/me",
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/Users/me/b",
+            "path": "x.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "tilde climbing above an unknown home is outside",
+      "src": "~/../x.png",
+      "cwd": "~",
+      "roots": [
+        "~"
+      ],
+      "expect": {
+        "kind": "outside",
+        "path": "~/../x.png"
+      }
+    },
+    {
+      "name": "a relative path climbing above an unknown home is outside",
+      "src": "../../x.png",
+      "cwd": "~/proj",
+      "roots": [
+        "~/proj",
+        "~"
+      ],
+      "expect": {
+        "kind": "outside",
+        "path": "~/proj/../../x.png"
+      }
+    },
+    {
+      "name": "a relative path under an unknown home stays inside",
+      "src": "../shared/x.png",
+      "cwd": "~/proj",
+      "roots": [
+        "~/proj",
+        "~"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "~",
+            "path": "shared/x.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "file:// URL",
+      "src": "file:///w/proj/shots/a.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "file://localhost URL, percent-encoded",
+      "src": "file://localhost/w/proj/my%20shot.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "my shot.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "cypher-file: mention",
+      "src": "cypher-file:shots/a.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "percent-encoding decodes",
+      "src": "shots/my%20shot.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/my shot.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "spaces as written (<…> destination)",
+      "src": "shots/my shot.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/my shot.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "#L12 fragment dropped",
+      "src": "shots/a.png#L12",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": ":12 line suffix dropped",
+      "src": "shots/a.png:12",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": ":12-20 line range dropped",
+      "src": "shots/a.png:12-20",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "query dropped",
+      "src": "shots/a.png?raw=1",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "extension in any case",
+      "src": "shots/A.PNG",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/png",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "shots/A.PNG"
+          }
+        ]
+      }
+    },
+    {
+      "name": "format jpg",
+      "src": "a.jpg",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/jpeg",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "a.jpg"
+          }
+        ]
+      }
+    },
+    {
+      "name": "format jpeg, upper case",
+      "src": "a.JPEG",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/jpeg",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "a.JPEG"
+          }
+        ]
+      }
+    },
+    {
+      "name": "format gif",
+      "src": "a.gif",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/gif",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "a.gif"
+          }
+        ]
+      }
+    },
+    {
+      "name": "format webp",
+      "src": "a.webp",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/webp",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "a.webp"
+          }
+        ]
+      }
+    },
+    {
+      "name": "format svg",
+      "src": "a.svg",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "local",
+        "mime": "image/svg+xml",
+        "candidates": [
+          {
+            "root": "/w/proj",
+            "path": "a.svg"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unsupported extension",
+      "src": "shots/a.bmp",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "not an image",
+      "src": "notes.pdf",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "no extension",
+      "src": "Makefile",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "a dot file is not an extension",
+      "src": "shots/.png",
+      "cwd": "/w/proj",
+      "roots": [
+        "/w/proj"
+      ],
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "plain http rejected",
+      "src": "http://x/a.png",
+      "expect": {
+        "kind": "rejected",
+        "reason": "insecure"
+      }
+    },
+    {
+      "name": "plain http without extension rejected",
+      "src": "http://x/render?id=3",
+      "expect": {
+        "kind": "rejected",
+        "reason": "insecure"
+      }
+    },
+    {
+      "name": "plain http, scheme in any case",
+      "src": "HTTP://x/a.png",
+      "expect": {
+        "kind": "rejected",
+        "reason": "insecure"
+      }
+    },
+    {
+      "name": "plain http to another kind of file is not an image",
+      "src": "http://x/doc.pdf",
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "https",
+      "src": "https://x/a.webp",
+      "expect": {
+        "kind": "remote",
+        "url": "https://x/a.webp"
+      }
+    },
+    {
+      "name": "https kept as written",
+      "src": "HTTPS://x/A.PNG#frag",
+      "expect": {
+        "kind": "remote",
+        "url": "HTTPS://x/A.PNG#frag"
+      }
+    },
+    {
+      "name": "https without extension: its bytes decide",
+      "src": "https://x/render?id=3&s=2",
+      "expect": {
+        "kind": "remote",
+        "url": "https://x/render?id=3&s=2"
+      }
+    },
+    {
+      "name": "https to another kind of file is not an image",
+      "src": "https://x/doc.pdf?dl=1",
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "https with nothing after it",
+      "src": "https://",
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "data URI png",
+      "src": "data:image/png;base64,iVBORw0KGgo=",
+      "expect": {
+        "kind": "data",
+        "mime": "image/png"
+      }
+    },
+    {
+      "name": "data URI svg+xml",
+      "src": "data:image/svg+xml;base64,PHN2Zy8+",
+      "expect": {
+        "kind": "data",
+        "mime": "image/svg+xml"
+      }
+    },
+    {
+      "name": "data URI in any case",
+      "src": "DATA:IMAGE/JPEG;base64,/9j/",
+      "expect": {
+        "kind": "data",
+        "mime": "image/jpeg"
+      }
+    },
+    {
+      "name": "data URI with parameters",
+      "src": "data:image/gif;name=a.gif;base64,R0lGODlh",
+      "expect": {
+        "kind": "data",
+        "mime": "image/gif"
+      }
+    },
+    {
+      "name": "data URI, non-image type",
+      "src": "data:text/plain;base64,aGk=",
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "data URI, unsupported image type",
+      "src": "data:image/bmp;base64,Qk0=",
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "data URI not base64",
+      "src": "data:image/svg+xml,%3Csvg%2F%3E",
+      "expect": {
+        "kind": "rejected",
+        "reason": "unsupported"
+      }
+    },
+    {
+      "name": "other scheme",
+      "src": "mailto:a@b.c",
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "other scheme with an image name",
+      "src": "ftp://x/a.png",
+      "expect": {
+        "kind": "not_image"
+      }
+    },
+    {
+      "name": "empty",
+      "src": "",
+      "expect": {
+        "kind": "not_image"
+      }
+    }
+  ],
+  "lines": [
+    {
+      "name": "a file reference in backticks",
+      "line": "`shots/a.png`",
+      "src": "shots/a.png"
+    },
+    {
+      "name": "a bare relative path",
+      "line": "shots/a.png",
+      "src": "shots/a.png"
+    },
+    {
+      "name": "a bare name",
+      "line": "a.png",
+      "src": "a.png"
+    },
+    {
+      "name": "surrounding spaces are trimmed",
+      "line": "  `shots/a.png`  ",
+      "src": "shots/a.png"
+    },
+    {
+      "name": "an absolute path, extension in any case",
+      "line": "/w/proj/a.PNG",
+      "src": "/w/proj/a.PNG"
+    },
+    {
+      "name": "a home path",
+      "line": "~/Desktop/shot.jpg",
+      "src": "~/Desktop/shot.jpg"
+    },
+    {
+      "name": "a file reference with lines",
+      "line": "`shots/a.png:12`",
+      "src": "shots/a.png:12"
+    },
+    {
+      "name": "a file URL",
+      "line": "file:///w/a.webp",
+      "src": "file:///w/a.webp"
+    },
+    {
+      "name": "an https URL to an image",
+      "line": "https://x/a.gif",
+      "src": "https://x/a.gif"
+    },
+    {
+      "name": "an autolink to an image",
+      "line": "<https://x/a.webp>",
+      "src": "https://x/a.webp"
+    },
+    {
+      "name": "an https URL without an image extension",
+      "line": "https://x/render?id=3",
+      "src": null
+    },
+    {
+      "name": "plain http",
+      "line": "http://x/a.png",
+      "src": null
+    },
+    {
+      "name": "prose around the path",
+      "line": "See shots/a.png",
+      "src": null
+    },
+    {
+      "name": "two references",
+      "line": "`a.png` `b.png`",
+      "src": null
+    },
+    {
+      "name": "another kind of file",
+      "line": "`notes.pdf`",
+      "src": null
+    },
+    {
+      "name": "emphasis",
+      "line": "**a.png**",
+      "src": null
+    },
+    {
+      "name": "a link",
+      "line": "[shot](a.png)",
+      "src": null
+    },
+    {
+      "name": "a Markdown image (parsed as one, not here)",
+      "line": "![shot](a.png)",
+      "src": null
+    },
+    {
+      "name": "a data URI",
+      "line": "data:image/png;base64,iVBORw0KGgo=",
+      "src": null
+    },
+    {
+      "name": "empty",
+      "line": "",
+      "src": null
+    }
+  ],
+  "sizing": {
+    "description": "How big every visual preview in a chat reply is (Markdown and inline images, image file references, SVG, a PDF's pages, a video's frame), shared by the desktop (crates/ui/src/markdown/preview_size.rs) and iOS; the same section is in image-sources-v1.json and file-previews-v1.json. Not covered: tool-row thumbnails, csv/tsv tables and the html page card (a full-width row). All lengths are logical points (no pixel scale); expected values are exact up to 4 decimals: compare within 0.01 (a platform may snap to its pixel grid when drawing). `previewSize(column, natural)`: `column` is the reply column's width, `natural` the content's natural size (only its aspect matters). The preview is always `column` wide (a small image or an SVG is upscaled). `contentHeight` = column * natural.height / natural.width, the height the whole content draws at. When contentHeight <= column * caps.crop.height / caps.crop.width (landscape, square, up to exactly 4:5) the preview shows it whole: height = contentHeight, cropped = false. Taller: height = column * crop.height / crop.width and cropped = true: the content still draws column wide and contentHeight tall, its top edge at the preview's top (horizontally it fills the width, so it is centred), and the part below the preview is cut off; a click still opens the whole thing. A natural or column size that is not positive shows nothing (all zero). PDF (`pdfRow` cases): `pdfRow(column, aspects, pages)` lays a PDF's first pages side by side in one row. `pages` is the page count; `aspects` the width / height of its first pages in order (at least min(pages, caps.pdfRow.maxPages) of them; fewer when only those are known; a non-positive one ends the list). Let max = min(pages, aspects known, caps.pdfRow.maxPages). For n from max down to 2: the row's shared height h = (column - (n - 1) * caps.pdfRow.gap) / (aspects[0] + ... + aspects[n-1]) and page i is h * aspects[i] wide, so the row fills the column exactly; pick the first (largest) n where every page is at least caps.pdfRow.minPageWidth - 0.001 wide. Pages in a row are never cropped (cropped = false, contentHeight = height). When no n >= 2 fits, one page shows like an image: previewSize(column, aspects[0] x 1), i.e. column wide, cropped to 4:5 with its top kept when taller; `height`, `cropped` and `contentHeight` are that page's. `expect`: `shown` = n, `height` the shared height, `widths` each shown page's width in order, `cropped`/`contentHeight` of the first page, `hidden` = pages - n, and `badge` = \"+<hidden>\" (a neutral badge on the last shown page) when hidden > 0, else null. A click on any page opens the file. Nothing shows (all zero, no badge) when column <= 0 or max = 0. The desktop draws each page's bitmap at the widest it can be in any column up to the drawn one; that is a drawing detail, not part of the shared rule.",
+    "caps": {
+      "crop": {
+        "width": 4,
+        "height": 5
+      },
+      "pdfRow": {
+        "maxPages": 4,
+        "minPageWidth": 150,
+        "gap": 8
+      }
+    },
+    "cases": [
+      {
+        "name": "wide 2:1 fills the width at its aspect",
+        "column": 600,
+        "natural": {
+          "width": 2000,
+          "height": 1000
+        },
+        "expect": {
+          "width": 600,
+          "height": 300.0,
+          "cropped": false,
+          "contentHeight": 300.0
+        }
+      },
+      {
+        "name": "square fills the width, as tall as wide",
+        "column": 600,
+        "natural": {
+          "width": 500,
+          "height": 500
+        },
+        "expect": {
+          "width": 600,
+          "height": 600.0,
+          "cropped": false,
+          "contentHeight": 600.0
+        }
+      },
+      {
+        "name": "portrait 1:2 is cropped to 4:5, the top kept",
+        "column": 600,
+        "natural": {
+          "width": 400,
+          "height": 800
+        },
+        "expect": {
+          "width": 600,
+          "height": 750.0,
+          "cropped": true,
+          "contentHeight": 1200.0
+        }
+      },
+      {
+        "name": "a tiny 16x16 icon is upscaled to the column",
+        "column": 600,
+        "natural": {
+          "width": 16,
+          "height": 16
+        },
+        "expect": {
+          "width": 600,
+          "height": 600.0,
+          "cropped": false,
+          "contentHeight": 600.0
+        }
+      },
+      {
+        "name": "very wide 10:1 stays a thin strip",
+        "column": 600,
+        "natural": {
+          "width": 3000,
+          "height": 300
+        },
+        "expect": {
+          "width": 600,
+          "height": 60.0,
+          "cropped": false,
+          "contentHeight": 60.0
+        }
+      },
+      {
+        "name": "exactly 4:5 shows whole",
+        "column": 600,
+        "natural": {
+          "width": 800,
+          "height": 1000
+        },
+        "expect": {
+          "width": 600,
+          "height": 750.0,
+          "cropped": false,
+          "contentHeight": 750.0
+        }
+      },
+      {
+        "name": "slightly taller than 4:5 is cropped",
+        "column": 600,
+        "natural": {
+          "width": 800,
+          "height": 1001
+        },
+        "expect": {
+          "width": 600,
+          "height": 750.0,
+          "cropped": true,
+          "contentHeight": 750.75
+        }
+      },
+      {
+        "name": "a phone screenshot in a phone column",
+        "column": 343,
+        "natural": {
+          "width": 1170,
+          "height": 2532
+        },
+        "expect": {
+          "width": 343,
+          "height": 428.75,
+          "cropped": true,
+          "contentHeight": 742.2872
+        }
+      },
+      {
+        "name": "a small landscape image in a phone column",
+        "column": 343,
+        "natural": {
+          "width": 32,
+          "height": 16
+        },
+        "expect": {
+          "width": 343,
+          "height": 171.5,
+          "cropped": false,
+          "contentHeight": 171.5
+        }
+      },
+      {
+        "name": "a US Letter page is cropped to 4:5, the top kept (a one-page PDF shows like this)",
+        "column": 600,
+        "natural": {
+          "width": 612,
+          "height": 792
+        },
+        "expect": {
+          "width": 600,
+          "height": 750.0,
+          "cropped": true,
+          "contentHeight": 776.4706
+        }
+      },
+      {
+        "name": "no natural size shows nothing",
+        "column": 600,
+        "natural": {
+          "width": 0,
+          "height": 100
+        },
+        "expect": {
+          "width": 0,
+          "height": 0,
+          "cropped": false,
+          "contentHeight": 0
+        }
+      },
+      {
+        "name": "no column shows nothing",
+        "column": 0,
+        "natural": {
+          "width": 100,
+          "height": 100
+        },
+        "expect": {
+          "width": 0,
+          "height": 0,
+          "cropped": false,
+          "contentHeight": 0
+        }
+      }
+    ],
+    "pdfRow": [
+      {
+        "name": "1 page shows like an image: column wide, a Letter page cropped to 4:5",
+        "column": 600,
+        "pages": 1,
+        "aspects": [
+          0.7727
+        ],
+        "expect": {
+          "shown": 1,
+          "height": 750.0,
+          "widths": [
+            600
+          ],
+          "cropped": true,
+          "contentHeight": 776.498,
+          "hidden": 0,
+          "badge": null
+        }
+      },
+      {
+        "name": "2 pages side by side, one height, filling the column",
+        "column": 600,
+        "pages": 2,
+        "aspects": [
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 2,
+          "height": 383.0723,
+          "widths": [
+            296.0,
+            296.0
+          ],
+          "cropped": false,
+          "contentHeight": 383.0723,
+          "hidden": 0,
+          "badge": null
+        }
+      },
+      {
+        "name": "3 pages side by side",
+        "column": 600,
+        "pages": 3,
+        "aspects": [
+          0.7727,
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 3,
+          "height": 251.9305,
+          "widths": [
+            194.6667,
+            194.6667,
+            194.6667
+          ],
+          "cropped": false,
+          "contentHeight": 251.9305,
+          "hidden": 0,
+          "badge": null
+        }
+      },
+      {
+        "name": "10 pages in a 600 column: 4 would be under 150 wide, so 3 and +7",
+        "column": 600,
+        "pages": 10,
+        "aspects": [
+          0.7727,
+          0.7727,
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 3,
+          "height": 251.9305,
+          "widths": [
+            194.6667,
+            194.6667,
+            194.6667
+          ],
+          "cropped": false,
+          "contentHeight": 251.9305,
+          "hidden": 7,
+          "badge": "+7"
+        }
+      },
+      {
+        "name": "10 pages in a desktop 640 column: 4 pages and +6",
+        "column": 640,
+        "pages": 10,
+        "aspects": [
+          0.7727,
+          0.7727,
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 4,
+          "height": 199.3012,
+          "widths": [
+            154.0,
+            154.0,
+            154.0,
+            154.0
+          ],
+          "cropped": false,
+          "contentHeight": 199.3012,
+          "hidden": 6,
+          "badge": "+6"
+        }
+      },
+      {
+        "name": "a narrow 340 column fits 2 pages, +1",
+        "column": 340,
+        "pages": 3,
+        "aspects": [
+          0.7727,
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 2,
+          "height": 214.8311,
+          "widths": [
+            166.0,
+            166.0
+          ],
+          "cropped": false,
+          "contentHeight": 214.8311,
+          "hidden": 1,
+          "badge": "+1"
+        }
+      },
+      {
+        "name": "a phone 343 column, 10 pages: 2 and +8",
+        "column": 343,
+        "pages": 10,
+        "aspects": [
+          0.7727,
+          0.7727,
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 2,
+          "height": 216.7724,
+          "widths": [
+            167.5,
+            167.5
+          ],
+          "cropped": false,
+          "contentHeight": 216.7724,
+          "hidden": 8,
+          "badge": "+8"
+        }
+      },
+      {
+        "name": "mixed aspects: a portrait and a landscape page share one height",
+        "column": 600,
+        "pages": 2,
+        "aspects": [
+          0.7727,
+          1.2941
+        ],
+        "expect": {
+          "shown": 2,
+          "height": 286.4331,
+          "widths": [
+            221.3269,
+            370.6731
+          ],
+          "cropped": false,
+          "contentHeight": 286.4331,
+          "hidden": 0,
+          "badge": null
+        }
+      },
+      {
+        "name": "mixed aspects: a wide page would leave the portrait ones under 150, so 2 and +2",
+        "column": 600,
+        "pages": 4,
+        "aspects": [
+          0.7727,
+          2.0,
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 2,
+          "height": 213.5103,
+          "widths": [
+            164.9794,
+            427.0206
+          ],
+          "cropped": false,
+          "contentHeight": 213.5103,
+          "hidden": 2,
+          "badge": "+2"
+        }
+      },
+      {
+        "name": "too narrow for 2 pages: 1 shown like an image, +1",
+        "column": 280,
+        "pages": 2,
+        "aspects": [
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 1,
+          "height": 350.0,
+          "widths": [
+            280
+          ],
+          "cropped": true,
+          "contentHeight": 362.3657,
+          "hidden": 1,
+          "badge": "+1"
+        }
+      },
+      {
+        "name": "only the aspects known count: 2 drawn of 6 pages, 2 and +4",
+        "column": 640,
+        "pages": 6,
+        "aspects": [
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 2,
+          "height": 408.9556,
+          "widths": [
+            316.0,
+            316.0
+          ],
+          "cropped": false,
+          "contentHeight": 408.9556,
+          "hidden": 4,
+          "badge": "+4"
+        }
+      },
+      {
+        "name": "a landscape single page is not cropped",
+        "column": 600,
+        "pages": 1,
+        "aspects": [
+          1.2941
+        ],
+        "expect": {
+          "shown": 1,
+          "height": 463.6427,
+          "widths": [
+            600
+          ],
+          "cropped": false,
+          "contentHeight": 463.6427,
+          "hidden": 0,
+          "badge": null
+        }
+      },
+      {
+        "name": "0 pages shows nothing",
+        "column": 600,
+        "pages": 0,
+        "aspects": [],
+        "expect": {
+          "shown": 0,
+          "height": 0,
+          "widths": [],
+          "cropped": false,
+          "contentHeight": 0,
+          "hidden": 0,
+          "badge": null
+        }
+      },
+      {
+        "name": "no column shows nothing",
+        "column": 0,
+        "pages": 3,
+        "aspects": [
+          0.7727,
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 0,
+          "height": 0,
+          "widths": [],
+          "cropped": false,
+          "contentHeight": 0,
+          "hidden": 0,
+          "badge": null
+        }
+      }
+    ]
+  }
+}

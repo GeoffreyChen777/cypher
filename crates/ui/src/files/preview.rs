@@ -142,7 +142,7 @@ pub(super) enum Zoom {
 /// `limit` (else an error), or with `head` just its first `limit` bytes.
 /// `progress` hears `(received, total)` after each slice. A file rewritten
 /// mid-read fails rather than splicing two versions.
-pub(super) async fn read_bytes(
+pub(crate) async fn read_bytes(
     engine: &crate::state::EngineHandle,
     params: serde_json::Map<String, serde_json::Value>,
     limit: u64,
@@ -199,7 +199,7 @@ pub(super) async fn read_bytes(
 }
 
 /// An image's pixel size from its header (no full decode).
-pub(super) fn image_dims(bytes: &[u8]) -> Option<(u32, u32)> {
+pub(crate) fn image_dims(bytes: &[u8]) -> Option<(u32, u32)> {
     image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?
@@ -244,9 +244,18 @@ pub(super) fn hex_per_row(width: f32) -> usize {
 /// element's width/height to at least [`SVG_PREVIEW_MIN`] on the long side,
 /// keeping (or adding) the viewBox so the drawing scales with it. Anything
 /// unparseable passes through unchanged. Also returns the declared size.
-pub(super) const SVG_PREVIEW_MIN: f32 = 256.0;
+pub(crate) const SVG_PREVIEW_MIN: f32 = 256.0;
 
-pub(super) fn svg_preview_bytes(source: &str) -> (Vec<u8>, Option<(f32, f32)>) {
+pub(crate) fn svg_preview_bytes(source: &str) -> (Vec<u8>, Option<(f32, f32)>) {
+    svg_scaled_bytes(source, |w, h| (SVG_PREVIEW_MIN / w.max(h)).min(16.0))
+}
+
+/// [`svg_preview_bytes`] with the enlargement chosen by `scale` from the
+/// declared width and height (at most 1 leaves the source as it is).
+pub(crate) fn svg_scaled_bytes(
+    source: &str,
+    scale: impl FnOnce(f32, f32) -> f32,
+) -> (Vec<u8>, Option<(f32, f32)>) {
     let unchanged = || (source.as_bytes().to_vec(), None);
     let Some(open) = source.find("<svg") else {
         return unchanged();
@@ -301,7 +310,7 @@ pub(super) fn svg_preview_bytes(source: &str) -> (Vec<u8>, Option<(f32, f32)>) {
         return unchanged();
     };
     let declared = Some((w, h));
-    let scale = (SVG_PREVIEW_MIN / w.max(h)).min(16.0);
+    let scale = scale(w, h);
     if scale <= 1.0 {
         return (source.as_bytes().to_vec(), declared);
     }

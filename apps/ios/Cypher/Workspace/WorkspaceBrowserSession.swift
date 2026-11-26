@@ -167,12 +167,28 @@ final class WorkspaceBrowserSession {
     /// A file's raw bytes (image previews), read a slice at a time through
     /// `ReadWorkspaceFileChunk`. Refused past `limit`, and when the file is
     /// rewritten while it loads.
-    func fileBytes(_ path: String, limit: UInt64 = 24 * 1024 * 1024) async throws -> Data {
+    func fileBytes(
+        _ path: String, limit: UInt64 = 24 * 1024 * 1024, rootSpaceId: String? = nil
+    ) async throws -> Data {
+        try await fileRead(path, limit: limit, head: false, rootSpaceId: rootSpaceId).data
+    }
+
+    /// A file's bytes and its whole size. `head`: only its first `limit`
+    /// bytes (a table preview), never refused for its size; else the whole
+    /// file, refused past `limit`.
+    func fileRead(
+        _ path: String, limit: UInt64, head: Bool, rootSpaceId: String? = nil
+    ) async throws -> (data: Data, size: UInt64) {
         try check()
         guard WorkspaceFilePath.valid(path, allowRoot: false) else { throw WorkspaceBrowserError.invalidPath }
         if isDemo {
-            guard let data = Self.demoBytes(path) else { throw WorkspaceBrowserError.invalidPath }
-            return data
+            guard let data = Self.demoBytes(path) ?? Self.demoText(path).map({ Data($0.utf8) }) else {
+                throw WorkspaceBrowserError.invalidPath
+            }
+            let size = UInt64(data.count)
+            if head { return (data.prefix(Int(min(limit, size))), size) }
+            guard size <= limit else { throw WorkspaceBrowserError.tooLarge }
+            return (data, size)
         }
         struct Chunk: Decodable, Sendable {
             var data: String
@@ -184,17 +200,93 @@ final class WorkspaceBrowserSession {
         var data = Data()
         var offset: UInt64 = 0
         var modified: Int64?
+        var root: [String: Any] = [:]
+        if let rootSpaceId { root["rootSpaceId"] = rootSpaceId }
         while true {
-            let chunk: Chunk = try await call("ReadWorkspaceFileChunk", path: path, extra: ["offset": offset])
-            guard chunk.bytes <= limit else { throw WorkspaceBrowserError.tooLarge }
+            let chunk: Chunk = try await call(
+                "ReadWorkspaceFileChunk", path: path, extra: root.merging(["offset": offset]) { _, new in new })
+            guard head || chunk.bytes <= limit else { throw WorkspaceBrowserError.tooLarge }
             if offset > 0, chunk.modifiedMs != modified { throw WorkspaceBrowserError.changedWhileReading }
             modified = chunk.modifiedMs
             guard let slice = Data(base64Encoded: chunk.data) else { throw WorkspaceBrowserError.unavailable }
             data.append(slice)
-            if chunk.done { return data }
+            if head, UInt64(data.count) >= limit { return (data.prefix(Int(limit)), chunk.bytes) }
+            if chunk.done { return (data, chunk.bytes) }
             guard chunk.nextOffset > offset else { throw WorkspaceBrowserError.unavailable }
             offset = chunk.nextOffset
         }
+    }
+
+    // MARK: Images
+
+    /// rpc `ChatFileRoot`: a folder the chat's files may be read in.
+    struct FileRoot: Decodable, Sendable {
+        /// nil for the chat's own folder; a granted project's space id.
+        var spaceId: String?
+        var name: String
+        /// Canonical absolute folder on the host.
+        var path: String
+    }
+
+    /// The folders the chat may read (`ListChatFileRoots`): its own, then a
+    /// workspace's granted projects. Just the chat's folder for a host that
+    /// can't say.
+    func fileRoots() async -> [FileRoot] {
+        guard !isDemo, (try? check()) != nil else { return [] }
+        let roots: [FileRoot]? = try? await call("ListChatFileRoots")
+        return roots ?? []
+    }
+
+    /// Where a chat image's local path resolves (`ImageSource.Context`): the
+    /// chat's folder as written, then each folder it may read. The host's
+    /// home is read off a `~` folder and its canonical path.
+    func imageContext() async -> ImageSource.Context {
+        let cwd = chat.cwd ?? ""
+        let roots = await fileRoots()
+        return Self.imageContext(cwd: cwd, roots: roots.map(\.path))
+    }
+
+    nonisolated static func imageContext(cwd: String, roots: [String]) -> ImageSource.Context {
+        var home: String?
+        if cwd == "~" {
+            home = roots.first
+        } else if cwd.hasPrefix("~/"), let own = roots.first, own.hasSuffix(String(cwd.dropFirst())) {
+            home = String(own.dropLast(cwd.count - 1))
+        }
+        var all = cwd.isEmpty ? [] : [cwd]
+        for root in roots where !all.contains(root) { all.append(root) }
+        return ImageSource.Context(cwd: cwd.isEmpty ? nil : cwd, roots: all, home: home)
+    }
+
+    /// One candidate's bytes: in the chat's own folder, or in the granted
+    /// project whose folder it names.
+    func imageBytes(_ candidate: ImageSource.Candidate) async throws -> Data {
+        try await fileBytes(candidate.path, limit: ImageSource.maxBytes, rootSpaceId: rootSpace(of: candidate))
+    }
+
+    /// One candidate's bytes for a file preview (`TranscriptImageFiles.preview`),
+    /// with the file's whole size.
+    func previewBytes(
+        _ candidate: ImageSource.Candidate, limit: UInt64, head: Bool
+    ) async throws -> (data: Data, size: UInt64) {
+        try await fileRead(candidate.path, limit: limit, head: head, rootSpaceId: rootSpace(of: candidate))
+    }
+
+    /// The granted project a candidate's root is (`rootSpaceId`); nil for
+    /// the chat's own folder. Throws `ImageLoadError.outside` for any other.
+    private func rootSpace(of candidate: ImageSource.Candidate) async throws -> String? {
+        let cwd = chat.cwd ?? ""
+        if candidate.root == cwd || candidate.root == ImageSource.normalize(cwd) { return nil }
+        let roots = await fileRoots()
+        let home = Self.imageContext(cwd: cwd, roots: roots.map(\.path)).home
+        let ownExpanded = home.map { ImageSource.normalize($0 + cwd.dropFirst()) }
+        if candidate.root == ownExpanded || roots.contains(where: { $0.path == candidate.root && $0.spaceId == nil }) {
+            return nil
+        }
+        guard let space = roots.first(where: { $0.path == candidate.root })?.spaceId else {
+            throw ImageLoadError.outside
+        }
+        return space
     }
 
     /// Where a reference or link a reply wrote lands in this checkout
@@ -264,6 +356,10 @@ final class WorkspaceBrowserSession {
         "notes": [
             .init(name: "guide.md", isDir: false), .init(name: "page.html", isDir: false),
             .init(name: "diagram.svg", isDir: false), .init(name: "icon.png", isDir: false),
+            .init(name: "latency.csv", isDir: false), .init(name: "regions.tsv", isDir: false),
+            .init(name: "report.pdf", isDir: false), .init(name: "demo.mp4", isDir: false),
+            .init(name: "prototype.html", isDir: false), .init(name: "screenshot.png", isDir: false),
+            .init(name: "banner.png", isDir: false), .init(name: "summary.pdf", isDir: false),
         ],
     ]
 
@@ -305,12 +401,27 @@ final class WorkspaceBrowserSession {
             </svg>
 
             """
+        case "notes/latency.csv": DemoDataset.latencyCSV
+        case "notes/regions.tsv": DemoDataset.regionsTSV
+        case "notes/prototype.html": DemoDataset.prototypeHTML
         default: nil
         }
     }
 
-    /// The demo checkout's one image: a small generated PNG.
+    /// The demo checkout's binary files: small generated PNGs (an icon, a
+    /// phone screenshot, a wide banner), a five-page and a one-page PDF drawn
+    /// here and the
+    /// bundled three-second clip.
     static func demoBytes(_ path: String) -> Data? {
+        switch path {
+        case "notes/report.pdf": return DemoDataset.reportPDF()
+        case "notes/summary.pdf": return DemoDataset.reportPDF(pages: 1)
+        case "notes/screenshot.png": return demoScreenshot()
+        case "notes/banner.png": return demoBanner()
+        case "notes/demo.mp4":
+            return Bundle.main.url(forResource: "demo-clip", withExtension: "mp4").flatMap { try? Data(contentsOf: $0) }
+        default: break
+        }
         guard path == "notes/icon.png" else { return nil }
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
@@ -320,6 +431,57 @@ final class WorkspaceBrowserSession {
             UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: 96, height: 96), cornerRadius: 22).fill()
             UIColor.white.setFill()
             UIBezierPath(ovalIn: CGRect(x: 28, y: 28, width: 40, height: 40)).fill()
+        }
+    }
+
+    /// `notes/screenshot.png`: a 390 × 844 phone screen (taller than 4:5): a
+    /// title, list rows, and a tab bar at the bottom a cropped preview cuts.
+    private static func demoScreenshot() -> Data {
+        let size = CGSize(width: 390, height: 844)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: size, format: format).pngData { _ in
+            UIColor(white: 0.97, alpha: 1).setFill()
+            UIRectFill(CGRect(origin: .zero, size: size))
+            let title: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 32, weight: .bold), .foregroundColor: UIColor.black,
+            ]
+            let row: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 17), .foregroundColor: UIColor.black,
+            ]
+            ("9:41" as NSString).draw(at: CGPoint(x: 32, y: 16), withAttributes: row)
+            ("Regions" as NSString).draw(at: CGPoint(x: 20, y: 96), withAttributes: title)
+            let colors: [UIColor] = [.systemGreen, .systemGreen, .systemOrange, .systemGreen, .systemBlue]
+            for (index, name) in ["eu-west", "us-east", "ap-south", "us-west", "sa-east"].enumerated() {
+                let y = 160 + CGFloat(index) * 64
+                UIColor.white.setFill()
+                UIBezierPath(roundedRect: CGRect(x: 16, y: y, width: 358, height: 56), cornerRadius: 12).fill()
+                colors[index].setFill()
+                UIBezierPath(ovalIn: CGRect(x: 32, y: y + 18, width: 20, height: 20)).fill()
+                (name as NSString).draw(at: CGPoint(x: 66, y: y + 17), withAttributes: row)
+            }
+            UIColor(white: 0.9, alpha: 1).setFill()
+            UIRectFill(CGRect(x: 0, y: 760, width: 390, height: 84))
+            ("Tab bar (cropped off in the preview)" as NSString).draw(
+                at: CGPoint(x: 52, y: 786), withAttributes: row)
+        }
+    }
+
+    /// `notes/banner.png`: a 1200 × 120 strip (10:1).
+    private static func demoBanner() -> Data {
+        let size = CGSize(width: 1200, height: 120)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: size, format: format).pngData { context in
+            let colors = [UIColor.systemIndigo.cgColor, UIColor.systemTeal.cgColor] as CFArray
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: nil) {
+                context.cgContext.drawLinearGradient(
+                    gradient, start: .zero, end: CGPoint(x: size.width, y: 0), options: [])
+            }
+            let text: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 56, weight: .heavy), .foregroundColor: UIColor.white,
+            ]
+            ("Cypher 0.4.8" as NSString).draw(at: CGPoint(x: 40, y: 24), withAttributes: text)
         }
     }
 

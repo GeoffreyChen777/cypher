@@ -22,6 +22,8 @@ Every language loads the same JSON file and runs every case in it.
 | Stream preview codec (inactive: the Edge relay is removed) | [`crates/sync/src/stream_preview.rs`](../crates/sync/src/stream_preview.rs) (inline tests) | — (the Edge rejects preview frames: `apps/edge/test/workerd/preview.workerd.test.ts`) | [`Sync/StreamPreview.swift`](../apps/ios/Cypher/Sync/StreamPreview.swift); [`StreamPreviewTests.swift`](../apps/ios/CypherTests/Sync/StreamPreviewTests.swift) | [`stream-preview-v1.json`](vectors/stream-preview-v1.json) |
 | Device trust: chain entries (`signingBytes`, hash, replay rules, refusal reasons), pairing code and MACs, Noise IK transcript and fragmenting | [`crates/trust/src`](../crates/trust/src); generator and check [`crates/trust/tests/vectors.rs`](../crates/trust/tests/vectors.rs) | [`apps/edge/src/trust/trust-chain.ts`](../apps/edge/src/trust/trust-chain.ts) (chain only); [`trust-chain.test.ts`](../apps/edge/src/trust/trust-chain.test.ts), [`trust-room.workerd.test.ts`](../apps/edge/test/workerd/trust-room.workerd.test.ts) | [`Sync/DeviceTrust.swift`](../apps/ios/Cypher/Sync/DeviceTrust.swift); [`scripts/tests/device-trust-vectors.swift`](../scripts/tests/device-trust-vectors.swift) | [`device-trust-v1.json`](vectors/device-trust-v1.json) |
 | Signed durable commands and launch records: the bytes a signature covers, from the entry's Loro value tree | [`crates/doc/src/command_auth.rs`](../crates/doc/src/command_auth.rs); generator and check [`crates/doc/tests/command_vectors.rs`](../crates/doc/tests/command_vectors.rs) | — (the Edge never sees inside commands) | [`Sync/CommandSignature.swift`](../apps/ios/Cypher/Sync/CommandSignature.swift); [`scripts/tests/command-signing-vectors.swift`](../scripts/tests/command-signing-vectors.swift), [`DeviceTrustTests.swift`](../apps/ios/CypherTests/Sync/DeviceTrustTests.swift) | [`command-signing-v1.json`](vectors/command-signing-v1.json) |
+| Git refs in chat text (`#123`, `owner/repo#123`, GitHub pull/issue/commit URLs, commit SHAs) for the hover cards | [`crates/proto/src/git_refs.rs`](../crates/proto/src/git_refs.rs) (`find_git_refs`; inline tests) | — | [`Markdown/GitRefs.swift`](../apps/ios/Cypher/Markdown/GitRefs.swift); [`GitRefsTests.swift`](../apps/ios/CypherTests/Transcript/GitRefsTests.swift) | [`git-refs-v1.json`](vectors/git-refs-v1.json) |
+| Chat file previews: which paths preview (csv, tsv, pdf, video, html, svg), size caps, the csv/tsv head as a table, path-only paragraphs | [`crates/ui/src/markdown/file_preview.rs`](../crates/ui/src/markdown/file_preview.rs) (inline tests, `shared_*`) | — | — (port pending) | [`file-previews-v1.json`](vectors/file-previews-v1.json) |
 | Preview reducer | [`crates/sync/src/preview_link.rs`](../crates/sync/src/preview_link.rs) (inline tests) | — | [`Sync/PreviewProjection.swift`](../apps/ios/Cypher/Sync/PreviewProjection.swift); [`PreviewProjectionTests.swift`](../apps/ios/CypherTests/Sync/PreviewProjectionTests.swift) | [`preview-reducer-v1.json`](vectors/preview-reducer-v1.json) |
 | Plan text reader (`PlanText::of`: a row's `bodyRev`/`resultRev` against the workspace chat doc's `planBodies` entry, docs/design/plan-body.md) | [`crates/proto/src/plan_body.rs`](../crates/proto/src/plan_body.rs); [`crates/proto/tests/plan_text_vectors.rs`](../crates/proto/tests/plan_text_vectors.rs) | — | [`Bots/PlanText.swift`](../apps/ios/Cypher/Bots/PlanText.swift); [`PlanTextTests.swift`](../apps/ios/CypherTests/Bots/PlanTextTests.swift) | [`plan-text-v1.json`](vectors/plan-text-v1.json) |
 | Slash command test (`slash_command`: whether a sent message ran as a slash command, from the host's `ListCommands` names or, before they load, the strict `/name` shape rule) | [`crates/ui/src/slash_command.rs`](../crates/ui/src/slash_command.rs) (inline tests) | — | [`Composer/SlashCommandText.swift`](../apps/ios/Cypher/Composer/SlashCommandText.swift); [`SlashCommandTextTests.swift`](../apps/ios/CypherTests/Composer/SlashCommandTextTests.swift) | [`slash-commands-v1.json`](vectors/slash-commands-v1.json) |
@@ -142,6 +144,39 @@ a slash command, else `null`. The file's `description` states the rule.
 An object; `apply` holds `{name, base, patch, code, applied, total}`: applying
 `patch` (SEARCH/REPLACE hunks) to `base` gives `code`, with `applied` of its
 `total` complete hunks taking. Matching is on UTF-8 bytes.
+
+### `git-refs-v1.json`
+
+An object; `detect` holds `{name, text, inCode, expect}`: finding the refs in
+`text` — a prose run, or one whole inline code span when `inCode` — gives
+exactly `expect`, in text order. Each expectation is
+`{match, kind, repo?, number?, sha?}`:
+
+- `match`: the matched substring. No offset unit is shared (Rust reports UTF-8
+  byte ranges); compare the substrings, in order.
+- `kind`: `issue` (an issue or pull request number; GitHub numbers both from one
+  sequence) or `commit`.
+- `repo`: the `owner/name` the ref names itself; absent means the chat's
+  checkout (a bare `#123` or SHA, detected only in chats with one).
+- `number` for `issue`; `sha` (lowercase) for `commit`.
+
+The rules themselves are documented once, in the Rust module's header.
+
+### `file-previews-v1.json`
+
+An object; its `description` is the full spec (cleaning and resolving paths
+follows `image-sources-v1.json`).
+
+- `caps`: `{tableReadBytes, tableRows, columnChars, pdfMaxBytes, videoMaxBytes,
+  htmlMaxBytes}` (bytes, rows, characters).
+- `kinds`: `{name, path, expect: {kind}}` — `kind(path)` is one of `csv`, `tsv`,
+  `pdf`, `video`, `html`, `svg`, `none`.
+- `table`: `{name, text, delimiter, complete, expect: {header, columns?, rows,
+  totalRows, truncated}}` — parsing `text` (`complete: false`: only the file's
+  head was read) gives exactly `expect`; `columns` is present only with
+  `header: true`.
+- `lines`: `{name, line, src}` — the file a path-only paragraph previews, or
+  `null`.
 
 ### `device-trust-v1.json`
 

@@ -144,7 +144,11 @@ pub fn refs_in(tree: &BlockTree) -> Vec<CodeRef> {
                 .iter()
                 .chain(rows.iter().flatten())
                 .for_each(|cell| runs(out, cell)),
-            Block::CodeBlock { .. } | Block::Artifact { .. } | Block::Rule => {}
+            Block::CodeBlock { .. }
+            | Block::Artifact { .. }
+            | Block::Rule
+            | Block::Image { .. }
+            | Block::FilePreview { .. } => {}
         }
     }
     let mut out = Vec::new();

@@ -283,11 +283,14 @@ impl Transcript {
             link: self.link_handler.clone(),
             diagram_toggled: Some(self.diagram_toggled_for(row_id, cx)),
             code_refs: Some(self.code_ref_ui(cx)),
+            git_refs: self.git_ref_ui(cx),
             artifact: self.artifact_handler.clone(),
             artifact_patches: Some({
                 let index = self.artifacts.clone();
                 Rc::new(move |row: &str, code: &str| index.borrow().patch_outcome(row, code))
             }),
+            images: Some(self.image_ui(cx)),
+            file_previews: Some(self.file_preview_ui(cx)),
             live,
             justify: false,
         };
@@ -298,6 +301,15 @@ impl Transcript {
         // A landing diagram is taller than the source it replaces: remeasure
         // its row, keeping the scroll anchor.
         let diagram_row = row_id.clone();
+        let streaming_tail = live && block_ix + 1 == tree.blocks.len();
+        self.request_images(&top.block, row_id, streaming_tail, cx);
+        self.request_file_previews(
+            &top.block,
+            row_id,
+            streaming_tail,
+            window.scale_factor(),
+            cx,
+        );
         markdown::mermaid::request_block(
             &top.block,
             theme,
@@ -331,7 +343,7 @@ impl Transcript {
 
     /// Remeasure one row whose height changed in place (a diagram landed or
     /// switched to its source), keeping the scroll anchor.
-    fn remeasure_row(&mut self, row_id: &SharedString, cx: &mut Context<Self>) {
+    pub(super) fn remeasure_row(&mut self, row_id: &SharedString, cx: &mut Context<Self>) {
         if let Some(ix) = self.rows.iter().position(|row| &row.id == row_id) {
             self.list.remeasure_items(ix..ix + 1);
         }
@@ -831,8 +843,9 @@ impl Transcript {
         let detail = paint.detail;
         let invocation = paint.invocation;
         let key = SharedString::from(format!("{row_id}#d{ix}"));
+        let thumb = self.tool_thumbnail(tool, row_id, &key, cx);
         if detail.is_none() && invocation.is_none() {
-            return tool_chip(tool, theme, cx.entity_id());
+            return tool_chip(tool, thumb, theme, cx.entity_id());
         }
         let affordance = paint.affordance;
         let affordance_h = if affordance.is_some() {
@@ -907,7 +920,7 @@ impl Transcript {
                         group.toggled_at = Some(Instant::now());
                         cx.notify();
                     }))
-                    .child(chip_header(tool, open, theme, cx.entity_id())),
+                    .child(chip_header(tool, thumb, open, theme, cx.entity_id())),
             );
         // The body stays mounted while the close tween shrinks over it.
         // Invocation first (what was asked), then output/diff (what

@@ -223,7 +223,7 @@ fn excerpt(total: usize, lines: Option<(usize, usize)>) -> Option<Excerpt> {
 
 /// A checkout path as a link the shell's file-link handler reads back:
 /// the characters a link would cut at are escaped.
-fn file_url(path: &str, lines: Option<(usize, usize)>) -> String {
+pub(super) fn file_url(path: &str, lines: Option<(usize, usize)>) -> String {
     let mut url = String::with_capacity(path.len() + 12);
     for c in path.chars() {
         match c {
@@ -495,8 +495,10 @@ impl Transcript {
             }
         };
         let task_key = key.clone();
+        let home = super::images::chat_home(self.state.read(cx));
         let task = cx.spawn_in(window, async move |this, cx| {
-            let (resolution, read) = resolve(&engine, &contexts, &task_key.path, cx).await;
+            let (resolution, read) =
+                resolve(&engine, &contexts, &task_key.path, home.as_deref(), cx).await;
             finish_resolution(this, task_key, resolution, read, cx);
         });
         self.code_refs.resolutions.insert(
@@ -629,7 +631,17 @@ impl Transcript {
         let viewport = window.viewport_size();
         let width = CARD_WIDTH.min(f32::from(viewport.width) - 16.0).max(240.0);
 
+        // An image file previews as its picture, not its bytes.
+        let picture = match &resolution {
+            Resolution::Found(path)
+                if crate::markdown::image_source::Format::for_path(path).is_some() =>
+            {
+                self.code_ref_picture(&target.key.chat_id, path, width, &theme, cx)
+            }
+            _ => None,
+        };
         let (body, body_lines) = match (&resolution, &file) {
+            _ if picture.is_some() => picture.unwrap_or_else(|| (div().into_any_element(), 0.0)),
             (Resolution::Found(_), Some(Ok(snapshot))) => {
                 self.code_ref_excerpt(snapshot, lines, scope, &theme)
             }
@@ -1135,18 +1147,22 @@ fn ending_in(wanted: &str, matches: Vec<FileSearchMatch>) -> Vec<String> {
 /// each granted project (an absolute path only in the root it lies in),
 /// and searches them all; its resolved paths are absolute
 /// ([`roots::join`]). A successful read comes back with the resolution.
+/// A `~` path expands with the host's `home` when known, then resolves like
+/// an absolute one: only inside the roots ([`links::expand_tilde`]).
 async fn resolve(
     engine: &EngineHandle,
     contexts: &LinkContexts,
     path: &str,
+    home: Option<&str>,
     cx: &mut AsyncWindowContext,
 ) -> (
     Resolution,
     Option<(String, Result<FileSnapshot, SharedString>)>,
 ) {
-    if path.starts_with('~') {
+    let Some(path) = links::expand_tilde(path, home) else {
         return (Resolution::Outside(path.to_owned()), None);
-    }
+    };
+    let path = path.as_str();
     let tries = match lookup_order(contexts, path) {
         Ok(tries) => tries,
         Err(resolution) => return (resolution, None),
@@ -1271,6 +1287,58 @@ async fn read_file(
     match read_content(engine, context, path, cx).await {
         Ok(content) => Ok(snapshot(path, content, cx).await),
         Err(err) => Err(crate::files::rpc_message(&err)),
+    }
+}
+
+impl Transcript {
+    /// A hovered image reference's picture (or why it can't show), as the
+    /// card's body, with its height in code lines.
+    fn code_ref_picture(
+        &mut self,
+        chat_id: &str,
+        path: &str,
+        width: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<(AnyElement, f32)> {
+        use crate::markdown::image::{self, Key, Shown};
+        const MAX_H: f32 = 220.0;
+        let key = Key {
+            scope: chat_id.to_owned().into(),
+            src: path.to_owned().into(),
+        };
+        let src = path.to_owned();
+        image::request(
+            key.clone(),
+            0.0,
+            cx,
+            |cx| self.load_image(&src, 0.0, cx),
+            |_: &mut Self, cx| cx.notify(),
+        );
+        let lines = |h: f32| h / theme.markdown.code_line_height;
+        Some(match image::lookup(&key) {
+            Shown::Ready(loaded) => {
+                let room = width - 20.0;
+                let scale = (room / loaded.width).min(MAX_H / loaded.height).min(1.0);
+                let (w, h) = (loaded.width * scale, loaded.height * scale);
+                (
+                    div()
+                        .p(px(10.0))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            gpui::img(loaded.image.clone())
+                                .w(px(w))
+                                .h(px(h))
+                                .rounded(px(6.0)),
+                        )
+                        .into_any_element(),
+                    lines(h + 20.0),
+                )
+            }
+            Shown::Pending => (card_note(theme, "Loading…".into(), None), 2.0),
+            Shown::Failed(reason) => (card_note(theme, reason, None), 2.0),
+        })
     }
 }
 

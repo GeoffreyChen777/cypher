@@ -55,6 +55,15 @@ indirect enum MDBlock: Hashable {
     case list(orderedStart: Int?, items: [MDListItem])
     case table(header: [[InlineRun]], rows: [[[InlineRun]]], align: [MDAlign])
     case rule
+    /// An image (`![alt](src)`, or a paragraph that is only an image path):
+    /// a block preview after the paragraph it was written in. `src` as
+    /// written; `ImageSource` says where its bytes come from. `caption` is
+    /// false when the text the image stood in kept its alt (desktop
+    /// parser.rs `Block::Image`): the alt is said once.
+    case image(src: String, alt: String, caption: Bool = true)
+    /// A paragraph that is only a path to a csv/tsv, pdf, video or html
+    /// file (`FilePreview.fileLine`): a table, first page, frame or page card.
+    case filePreview(src: String, kind: FilePreview.Kind)
 }
 
 /// A top-level block plus the 1-based source line it starts on (the stable
@@ -84,27 +93,78 @@ enum MarkdownParser {
         let context = Context(
             formulas: math?.formulas ?? [],
             lines: parsed.split(separator: "\n", omittingEmptySubsequences: false))
-        return document.children.compactMap { child in
-            guard let block = convertBlock(child, context) else { return nil }
+        return document.children.flatMap { child in
             let line = child.range?.lowerBound.line ?? 1
-            return TopBlock(startLine: line, block: block)
+            return convertBlocks(child, context).map { TopBlock(startLine: line, block: $0) }
         }
     }
 
     /// What every block conversion reads: the formulas the math rewrite took
-    /// out, and the parsed source's lines (block ranges index them).
+    /// out, and the parsed source's lines (block ranges index them); and
+    /// where the images met in inline text wait for their block to end.
     private struct Context {
         var formulas: [String]
         var lines: [Substring]
+        let images = ImageSink()
+    }
+
+    /// Images met in inline text, `(src, alt)`, until the block they stood
+    /// in takes them.
+    private final class ImageSink {
+        var images: [(src: String, alt: String)] = []
+    }
+
+    /// A block as the blocks it renders as (desktop parser.rs
+    /// `paragraph_blocks`): a paragraph, heading or table is followed by the
+    /// images written in it — the sentence keeps their alt text and the
+    /// images then carry no caption, so it is said once; a paragraph that
+    /// said nothing but the images is dropped and they caption themselves —
+    /// and a paragraph that only names an image file is that image, one that
+    /// only names a previewable file that file's preview.
+    private static func convertBlocks(_ markup: Markup, _ context: Context) -> [MDBlock] {
+        if let paragraph = markup as? Paragraph, let source = lineSource(of: paragraph, context) {
+            if let src = ImageSource.imageLine(source) { return [.image(src: src, alt: src)] }
+            if let src = FilePreview.fileLine(source), let kind = FilePreview.kind(src) {
+                return [.filePreview(src: src, kind: kind)]
+            }
+        }
+        let taken = context.images.images.count
+        let block = convertBlock(markup, context)
+        let found = Array(context.images.images[taken...])
+        context.images.images.removeSubrange(taken...)
+        func images(caption: Bool) -> [MDBlock] {
+            found.map { MDBlock.image(src: $0.src, alt: $0.alt, caption: caption) }
+        }
+        guard let block else { return images(caption: true) }
+        guard !found.isEmpty else { return [block] }
+        if case .paragraph(let runs) = block {
+            let squeeze = { (text: String) in text.filter { !$0.isWhitespace } }
+            if runs.map({ squeeze($0.text) }).joined() == found.map({ squeeze($0.alt) }).joined() {
+                return images(caption: true)
+            }
+        }
+        return [block] + images(caption: false)
+    }
+
+    /// A one-line paragraph's Markdown source, for `ImageSource.imageLine`
+    /// and `FilePreview.fileLine`.
+    private static func lineSource(of paragraph: Paragraph, _ context: Context) -> String? {
+        guard let range = paragraph.range, range.lowerBound.line == range.upperBound.line,
+            range.lowerBound.line >= 1, range.lowerBound.line - 1 < context.lines.count
+        else { return nil }
+        let line = context.lines[range.lowerBound.line - 1].utf8
+        let source = String(decoding: line.dropFirst(max(0, range.lowerBound.column - 1)), as: UTF8.self)
+        guard source.utf8.count <= 4096 else { return nil }
+        return source
     }
 
     private static func convertBlock(_ markup: Markup, _ context: Context) -> MDBlock? {
         let formulas = context.formulas
         switch markup {
         case let paragraph as Paragraph:
-            return .paragraph(inlines(of: paragraph, formulas))
+            return .paragraph(inlines(of: paragraph, context))
         case let heading as Heading:
-            return .heading(level: heading.level, inlines(of: heading, formulas))
+            return .heading(level: heading.level, inlines(of: heading, context))
         case let code as CodeBlock:
             var body = code.code
             if body.hasSuffix("\n") { body.removeLast() }
@@ -118,16 +178,16 @@ enum MarkdownParser {
             let lang = info.split(whereSeparator: \.isWhitespace).first.map(String.init)
             return .codeBlock(language: lang, code: body, closed: closed)
         case let quote as BlockQuote:
-            return .blockquote(quote.children.compactMap { convertBlock($0, context) })
+            return .blockquote(quote.children.flatMap { convertBlocks($0, context) })
         case let list as UnorderedList:
             return .list(orderedStart: nil, items: listItems(of: list, context))
         case let list as OrderedList:
             return .list(orderedStart: Int(list.startIndex), items: listItems(of: list, context))
         case let table as Markdown.Table:
             // `.cells`/`.rows` are lazy sequences — materialize eagerly.
-            let header: [[InlineRun]] = table.head.cells.map { inlines(of: $0, formulas) }
+            let header: [[InlineRun]] = table.head.cells.map { inlines(of: $0, context) }
             let rows: [[[InlineRun]]] = table.body.rows.map { row in
-                row.cells.map { inlines(of: $0, formulas) } as [[InlineRun]]
+                row.cells.map { inlines(of: $0, context) } as [[InlineRun]]
             }
             let align: [MDAlign] = table.columnAlignments.map {
                 switch $0 {
@@ -157,7 +217,7 @@ enum MarkdownParser {
             guard let item = child as? ListItem else { return nil }
             let checked: Bool? = item.checkbox.map { $0 == .checked }
             return MDListItem(
-                checked: checked, children: item.children.compactMap { convertBlock($0, context) })
+                checked: checked, children: item.children.flatMap { convertBlocks($0, context) })
         }
     }
 
@@ -188,16 +248,18 @@ enum MarkdownParser {
         return closer.count >= run && closer.allSatisfy { $0 == fence }
     }
 
-    private static func inlines(of container: Markup, _ formulas: [String]) -> [InlineRun] {
+    private static func inlines(of container: Markup, _ context: Context) -> [InlineRun] {
         var runs: [InlineRun] = []
         for child in container.children {
-            collectInline(child, style: .plain, formulas, into: &runs)
+            collectInline(child, style: .plain, context.formulas, into: &runs, images: context.images)
         }
         return mergeRuns(MathSource.dropFillers(runs))
     }
 
+    /// `images`: where the images met go, to follow their block.
     private static func collectInline(
-        _ markup: Markup, style: InlineStyle, _ formulas: [String], into runs: inout [InlineRun]
+        _ markup: Markup, style: InlineStyle, _ formulas: [String], into runs: inout [InlineRun],
+        images: ImageSink
     ) {
         switch markup {
         case let text as Markdown.Text:
@@ -209,24 +271,30 @@ enum MarkdownParser {
         case let strong as Strong:
             var s = style
             s.bold = true
-            strong.children.forEach { collectInline($0, style: s, formulas, into: &runs) }
+            strong.children.forEach { collectInline($0, style: s, formulas, into: &runs, images: images) }
         case let em as Emphasis:
             var s = style
             s.italic = true
-            em.children.forEach { collectInline($0, style: s, formulas, into: &runs) }
+            em.children.forEach { collectInline($0, style: s, formulas, into: &runs, images: images) }
         case let strike as Strikethrough:
             var s = style
             s.strikethrough = true
-            strike.children.forEach { collectInline($0, style: s, formulas, into: &runs) }
+            strike.children.forEach { collectInline($0, style: s, formulas, into: &runs, images: images) }
         case let link as Markdown.Link:
             var s = style
             s.link = link.destination
-            link.children.forEach { collectInline($0, style: s, formulas, into: &runs) }
+            link.children.forEach { collectInline($0, style: s, formulas, into: &runs, images: images) }
         case let image as Markdown.Image:
-            // Images render as their alt text (desktop parity: no inline images).
             let alt = MathSource.plain(
                 image.children.compactMap { ($0 as? Markdown.Text)?.string }.joined(), formulas: formulas)
-            runs.append(InlineRun(text: alt.isEmpty ? (image.source ?? "") : alt, style: style))
+            // The sentence keeps the alt text; an image the source names
+            // follows its block.
+            if let src = image.source, ImageSource.isImage(src) {
+                images.images.append((src, alt.trimmingCharacters(in: .whitespacesAndNewlines)))
+                if !alt.isEmpty { runs.append(InlineRun(text: alt, style: style)) }
+            } else {
+                runs.append(InlineRun(text: alt.isEmpty ? (image.source ?? "") : alt, style: style))
+            }
         case is SoftBreak:
             runs.append(InlineRun(text: " ", style: style))
         case is LineBreak:
@@ -235,7 +303,7 @@ enum MarkdownParser {
             runs.append(InlineRun(text: html.rawHTML, style: style))
         default:
             for child in markup.children {
-                collectInline(child, style: style, formulas, into: &runs)
+                collectInline(child, style: style, formulas, into: &runs, images: images)
             }
         }
     }
@@ -292,13 +360,17 @@ final class IncrementalMarkdownParser {
             blocks = MarkdownParser.parse(text)
             return
         }
-        guard blocks.count >= 2 else {
+        // Blocks of one source block (a paragraph and its images) share a
+        // start line: count source blocks, not blocks.
+        var starts: [Int] = []
+        for block in blocks where starts.last != block.startLine { starts.append(block.startLine) }
+        guard starts.count >= 2 else {
             blocks = MarkdownParser.parse(text)
             return
         }
-        // Stable boundary: the start line of the second-to-last block.
-        let boundaryLine = blocks[blocks.count - 2].startLine
-        let stable = Array(blocks.prefix(blocks.count - 2))
+        // Stable boundary: the start line of the second-to-last source block.
+        let boundaryLine = starts[starts.count - 2]
+        let stable = Array(blocks.prefix { $0.startLine < boundaryLine })
         let tailSource = Self.suffix(of: text, fromLine: boundaryLine)
         let tailBlocks = MarkdownParser.parse(tailSource).map { top in
             TopBlock(startLine: top.startLine + boundaryLine - 1, block: top.block)

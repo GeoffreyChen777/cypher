@@ -96,12 +96,22 @@ pub struct RenderOptions {
     /// clicks here ([`super::code_ref`]). `None` keeps them plain inline
     /// code — surfaces with nothing to preview them against.
     pub code_refs: Option<CodeRefUi>,
+    /// Pull request, issue and commit references become links that report
+    /// hover and clicks here ([`super::git_ref`]); `None` (a chat without a
+    /// git checkout, previews) detects none.
+    pub git_refs: Option<super::git_ref::GitRefUi>,
     /// Opens artifact cards and HTML fences' Preview; `None` renders the
     /// cards inert and the fences without the button.
     pub artifact: Option<super::artifact::ArtifactHandler>,
     /// How the tree's patch fences went, for their cards; `None` renders
     /// them inert (surfaces that index no pages).
     pub artifact_patches: Option<super::artifact::PatchLookup>,
+    /// Loads and opens image blocks ([`super::image`]); `None` shows only
+    /// their captions.
+    pub images: Option<super::image::ImageUi>,
+    /// Loads and opens file preview blocks ([`super::file_card`]); `None`
+    /// shows them as plain file chips.
+    pub file_previews: Option<super::file_card::FilePreviewUi>,
     /// The row is still streaming: an artifact whose fence hasn't closed
     /// is still being written.
     pub live: bool,
@@ -190,8 +200,11 @@ impl RenderOptions {
             link: None,
             diagram_toggled: None,
             code_refs: None,
+            git_refs: None,
             artifact: None,
             artifact_patches: None,
+            images: None,
+            file_previews: None,
             live: false,
             justify: false,
         }
@@ -220,6 +233,9 @@ pub struct RenderCache {
     /// The [`crate::kit::theme::theme_generation`] these entries were shaped under.
     generation: u32,
     style_revision: u64,
+    /// Whether the entries were flattened with git references linked, and
+    /// under which [`super::git_ref::Unresolved::revision`].
+    git_refs: Option<u64>,
 }
 
 /// Cached code text/runs (validity: code length + highlight identity).
@@ -460,6 +476,8 @@ pub fn render_block(
             rows,
             align,
         } => render_table(header, rows, align, ctx, window),
+        Block::Image { src, alt, caption } => super::image::render(src, alt, *caption, ctx),
+        Block::FilePreview { src, kind } => super::file_card::render(src, *kind, ctx),
         Block::Rule => div()
             .h(px(1.0))
             .w_full()
@@ -1117,6 +1135,8 @@ pub fn count_block_matches(block: &Block, query: &str) -> usize {
             cells(header) + rows.iter().map(|row| cells(row)).sum::<usize>()
         }
         Block::Rule => 0,
+        // Captions are not part of the selectable text.
+        Block::Image { .. } | Block::FilePreview { .. } => 0,
     }
 }
 
@@ -1289,6 +1309,15 @@ fn flatten_runs_math(
         // face, size and wash set it apart.
         let color = if run.style.code {
             inline_code_text(theme)
+        } else if run
+            .style
+            .link
+            .as_deref()
+            .is_some_and(super::git_ref::is_ref_link)
+        {
+            // A detected reference reads in the body ink: neutral, never
+            // the accent a chat theme gives links.
+            theme.text
         } else if is_link {
             theme.markdown_link.unwrap_or(theme.text)
         } else {
@@ -1368,9 +1397,17 @@ fn flatten_cached(
     math_env: Option<&MathEnv>,
 ) -> Rc<FlatText> {
     let chips = opts.code_refs.is_some();
+    let git_refs = opts
+        .git_refs
+        .as_ref()
+        .map(|ui| ui.unresolved.borrow().revision());
     let build = || {
+        let linked = opts.git_refs.as_ref().and_then(|ui| {
+            let unresolved = ui.unresolved.borrow();
+            super::git_ref::linkify(runs, &|git_ref| unresolved.hides(git_ref))
+        });
         Rc::new(flatten_runs_math(
-            runs,
+            linked.as_deref().unwrap_or(runs),
             theme,
             base_weight,
             font_size,
@@ -1382,6 +1419,10 @@ fn flatten_cached(
         Some(cache) => {
             let mut cache = cache.borrow_mut();
             cache.sync_palette(theme);
+            if cache.git_refs != git_refs {
+                cache.clear();
+                cache.git_refs = git_refs;
+            }
             cache
                 .flats
                 .entry((opts.row_key.clone(), top_ix, ix))
@@ -1416,6 +1457,7 @@ fn flat_text_element(
         && opts.selection.is_none()
         && flat.math.is_empty()
         && chip_ui.is_none()
+        && opts.git_refs.is_none()
     {
         let handler = opts.link.clone();
         let on_link: super::justified::LinkClick = Rc::new(move |url, window, cx| {
@@ -1448,6 +1490,31 @@ fn flat_text_element(
         let id: SharedString = format!("{}-t{ix}", opts.row_key).into();
         let handler = opts.link.clone();
         let scope = opts.scope;
+        let git_click = opts.git_refs.clone().map(|ui| {
+            let (key, row_key, layout, ranges) = (
+                sel_key.clone(),
+                opts.row_key.clone(),
+                layout.clone(),
+                flat.links.clone(),
+            );
+            move |link_ix: usize, window: &mut Window, cx: &mut gpui::App| -> bool {
+                let Some((range, url)) = ranges.get(link_ix) else {
+                    return false;
+                };
+                let Some(git_ref) = super::git_ref::ref_of_link(url) else {
+                    return false;
+                };
+                let spans = super::git_ref::spans(&ranges);
+                let ix = spans.iter().position(|(r, _)| r == range).unwrap_or(0);
+                let span = (range.clone(), git_ref);
+                (ui.on_click)(
+                    super::git_ref::hover_for(&key, &row_key, ix, &span, &layout),
+                    window,
+                    cx,
+                );
+                true
+            }
+        });
         let chip_click = chip_ui.clone().map(|ui| {
             let (chips, key, row_key, layout) = (
                 flat.refs.clone(),
@@ -1473,6 +1540,10 @@ fn flat_text_element(
                     if let Some(click) = &chip_click {
                         click(clicked_ix - link_count, window, cx);
                     }
+                } else if git_click
+                    .as_ref()
+                    .is_some_and(|click| click(clicked_ix, window, cx))
+                {
                 } else if let Some(url) = urls.get(clicked_ix)
                     && !handler.as_ref().is_some_and(|take| take(url, window, cx))
                 {
@@ -1497,6 +1568,19 @@ fn flat_text_element(
             flat.refs.clone(),
             layout.clone(),
         )
+    });
+    let git_overlay = opts.git_refs.clone().and_then(|ui| {
+        let spans = super::git_ref::spans(&flat.links);
+        (!spans.is_empty()).then(|| {
+            super::git_ref::hover_overlay(
+                ui,
+                opts.scope,
+                sel_key.clone(),
+                opts.row_key.clone(),
+                spans,
+                layout.clone(),
+            )
+        })
     });
     let code_ranges = flat.code_ranges.clone();
     let flat_text = flat.text.clone();
@@ -1596,6 +1680,7 @@ fn flat_text_element(
         .child(underlay)
         .child(text_el)
         .children(chip_overlay)
+        .children(git_overlay)
         .into_any_element()
 }
 

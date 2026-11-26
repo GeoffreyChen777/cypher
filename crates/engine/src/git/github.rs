@@ -1,6 +1,6 @@
 //! GitHub for this device: the Cypher GitHub App sign-in (Settings → GitHub)
 //! and the REST calls behind the composer's `#` issue and pull request
-//! references.
+//! references and the chat's pull request and issue hover cards (`previews`).
 //!
 //! Every device holds its own GitHub credential, like it holds its own git
 //! checkouts: a token never syncs and never crosses the relay. Sign-in uses
@@ -72,6 +72,8 @@ pub struct GithubConfig {
     pub local_fallbacks: bool,
     /// One device-flow `interval` unit (a second against GitHub).
     pub poll_unit: Duration,
+    /// The whole of one hover-card lookup (`ResolveGitRef`).
+    pub preview_timeout: Duration,
 }
 
 impl GithubConfig {
@@ -93,6 +95,7 @@ impl GithubConfig {
             web_base: "https://github.com".into(),
             local_fallbacks: true,
             poll_unit: Duration::from_secs(1),
+            preview_timeout: previews::PREVIEW_TIMEOUT,
         }
     }
 
@@ -219,6 +222,7 @@ struct Inner {
     local: std::sync::Mutex<LocalCredentials>,
     repo_access: std::sync::Mutex<HashMap<String, (GithubCredentialSource, Instant)>>,
     logins: std::sync::Mutex<HashMap<String, LoginEntry>>,
+    previews: std::sync::Mutex<previews::PreviewCache>,
 }
 
 #[derive(Clone)]
@@ -262,6 +266,9 @@ struct RestIssue {
     draft: bool,
     #[serde(default)]
     repository_url: Option<String>,
+    /// `completed`, `not_planned`, `reopened`.
+    #[serde(default)]
+    state_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -389,6 +396,7 @@ impl Github {
                 local: Default::default(),
                 repo_access: Default::default(),
                 logins: Default::default(),
+                previews: std::sync::Mutex::new(previews::preview_cache()),
             }),
         }
     }
@@ -1260,7 +1268,7 @@ pub fn pick_github_repo(config: &str) -> Option<String> {
 }
 
 /// The GitHub repository of the checkout at `root`, if any.
-async fn github_repo(root: &Path) -> Option<String> {
+pub(crate) async fn github_repo(root: &Path) -> Option<String> {
     let output = tokio::process::Command::new("git")
         .args(["config", "--get-regexp", r"^remote\..*\.(url|gh-resolved)$"])
         .current_dir(root)
@@ -1361,6 +1369,8 @@ fn snapshot_from(
         comments: kept,
     }
 }
+
+mod previews;
 
 #[cfg(test)]
 mod tests;

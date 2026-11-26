@@ -1,0 +1,472 @@
+{
+  "detect": [
+    {
+      "name": "bare PR number",
+      "text": "Fixed in #123.",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "#123",
+          "kind": "issue",
+          "number": 123
+        }
+      ]
+    },
+    {
+      "name": "at the start, in parentheses, and as a list",
+      "text": "#7 (and #8), #9",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "#7",
+          "kind": "issue",
+          "number": 7
+        },
+        {
+          "match": "#8",
+          "kind": "issue",
+          "number": 8
+        },
+        {
+          "match": "#9",
+          "kind": "issue",
+          "number": 9
+        }
+      ]
+    },
+    {
+      "name": "a range of numbers",
+      "text": "PRs #10-#12 landed",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "#10",
+          "kind": "issue",
+          "number": 10
+        },
+        {
+          "match": "#12",
+          "kind": "issue",
+          "number": 12
+        }
+      ]
+    },
+    {
+      "name": "CJK text right before and after",
+      "text": "已合并#45，谢谢",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "#45",
+          "kind": "issue",
+          "number": 45
+        }
+      ]
+    },
+    {
+      "name": "qualified repo",
+      "text": "see octo-org/hello.world#88 for details",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "octo-org/hello.world#88",
+          "kind": "issue",
+          "repo": "octo-org/hello.world",
+          "number": 88
+        }
+      ]
+    },
+    {
+      "name": "qualified repo in parentheses",
+      "text": "(rust-lang/rust#1)",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "rust-lang/rust#1",
+          "kind": "issue",
+          "repo": "rust-lang/rust",
+          "number": 1
+        }
+      ]
+    },
+    {
+      "name": "pull URL",
+      "text": "Opened https://github.com/acme/app/pull/71 just now",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "https://github.com/acme/app/pull/71",
+          "kind": "issue",
+          "repo": "acme/app",
+          "number": 71
+        }
+      ]
+    },
+    {
+      "name": "issues URL with fragment, sentence period left out",
+      "text": "See https://github.com/acme/app/issues/5#issuecomment-99.",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "https://github.com/acme/app/issues/5#issuecomment-99",
+          "kind": "issue",
+          "repo": "acme/app",
+          "number": 5
+        }
+      ]
+    },
+    {
+      "name": "pull URL with trailing path and query",
+      "text": "https://www.github.com/acme/app/pull/71/files?w=1",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "https://www.github.com/acme/app/pull/71/files?w=1",
+          "kind": "issue",
+          "repo": "acme/app",
+          "number": 71
+        }
+      ]
+    },
+    {
+      "name": "markdown-style link target, unbalanced paren left out",
+      "text": "[PR](https://github.com/acme/app/pull/3)",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "https://github.com/acme/app/pull/3",
+          "kind": "issue",
+          "repo": "acme/app",
+          "number": 3
+        }
+      ]
+    },
+    {
+      "name": "commit URL",
+      "text": "landed as https://github.com/acme/app/commit/15d45c7a9b0e1f2d3c4b5a69788766554433221a",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "https://github.com/acme/app/commit/15d45c7a9b0e1f2d3c4b5a69788766554433221a",
+          "kind": "commit",
+          "repo": "acme/app",
+          "sha": "15d45c7a9b0e1f2d3c4b5a69788766554433221a"
+        }
+      ]
+    },
+    {
+      "name": "commit inside a pull URL",
+      "text": "https://github.com/acme/app/pull/3/commits/a1b2c3d4",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "https://github.com/acme/app/pull/3/commits/a1b2c3d4",
+          "kind": "commit",
+          "repo": "acme/app",
+          "sha": "a1b2c3d4"
+        }
+      ]
+    },
+    {
+      "name": "CJK full stop ends the URL",
+      "text": "见https://github.com/acme/app/pull/9。",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "https://github.com/acme/app/pull/9",
+          "kind": "issue",
+          "repo": "acme/app",
+          "number": 9
+        }
+      ]
+    },
+    {
+      "name": "short SHA",
+      "text": "Reverted a1b2c3d yesterday",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "a1b2c3d",
+          "kind": "commit",
+          "sha": "a1b2c3d"
+        }
+      ]
+    },
+    {
+      "name": "full SHA at the end of a sentence",
+      "text": "Merged as 74509e8a3f1c2b0d9e8f7a6b5c4d3e2f1a0b9c8d.",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "74509e8a3f1c2b0d9e8f7a6b5c4d3e2f1a0b9c8d",
+          "kind": "commit",
+          "sha": "74509e8a3f1c2b0d9e8f7a6b5c4d3e2f1a0b9c8d"
+        }
+      ]
+    },
+    {
+      "name": "commit range is two SHAs",
+      "text": "a1b2c3d..e4f5a6b7",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "a1b2c3d",
+          "kind": "commit",
+          "sha": "a1b2c3d"
+        },
+        {
+          "match": "e4f5a6b7",
+          "kind": "commit",
+          "sha": "e4f5a6b7"
+        }
+      ]
+    },
+    {
+      "name": "SHA in CJK prose",
+      "text": "提交a1b2c3d修复了它",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "a1b2c3d",
+          "kind": "commit",
+          "sha": "a1b2c3d"
+        }
+      ]
+    },
+    {
+      "name": "SHA and PR together",
+      "text": "12417aba (#64) released",
+      "inCode": false,
+      "expect": [
+        {
+          "match": "12417aba",
+          "kind": "commit",
+          "sha": "12417aba"
+        },
+        {
+          "match": "#64",
+          "kind": "issue",
+          "number": 64
+        }
+      ]
+    },
+    {
+      "name": "C# and F# are languages",
+      "text": "Written in C# and F#7 notes",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "# inside a word",
+      "text": "abc#123 and x_#4",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "markdown heading markers",
+      "text": "## 123 and ##456",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "HTML entity",
+      "text": "&#123; is a brace",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "URL fragment of another site",
+      "text": "https://example.com/docs#123 and https://example.com/a1b2c3d4",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "number running on into a word",
+      "text": "#12abc #1.5 #12-3",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "leading zero and over-long number",
+      "text": "#0 #007 #1234567890",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "path-like owner",
+      "text": "src/lib/x#1 and ./a/b#2",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "all letters is not a prose SHA",
+      "text": "deadbeef and cafebabe",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "all digits is not a SHA",
+      "text": "build 1234567 on 20261123",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "too short and too long",
+      "text": "a1b2c3 and 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "uppercase hex",
+      "text": "ABC1234 and A1B2C3D4",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "hex colour",
+      "text": "color #a1b2c3 or #a1b2c3d4",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "UUID",
+      "text": "id 550e8400-e29b-41d4-a716-446655440000",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "0x literal",
+      "text": "mask 0x1f2e3d4c",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "part of a longer word",
+      "text": "ga1b2c3d and a1b2c3d_x and a1b2c3dz",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "file names, paths and key:value",
+      "text": "a1b2c3d4.png /tmp/a1b2c3d4/ key:a1b2c3d4 a1b2c3d4@host",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "variables and URL escapes",
+      "text": "$a1b2c3d4 %a1b2c3d4",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "non-GitHub repo URL",
+      "text": "https://gitlab.com/acme/app/pull/3",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "GitHub URL that names no ref",
+      "text": "https://github.com/acme/app/tree/main",
+      "inCode": false,
+      "expect": []
+    },
+    {
+      "name": "code: bare number",
+      "text": "#123",
+      "inCode": true,
+      "expect": [
+        {
+          "match": "#123",
+          "kind": "issue",
+          "number": 123
+        }
+      ]
+    },
+    {
+      "name": "code: qualified",
+      "text": "acme/app#5",
+      "inCode": true,
+      "expect": [
+        {
+          "match": "acme/app#5",
+          "kind": "issue",
+          "repo": "acme/app",
+          "number": 5
+        }
+      ]
+    },
+    {
+      "name": "code: SHA, surrounding spaces trimmed",
+      "text": " a1b2c3d4 ",
+      "inCode": true,
+      "expect": [
+        {
+          "match": "a1b2c3d4",
+          "kind": "commit",
+          "sha": "a1b2c3d4"
+        }
+      ]
+    },
+    {
+      "name": "code: all-letter hex is accepted",
+      "text": "deadbeef",
+      "inCode": true,
+      "expect": [
+        {
+          "match": "deadbeef",
+          "kind": "commit",
+          "sha": "deadbeef"
+        }
+      ]
+    },
+    {
+      "name": "code: URL",
+      "text": "https://github.com/acme/app/pull/71",
+      "inCode": true,
+      "expect": [
+        {
+          "match": "https://github.com/acme/app/pull/71",
+          "kind": "issue",
+          "repo": "acme/app",
+          "number": 71
+        }
+      ]
+    },
+    {
+      "name": "code: all digits is a number",
+      "text": "1234567",
+      "inCode": true,
+      "expect": []
+    },
+    {
+      "name": "code: must be the whole span",
+      "text": "git show a1b2c3d",
+      "inCode": true,
+      "expect": []
+    },
+    {
+      "name": "code: hex colour",
+      "text": "#a1b2c3",
+      "inCode": true,
+      "expect": []
+    },
+    {
+      "name": "code: C# string",
+      "text": "C#123",
+      "inCode": true,
+      "expect": []
+    },
+    {
+      "name": "code: uppercase hex",
+      "text": "DEADBEEF",
+      "inCode": true,
+      "expect": []
+    },
+    {
+      "name": "code: 0x literal",
+      "text": "0xdeadbeef",
+      "inCode": true,
+      "expect": []
+    }
+  ]
+}

@@ -58,11 +58,21 @@ extension WorkspaceStore {
         params: [String: Any]
     ) async throws -> T {
         guard
-            ["ListWorkspaceFiles", "ReadWorkspaceFile", "ReadWorkspaceFileChunk", "GetCheckoutDiff"].contains(method)
+            [
+                "ListWorkspaceFiles", "ReadWorkspaceFile", "ReadWorkspaceFileChunk", "GetCheckoutDiff",
+                "ListChatFileRoots",
+            ].contains(method)
         else {
             throw RelayError.notConnected
         }
         return try await relayClient(for: deviceId).call(method: method, params: params, timeoutSeconds: 30)
+    }
+
+    /// ResolveGitRef on the chat's host: what a reply's `#12`, sha or GitHub
+    /// link is (a card), or why it can't say.
+    func resolveGitRef(deviceId: String, chatId: String, ref: GitRef) async throws -> GitRefResolution {
+        try await relayClient(for: deviceId)
+            .call(method: "ResolveGitRef", params: ["chatId": chatId, "ref": ref.wire], timeoutSeconds: 20)
     }
 
     /// ListRefs on the target device — branches with current/worktree markers

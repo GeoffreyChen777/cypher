@@ -1758,6 +1758,7 @@ pub(super) fn detail_body(
 /// running spinner turning.
 fn chip_header_row(
     tool: &ToolItem,
+    thumb: Option<AnyElement>,
     chevron: Option<bool>,
     theme: &Theme,
     view: EntityId,
@@ -1819,6 +1820,8 @@ fn chip_header_row(
                 })
                 .child(SharedString::from(parameter)),
         )
+        // The image the call read or wrote ([`super::images::tool_image`]).
+        .children(thumb)
         .children(
             tool.permission
                 .as_ref()
@@ -1994,12 +1997,23 @@ pub(super) fn tool_status_icon(status: ToolStatus, theme: &Theme, view: EntityId
 }
 
 /// The header row of an expandable chip card.
-pub(super) fn chip_header(tool: &ToolItem, open: bool, theme: &Theme, view: EntityId) -> gpui::Div {
-    chip_header_row(tool, Some(open), theme, view)
+pub(super) fn chip_header(
+    tool: &ToolItem,
+    thumb: Option<AnyElement>,
+    open: bool,
+    theme: &Theme,
+    view: EntityId,
+) -> gpui::Div {
+    chip_header_row(tool, thumb, Some(open), theme, view)
 }
 
 /// A plain (non-expandable) chip: guide rail + bordered card.
-pub(super) fn tool_chip(tool: &ToolItem, theme: &Theme, view: EntityId) -> AnyElement {
+pub(super) fn tool_chip(
+    tool: &ToolItem,
+    thumb: Option<AnyElement>,
+    theme: &Theme,
+    view: EntityId,
+) -> AnyElement {
     div()
         .h(px(CHIP_HEIGHT))
         .w_full()
@@ -2021,7 +2035,7 @@ pub(super) fn tool_chip(tool: &ToolItem, theme: &Theme, view: EntityId) -> AnyEl
                 .border_1()
                 .border_color(crate::kit::theme::hairline(0.07))
                 .bg(crate::kit::theme::ink(0.03))
-                .child(chip_header_row(tool, None, theme, view)),
+                .child(chip_header_row(tool, thumb, None, theme, view)),
         )
         .into_any_element()
 }
@@ -2145,7 +2159,9 @@ impl Transcript {
             .child(self.wheel_observer())
             .child(rail)
             .children(self.translation_button(window, cx))
-            .children(self.code_ref_card(window, cx));
+            .children(self.code_ref_card(window, cx))
+            .children(self.git_ref_card(window, cx))
+            .children(self.image_viewer(window, cx));
         // The shared Comment pill/editor lives in the SHELL's deferred layer
         // (paints above every clipped surface). The transcript only guards
         // liveness: a doc commit that replaced the offer's head row drops it.

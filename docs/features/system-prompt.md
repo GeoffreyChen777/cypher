@@ -27,7 +27,8 @@ shows the path). Editing the file by hand works too.
 - The app adds one more block there, from an extension it loads into every
   Pi (`crates/harness/src/pi/chat-rendering.ts`): the chat renders Markdown,
   math and Mermaid, so draw a ```` ```mermaid ```` diagram where one explains
-  better than prose, and it renders [artifacts](artifacts.md), pages written
+  better than prose; it shows images written as `![caption](path-or-url)`
+  (a local file or an https URL); and it renders [artifacts](artifacts.md), pages written
   in an ```` ```html artifact ```` fence. It ships with the app, not the
   Runtime.
 - While a chat's [session explainer](artifacts.md#the-session-explainer-explain)

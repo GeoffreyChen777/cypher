@@ -310,9 +310,10 @@ final class MermaidRenderer: NSObject, WKNavigationDelegate {
 }
 
 /// `work`'s result, or nil when `limit` passes first. The work is not
-/// cancelled (a web view call cannot be); its late result is dropped.
+/// cancelled (a web view call cannot be); its late result is dropped. Also
+/// SVGRaster's.
 @MainActor
-private func withDeadline<T>(_ limit: Duration, _ work: @escaping @MainActor () async -> T) async -> T? {
+func withDeadline<T>(_ limit: Duration, _ work: @escaping @MainActor () async -> T) async -> T? {
     let once = ResumeOnce<T?>()
     return await withCheckedContinuation { continuation in
         once.continuation = continuation
@@ -326,7 +327,7 @@ private func withDeadline<T>(_ limit: Duration, _ work: @escaping @MainActor () 
 
 /// A continuation resumed by whichever caller comes first.
 @MainActor
-private final class ResumeOnce<Value> {
+final class ResumeOnce<Value> {
     var continuation: CheckedContinuation<Value, Never>?
     func resume(_ value: sending Value) {
         continuation?.resume(returning: value)
