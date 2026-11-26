@@ -556,6 +556,10 @@ impl Composer {
         };
         self.answered_requests.insert(request_id.clone());
         self.answered_at = Some(Instant::now());
+        // A side chat's answer is no ledger command: nothing to follow.
+        if matches!(self.transport, ComposerTransport::Main) {
+            self.note_sent(Sent::Answer(request_id.clone()), cx);
+        }
         self.input_swap_instant = true;
         let placeholder = self.idle_placeholder(cx);
         self.input.update(cx, |input, cx| {
@@ -607,39 +611,30 @@ impl Composer {
                     params,
                 )
                 .await;
-            if let Err(err) = result {
-                this.update(cx, |composer, cx| {
-                    composer.failure = Some(format!("Answer failed: {err}").into());
-                    // The answer never left this device — put the panel back.
-                    composer.answered_requests.remove(&request_id);
-                    cx.notify();
-                })
-                .ok();
-                return;
-            }
-            // Safety net against a dead-looking session: the command queued,
-            // but the host may still REJECT it (e.g. the run's resolver is
-            // gone). If the very same request is still the live pending input
-            // once the host has had ample time to execute and the resolved
-            // flag to sync back, the answer demonstrably didn't take — bring
-            // the panel back instead of leaving the question unanswerable.
-            //
-            // [`WIZARD_STUCK_ANSWER_MS`], not a couple of seconds: this must
-            // never race a slow-but-healthy round trip, or the card the user
-            // just answered reappears for a moment before the resolved flag
-            // lands — the flash this whole path is trying to avoid.
-            cx.background_executor()
-                .timer(Duration::from_millis(WIZARD_STUCK_ANSWER_MS))
-                .await;
             this.update(cx, |composer, cx| {
-                let transcript = composer.state.read(cx).transcript.clone();
-                let still_pending = pending_input_request(&transcript)
-                    .is_some_and(|(pending_id, _)| pending_id == request_id);
-                // The panel lifecycle rebuilds the card from the pending
-                // request as soon as it stops being suppressed.
-                if still_pending && composer.answered_requests.remove(&request_id) {
-                    cx.notify();
+                match result {
+                    // The notices follow this command's outcome from here on
+                    // (`sent_outcome_line`): "Sending…" while the host hasn't
+                    // taken it, its reason if it turns the answer down.
+                    Ok(reply) => {
+                        if let Some(command_id) = reply["commandId"].as_str() {
+                            composer
+                                .answer_commands
+                                .insert(request_id.clone(), command_id.to_string());
+                        }
+                    }
+                    Err(err) => {
+                        composer.failure = Some(format!("Answer failed: {err}").into());
+                        // The answer never left this device — put the panel back.
+                        composer.answered_requests.remove(&request_id);
+                        if composer.sent.as_ref().map(|(sent, _)| sent)
+                            == Some(&Sent::Answer(request_id.clone()))
+                        {
+                            composer.sent = None;
+                        }
+                    }
                 }
+                cx.notify();
             })
             .ok();
         }));

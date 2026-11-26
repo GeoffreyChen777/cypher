@@ -99,12 +99,13 @@ final class SessionCommandTests: XCTestCase {
         XCTAssertNil(store.inputAnswerFailure)
     }
 
-    func testInputCommandOutcomesReadOnlySettledAnswers() {
+    func testCommandOutcomesReadAnswersAndStopsWithTheirResolution() {
         let root: [String: LoroValue] = [
             "commands": .list(value: [
                 .map(value: [
                     "id": .string(value: "c1"), "kind": .string(value: "respondInput"),
                     "status": .string(value: "rejected"),
+                    "resolution": .string(value: "no pending input request"),
                 ]),
                 .map(value: [
                     "id": .string(value: "c2"), "kind": .string(value: "respondInput"),
@@ -114,8 +115,62 @@ final class SessionCommandTests: XCTestCase {
                     "id": .string(value: "c3"), "kind": .string(value: "steer"),
                     "status": .string(value: "applied"),
                 ]),
+                .map(value: [
+                    "id": .string(value: "c4"), "kind": .string(value: "interrupt"),
+                    "status": .string(value: "applied"), "resolution": .string(value: "no live run"),
+                ]),
             ])
         ]
-        XCTAssertEqual(SessionStore.inputCommandOutcomes(root: root), ["c1": "rejected"])
+        XCTAssertEqual(
+            SessionStore.inputCommandOutcomes(root: root),
+            [
+                "c1": CommandOutcome(status: "rejected", resolution: "no pending input request"),
+                "c2": CommandOutcome(status: "pending"),
+                "c4": CommandOutcome(status: "applied", resolution: "no live run"),
+            ])
+    }
+
+    private func sentCommandId(_ store: SessionStore, kind: String) -> String? {
+        commands(store).last { $0["kind"]?.stringValue == kind }?["id"]?.stringValue
+    }
+
+    func testAnAnswerShowsItsHostOutcome() throws {
+        let store = makeStore()
+        store.setEntries([question("req-1", resolved: false)])
+        XCTAssertNil(store.sentAnswerOutcome)
+        XCTAssertTrue(store.respondInput(requestId: "req-1", answers: []))
+        let id = try XCTUnwrap(sentCommandId(store, kind: "respondInput"))
+        XCTAssertEqual(store.sentAnswerOutcome, .sending, "Not in a projection yet")
+        store.adoptCommandOutcomes([id: CommandOutcome(status: "pending")])
+        XCTAssertEqual(store.sentAnswerOutcome?.text, "Sending…")
+        // The host turns it down: the panel stays retired and says why.
+        store.adoptCommandOutcomes([
+            id: CommandOutcome(
+                status: "rejected", resolution: "the running turn is no longer waiting on this question")
+        ])
+        store.setEntries([question("req-1", resolved: false)])
+        XCTAssertNil(store.openInputRequest)
+        XCTAssertEqual(
+            store.sentOutcomeLine, "No longer waiting: the running turn is no longer waiting on this question")
+        // Applied and resolved: nothing left to say.
+        store.adoptCommandOutcomes([id: CommandOutcome(status: "applied")])
+        store.setEntries([question("req-1", resolved: true)])
+        XCTAssertEqual(store.sentAnswerOutcome, .done)
+        XCTAssertNil(store.sentOutcomeLine)
+    }
+
+    func testAStopShowsItsHostOutcomeUntilTheNextMessage() throws {
+        let store = makeStore()
+        XCTAssertTrue(store.sendInterrupt())
+        let id = try XCTUnwrap(sentCommandId(store, kind: "interrupt"))
+        XCTAssertNil(store.sentOutcomeLine, "Stopping… waits out the quiet window")
+        store.adoptCommandOutcomes([id: CommandOutcome(status: "rejected", resolution: "chat not hosted here")])
+        XCTAssertEqual(store.sentOutcomeLine, "Didn't stop: chat not hosted here")
+        store.adoptCommandOutcomes([id: CommandOutcome(status: "applied", resolution: "no live run")])
+        XCTAssertNil(store.sentOutcomeLine)
+        store.adoptCommandOutcomes([id: CommandOutcome(status: "expired")])
+        XCTAssertEqual(store.sentOutcomeLine, "Didn't stop: the Stop expired before the session took it")
+        XCTAssertTrue(store.sendSteer(prompt: "go on"))
+        XCTAssertNil(store.sentOutcomeLine, "A new message ends the line")
     }
 }

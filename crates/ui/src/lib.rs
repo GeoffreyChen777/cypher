@@ -6,6 +6,7 @@ mod appearance;
 mod artifacts;
 mod attachments;
 mod changes;
+mod command_outcome;
 mod comment_popup;
 mod composer;
 mod files;

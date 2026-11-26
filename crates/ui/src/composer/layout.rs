@@ -60,15 +60,10 @@ pub const AUTO_ADVANCE_MS: u64 = 220;
 /// that switched itself back on partway through would be the very flash this
 /// avoids.
 pub const WIZARD_HANDOFF_QUIET_MS: u64 = 1_500;
-/// A queued answer the host never applied: this long after the command was
-/// accepted, a question STILL pending is one whose answer demonstrably didn't
-/// take, so the card comes back rather than leaving it unanswerable. Set far
-/// past any follow-up stage, so an ordinary two-stage handoff never trips it.
-pub const WIZARD_STUCK_ANSWER_MS: u64 = 6_000;
-// The net exists for an answer the host dropped, never for one still in
-// flight: it must sit well outside the window in which a follow-up stage
-// legitimately arrives, or it brings back the card the user just answered.
-const _: () = assert!(WIZARD_STUCK_ANSWER_MS > WIZARD_HANDOFF_QUIET_MS);
+/// The composer's "Sending…" / "Stopping…" line waits this long after the
+/// answer or Stop went out: a host that takes it at once (the usual case)
+/// never flashes the line. What the host decided shows at once.
+pub const OUTCOME_QUIET_MS: u64 = 700;
 /// Keep a question panel with many options inside the composer instead of
 /// letting its content push past the bottom edge of the window.
 pub(super) const WIZARD_CONTENT_MAX_HEIGHT: f32 = 360.0;

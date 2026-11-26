@@ -310,6 +310,15 @@ edges; Rust runner `crates/proto/tests/plan_asks_vectors.rs`).
   journaled while the doc never stores the settle, and the closed journal hid the run
   from `recover_stale`. A fresh dispatch stamps a lost run's streaming entries too, and
   engine shutdown stores docs right after the runs settle.
+- **Clients show the outcome (2026-11-26).** An answer or Stop sent from a surface
+  shows that command's host outcome from the ledger, one rule per platform pinned by
+  `protocol/vectors/command-outcomes-v1.json` (`crates/ui/src/command_outcome.rs`
+  `answer_outcome`/`stop_outcome`, `apps/ios/Cypher/Sync/CommandOutcome.swift`):
+  "Sending…" while pending (or applied with the question not yet resolved), gone once
+  applied and resolved, "No longer waiting: <resolution>" when rejected or expired;
+  "Stopping…", then nothing once applied, "Didn't stop: <resolution>" when refused.
+  The Needs you cards, the Asking page and the composer's line read it; a turned-down
+  answer no longer brings the question panel back (the host said it isn't waiting).
 - **Coordinator.** `session_state`: a row with `asking` and an unresolved part in the doc
   is `Asking` whatever its status (Idle after a crash is no longer `Finished`).
   `wait_for_session` appends "its device is offline…" when the row's host has no fresh

@@ -457,6 +457,11 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let failure = self.failure.clone();
+        let sent_outcome = if matches!(self.transport, ComposerTransport::Main) {
+            self.sent_outcome_line(cx)
+        } else {
+            None
+        };
         let failed_delivery = if matches!(self.transport, ComposerTransport::Main) {
             self.state.read(cx).failed_commands().into_iter().next()
         } else {
@@ -482,6 +487,20 @@ impl Composer {
                 },
             ))
             .pb(px(Theme::SPACE_LG))
+            .when_some(sent_outcome, |el, line| {
+                // The host's word on the last answer or Stop: neutral ink,
+                // like every status line.
+                el.child(
+                    div()
+                        .id("composer-sent-outcome")
+                        .mt(px(6.0))
+                        .px(px(12.0))
+                        .text_size(px(12.0))
+                        .line_height(px(16.0))
+                        .text_color(theme.text_muted)
+                        .child(line),
+                )
+            })
             .when_some(failure, |el, message| {
                 el.child(failure_notice(message, theme, cx))
             });
