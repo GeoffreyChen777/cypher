@@ -1,7 +1,7 @@
 //! Image blocks in chat replies ([`Block::Image`]): the preview, the
 //! column's full width ([`super::preview_size`]: a tall one cropped to 4:5,
-//! its top kept) with its alt text as a caption, and the store of loaded
-//! images.
+//! its top kept, rounded with a hairline edge: [`picture_frame`]) with its
+//! alt text as a caption, and the store of loaded images.
 //!
 //! The store follows the diagram store ([`super::mermaid`]): a surface asks
 //! for every image a block shows before rendering it ([`request`]), with the
@@ -242,28 +242,75 @@ pub fn sources(block: &Block) -> Vec<(&str, &str)> {
     out
 }
 
-/// Content of natural size `width` × `height` filling the column by
+/// A picture of natural size `width` × `height` filling the column by
 /// [`super::preview_size`]: the frame is the column wide at the preview's
-/// aspect, the content inside it column wide at its own, its top at the
-/// frame's top (a tall one runs past the frame's bottom and is cut off
-/// there). The frame clips and rounds; style it further (click, border).
-pub fn fill_frame(width: f32, height: f32, content: AnyElement) -> gpui::Div {
+/// aspect, the picture inside it column wide at its own, its top at the
+/// frame's top (a tall one is cut off at the frame's bottom). Style the
+/// frame further (click, background, overlays).
+pub fn picture_frame(image: Arc<Image>, width: f32, height: f32) -> gpui::Div {
     let size = super::preview_size::preview_size(1.0, width, height);
     div()
         .relative()
         .w_full()
         .aspect_ratio(size.aspect())
-        .rounded(px(RADIUS))
-        .overflow_hidden()
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .w_full()
-                .aspect_ratio(size.content_aspect())
-                .child(content),
+        .child(rounded_picture(
+            image,
+            size.cropped.then(|| size.content_aspect()),
+        ))
+}
+
+/// `image` filling its box with [`RADIUS`] corners under a hairline edge:
+/// a light picture (or a cropped one's cut) still shows where it ends.
+/// `crop`: the picture's own aspect when it is taller than the box, drawn
+/// box wide from the top and cut off at the bottom.
+///
+/// The picture rounds its own corners and the edge is drawn over it: gpui
+/// clips overflow to a rectangle, so a frame's rounding never cuts its
+/// child's square corners (they showed past the border).
+pub fn rounded_picture(image: Arc<Image>, crop: Option<f32>) -> gpui::Div {
+    let picture = match crop {
+        // gpui's `img` only crops evenly (cover); painting the visible
+        // part of the fitted box keeps the top and rounds the real corners.
+        Some(aspect) => gpui::canvas(
+            |_, _, _| {},
+            move |bounds, (), window, cx| {
+                let Some(data) = image.clone().use_render_image(window, cx) else {
+                    return;
+                };
+                let fitted = gpui::Bounds {
+                    origin: bounds.origin,
+                    size: gpui::size(bounds.size.width, bounds.size.width / aspect.max(0.01)),
+                };
+                window
+                    .paint_image_fitted(
+                        bounds,
+                        fitted,
+                        gpui::Corners::all(px(RADIUS)),
+                        data,
+                        0,
+                        false,
+                    )
+                    .ok();
+            },
         )
+        .size_full()
+        .into_any_element(),
+        None => img(image)
+            .size_full()
+            .rounded(px(RADIUS))
+            .into_any_element(),
+    };
+    div().absolute().inset_0().child(picture).child(edge())
+}
+
+/// The hairline edge over a picture, at its [`RADIUS`].
+pub fn edge() -> gpui::Div {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded(px(RADIUS))
+        .border_1()
+        .border_color(hairline(0.11))
 }
 
 /// Opens the viewer for a clicked image.
@@ -354,19 +401,11 @@ pub fn render(src: &str, alt: &str, caption: bool, ctx: BlockCtx) -> AnyElement 
         Shown::Ready(loaded) => {
             let on_open = ui.on_open.clone();
             let alt: SharedString = alt.trim().to_owned().into();
-            fill_frame(
-                loaded.width,
-                loaded.height,
-                img(loaded.image.clone()).size_full().into_any_element(),
-            )
-            // A hairline edge, like the file previews': a light picture
-            // (or a cropped one's cut) still shows where it ends.
-            .border_1()
-            .border_color(hairline(0.11))
-            .id(id)
-            .cursor_pointer()
-            .on_click(move |_, window, cx| on_open(key.clone(), alt.clone(), window, cx))
-            .into_any_element()
+            picture_frame(loaded.image.clone(), loaded.width, loaded.height)
+                .id(id)
+                .cursor_pointer()
+                .on_click(move |_, window, cx| on_open(key.clone(), alt.clone(), window, cx))
+                .into_any_element()
         }
     };
     div()

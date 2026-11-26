@@ -274,6 +274,10 @@ impl Transcript {
                 .child(
                     img(loaded.image.clone())
                         .size_full()
+                        // Its own corners (the frame's 4 minus its 1px
+                        // border): the frame's rounding clips only to a
+                        // rectangle.
+                        .rounded(px(3.0))
                         .object_fit(ObjectFit::Cover),
                 )
                 .into_any_element(),

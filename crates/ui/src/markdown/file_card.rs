@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Context, EntityId, Image, SharedString, Task, Window, div, img, prelude::*, px,
+    AnyElement, App, Context, EntityId, Image, SharedString, Task, Window, div, prelude::*, px,
 };
 
 use super::file_preview::{Kind, Table};
@@ -336,13 +336,12 @@ pub fn render(src: &str, kind: Kind, ctx: BlockCtx) -> AnyElement {
                         .flex_col()
                         .gap(px(6.0))
                         .child(
-                            super::image::fill_frame(
+                            super::image::picture_frame(
+                                frame.image.clone(),
                                 frame.width,
                                 frame.height,
-                                img(frame.image.clone()).size_full().into_any_element(),
                             )
-                            .border_1()
-                            .border_color(hairline(0.11))
+                            .rounded(px(RADIUS))
                             .bg(gpui::black())
                             .children(play),
                         )
@@ -388,14 +387,12 @@ pub fn render(src: &str, kind: Kind, ctx: BlockCtx) -> AnyElement {
                             let size =
                                 super::preview_size::preview_size(1.0, page.width, page.height);
                             div()
+                                .relative()
                                 .w_full()
                                 .aspect_ratio(size.content_aspect())
                                 .rounded(px(RADIUS))
-                                .overflow_hidden()
-                                .border_1()
-                                .border_color(hairline(0.11))
                                 .bg(gpui::white())
-                                .child(img(page.image.clone()).size_full())
+                                .child(super::image::rounded_picture(page.image.clone(), None))
                         }))
                         .children(more)
                         .child(caption(&loaded, theme)),
