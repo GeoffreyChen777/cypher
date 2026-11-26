@@ -1,6 +1,6 @@
 //! Pictures the system draws for file previews ([`super::file_card`]): a
 //! PDF's first pages (PDFKit) and a video's poster frame (AVFoundation), as
-//! PNG bytes `pixels` wide — the column they fill times the window's scale
+//! PNG bytes as many pixels wide as they show at times the window's scale
 //! factor, so they are sharp there. macOS only; elsewhere every call returns
 //! `None` and the preview shows a plain chip.
 //!
@@ -12,14 +12,23 @@ pub const MAX_PIXELS: f64 = 16.0 * 1024.0 * 1024.0;
 
 /// A PDF's first pages as PNGs.
 pub struct PdfPages {
-    /// The first `max` pages (fewer when it has fewer), in order.
+    /// The first pages drawn, in order (fewer than asked when it has fewer,
+    /// or a page failed to draw).
     pub pages: Vec<Vec<u8>>,
+    /// Each drawn page's size in PDF points, as it shows (rotation applied).
+    pub sizes: Vec<(f64, f64)>,
     /// Pages the document has.
     pub count: usize,
 }
 
-/// The first `max` pages of a PDF, each a PNG `pixels` wide.
-pub fn pdf_pages(bytes: &[u8], max: usize, pixels: f64) -> Option<PdfPages> {
+/// The first `max` pages of a PDF as PNGs: `pixels` gets the aspects
+/// (width / height) of those pages and the document's page count, and
+/// says how many pixels wide to draw each (one entry per page to draw).
+pub fn pdf_pages(
+    bytes: &[u8],
+    max: usize,
+    pixels: impl FnOnce(&[f64], usize) -> Vec<f64>,
+) -> Option<PdfPages> {
     #[cfg(target_os = "macos")]
     {
         mac::pdf_pages(bytes, max, pixels)
@@ -148,7 +157,11 @@ mod mac {
         unsafe { data_bytes(png) }
     }
 
-    pub(super) fn pdf_pages(bytes: &[u8], max: usize, pixels: f64) -> Option<super::PdfPages> {
+    pub(super) fn pdf_pages(
+        bytes: &[u8],
+        max: usize,
+        pixels: impl FnOnce(&[f64], usize) -> Vec<f64>,
+    ) -> Option<super::PdfPages> {
         let doc_class = Class::get("PDFDocument")?;
         pooled(|| unsafe {
             let data: *mut Object = msg_send![
@@ -167,21 +180,37 @@ mod mac {
             if locked != NO || count == 0 {
                 return None;
             }
-            let mut pages = Vec::new();
+            let mut sizes = Vec::new();
             for ix in 0..count.min(max) {
+                match page_size(doc, ix) {
+                    Some(size) => sizes.push(size),
+                    None if ix == 0 => return None,
+                    None => break,
+                }
+            }
+            let aspects: Vec<f64> = sizes.iter().map(|(w, h)| w / h).collect();
+            let widths = pixels(&aspects, count);
+            sizes.truncate(widths.len());
+            let mut pages = Vec::new();
+            for (ix, pixels) in widths.into_iter().enumerate().take(sizes.len()) {
                 // Each page in its own pool: a bitmap per page adds up.
-                match pooled(|| page_png(doc, ix, pixels)) {
+                match pooled(|| page_png(doc, ix, sizes[ix], pixels)) {
                     Some(png) => pages.push(png),
                     None if ix == 0 => return None,
                     None => break,
                 }
             }
-            Some(super::PdfPages { pages, count })
+            sizes.truncate(pages.len());
+            Some(super::PdfPages {
+                pages,
+                sizes,
+                count,
+            })
         })
     }
 
-    /// Page `ix` of `doc` as a PNG `pixels` wide.
-    unsafe fn page_png(doc: *mut Object, ix: usize, pixels: f64) -> Option<Vec<u8>> {
+    /// Page `ix` of `doc`'s size in points as it shows (rotation applied).
+    unsafe fn page_size(doc: *mut Object, ix: usize) -> Option<(f64, f64)> {
         unsafe {
             let page: *mut Object = msg_send![doc, pageAtIndex: ix];
             if page.is_null() {
@@ -193,7 +222,20 @@ mod mac {
             if rotation % 180 != 0 {
                 std::mem::swap(&mut w, &mut h);
             }
-            if w <= 0.0 || h <= 0.0 {
+            (w > 0.0 && h > 0.0).then_some((w, h))
+        }
+    }
+
+    /// Page `ix` of `doc`, `w` × `h` points, as a PNG `pixels` wide.
+    unsafe fn page_png(
+        doc: *mut Object,
+        ix: usize,
+        (w, h): (f64, f64),
+        pixels: f64,
+    ) -> Option<Vec<u8>> {
+        unsafe {
+            let page: *mut Object = msg_send![doc, pageAtIndex: ix];
+            if page.is_null() {
                 return None;
             }
             let (width, height) = drawn_size(w, h, pixels);
@@ -315,18 +357,28 @@ mod tests {
     }
 
     #[test]
-    fn pdf_pages_draw_at_their_aspect_up_to_the_cap() {
-        let drawn = pdf_pages(&tiny_pdf(5), 3, 600.0).expect("pages");
+    fn pdf_pages_draw_at_their_aspect_and_asked_widths() {
+        let mut asked = None;
+        let drawn = pdf_pages(&tiny_pdf(5), 3, |aspects, count| {
+            asked = Some((aspects.to_vec(), count));
+            vec![600.0, 300.0, 300.0]
+        })
+        .expect("pages");
+        assert_eq!(asked, Some((vec![2.0; 3], 5)));
         assert_eq!((drawn.pages.len(), drawn.count), (3, 5));
-        for png in &drawn.pages {
+        assert_eq!(drawn.sizes, vec![(200.0, 100.0); 3]);
+        for (png, asked) in drawn.pages.iter().zip([600, 300, 300]) {
             let (w, h) = crate::files::preview::image_dims(png).expect("a png");
             assert!(w >= h * 2 - 4 && w <= h * 2 + 4, "{w}x{h}");
             // At least as wide as asked (a Retina screen may draw twice it).
-            assert!(w >= 596, "{w}x{h}");
+            assert!(w >= asked - 4, "{w}x{h}");
         }
-        let one = pdf_pages(&tiny_pdf(1), 3, 300.0).expect("a page");
+        // Fewer widths than pages: only those draw.
+        let two = pdf_pages(&tiny_pdf(5), 4, |_, _| vec![300.0; 2]).expect("pages");
+        assert_eq!((two.pages.len(), two.sizes.len(), two.count), (2, 2, 5));
+        let one = pdf_pages(&tiny_pdf(1), 3, |_, _| vec![300.0]).expect("a page");
         assert_eq!((one.pages.len(), one.count), (1, 1));
-        assert!(pdf_pages(b"not a pdf", 3, 600.0).is_none());
+        assert!(pdf_pages(b"not a pdf", 3, |_, _| vec![600.0]).is_none());
     }
 
     #[test]

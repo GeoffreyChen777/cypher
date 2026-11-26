@@ -26,7 +26,7 @@ use crate::markdown::file_thumb;
 use crate::markdown::image::Key;
 use crate::markdown::image_source;
 use crate::markdown::parser::{ArtifactKind, Block};
-use crate::markdown::preview_size::PDF_PAGES;
+use crate::markdown::preview_size;
 
 use super::Transcript;
 
@@ -68,6 +68,7 @@ impl Transcript {
         let scope = self.image_scope(cx);
         let entity = cx.weak_entity();
         FilePreviewUi {
+            column: self.preview_column(cx),
             scope,
             on_open: Rc::new(move |key: Key, window: &mut Window, cx: &mut App| {
                 let Shown::Ready(loaded) = file_card::lookup(&key) else {
@@ -159,7 +160,6 @@ impl Transcript {
         scale: f32,
         cx: &mut Context<Self>,
     ) -> Task<Result<Loaded, SharedString>> {
-        let pixels = f64::from(width * scale.max(1.0));
         let state = self.state.read(cx);
         let contexts = crate::files::link_contexts(state);
         let engine = state.engine().cloned();
@@ -243,7 +243,7 @@ impl Transcript {
                 let local = place.local.clone();
                 let body = cx
                     .background_executor()
-                    .spawn(async move { body(kind, bytes, size, local.as_deref(), pixels) })
+                    .spawn(async move { body(kind, bytes, size, local.as_deref(), width, scale) })
                     .await;
                 let sharp_to = match body {
                     Body::Frame(_) | Body::Pages { .. } => width,
@@ -276,14 +276,17 @@ fn sources<'a>(block: &'a Block, out: &mut Vec<(&'a str, Kind)>) {
 
 /// What a read file shows (off the UI thread): `bytes` is what was read of
 /// it, `size` its whole size, `local` the file on this device; pages and
-/// frames draw `pixels` wide.
+/// frames draw sharp for a column up to `width` points at `scale`.
 fn body(
     kind: Kind,
     bytes: Vec<u8>,
     size: u64,
     local: Option<&std::path::Path>,
-    pixels: f64,
+    width: f32,
+    scale: f32,
 ) -> Body {
+    let scale = f64::from(scale.max(1.0));
+    let pixels = f64::from(width) * scale;
     match kind {
         Kind::Csv | Kind::Tsv => {
             let delimiter = kind.delimiter().unwrap_or(',');
@@ -294,10 +297,32 @@ fn body(
             )))
         }
         Kind::Pdf => {
-            let Some(drawn) = file_thumb::pdf_pages(&bytes, PDF_PAGES, pixels) else {
+            // Each page as wide as it gets in any row up to this column.
+            let drawn =
+                file_thumb::pdf_pages(&bytes, preview_size::PDF_ROW_MAX, |aspects, count| {
+                    let aspects: Vec<f32> = aspects.iter().map(|a| *a as f32).collect();
+                    preview_size::pdf_draw_widths(width, &aspects, count)
+                        .into_iter()
+                        .map(|points| f64::from(points) * scale)
+                        .collect()
+                });
+            let Some(drawn) = drawn else {
                 return Body::Plain;
             };
-            let pages: Vec<Picture> = drawn.pages.into_iter().map_while(picture).collect();
+            // A page's shape is its own size in points, not its bitmap's
+            // (rounded to whole pixels).
+            let pages: Vec<Picture> = drawn
+                .pages
+                .into_iter()
+                .zip(drawn.sizes)
+                .map_while(|(png, (w, h))| {
+                    picture(png).map(|picture| Picture {
+                        width: w as f32,
+                        height: h as f32,
+                        ..picture
+                    })
+                })
+                .collect();
             if pages.is_empty() {
                 return Body::Plain;
             }
@@ -380,14 +405,20 @@ mod tests {
 
     #[test]
     fn a_table_counts_its_rows_as_read() {
-        let Body::Table(table) = body(Kind::Csv, b"a,b\n1,2\n3,4\n".to_vec(), 12, None, 600.0)
+        let Body::Table(table) = body(Kind::Csv, b"a,b\n1,2\n3,4\n".to_vec(), 12, None, 600.0, 2.0)
         else {
             panic!("a table");
         };
         assert_eq!(table.count_label(), "2 rows");
         // Only the head was read: the last record may be cut, so it goes.
-        let Body::Table(table) = body(Kind::Tsv, b"a\tb\n1\t2\n3\t".to_vec(), 4096, None, 600.0)
-        else {
+        let Body::Table(table) = body(
+            Kind::Tsv,
+            b"a\tb\n1\t2\n3\t".to_vec(),
+            4096,
+            None,
+            600.0,
+            2.0,
+        ) else {
             panic!("a table");
         };
         assert_eq!(table.count_label(), "1+ rows");
@@ -396,7 +427,7 @@ mod tests {
     #[test]
     fn pages_carry_their_title_and_source() {
         let html = b"<html><title>Q3 report</title><body>hi</body></html>".to_vec();
-        let Body::Page { title, code } = body(Kind::Html, html, 52, None, 600.0) else {
+        let Body::Page { title, code } = body(Kind::Html, html, 52, None, 600.0, 2.0) else {
             panic!("a page");
         };
         assert_eq!(title.as_deref(), Some("Q3 report"));
@@ -407,11 +438,11 @@ mod tests {
     fn no_picture_reads_as_plain() {
         assert!(picture(b"not a png".to_vec()).is_none());
         assert!(matches!(
-            body(Kind::Video, vec![0], 10, None, 600.0),
+            body(Kind::Video, vec![0], 10, None, 600.0, 2.0),
             Body::Plain
         ));
         assert!(matches!(
-            body(Kind::Pdf, b"not a pdf".to_vec(), 9, None, 600.0),
+            body(Kind::Pdf, b"not a pdf".to_vec(), 9, None, 600.0, 2.0),
             Body::Plain
         ));
     }

@@ -1228,13 +1228,17 @@
     }
   ],
   "sizing": {
-    "description": "How big every visual preview in a chat reply is (Markdown and inline images, image file references, SVG, a PDF's pages, a video's frame), shared by the desktop (crates/ui/src/markdown/preview_size.rs) and iOS; the same section is in image-sources-v1.json and file-previews-v1.json. Not covered: tool-row thumbnails, csv/tsv tables and the html page card (a full-width row). All lengths are logical points (no pixel scale); expected values are exact up to 4 decimals: compare within 0.01 (a platform may snap to its pixel grid when drawing). `previewSize(column, natural)`: `column` is the reply column's width, `natural` the content's natural size (only its aspect matters). The preview is always `column` wide (a small image or an SVG is upscaled). `contentHeight` = column * natural.height / natural.width, the height the whole content draws at. When contentHeight <= column * caps.crop.height / caps.crop.width (landscape, square, up to exactly 4:5) the preview shows it whole: height = contentHeight, cropped = false. Taller: height = column * crop.height / crop.width and cropped = true: the content still draws column wide and contentHeight tall, its top edge at the preview's top (horizontally it fills the width, so it is centred), and the part below the preview is cut off; a click still opens the whole thing. A natural or column size that is not positive shows nothing (all zero). PDF: its pages stack at full width, each `column` wide and `contentHeight` of its own size tall, never cropped. `pdf` cases: `pdfPages(pages)` -> `shown` = min(pages, caps.pdfPages) pages, `more` = the rest, and when more > 0 a row below them reading `label` (\"1 more page\", else \"N more pages\") that opens the file; `label` is null when more = 0.",
+    "description": "How big every visual preview in a chat reply is (Markdown and inline images, image file references, SVG, a PDF's pages, a video's frame), shared by the desktop (crates/ui/src/markdown/preview_size.rs) and iOS; the same section is in image-sources-v1.json and file-previews-v1.json. Not covered: tool-row thumbnails, csv/tsv tables and the html page card (a full-width row). All lengths are logical points (no pixel scale); expected values are exact up to 4 decimals: compare within 0.01 (a platform may snap to its pixel grid when drawing). `previewSize(column, natural)`: `column` is the reply column's width, `natural` the content's natural size (only its aspect matters). The preview is always `column` wide (a small image or an SVG is upscaled). `contentHeight` = column * natural.height / natural.width, the height the whole content draws at. When contentHeight <= column * caps.crop.height / caps.crop.width (landscape, square, up to exactly 4:5) the preview shows it whole: height = contentHeight, cropped = false. Taller: height = column * crop.height / crop.width and cropped = true: the content still draws column wide and contentHeight tall, its top edge at the preview's top (horizontally it fills the width, so it is centred), and the part below the preview is cut off; a click still opens the whole thing. A natural or column size that is not positive shows nothing (all zero). PDF (`pdfRow` cases): `pdfRow(column, aspects, pages)` lays a PDF's first pages side by side in one row. `pages` is the page count; `aspects` the width / height of its first pages in order (at least min(pages, caps.pdfRow.maxPages) of them; fewer when only those are known; a non-positive one ends the list). Let max = min(pages, aspects known, caps.pdfRow.maxPages). For n from max down to 2: the row's shared height h = (column - (n - 1) * caps.pdfRow.gap) / (aspects[0] + ... + aspects[n-1]) and page i is h * aspects[i] wide, so the row fills the column exactly; pick the first (largest) n where every page is at least caps.pdfRow.minPageWidth - 0.001 wide. Pages in a row are never cropped (cropped = false, contentHeight = height). When no n >= 2 fits, one page shows like an image: previewSize(column, aspects[0] x 1), i.e. column wide, cropped to 4:5 with its top kept when taller; `height`, `cropped` and `contentHeight` are that page's. `expect`: `shown` = n, `height` the shared height, `widths` each shown page's width in order, `cropped`/`contentHeight` of the first page, `hidden` = pages - n, and `badge` = \"+<hidden>\" (a neutral badge on the last shown page) when hidden > 0, else null. A click on any page opens the file. Nothing shows (all zero, no badge) when column <= 0 or max = 0. The desktop draws each page's bitmap at the widest it can be in any column up to the drawn one; that is a drawing detail, not part of the shared rule.",
     "caps": {
       "crop": {
         "width": 4,
         "height": 5
       },
-      "pdfPages": 3
+      "pdfRow": {
+        "maxPages": 4,
+        "minPageWidth": 150,
+        "gap": 8
+      }
     },
     "cases": [
       {
@@ -1364,7 +1368,7 @@
         }
       },
       {
-        "name": "a US Letter PDF page (portrait, but pages are never cropped: use contentHeight)",
+        "name": "a US Letter page is cropped to 4:5, the top kept (a one-page PDF shows like this)",
         "column": 600,
         "natural": {
           "width": 612,
@@ -1406,50 +1410,300 @@
         }
       }
     ],
-    "pdf": [
+    "pdfRow": [
       {
-        "name": "0 pages",
-        "pages": 0,
-        "expect": {
-          "shown": 0,
-          "more": 0,
-          "label": null
-        }
-      },
-      {
-        "name": "1 page",
+        "name": "1 page shows like an image: column wide, a Letter page cropped to 4:5",
+        "column": 600,
         "pages": 1,
+        "aspects": [
+          0.7727
+        ],
         "expect": {
           "shown": 1,
-          "more": 0,
-          "label": null
+          "height": 750.0,
+          "widths": [
+            600
+          ],
+          "cropped": true,
+          "contentHeight": 776.498,
+          "hidden": 0,
+          "badge": null
         }
       },
       {
-        "name": "3 pages",
+        "name": "2 pages side by side, one height, filling the column",
+        "column": 600,
+        "pages": 2,
+        "aspects": [
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 2,
+          "height": 383.0723,
+          "widths": [
+            296.0,
+            296.0
+          ],
+          "cropped": false,
+          "contentHeight": 383.0723,
+          "hidden": 0,
+          "badge": null
+        }
+      },
+      {
+        "name": "3 pages side by side",
+        "column": 600,
         "pages": 3,
+        "aspects": [
+          0.7727,
+          0.7727,
+          0.7727
+        ],
         "expect": {
           "shown": 3,
-          "more": 0,
-          "label": null
+          "height": 251.9305,
+          "widths": [
+            194.6667,
+            194.6667,
+            194.6667
+          ],
+          "cropped": false,
+          "contentHeight": 251.9305,
+          "hidden": 0,
+          "badge": null
         }
       },
       {
-        "name": "4 pages",
+        "name": "10 pages in a 600 column: 4 would be under 150 wide, so 3 and +7",
+        "column": 600,
+        "pages": 10,
+        "aspects": [
+          0.7727,
+          0.7727,
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 3,
+          "height": 251.9305,
+          "widths": [
+            194.6667,
+            194.6667,
+            194.6667
+          ],
+          "cropped": false,
+          "contentHeight": 251.9305,
+          "hidden": 7,
+          "badge": "+7"
+        }
+      },
+      {
+        "name": "10 pages in a desktop 640 column: 4 pages and +6",
+        "column": 640,
+        "pages": 10,
+        "aspects": [
+          0.7727,
+          0.7727,
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 4,
+          "height": 199.3012,
+          "widths": [
+            154.0,
+            154.0,
+            154.0,
+            154.0
+          ],
+          "cropped": false,
+          "contentHeight": 199.3012,
+          "hidden": 6,
+          "badge": "+6"
+        }
+      },
+      {
+        "name": "a narrow 340 column fits 2 pages, +1",
+        "column": 340,
+        "pages": 3,
+        "aspects": [
+          0.7727,
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 2,
+          "height": 214.8311,
+          "widths": [
+            166.0,
+            166.0
+          ],
+          "cropped": false,
+          "contentHeight": 214.8311,
+          "hidden": 1,
+          "badge": "+1"
+        }
+      },
+      {
+        "name": "a phone 343 column, 10 pages: 2 and +8",
+        "column": 343,
+        "pages": 10,
+        "aspects": [
+          0.7727,
+          0.7727,
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 2,
+          "height": 216.7724,
+          "widths": [
+            167.5,
+            167.5
+          ],
+          "cropped": false,
+          "contentHeight": 216.7724,
+          "hidden": 8,
+          "badge": "+8"
+        }
+      },
+      {
+        "name": "mixed aspects: a portrait and a landscape page share one height",
+        "column": 600,
+        "pages": 2,
+        "aspects": [
+          0.7727,
+          1.2941
+        ],
+        "expect": {
+          "shown": 2,
+          "height": 286.4331,
+          "widths": [
+            221.3269,
+            370.6731
+          ],
+          "cropped": false,
+          "contentHeight": 286.4331,
+          "hidden": 0,
+          "badge": null
+        }
+      },
+      {
+        "name": "mixed aspects: a wide page would leave the portrait ones under 150, so 2 and +2",
+        "column": 600,
         "pages": 4,
+        "aspects": [
+          0.7727,
+          2.0,
+          0.7727,
+          0.7727
+        ],
         "expect": {
-          "shown": 3,
-          "more": 1,
-          "label": "1 more page"
+          "shown": 2,
+          "height": 213.5103,
+          "widths": [
+            164.9794,
+            427.0206
+          ],
+          "cropped": false,
+          "contentHeight": 213.5103,
+          "hidden": 2,
+          "badge": "+2"
         }
       },
       {
-        "name": "7 pages",
-        "pages": 7,
+        "name": "too narrow for 2 pages: 1 shown like an image, +1",
+        "column": 280,
+        "pages": 2,
+        "aspects": [
+          0.7727,
+          0.7727
+        ],
         "expect": {
-          "shown": 3,
-          "more": 4,
-          "label": "4 more pages"
+          "shown": 1,
+          "height": 350.0,
+          "widths": [
+            280
+          ],
+          "cropped": true,
+          "contentHeight": 362.3657,
+          "hidden": 1,
+          "badge": "+1"
+        }
+      },
+      {
+        "name": "only the aspects known count: 2 drawn of 6 pages, 2 and +4",
+        "column": 640,
+        "pages": 6,
+        "aspects": [
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 2,
+          "height": 408.9556,
+          "widths": [
+            316.0,
+            316.0
+          ],
+          "cropped": false,
+          "contentHeight": 408.9556,
+          "hidden": 4,
+          "badge": "+4"
+        }
+      },
+      {
+        "name": "a landscape single page is not cropped",
+        "column": 600,
+        "pages": 1,
+        "aspects": [
+          1.2941
+        ],
+        "expect": {
+          "shown": 1,
+          "height": 463.6427,
+          "widths": [
+            600
+          ],
+          "cropped": false,
+          "contentHeight": 463.6427,
+          "hidden": 0,
+          "badge": null
+        }
+      },
+      {
+        "name": "0 pages shows nothing",
+        "column": 600,
+        "pages": 0,
+        "aspects": [],
+        "expect": {
+          "shown": 0,
+          "height": 0,
+          "widths": [],
+          "cropped": false,
+          "contentHeight": 0,
+          "hidden": 0,
+          "badge": null
+        }
+      },
+      {
+        "name": "no column shows nothing",
+        "column": 0,
+        "pages": 3,
+        "aspects": [
+          0.7727,
+          0.7727,
+          0.7727
+        ],
+        "expect": {
+          "shown": 0,
+          "height": 0,
+          "widths": [],
+          "cropped": false,
+          "contentHeight": 0,
+          "hidden": 0,
+          "badge": null
         }
       }
     ]

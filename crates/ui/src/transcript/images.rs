@@ -79,6 +79,11 @@ impl Transcript {
     /// [`PREVIEW_WIDTH_STEP`]: what an SVG, a PDF page or a video frame is
     /// drawn for (a column grown past it draws them again).
     pub(super) fn preview_width(&self, cx: &gpui::App) -> f32 {
+        preview_step(self.preview_column(cx))
+    }
+
+    /// The reply column's width that previews fill (points).
+    pub(super) fn preview_column(&self, cx: &gpui::App) -> f32 {
         let gutter = if self.embedded { 14.0 } else { 48.0 };
         let tile = self
             .viewport_size
@@ -88,7 +93,7 @@ impl Transcript {
         if !crate::appearance::chat_style::settings(cx).wide {
             column = column.min(super::MAX_CONTENT_WIDTH);
         }
-        preview_step(column)
+        column
     }
 
     pub(super) fn image_scope(&self, cx: &Context<Self>) -> SharedString {

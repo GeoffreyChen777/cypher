@@ -1,7 +1,8 @@
 //! File preview blocks in chat replies ([`Block::FilePreview`]): a paragraph
 //! that is only a path to a csv/tsv, pdf, video or html file
 //! ([`super::file_preview`]). A table shows its first rows, a PDF its first
-//! pages and a video a poster frame (macOS), each the column's full width
+//! pages side by side in one row ([`super::preview_size::pdf_row`]) and a
+//! video a poster frame (macOS), each the column's full width
 //! ([`super::preview_size`]), an html page a full-width card that opens it
 //! in the artifact viewer. Anything that can't show reads as a neutral chip
 //! saying why.
@@ -28,15 +29,14 @@ use crate::kit::icons::{self, icon};
 use crate::kit::theme::{MonoStyled as _, hairline, ink};
 
 const RADIUS: f32 = 8.0;
-/// Space between a PDF's stacked pages.
-const PAGE_GAP: f32 = 8.0;
 /// Pixel width a cell's character takes in the table's monospace face.
 const CHAR_W: f32 = 7.0;
 const MAX_READY: usize = 32;
 const RETRY_AFTER: Duration = Duration::from_secs(20);
 
-/// A drawn page or frame and its pixel size (only its aspect matters: it
-/// shows column wide).
+/// A drawn page or frame and its size (only its aspect matters: it shows
+/// as wide as its layout makes it): a frame's in pixels, a PDF page's in
+/// PDF points.
 #[derive(Clone)]
 pub struct Picture {
     pub image: Arc<Image>,
@@ -50,7 +50,8 @@ pub enum Body {
     Table(Arc<Table>),
     /// A video's frame, sized like an image (a tall one cropped).
     Frame(Picture),
-    /// A PDF's first pages, stacked uncropped, and how many it has.
+    /// A PDF's first pages (as many as its widest row shows), and how many
+    /// it has.
     Pages {
         pages: Vec<Picture>,
         count: usize,
@@ -246,6 +247,9 @@ pub type OpenHandler = Rc<dyn Fn(Key, &mut Window, &mut App)>;
 pub struct FilePreviewUi {
     pub scope: SharedString,
     pub on_open: OpenHandler,
+    /// The reply column's width (points): how many of a PDF's pages fit
+    /// side by side ([`super::preview_size::pdf_row`]).
+    pub column: f32,
 }
 
 /// The file name a source shows.
@@ -349,56 +353,16 @@ pub fn render(src: &str, kind: Kind, ctx: BlockCtx) -> AnyElement {
                 )
                 .into_any_element()
             }
-            Body::Pages { pages, count } => {
-                let (_, more) = super::preview_size::pdf_pages(*count);
-                let more = super::preview_size::more_pages_label(more).map(|label| {
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(6.0))
-                        .px(px(10.0))
-                        .py(px(7.0))
-                        .rounded(px(RADIUS))
-                        .border_1()
-                        .border_color(hairline(0.11))
-                        .bg(ink(0.02))
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
-                        .text_color(theme.text_muted)
-                        .child(
-                            icon(icons::DOCUMENT)
-                                .size(px(14.0))
-                                .flex_none()
-                                .text_color(theme.text_muted),
-                        )
-                        .child(SharedString::from(label))
-                });
-                clickable(
-                    div()
-                        .id(id)
-                        .flex()
-                        .flex_col()
-                        .gap(px(PAGE_GAP))
-                        .children(pages.iter().map(|page| {
-                            // A page shows whole: column wide at its aspect.
-                            let size =
-                                super::preview_size::preview_size(1.0, page.width, page.height);
-                            div()
-                                .relative()
-                                .w_full()
-                                .aspect_ratio(size.content_aspect())
-                                .rounded(px(RADIUS))
-                                .bg(gpui::white())
-                                .child(super::image::rounded_picture(page.image.clone(), None))
-                        }))
-                        .children(more)
-                        .child(caption(&loaded, theme)),
-                )
-                .into_any_element()
-            }
+            Body::Pages { pages, count } => clickable(
+                div()
+                    .id(id)
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(pdf_row(pages, *count, ui.column))
+                    .child(caption(&loaded, theme)),
+            )
+            .into_any_element(),
             Body::Page { title, .. } => {
                 let title = title.clone().unwrap_or_else(|| loaded.name.clone());
                 clickable(
@@ -440,6 +404,62 @@ pub fn render(src: &str, kind: Kind, ctx: BlockCtx) -> AnyElement {
             }
         },
     }
+}
+
+/// A PDF's pages side by side ([`super::preview_size::pdf_row`]): one
+/// height, filling the column, each rounded under a hairline edge on white;
+/// pages left over as a "+N" badge on the last one. A single page shows
+/// like an image (cropped to 4:5, its top kept).
+fn pdf_row(pages: &[Picture], count: usize, column: f32) -> gpui::Div {
+    let aspects: Vec<f32> = pages.iter().map(|page| page.width / page.height).collect();
+    let row = super::preview_size::pdf_row(column, &aspects, count);
+    let badge = row.badge();
+    let last = row.shown().saturating_sub(1);
+    let page_box = |ix: usize, size: &super::preview_size::PreviewSize| {
+        let page = &pages[ix];
+        let badge = (ix == last).then(|| badge.clone()).flatten().map(|label| {
+            div()
+                .absolute()
+                .right(px(8.0))
+                .bottom(px(8.0))
+                .px(px(8.0))
+                .py(px(2.0))
+                .rounded_full()
+                // Neutral ink on any page, light or dark mode: the page
+                // itself is always drawn on white.
+                .bg(gpui::black().opacity(0.6))
+                .text_size(px(12.0))
+                .line_height(px(16.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(gpui::white())
+                .child(SharedString::from(label))
+        });
+        div()
+            .relative()
+            .min_w_0()
+            .aspect_ratio(size.aspect())
+            .rounded(px(RADIUS))
+            .bg(gpui::white())
+            .child(super::image::rounded_picture(
+                page.image.clone(),
+                size.cropped.then(|| size.content_aspect()),
+            ))
+            .children(badge)
+    };
+    if row.shown() == 1 {
+        return div().w_full().child(page_box(0, &row.pages[0]).w_full());
+    }
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .gap(px(super::preview_size::PDF_GAP))
+        .children(
+            row.pages
+                .iter()
+                .enumerate()
+                .map(|(ix, size)| page_box(ix, size).w(px(size.width))),
+        )
 }
 
 fn card_frame() -> gpui::Div {
