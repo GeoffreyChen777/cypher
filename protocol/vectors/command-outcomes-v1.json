@@ -1,0 +1,36 @@
+{
+  "about": "What a client shows for a question it answered or a Stop it sent, from that command's host outcome in the doc's ledger (crates/ui/src/command_outcome.rs: answer_outcome, stop_outcome). `answer`: `sent` = this client sent an answer to the question; `status`/`resolution` = that command's ledger entry (status null: not in the ledger yet); `resolved` = the question's part is resolved. `stop`: the Stop command this client sent. `expect.text` is the line shown (null: nothing). The iPhone twin (apps/ios/Cypher/Sync/CommandOutcome.swift, CommandOutcomeTests) runs these too.",
+  "answer": [
+    { "name": "not answered here, open", "sent": false, "status": null, "resolution": null, "resolved": false, "expect": { "state": "open", "text": null } },
+    { "name": "not answered here, resolved elsewhere", "sent": false, "status": null, "resolution": null, "resolved": true, "expect": { "state": "done", "text": null } },
+    { "name": "sent, not in the ledger yet", "sent": true, "status": null, "resolution": null, "resolved": false, "expect": { "state": "sending", "text": "Sending…" } },
+    { "name": "sent, resolved before the ledger shows it", "sent": true, "status": null, "resolution": null, "resolved": true, "expect": { "state": "done", "text": null } },
+    { "name": "pending", "sent": true, "status": "pending", "resolution": null, "resolved": false, "expect": { "state": "sending", "text": "Sending…" } },
+    { "name": "pending while another client's answer resolved it", "sent": true, "status": "pending", "resolution": null, "resolved": true, "expect": { "state": "sending", "text": "Sending…" } },
+    { "name": "applied, resolution still syncing", "sent": true, "status": "applied", "resolution": null, "resolved": false, "expect": { "state": "sending", "text": "Sending…" } },
+    { "name": "applied and resolved", "sent": true, "status": "applied", "resolution": null, "resolved": true, "expect": { "state": "done", "text": null } },
+    { "name": "applied as the next turn", "sent": true, "status": "applied", "resolution": "answered as new turn", "resolved": true, "expect": { "state": "done", "text": null } },
+    { "name": "rejected: answered twice", "sent": true, "status": "rejected", "resolution": "no pending input request", "resolved": true, "expect": { "state": "noLongerWaiting", "text": "No longer waiting: no pending input request" } },
+    { "name": "rejected: the live run stopped waiting", "sent": true, "status": "rejected", "resolution": "the running turn is no longer waiting on this question", "resolved": false, "expect": { "state": "noLongerWaiting", "text": "No longer waiting: the running turn is no longer waiting on this question" } },
+    { "name": "rejected: a subagent's question", "sent": true, "status": "rejected", "resolution": "the subagent's question is no longer pending", "resolved": true, "expect": { "state": "noLongerWaiting", "text": "No longer waiting: the subagent's question is no longer pending" } },
+    { "name": "rejected: no run config", "sent": true, "status": "rejected", "resolution": "no pending input request and no prior run config", "resolved": false, "expect": { "state": "noLongerWaiting", "text": "No longer waiting: no pending input request and no prior run config" } },
+    { "name": "rejected without a resolution", "sent": true, "status": "rejected", "resolution": null, "resolved": false, "expect": { "state": "noLongerWaiting", "text": "No longer waiting: the session didn't take the answer" } },
+    { "name": "rejected with a blank resolution", "sent": true, "status": "rejected", "resolution": "  ", "resolved": false, "expect": { "state": "noLongerWaiting", "text": "No longer waiting: the session didn't take the answer" } },
+    { "name": "resolution trimmed", "sent": true, "status": "rejected", "resolution": " no pending input request\n", "resolved": false, "expect": { "state": "noLongerWaiting", "text": "No longer waiting: no pending input request" } },
+    { "name": "expired without a resolution", "sent": true, "status": "expired", "resolution": null, "resolved": false, "expect": { "state": "noLongerWaiting", "text": "No longer waiting: the answer expired before the session took it" } },
+    { "name": "expired with a resolution", "sent": true, "status": "expired", "resolution": "expired", "resolved": false, "expect": { "state": "noLongerWaiting", "text": "No longer waiting: expired" } },
+    { "name": "superseded", "sent": true, "status": "superseded", "resolution": null, "resolved": false, "expect": { "state": "noLongerWaiting", "text": "No longer waiting: the session didn't take the answer" } }
+  ],
+  "stop": [
+    { "name": "not in the ledger yet", "status": null, "resolution": null, "expect": { "state": "stopping", "text": "Stopping…" } },
+    { "name": "pending", "status": "pending", "resolution": null, "expect": { "state": "stopping", "text": "Stopping…" } },
+    { "name": "applied to a live run", "status": "applied", "resolution": null, "expect": { "state": "done", "text": null } },
+    { "name": "applied with no live run", "status": "applied", "resolution": "no live run", "expect": { "state": "done", "text": null } },
+    { "name": "applied, settled a lost run", "status": "applied", "resolution": "no live run; settled 1 streaming entry, closed 1 question", "expect": { "state": "done", "text": null } },
+    { "name": "superseded: its turn already ended", "status": "superseded", "resolution": null, "expect": { "state": "done", "text": null } },
+    { "name": "rejected", "status": "rejected", "resolution": "chat not hosted here", "expect": { "state": "refused", "text": "Didn't stop: chat not hosted here" } },
+    { "name": "rejected without a resolution", "status": "rejected", "resolution": null, "expect": { "state": "refused", "text": "Didn't stop: the session didn't take the Stop" } },
+    { "name": "expired without a resolution", "status": "expired", "resolution": null, "expect": { "state": "refused", "text": "Didn't stop: the Stop expired before the session took it" } },
+    { "name": "expired with a resolution", "status": "expired", "resolution": "expired", "expect": { "state": "refused", "text": "Didn't stop: expired" } }
+  ]
+}

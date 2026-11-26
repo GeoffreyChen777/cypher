@@ -596,6 +596,15 @@ fn slash_error_message(err: &RpcError) -> SharedString {
     }
 }
 
+/// An answer or Stop the composer sent, for the line that shows its outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Sent {
+    /// An answer to this request (its command id in `answer_commands`).
+    Answer(String),
+    /// A Stop, as this command (`None` until the queue call answers).
+    Stop(Option<String>),
+}
+
 pub struct Composer {
     /// A style change needs fresh child measurements, then one pass after a
     /// possible compact/expanded flip. Never depend on typing to finish sizing.
@@ -670,8 +679,15 @@ pub struct Composer {
     /// option copy select + copy like transcript text).
     wizard_selection: crate::markdown::selection::SelectionScope,
     /// Requests already answered locally (suppresses the panel until the doc
-    /// frame marks them resolved).
+    /// frame marks them resolved, or for good once the host turns the
+    /// answer down: `command_outcome::answer_outcome`).
     answered_requests: HashSet<String>,
+    /// The `RespondInput` command each answer above went out as.
+    answer_commands: HashMap<String, String>,
+    /// The last answer or Stop sent from here: the notices show its host
+    /// outcome until the next send or chat switch.
+    sent: Option<(Sent, Instant)>,
+    sent_quiet: Option<Task<()>>,
     advance_task: Option<Task<()>>,
     /// When the last answer went out. A card mounting within
     /// [`WIZARD_HANDOFF_QUIET_MS`] of it is the follow-up stage, and swaps in
@@ -754,6 +770,49 @@ struct CommentEdit {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
+    /// What came of the last answer or Stop sent from here, as the notices'
+    /// line (`command_outcome`): `None` once it took effect. "Sending…" and
+    /// "Stopping…" wait out [`OUTCOME_QUIET_MS`]; a refusal shows at once.
+    fn sent_outcome_line(&self, cx: &App) -> Option<SharedString> {
+        use crate::command_outcome::{Outcome, answer_outcome, stop_outcome};
+        let (sent, at) = self.sent.as_ref()?;
+        let state = self.state.read(cx);
+        let commands = state.commands();
+        let (text, in_flight) = match sent {
+            Sent::Answer(request_id) => {
+                let outcome = Outcome::of(
+                    commands,
+                    self.answer_commands.get(request_id).map(String::as_str),
+                );
+                let resolved = input_request_resolved(&state.transcript, request_id);
+                let shown = answer_outcome(Some(outcome), resolved);
+                let in_flight = shown == crate::command_outcome::AnswerOutcome::Sending;
+                (shown.text()?, in_flight)
+            }
+            Sent::Stop(command_id) => {
+                let shown = stop_outcome(Outcome::of(commands, command_id.as_deref()));
+                let in_flight = shown == crate::command_outcome::StopOutcome::Stopping;
+                (shown.text()?, in_flight)
+            }
+        };
+        if in_flight && at.elapsed() < Duration::from_millis(OUTCOME_QUIET_MS) {
+            return None;
+        }
+        Some(text.into())
+    }
+
+    /// Note an answer or Stop just sent, and repaint once its quiet window
+    /// is over so a slow host's "Sending…" appears.
+    fn note_sent(&mut self, sent: Sent, cx: &mut Context<Self>) {
+        self.sent = Some((sent, Instant::now()));
+        self.sent_quiet = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(OUTCOME_QUIET_MS))
+                .await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        }));
+    }
+
     pub fn report_error(&mut self, message: String, cx: &mut Context<Self>) {
         self.failure = Some(message.into());
         cx.notify();
@@ -997,6 +1056,9 @@ impl Composer {
             wizard_focus_pending: false,
             wizard_selection: crate::markdown::selection::next_question_scope(),
             answered_requests: HashSet::new(),
+            answer_commands: HashMap::new(),
+            sent: None,
+            sent_quiet: None,
             advance_task: None,
             answered_at: None,
             input_swap_instant: false,

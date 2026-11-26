@@ -20,6 +20,7 @@ use super::board::{card_corner, card_glyph, card_item};
 use super::items::ago;
 use super::panel::{PanelHead, PanelItem};
 use super::*;
+use crate::command_outcome::{AnswerOutcome, Outcome, answer_outcome};
 use crate::composer::permission_card::{self, FactKind, OptionRole};
 use crate::kit::theme::MonoStyled;
 use cypher_proto::{NeedsYou, UserInputQuestion};
@@ -492,12 +493,38 @@ fn card_copy(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
 /// answered once the device is back (docs/design/plan-asks.md).
 const WAITING_FOR_DEVICE: &str = "Waiting for its device";
 
-fn card_note(text: &'static str, theme: &Theme) -> gpui::Div {
+fn card_note(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
     div()
         .mt(px(8.0))
         .text_size(px(12.0))
         .text_color(theme.text_muted)
-        .child(text)
+        .child(text.into())
+}
+
+/// The prompt of the question `request_id` names in a transcript, resolved
+/// or not.
+fn input_prompt(
+    transcript: &[cypher_doc::SessionMessageEntry],
+    request_id: &str,
+) -> Option<String> {
+    transcript.iter().rev().find_map(|entry| {
+        entry.parts.iter().find_map(|part| match part {
+            cypher_doc::MessagePart::Input {
+                request_id: rid,
+                questions,
+                ..
+            } if rid == request_id => questions.first().map(question_text),
+            _ => None,
+        })
+    })
+}
+
+/// A question answered from a Needs you card: in which chat, and as which
+/// `RespondInput` command (`None` until the queue call answers).
+#[derive(Debug, Clone)]
+pub(super) struct SentAnswer {
+    chat_id: String,
+    command_id: Option<String>,
 }
 
 impl Shell {
@@ -966,13 +993,46 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> NeedContent {
         let peek = self.peek(chat_id, false, cx);
-        let (pending, loaded) = {
+        let (pending, loaded, sent) = {
             let state = peek.read(cx);
-            (
-                crate::composer::pending_input_request(&state.transcript),
-                !state.transcript.is_empty(),
-            )
+            let pending = crate::composer::pending_input_request(&state.transcript);
+            // What the answer sent from here came to (one rule,
+            // `command_outcome::answer_outcome`): for the open question, or,
+            // once none is open, for one answered here and since resolved
+            // (turned down when another device answered first).
+            let sent = match &pending {
+                Some((request_id, questions)) => self.board.answered.get(request_id).map(|sent| {
+                    let outcome = Outcome::of(state.commands(), sent.command_id.as_deref());
+                    (
+                        questions.first().map(question_text),
+                        answer_outcome(Some(outcome), false),
+                    )
+                }),
+                None => self
+                    .board
+                    .answered
+                    .iter()
+                    .filter(|(_, sent)| sent.chat_id == chat_id)
+                    .find_map(|(request_id, sent)| {
+                        let outcome = Outcome::of(state.commands(), sent.command_id.as_deref());
+                        let shown = answer_outcome(Some(outcome), true);
+                        matches!(shown, AnswerOutcome::NoLongerWaiting(_))
+                            .then(|| (input_prompt(&state.transcript, request_id), shown))
+                    }),
+            };
+            (pending, !state.transcript.is_empty(), sent)
         };
+        if let Some((prompt, shown)) = sent
+            && let Some(text) = shown.text()
+        {
+            let headline = prompt
+                .map(|prompt| crate::composer::split_question_context(&prompt).0)
+                .unwrap_or_else(|| "Waiting on you".into());
+            return NeedContent {
+                title: headline,
+                body: card_note(text, theme),
+            };
+        }
         let Some((request_id, questions)) = pending else {
             return NeedContent {
                 title: if loaded {
@@ -990,13 +1050,6 @@ impl Shell {
             };
         };
         let prompt = question_text(&question);
-        if self.board.answered.contains(&request_id) {
-            let (headline, _) = crate::composer::split_question_context(&prompt);
-            return NeedContent {
-                title: headline,
-                body: card_note("Answer sent.", theme),
-            };
-        }
         let answer = |label: &str, cx: &mut Context<Self>| {
             answer_click(
                 chat_id.to_string(),
@@ -1270,19 +1323,34 @@ impl Shell {
         let Ok(command) = serde_json::to_value(&command) else {
             return;
         };
-        self.board.answered.insert(request_id.clone());
+        self.board.answered.insert(
+            request_id.clone(),
+            SentAnswer {
+                chat_id: chat_id.clone(),
+                command_id: None,
+            },
+        );
         self.board.needs_decided = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let params = serde_json::json!({ "chatId": chat_id, "command": command });
-            if let Err(err) = engine.client().call(methods::QUEUE_COMMAND, params).await {
-                this.update(cx, |this, cx| {
-                    this.board.answered.remove(&request_id);
-                    this.sidebar.notice = Some(format!("Answer failed: {err}").into());
-                    cx.notify();
-                })
-                .ok();
-            }
+            let reply = engine.client().call(methods::QUEUE_COMMAND, params).await;
+            this.update(cx, |this, cx| {
+                match reply {
+                    // The card follows this command's outcome from here on.
+                    Ok(reply) => {
+                        if let Some(sent) = this.board.answered.get_mut(&request_id) {
+                            sent.command_id = reply["commandId"].as_str().map(str::to_string);
+                        }
+                    }
+                    Err(err) => {
+                        this.board.answered.remove(&request_id);
+                        this.sidebar.notice = Some(format!("Answer failed: {err}").into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }

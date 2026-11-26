@@ -83,13 +83,23 @@ final class SessionStore {
     /// Questions this device answered whose part the host hasn't resolved
     /// yet: request id → the respondInput command id ("" over a direct
     /// transport). The panel retires on the tap instead of waiting out the
-    /// host round trip; it only comes back if the answer is turned down.
+    /// host round trip; it comes back only if the answer never left this
+    /// device (`reopenInput`). One the host turned down stays retired: what
+    /// came of it is `sentOutcomeLine`.
     private(set) var answeredInputs: [String: String] = [:]
     /// Why an answered question came back — shown on the reopened panel.
     private(set) var inputAnswerFailure: String?
-    /// Host outcomes of respondInput commands (command id → status), read
-    /// with each projection.
-    @ObservationIgnored private var inputCommandOutcomes: [String: String] = [:]
+    /// Host outcomes of this chat's respondInput and interrupt commands
+    /// (command id → status and resolution), read with each projection.
+    private(set) var commandOutcomes: [String: CommandOutcome] = [:]
+    /// The last answer or Stop queued from here (not over a direct
+    /// transport, which has no ledger), until the next message: the
+    /// surfaces show its host outcome (CommandOutcome).
+    private(set) var lastSent: SentCommand?
+    /// `lastSent` went out over `CommandOutcome.quietMs` ago: the
+    /// composer's "Sending…" / "Stopping…" may show.
+    private(set) var lastSentQuietOver = false
+    @ObservationIgnored private var quietTask: Task<Void, Never>?
     /// The `planBodies` entries work pages read (`watchPlanBody`), by work
     /// id: a watched work id whose entry the doc lacks is absent. Read with
     /// each projection while any page watches, never otherwise.
@@ -573,7 +583,7 @@ final class SessionStore {
             self.projecting = false
             self.adoptPlanBodies(bodies, read: bodyIds)
             self.transcriptCache.adopt(read.2)
-            self.inputCommandOutcomes = read.0.inputOutcomes
+            self.adoptCommandOutcomes(read.0.inputOutcomes)
             if let rounds = read.1 {
                 self.outline = rounds
                 if self.earlierRounds != rounds.rounds { self.earlierRounds = rounds.rounds }
@@ -609,7 +619,7 @@ final class SessionStore {
         /// The index in `messages` the window starts at.
         var start: Int
         var coverage: PreviewCoverage?
-        var inputOutcomes: [String: String]
+        var inputOutcomes: [String: CommandOutcome]
         /// The messages steer commands sent.
         var steers: Set<String>
     }
@@ -784,20 +794,21 @@ final class SessionStore {
             })
     }
 
-    /// Settled respondInput commands: command id → host status.
-    nonisolated static func inputCommandOutcomes(root: [String: LoroValue]) -> [String: String] {
+    /// respondInput and interrupt commands: command id → host status and
+    /// resolution.
+    nonisolated static func inputCommandOutcomes(root: [String: LoroValue]) -> [String: CommandOutcome] {
         inputCommandOutcomes(commands: root["commands"]?.listValue ?? [])
     }
 
-    nonisolated static func inputCommandOutcomes(commands: [LoroValue]) -> [String: String] {
-        var outcomes: [String: String] = [:]
+    nonisolated static func inputCommandOutcomes(commands: [LoroValue]) -> [String: CommandOutcome] {
+        var outcomes: [String: CommandOutcome] = [:]
         for command in commands {
             guard let command = command.mapValue,
-                command["kind"]?.stringValue == "respondInput",
+                let kind = command["kind"]?.stringValue, kind == "respondInput" || kind == "interrupt",
                 let id = command["id"]?.stringValue,
-                let status = command["status"]?.stringValue, status != "pending"
+                let status = command["status"]?.stringValue
             else { continue }
-            outcomes[id] = status
+            outcomes[id] = CommandOutcome(status: status, resolution: command["resolution"]?.stringValue)
         }
         return outcomes
     }
@@ -1035,20 +1046,54 @@ final class SessionStore {
         return ids
     }
 
-    /// Forget answers whose question resolved, and reopen any the host
-    /// rejected or let expire — the question is still open, and silently
-    /// keeping it hidden would leave the run waiting on nobody.
+    /// Forget answers whose question resolved. One the host turned down
+    /// stays answered here: the host is no longer waiting on it, and the
+    /// surfaces say why (`sentOutcomeLine`) instead of asking again.
     private func settleAnsweredInputs() {
         guard !answeredInputs.isEmpty else { return }
         let open = unresolvedInputIds
-        for (requestId, commandId) in answeredInputs {
-            if !open.contains(requestId) {
-                answeredInputs[requestId] = nil
-            } else if let status = inputCommandOutcomes[commandId],
-                status == "rejected" || status == "expired"
-            {
-                reopenInput(requestId, reason: "Your answer didn't reach the agent. Please answer again.")
-            }
+        for requestId in answeredInputs.keys where !open.contains(requestId) {
+            answeredInputs[requestId] = nil
+        }
+    }
+
+    /// The last answer sent from here, as the cards show it
+    /// (CommandOutcome.answer); nil when none was sent.
+    var sentAnswerOutcome: AnswerOutcome? {
+        guard case .answer(let requestId, let commandId) = lastSent else { return nil }
+        return CommandOutcome.answer(
+            commandOutcomes[commandId] ?? CommandOutcome(), resolved: !unresolvedInputIds.contains(requestId))
+    }
+
+    /// What came of the last answer or Stop sent from here, as the line by
+    /// the composer: nil once it took effect. "Sending…" / "Stopping…" wait
+    /// out `CommandOutcome.quietMs`; a refusal shows at once.
+    var sentOutcomeLine: String? {
+        switch lastSent {
+        case nil: return nil
+        case .answer:
+            guard let outcome = sentAnswerOutcome else { return nil }
+            return outcome == .sending && !lastSentQuietOver ? nil : outcome.text
+        case .stop(let commandId):
+            let outcome = CommandOutcome.stop(commandOutcomes[commandId] ?? CommandOutcome())
+            return outcome == .stopping && !lastSentQuietOver ? nil : outcome.text
+        }
+    }
+
+    /// The ledger's outcomes as the latest projection read them.
+    func adoptCommandOutcomes(_ outcomes: [String: CommandOutcome]) {
+        if commandOutcomes != outcomes { commandOutcomes = outcomes }
+    }
+
+    private func noteSent(_ sent: SentCommand?) {
+        lastSent = sent
+        lastSentQuietOver = false
+        quietTask?.cancel()
+        guard sent != nil else { return }
+        quietTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(CommandOutcome.quietMs))
+            guard !Task.isCancelled else { return }
+            self?.lastSentQuietOver = true
         }
     }
 
@@ -1090,6 +1135,7 @@ final class SessionStore {
         ]
         if let agentPrompt { payload["agentPrompt"] = agentPrompt }
         guard queueCommand(kind: "run", payload: payload) != nil else { return false }
+        noteSent(nil)
         pendingSends.append(
             PendingSend(
                 messageId: messageId, text: prompt, at: nowMs(),
@@ -1115,6 +1161,7 @@ final class SessionStore {
         ]
         if let agentPrompt { payload["agentPrompt"] = agentPrompt }
         guard queueCommand(kind: "steer", payload: payload) != nil else { return false }
+        noteSent(nil)
         pendingSends.append(
             PendingSend(
                 messageId: messageId, text: prompt, at: nowMs(), isSteer: true,
@@ -1126,7 +1173,9 @@ final class SessionStore {
     @discardableResult
     func sendInterrupt() -> Bool {
         if let directTransport { return directTransport.interrupt() }
-        return queueCommand(kind: "interrupt", payload: ["kind": "interrupt"]) != nil
+        guard let commandId = queueCommand(kind: "interrupt", payload: ["kind": "interrupt"]) else { return false }
+        noteSent(.stop(commandId: commandId))
+        return true
     }
 
     /// Answer a question; on success its panel retires immediately.
@@ -1148,6 +1197,7 @@ final class SessionStore {
         }
         guard let commandId else { return false }
         answeredInputs[requestId] = commandId
+        if !commandId.isEmpty { noteSent(.answer(requestId: requestId, commandId: commandId)) }
         inputAnswerFailure = nil
         demoInputAnswered?(requestId)
         return true

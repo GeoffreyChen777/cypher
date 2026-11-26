@@ -48,11 +48,13 @@ use crate::util::{new_id, now_ms};
 use crate::util::lock;
 
 mod live_level;
+pub(crate) mod questions;
 mod recovery;
 mod run_task;
 mod steer;
 mod task_id;
 
+pub use recovery::{DeadRunSettled, Stopped};
 use run_task::*;
 use steer::RoutedSteer;
 pub use steer::SteerOutcome;
@@ -918,6 +920,15 @@ impl SessionsEngine {
 
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
+        // A fresh run, so no run is live here: a streaming entry still in the
+        // doc belongs to a run that was lost without settling it. Settle it
+        // before this run's entries follow it (its questions stay as they are:
+        // open ones are still answered as a next turn).
+        if !self.has_run(chat_id)
+            && let Err(err) = handle.mark_abandoned_streams("Run ended before it finished")
+        {
+            tracing::warn!(chat = %chat_id, error = %err, "lost run settle failed");
+        }
         let user_id = message_id.unwrap_or_else(new_id);
         handle.write_user_prompt(&user_id, &visible_prompt, &comments, now_ms())?;
 

@@ -25,6 +25,7 @@ impl Composer {
             let draft = self.drafts.get(&key).cloned().unwrap_or_default();
             self.current_key = key;
             self.failure = None;
+            self.sent = None;
             self.wizard = None;
             // Comments are current-chat-only: switching chats discards them
             // (and the inspector/edit state with them).
@@ -712,6 +713,7 @@ impl Composer {
             self.drafts.remove(&self.current_key);
         }
         self.failure = None;
+        self.sent = None;
         self.sending = true;
         // Comments: snapshot for the command + failure restore, then clear
         // OPTIMISTICALLY (the indicator hides the instant you send). They
@@ -805,15 +807,31 @@ impl Composer {
                     "chatId": chat_id,
                     "command": { "kind": "interrupt" },
                 });
+                self.note_sent(Sent::Stop(None), cx);
                 self.send_task = Some(cx.spawn(async move |this, cx| {
                     let result = engine.client().call(methods::QUEUE_COMMAND, params).await;
-                    if let Err(err) = result {
-                        this.update(cx, |composer, cx| {
-                            composer.failure = Some(format!("Stop failed: {err}").into());
-                            cx.notify();
-                        })
-                        .ok();
-                    }
+                    this.update(cx, |composer, cx| {
+                        let ours =
+                            composer.sent.as_ref().map(|(sent, _)| sent) == Some(&Sent::Stop(None));
+                        match result {
+                            // The notices follow this Stop's outcome.
+                            Ok(reply) if ours => {
+                                let id = reply["commandId"].as_str().map(str::to_string);
+                                if let Some((sent, _)) = composer.sent.as_mut() {
+                                    *sent = Sent::Stop(id);
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(err) => {
+                                if ours {
+                                    composer.sent = None;
+                                }
+                                composer.failure = Some(format!("Stop failed: {err}").into());
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
                 }));
             }
             ComposerTransport::SideChat(side) => {

@@ -76,6 +76,7 @@ mod turns {
     mod extension_notices;
     mod follow_up_attachments;
     mod input_translation;
+    mod lost_runs;
     mod model_switch;
     mod projectless;
     mod queue_first_attachments;

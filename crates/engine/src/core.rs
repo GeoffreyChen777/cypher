@@ -555,6 +555,12 @@ impl EngineCore {
         }
         self.side_chats.shutdown().await;
         self.sessions.shutdown().await;
+        // Store the settled runs NOW, not only at the end: the desktop app
+        // gives its quit hook a fraction of a second, and a run's `Done`
+        // is already in its journal — a doc still holding the streaming
+        // entry would leave boot recovery a closed journal over a run that
+        // never settled (its question unanswerable, its Stop a no-op).
+        self.doc_host.flush_all();
         self.terminals.shutdown();
         // Cancel + await every worker that can reach Edge before flushing: a
         // replaced synced runtime must not keep polling releases or draining

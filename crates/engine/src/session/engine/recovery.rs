@@ -176,10 +176,14 @@ impl SessionsEngine {
                 session_id: None,
             };
             self.inner.publish(&chat_id, &done);
-            let stamped = handle.mark_abandoned_streams(note)?.len();
             // Its questions outlive the run (answerable through the dead-run
             // fallback) unless the run is picked back up, which asks again.
-            self.reopen_questions(&chat_id, will_resume);
+            let questions = if will_resume {
+                DeadQuestions::Close
+            } else {
+                DeadQuestions::Keep
+            };
+            let stamped = self.settle_dead_run(&chat_id, note, questions)?.stamped;
             self.set_status(&chat_id, SessionStatus::Idle, false);
             reopened.insert(chat_id.clone());
             tracing::info!(chat = %chat_id, stamped, will_resume, attempts, "recovered stale session journal");
@@ -244,95 +248,154 @@ impl SessionsEngine {
         Ok(recovered)
     }
 
-    /// Boot recovery for questions (docs/design/plan-asks.md, e1/e2): the
-    /// previous engine's open questions are memory, so every row of this
-    /// device that still says it asks (`asking`, or awaiting input) and has
-    /// no run is rebuilt from its doc: its own questions stay open, a
-    /// forwarded mirror whose subagent run died with the engine is resolved
-    /// and the root's awaiting-input hold ends. `skip`: chats
+    /// Boot recovery for rows the journal sweep did not reach
+    /// (docs/design/plan-asks.md, e1/e2). The previous engine's runs and open
+    /// questions were memory, so every row of this device that still says a
+    /// run was going (`Working`, awaiting input, or `asking`) and has no run
+    /// now lost its run, whatever its journal says: a journal can already
+    /// end on the run's `Done` while the doc never stored the settle (the
+    /// debounced snapshot, or a quit cut short before the shutdown flush).
+    /// Each is settled like a crash ([`Self::settle_dead_run`]): its
+    /// streaming entries stamped aborted, its own questions kept open and
+    /// answerable, a forwarded mirror whose subagent died with the engine
+    /// resolved, and the root's awaiting-input hold ended. `skip`: chats
     /// [`Self::recover_stale`] already did. Returns the rows rewritten.
     pub fn recover_open_questions(&self, skip: &HashSet<String>) -> Result<usize, EngineError> {
+        const NOTE: &str = "Run interrupted by engine restart";
         let Some(ws) = self.inner.workspace() else {
             return Ok(0);
         };
         let mut fixed = 0usize;
         for row in ws.read_sessions()? {
+            let claimed_a_run = matches!(
+                row.status,
+                SessionStatus::Working | SessionStatus::AwaitingInput
+            ) || row.asking.is_some();
             if row.device_id != self.inner.device_id
                 || skip.contains(&row.chat_id)
-                || (row.status != SessionStatus::AwaitingInput && row.asking.is_none())
-                || lock(&self.inner.runs).contains_key(&row.chat_id)
+                || !claimed_a_run
+                || self.has_run(&row.chat_id)
             {
                 continue;
             }
-            self.reopen_questions(&row.chat_id, false);
+            let settled = self.settle_dead_run(&row.chat_id, NOTE, DeadQuestions::Keep)?;
             let status = match row.status {
                 SessionStatus::Errored => SessionStatus::Errored,
                 _ => SessionStatus::Idle,
             };
             self.set_status(&row.chat_id, status, false);
+            tracing::info!(chat = %row.chat_id, stamped = settled.stamped,
+                kept = settled.kept, closed = settled.closed, "lost run recovered on boot");
             fixed += 1;
         }
         if fixed > 0 {
-            tracing::info!(fixed, "open questions recovered on boot");
+            tracing::info!(fixed, "lost runs recovered on boot");
         }
         Ok(fixed)
     }
 
-    /// Rebuild `chat_id`'s open questions from its doc once no run holds
-    /// them: its own unresolved questions stay open, unless `rerun` (the
-    /// turn is dispatched again and asks anew) or it is a child chat (its
-    /// subagent run, the parent's tool call, died with it); those and any
-    /// mirror without a live forward are resolved in the doc. The row picks
-    /// the result up on its next write.
-    fn reopen_questions(&self, chat_id: &str, rerun: bool) {
-        let Ok(handle) = self.doc_handle(chat_id) else {
-            return;
-        };
-        let Ok(entries) = handle.doc().read_entries() else {
-            return;
-        };
+    /// Stop a chat (the `Interrupt` command): interrupt its live run, or —
+    /// with no run — settle what a lost run left behind: its streaming
+    /// entries are stamped aborted, every question no live run holds is
+    /// closed (resolved in the doc, gone from the row's `asking`), and the
+    /// row goes Idle. Stop is never a silent no-op.
+    pub async fn stop(&self, chat_id: &str) -> Result<Stopped, EngineError> {
+        const NOTE: &str = "Stopped after its run had already ended";
+        if self.interrupt(chat_id).await? {
+            return Ok(Stopped::Run);
+        }
+        let settled = self.settle_dead_run(chat_id, NOTE, DeadQuestions::Close)?;
+        let active = self.session_status(chat_id).is_some_and(|s| {
+            matches!(
+                s.status,
+                SessionStatus::Working | SessionStatus::AwaitingInput
+            )
+        });
+        if active {
+            self.set_status(chat_id, SessionStatus::Idle, false);
+        } else {
+            self.inner.sync_asking(chat_id);
+        }
+        Ok(Stopped::NoRun(settled))
+    }
+
+    /// The chat's open questions as [`questions::open_questions`] reads them
+    /// from its doc now, against what is live: its run and the live forwards
+    /// of subagent questions mirrored into it.
+    pub(crate) fn open_questions(
+        &self,
+        chat_id: &str,
+    ) -> Result<Vec<questions::OpenQuestion>, EngineError> {
+        let handle = self.doc_handle(chat_id)?;
+        let entries = handle.doc().read_entries()?;
+        let live_mirrors = self.live_mirrors(chat_id);
+        Ok(questions::open_questions(
+            &entries,
+            questions::Liveness {
+                run_live: self.has_run(chat_id),
+                live_mirrors: &live_mirrors,
+            },
+        ))
+    }
+
+    fn live_mirrors(&self, chat_id: &str) -> HashSet<String> {
+        lock(&self.inner.forwarded)
+            .iter()
+            .filter(|(_, from)| from.root == chat_id)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Settle `chat_id` after its run was lost (no live owner will ever
+    /// settle it): stamp this device's streaming entries aborted with
+    /// `note`, then rebuild its open questions from the doc
+    /// ([`Self::open_questions`]). A question a live run still holds (a
+    /// subagent's live forward) stays as it is. Every other one is resolved
+    /// in the doc when `questions` says close, when it is a mirror (its
+    /// subagent died with the run), or when the chat is a child chat (its
+    /// subagent run, the parent's tool call, died with it); otherwise it
+    /// stays open, answered as the next turn. The row picks the result up
+    /// on its next write. A no-op while the chat has a run.
+    pub(crate) fn settle_dead_run(
+        &self,
+        chat_id: &str,
+        note: &str,
+        questions: DeadQuestions,
+    ) -> Result<DeadRunSettled, EngineError> {
+        let mut settled = DeadRunSettled::default();
+        if self.has_run(chat_id) {
+            return Ok(settled);
+        }
+        let handle = self.doc_handle(chat_id)?;
+        settled.stamped = handle.mark_abandoned_streams(note)?.len();
         let child = self
             .inner
             .workspace()
             .and_then(|ws| ws.chat(chat_id).ok().flatten())
             .is_some_and(|chat| chat.is_child());
-        let live_mirrors: HashSet<String> = lock(&self.inner.forwarded)
-            .iter()
-            .filter(|(_, from)| from.root == chat_id)
-            .map(|(id, _)| id.clone())
-            .collect();
+        let live_mirrors = self.live_mirrors(chat_id);
         let mut own = Vec::new();
-        for entry in &entries {
-            for part in &entry.parts {
-                let MessagePart::Input {
-                    request_id,
-                    questions,
-                    resolved: false,
-                    ..
-                } = part
-                else {
-                    continue;
-                };
-                let mirror = questions.iter().any(|q| q.asked_by.is_some());
-                if mirror && live_mirrors.contains(request_id) {
-                    continue;
-                }
-                if mirror || rerun || child {
-                    if let Err(err) = handle.doc().resolve_input(request_id) {
-                        tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
-                            "dead question resolve failed");
-                    }
-                    continue;
-                }
-                own.push(cypher_proto::SessionAsk {
-                    request_id: request_id.clone(),
-                    asked_at: entry.created_at,
-                    permission: super::ask_permission(questions),
-                    asked_by: None,
-                    from_chat_id: None,
-                });
+        for open in self.open_questions(chat_id)? {
+            if open.holder == questions::Holder::LiveRun {
+                continue;
             }
+            if open.mirror || child || questions == DeadQuestions::Close {
+                if let Err(err) = handle.doc().resolve_input(&open.request_id) {
+                    tracing::warn!(chat = %chat_id, request = %open.request_id, error = %err,
+                        "dead question resolve failed");
+                }
+                settled.closed += 1;
+                continue;
+            }
+            own.push(cypher_proto::SessionAsk {
+                request_id: open.request_id,
+                asked_at: open.asked_at,
+                permission: super::ask_permission(&open.questions),
+                asked_by: None,
+                from_chat_id: None,
+            });
         }
+        settled.kept = own.len();
         {
             let mut open = lock(&self.inner.open_asks);
             let mut asks = own;
@@ -349,7 +412,39 @@ impl SessionsEngine {
         if live_mirrors.is_empty() {
             lock(&self.inner.held_statuses).remove(chat_id);
         }
+        Ok(settled)
     }
+}
+
+/// What [`SessionsEngine::settle_dead_run`] does with the questions no live
+/// run holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeadQuestions {
+    /// They stay open: the answer runs as the next turn.
+    Keep,
+    /// They are closed: the user stopped the chat, or the turn is
+    /// dispatched again and asks anew.
+    Close,
+}
+
+/// What settling a lost run changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeadRunSettled {
+    /// Streaming entries stamped aborted.
+    pub stamped: usize,
+    /// Questions resolved in the doc.
+    pub closed: usize,
+    /// Questions left open (answerable as the next turn).
+    pub kept: usize,
+}
+
+/// What [`SessionsEngine::stop`] stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    /// The live run was interrupted (it settles itself).
+    Run,
+    /// There was no run; what its loss left behind was settled.
+    NoRun(DeadRunSettled),
 }
 
 impl Inner {

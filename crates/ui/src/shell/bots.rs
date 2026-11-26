@@ -87,9 +87,11 @@ pub(super) struct BoardUi {
     needs_decided: bool,
     /// The Review panel's editable draft, for the exchange it was opened on.
     review: Option<(String, Entity<TextInput>)>,
-    /// Questions answered from the Asking panel, until their session says
-    /// so (request ids).
-    answered: std::collections::HashSet<String>,
+    /// Questions answered from the Needs you cards and the Asking page
+    /// (request id → chat and the `RespondInput` command id, `None` until
+    /// the queue call answers): their cards show that command's outcome
+    /// (`command_outcome::answer_outcome`).
+    answered: std::collections::HashMap<String, needs::SentAnswer>,
     /// The work item whose Stop is armed (a second click stops it), and the
     /// task that disarms it.
     stop_armed: Option<String>,

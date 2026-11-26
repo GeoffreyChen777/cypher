@@ -515,6 +515,12 @@ impl AppState {
         }
     }
 
+    /// The selected chat's command ledger, as the last `WatchDocCommands`
+    /// frame had it.
+    pub fn commands(&self) -> &[SessionCommandEntry] {
+        &self.commands
+    }
+
     /// Projected status of the selected chat's message command, or `None`
     /// when no Run/Steer command exists for it.
     pub fn command_status_for(&self, message_id: &str) -> Option<CommandSendStatus> {

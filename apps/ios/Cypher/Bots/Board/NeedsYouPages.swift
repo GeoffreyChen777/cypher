@@ -126,13 +126,12 @@ struct NeedsYouPage: View {
     @Environment(AppModel.self) private var model
     let botId: String
     @State private var actions = BotActionRunner()
-    @State private var answered: Set<String> = []
 
     var body: some View {
         let rows = model.bot(id: botId).flatMap { bot in model.data?.boardNeedRows(bot) } ?? []
         BotCardPage(title: "Needs you") {
             ForEach(rows) { row in
-                NeedsYouItemCard(row: row, actions: actions, answered: $answered)
+                NeedsYouItemCard(row: row, actions: actions)
             }
         }
         .overlay {
@@ -154,7 +153,6 @@ struct NeedsYouItemCard: View {
     @Environment(\.openBotChat) private var openChat
     let row: BoardNeedRow
     let actions: BotActionRunner
-    @Binding var answered: Set<String>
 
     var body: some View {
         switch row.item {
@@ -204,7 +202,7 @@ struct NeedsYouItemCard: View {
             if let chat = model.chat(id: row.askingChatId ?? chatId), let store = model.sessionStore(for: chat) {
                 AskingCard(
                     chat: chat, store: store, source: row.source, at: row.at, link: link, linkId: linkId,
-                    waiting: row.waiting, answered: $answered)
+                    waiting: row.waiting)
             } else {
                 card { NeedsCardNote(text: "The session syncs from the device it runs on.") }
             }
@@ -267,12 +265,12 @@ struct AskingCard: View {
     var onPage = false
     /// Its question waits for its device, which is offline.
     var waiting = false
-    /// Requests answered from here, until the session says so.
-    @Binding var answered: Set<String>
     @State private var answerError: String?
 
     var body: some View {
-        let request = store.openInputRequest.flatMap { answered.contains($0.requestId) ? nil : $0 }
+        // One this device answered is gone from here: the card says what came
+        // of the answer instead (`status`).
+        let request = store.openInputRequest
         Group {
             if let request, let question = request.questions.first {
                 if request.questions.count == 1, let permission = PermissionRequest(question) {
@@ -362,9 +360,11 @@ struct AskingCard: View {
 
     private var titleLines: Int? { onPage ? nil : 3 }
 
-    /// What the card says with no question open.
+    /// What the card says with no question open: first what came of the
+    /// answer sent from this device (CommandOutcome.answer: "Sending…", or
+    /// the host's reason for turning it down).
     private var status: String {
-        if !answered.isEmpty { return "Answer sent." }
+        if let line = store.sentAnswerOutcome?.text { return line }
         if waiting { return "\(BoardNeedRow.waitingForDevice)." }
         let asking = model.data?.sessionAsking(chat.id) ?? (model.indicator(for: chat) == .awaitingInput)
         if !store.entries.isEmpty || !asking {
@@ -380,9 +380,7 @@ struct AskingCard: View {
     }
 
     private func respond(_ requestId: String, _ answers: [UserInputAnswer]) {
-        if store.respondInput(requestId: requestId, answers: answers) {
-            answered.insert(requestId)
-        } else {
+        if !store.respondInput(requestId: requestId, answers: answers) {
             answerError = "Couldn't queue your answer. Please retry."
         }
     }
@@ -522,7 +520,6 @@ struct AskingPage: View {
     let botId: String
     let chatId: String
     let workId: String?
-    @State private var answered: Set<String> = []
 
     var body: some View {
         if let chat = model.chat(id: chatId) {
@@ -548,7 +545,7 @@ struct AskingPage: View {
             if let store {
                 AskingCard(
                     chat: asker, store: store, source: source, at: chat.lastMessageAt, onPage: true,
-                    waiting: waiting, answered: $answered)
+                    waiting: waiting)
             } else {
                 NeedsYouCard(
                     symbol: "questionmark.circle", source: source, title: singleLine(chat.displayTitle),

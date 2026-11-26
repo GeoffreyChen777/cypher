@@ -977,6 +977,12 @@ struct SessionView: View {
                     } else if let notice {
                         Text(notice).font(Theme.sans(12)).foregroundStyle(Theme.textMuted)
                             .padding(.horizontal, 20)
+                    } else if let line = store.sentOutcomeLine {
+                        // The host's word on the last answer or Stop sent
+                        // from here (CommandOutcome).
+                        Text(line).font(Theme.sans(12)).foregroundStyle(Theme.textMuted)
+                            .padding(.horizontal, 20)
+                            .accessibilityIdentifier("session-sent-outcome")
                     }
                     if let bot = workspaceBot, store.openInputRequest == nil,
                         case let shortcuts = model.data?.shortcuts(of: bot.id) ?? [], !shortcuts.isEmpty
