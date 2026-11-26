@@ -18,8 +18,11 @@ export DEBIAN_FRONTEND=noninteractive
 printf 'Acquire::Retries "3";\nAcquire::http::Timeout "20";\n' >/etc/apt/apt.conf.d/80-ci-retries
 
 # `apt-get update` exits 0 when its downloads fail; the install then cannot
-# find the packages, so the pair fails together.
-install() { apt-get update -qq && apt-get install -y -qq "$@"; }
+# find the packages, so the pair fails together. apt's own timeout only ends
+# a connection that goes silent, not one that trickles: on 2026-11-23 an
+# amd64 release build sat in this step until the job's 40 minutes ran out,
+# never reaching a fallback mirror. A hard limit per attempt moves on.
+install() { timeout 300 apt-get update -qq && timeout 600 apt-get install -y -qq "$@"; }
 
 install "$@" && exit 0
 
