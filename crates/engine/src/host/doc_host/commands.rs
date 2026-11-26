@@ -3,6 +3,8 @@
 
 use super::launch::TrustedLaunch;
 use super::*;
+use crate::session::engine::Stopped;
+use crate::session::engine::questions::Holder;
 
 impl DocHost {
     /// Sign the commands this device queues and check every command before
@@ -110,15 +112,32 @@ impl DocHost {
                     .await
             }
             SessionCommandPayload::Interrupt {} => {
-                sessions.interrupt(chat_id).await?;
-                Ok((SessionCommandStatus::Applied, None))
+                let outcome = match sessions.stop(chat_id).await {
+                    Ok(Stopped::Run) => Ok((SessionCommandStatus::Applied, None)),
+                    Ok(Stopped::NoRun(settled)) => Ok((
+                        SessionCommandStatus::Applied,
+                        Some(no_run_stop_resolution(settled)),
+                    )),
+                    Err(err) => Err(err),
+                };
+                log_outcome("interrupt", chat_id, &entry.id, None, &outcome);
+                outcome
             }
             SessionCommandPayload::RespondInput {
                 request_id,
                 answers,
             } => {
-                self.execute_respond_input(sessions, handle, request_id, answers)
-                    .await
+                let outcome = self
+                    .execute_respond_input(sessions, handle, request_id, answers)
+                    .await;
+                log_outcome(
+                    "respond_input",
+                    chat_id,
+                    &entry.id,
+                    Some(request_id),
+                    &outcome,
+                );
+                outcome
             }
         }
     }
@@ -353,39 +372,35 @@ impl DocHost {
         if sessions.respond_input(chat_id, request_id, answers.to_vec())? {
             return Ok((SessionCommandStatus::Applied, None));
         }
-        // No live resolver. Only a request id the doc shows as an
-        // OPEN question on a SETTLED entry gets the orphan fallback:
-        // a mismatched or already-resolved id is a stale/buggy answer
-        // and must still reject, and a still-streaming entry's
-        // question belongs to the live run (a just-consumed resolver
-        // racing a second answer must not spawn a duplicate turn).
-        let questions = handle.doc.read_entries().ok().and_then(|entries| {
-            entries
-                .iter()
-                .rev()
-                .filter(|e| e.status != Some(MessageStatus::Streaming))
-                .find_map(|e| {
-                    e.parts.iter().find_map(|p| match p {
-                        MessagePart::Input {
-                            request_id: rid,
-                            questions,
-                            resolved: false,
-                            ..
-                        } if rid == request_id => Some(questions.clone()),
-                        _ => None,
-                    })
-                })
-        });
-        let Some(questions) = questions else {
+        // No live resolver. Whether the doc still has this question open,
+        // and who answers it, is the one rule every reader of questions
+        // uses (`questions::open_questions`): a mismatched or
+        // already-resolved id is a stale/buggy answer and rejects; a
+        // question a live run holds is that run's (a just-consumed resolver
+        // racing a second answer must not spawn a duplicate turn); any
+        // other open question — on a settled entry, or on a streaming entry
+        // no run is writing any more — gets the next-turn fallback.
+        let open = sessions
+            .open_questions(chat_id)?
+            .into_iter()
+            .find(|q| q.request_id == request_id);
+        let Some(open) = open else {
             return Ok((
                 SessionCommandStatus::Rejected,
                 Some("no pending input request".into()),
             ));
         };
+        if open.holder == Holder::LiveRun {
+            return Ok((
+                SessionCommandStatus::Rejected,
+                Some("the running turn is no longer waiting on this question".into()),
+            ));
+        }
+        let questions = open.questions;
         // A subagent's question mirrored here is the subagent's to answer:
         // this chat's agent never asked it, so it must not get the answer as
         // a turn. Its mirror is gone with the run; close the question.
-        if questions.iter().any(|q| q.asked_by.is_some()) {
+        if open.mirror {
             if let Err(err) = handle.doc.resolve_input(request_id) {
                 tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                     "orphaned subagent question resolve failed");
@@ -396,8 +411,8 @@ impl DocHost {
                 Some("the subagent's question is no longer pending".into()),
             ));
         }
-        // The run died under the question (engine restart, crash).
-        // The question is still open in the doc and the command is
+        // The run died under the question (engine restart, crash, a quit
+        // cut short). The question is still open in the doc and the command is
         // durable, so honor it anyway — stamp the part resolved and
         // deliver the answers as the next (resumed) turn, the same
         // fallback a dead-run steer takes. The question UI stays up
@@ -1197,5 +1212,46 @@ impl DocHost {
             }
             lock(&self.inner.executing).remove(&entry.id);
         }
+    }
+}
+
+/// The resolution of a Stop that found no run: what settling its lost run
+/// changed. Pure.
+fn no_run_stop_resolution(settled: crate::session::engine::DeadRunSettled) -> String {
+    if settled.stamped == 0 && settled.closed == 0 {
+        return "no live run".into();
+    }
+    format!(
+        "no live run; settled {} streaming entr{}, closed {} question{}",
+        settled.stamped,
+        if settled.stamped == 1 { "y" } else { "ies" },
+        settled.closed,
+        if settled.closed == 1 { "" } else { "s" },
+    )
+}
+
+/// Log a question/stop command's outcome: applied at INFO, rejected or
+/// failed at WARN with the reason.
+fn log_outcome(
+    kind: &str,
+    chat_id: &str,
+    command_id: &str,
+    request_id: Option<&str>,
+    outcome: &Result<(SessionCommandStatus, Option<String>), EngineError>,
+) {
+    let request = request_id.unwrap_or("-");
+    match outcome {
+        Ok((SessionCommandStatus::Rejected, reason)) => tracing::warn!(
+            chat = %chat_id, command = %command_id, request = %request, kind,
+            reason = reason.as_deref().unwrap_or("-"), "command rejected"
+        ),
+        Ok((status, resolution)) => tracing::info!(
+            chat = %chat_id, command = %command_id, request = %request, kind,
+            status = ?status, resolution = resolution.as_deref().unwrap_or("-"), "command applied"
+        ),
+        Err(err) => tracing::warn!(
+            chat = %chat_id, command = %command_id, request = %request, kind,
+            error = %err, "command failed"
+        ),
     }
 }

@@ -352,21 +352,24 @@ pub(super) fn session_state(
     }
 }
 
-/// The question a session is waiting on: its newest unresolved input part.
+/// The question a session is waiting on: its newest open question, by the
+/// one rule every reader of questions uses
+/// ([`crate::session::engine::questions::open_questions`]). Whether a live
+/// run holds it is the session host's to say (its row's status and
+/// `asking`), not this reader's: any device may run the coordinator.
 pub(super) fn pending_input(
     entries: &[SessionMessageEntry],
 ) -> Option<(String, Vec<UserInputQuestion>)> {
-    entries.iter().rev().find_map(|entry| {
-        entry.parts.iter().rev().find_map(|part| match part {
-            MessagePart::Input {
-                request_id,
-                questions,
-                resolved: false,
-                ..
-            } => Some((request_id.clone(), questions.clone())),
-            _ => None,
-        })
-    })
+    let no_mirrors = std::collections::HashSet::new();
+    crate::session::engine::questions::open_questions(
+        entries,
+        crate::session::engine::questions::Liveness {
+            run_live: false,
+            live_mirrors: &no_mirrors,
+        },
+    )
+    .pop()
+    .map(|open| (open.request_id, open.questions))
 }
 
 /// The newest assistant message with text.
