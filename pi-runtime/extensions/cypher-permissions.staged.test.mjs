@@ -12,7 +12,19 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { after, test } from "node:test";
+import { after, test as nodeTest } from "node:test";
+
+// Each test is its own chat: grants and remembered denials are kept per chat
+// (a "Deny" in one test must not answer for the next), while the turns of one
+// test share theirs. Top-level tests in a file run one at a time.
+let chatId = "chat-e2e";
+function test(name, ...rest) {
+  const fn = rest.pop();
+  return nodeTest(name, ...rest, (t) => {
+    chatId = `chat-e2e-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 60)}`;
+    return fn(t);
+  });
+}
 
 const stage = process.env.CYPHER_PI_RUNTIME_STAGE;
 assert.ok(stage, "CYPHER_PI_RUNTIME_STAGE must point at a staged Pi runtime");
@@ -108,7 +120,7 @@ async function turn(steps, { answers = [], level = "workspace-write", judge, ext
         JUDGE_ANSWER: judge ?? "",
         SCRIPT_API: api ?? "",
         CYPHER_PERMISSION_LEVEL: level,
-        CYPHER_CHAT_ID: "chat-e2e",
+        CYPHER_CHAT_ID: chatId,
         GITHUB_TOKEN: "ghp_secret",
         // What the engine passes: the owner's own words (explicit.ts).
         ...(ownerWords ? { CYPHER_OWNER_WORDS: JSON.stringify(ownerWords) } : {}),
