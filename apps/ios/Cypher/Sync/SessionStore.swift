@@ -116,6 +116,9 @@ final class SessionStore {
     /// `.honest` sidecar): the room's cursor amnesty can skip refetching
     /// every row since the checkpoint. A fresh doc's cursor 0 claims nothing.
     @ObservationIgnored private var cursorHonest = true
+    /// What the room provably holds (RoomLedger), saved beside the snapshot:
+    /// after each catch-up, what the doc holds beyond it goes up again.
+    @ObservationIgnored private var ledger = RoomLedger()
     /// The disk snapshot has been read (`start`); the room waits for it.
     @ObservationIgnored private var hydrated = false
     @ObservationIgnored private var stopped = false
@@ -314,21 +317,23 @@ final class SessionStore {
         let doc = self.doc
         let chatId = self.chatId
         Task { @MainActor [weak self] in
-            let saved = await Task.detached(priority: .userInitiated) {
-                DocDisk.loadChat2(into: doc, id: chatId)
+            let (saved, ledger) = await Task.detached(priority: .userInitiated) {
+                (DocDisk.loadChat2(into: doc, id: chatId), DocDisk.loadLedger(id: chatId))
             }.value
             guard let self, !self.stopped else { return }
             if let saved {
                 self.cursor = saved.cursor
                 self.cursorHonest = saved.honest
             }
+            if let ledger { self.ledger = ledger }
             self.hydrated = true
             // Created only now: a save before the read would write a doc
             // missing its own history.
             self.saver = DocSaver { [weak self] in
                 guard let self else { return }
                 DocDisk.saveChat2Later(
-                    doc: self.doc, id: self.chatId, cursor: self.cursor, honest: self.cursorHonest)
+                    doc: self.doc, id: self.chatId, cursor: self.cursor, honest: self.cursorHonest,
+                    ledger: self.ledger)
             }
             if !self.unsentLocalUpdates.isEmpty { self.saver?.poke() }
             self.connectIfReady()
@@ -422,6 +427,24 @@ final class SessionStore {
                     self.revision &+= 1
                 }
                 return self.previewProjection.retry(chatId: self.chatId, cursor: self.cursor)
+            },
+            ledgerRebase: { [weak self] state, frontier in
+                guard let self else { return .max }
+                self.ledger.rebase(
+                    checkpointSeq: state.checkpointSize > 0 ? state.checkpointSeq : 0,
+                    frontier: state.checkpointSize > 0 ? RoomLedger.vector(frontier) : [:],
+                    headSeq: state.headSeq)
+                self.saver?.poke()
+                return self.ledger.through
+            },
+            ledgerNote: { [weak self] seq, bytes in
+                guard let self else { return }
+                self.ledger.note(seq: seq, spans: RoomLedger.spans(of: bytes) ?? [:])
+                self.saver?.poke()
+            },
+            heal: { [weak self] queued in
+                guard let self else { return [] }
+                return RoomHeal.batches(doc: self.doc, ledger: self.ledger, queued: queued)
             }
         )
         let client = ChatRoomClient(
@@ -440,19 +463,11 @@ final class SessionStore {
         chatRoom = client
         let unsent = unsentLocalUpdates
         unsentLocalUpdates = []
-        // First contact with the room (cursor 0): everything committed
-        // BEFORE the local-update subscription saw a client — an adopt's
-        // requeued commands, sends queued while offline — is invisible to
-        // the push path, yet every later commit
-        // causally depends on it (doc_host.rs first-contact rule; rows built
-        // on unpushed deps sit in peers' pending-dep buffers forever). Push
-        // the doc's full update log as the join's first batch; once acked
-        // the cursor moves and this never re-arms.
-        if cursor == 0,
-            let all = try? doc.export(mode: .updates(from: VersionVector())), !all.isEmpty
-        {
-            Task { await client.enqueue(update: all) }
-        } else if !unsent.isEmpty {
+        // Commits the push path never saw (made before the subscription: an
+        // adopt's requeued commands, a doc's first ops; or queued in a
+        // process that died before the ack) go up with the catch-up's heal,
+        // ahead of these: the room ledger names everything the room lacks.
+        if !unsent.isEmpty {
             Task {
                 for update in unsent { await client.enqueue(update: update) }
             }

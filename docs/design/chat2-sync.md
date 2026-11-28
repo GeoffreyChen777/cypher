@@ -111,6 +111,23 @@ phone on a slow link needs it to:
   cursor: no import since the last amnesty parked operations (`ImportStatus.pending`).
 - Snapshots and checkpoints import off the main thread, and a catch-up's rows are shown
   at most once a second instead of one projection per row.
+- The push queue is in memory only, so the doc can be saved holding commits the room
+  never got (the app died before their ACK), and every later commit builds on them:
+  readers park those commits for good. A rejected push, or a row the host parked
+  that a checkpoint then deleted, leaves the same gap. A room ledger
+  (`RoomLedger.swift`, saved as `c2_<id>.room`) closes it: it records what the room
+  provably holds, namely the checkpoint frontier from `state` plus the counter ranges of
+  the rows after the checkpoint seq (backfilled, live, or acked pushes). After each
+  catch-up, whatever the doc holds beyond the ledger and the queue goes up first, in
+  pieces under the row cap. The ledger may claim less than the room holds (a duplicate
+  push) but never more. A hello whose checkpoint the ledger hasn't read rows for asks
+  for rows from the ledger's seq, own rows included. This replaces the first-contact
+  full-log push.
+
+The host logs every row it parks (`chat2 sink: row parked until the ops it builds on
+arrive`), naming the ops the row is missing. A parked row imports without error and
+changes nothing, so without this log a chat whose phone sends never land looked
+healthy.
 
 ## M. Doc lineage
 
