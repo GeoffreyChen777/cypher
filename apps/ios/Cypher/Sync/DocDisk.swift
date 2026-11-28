@@ -47,6 +47,21 @@ enum DocDisk {
         snapshot.deletingPathExtension().appendingPathExtension("honest")
     }
 
+    /// `c2_<id>.room` = the chat's RoomLedger as JSON: what the room holds.
+    /// It describes the room, not the snapshot, so the two need no common
+    /// write: a ledger behind its snapshot claims less (a duplicate push),
+    /// and it never claims what the room lacks.
+    static func ledgerURL(for snapshot: URL) -> URL {
+        snapshot.deletingPathExtension().appendingPathExtension("room")
+    }
+
+    /// The saved room ledger; nil when absent or unreadable (the next hello
+    /// rebuilds it from the room).
+    static func loadLedger(id: String) -> RoomLedger? {
+        guard let data = try? Data(contentsOf: ledgerURL(for: chat2URL(for: id))) else { return nil }
+        return try? JSONDecoder().decode(RoomLedger.self, from: data)
+    }
+
     /// Import the chat2 snapshot; returns its cursor and whether the
     /// `.honest` sidecar vouches for it, or nil when absent or unreadable
     /// (caller starts fresh at cursor 0 — the room re-serves).
@@ -83,8 +98,16 @@ enum DocDisk {
     /// `saveChat2` on the writer queue. Read `cursor` before the export runs:
     /// the doc can only gain rows meanwhile, and content ahead of its cursor
     /// costs a re-fetch, never a gap.
-    static func saveChat2Later(doc: LoroDoc, id: String, cursor: UInt64, honest: Bool) {
-        writer.async { saveChat2(doc: doc, id: id, cursor: cursor, honest: honest) }
+    static func saveChat2Later(doc: LoroDoc, id: String, cursor: UInt64, honest: Bool, ledger: RoomLedger? = nil) {
+        writer.async {
+            saveChat2(doc: doc, id: id, cursor: cursor, honest: honest)
+            if let ledger { saveLedger(ledger, id: id) }
+        }
+    }
+
+    static func saveLedger(_ ledger: RoomLedger, id: String) {
+        guard let data = try? JSONEncoder().encode(ledger) else { return }
+        try? data.write(to: ledgerURL(for: chat2URL(for: id)), options: .atomic)
     }
 
     /// Waits out every queued write (backgrounding: the app may be
@@ -120,10 +143,11 @@ enum DocDisk {
                 at: directory,
                 includingPropertiesForKeys: [.contentModificationDateKey])
         else { return }
-        // A snapshot's `.honest` sidecar goes with it, and counts for nothing.
+        // A snapshot's `.honest` and `.room` sidecars go with it, and count
+        // for nothing.
         let sessions = files.filter {
             !$0.lastPathComponent.hasPrefix("ws3_") && !$0.lastPathComponent.hasPrefix("registry1_")
-                && $0.pathExtension != "honest"
+                && $0.pathExtension != "honest" && $0.pathExtension != "room"
         }
         guard sessions.count > keep else { return }
         let sorted = sessions.sorted {
@@ -135,6 +159,7 @@ enum DocDisk {
         }
         for stale in sorted.dropFirst(keep) {
             try? fm.removeItem(at: honestURL(for: stale))
+            try? fm.removeItem(at: ledgerURL(for: stale))
             try? fm.removeItem(at: stale)
         }
     }

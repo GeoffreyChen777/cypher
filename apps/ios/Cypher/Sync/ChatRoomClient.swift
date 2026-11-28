@@ -66,6 +66,16 @@ actor ChatRoomClient {
         var event: @MainActor @Sendable (ChatRoomEvent) -> Void
         var preview: @MainActor @Sendable (Data?) -> [Data] = { _ in [] }
         var previewRetry: @MainActor @Sendable () -> Data? = { nil }
+        /// The room ledger (RoomLedger) learns a hello answer: the state and
+        /// its checkpoint frontier. Returns the seq the ledger needs rows
+        /// after to know the room (`.max`: none).
+        var ledgerRebase: @MainActor @Sendable (ChatStateHeader, Data) -> UInt64 = { _, _ in .max }
+        /// The room holds this row (seq, update bytes): backfilled, live, or
+        /// this device's own push the room acked.
+        var ledgerNote: @MainActor @Sendable (UInt64, Data) -> Void = { _, _ in }
+        /// After a catch-up: batches with what the doc holds and the room
+        /// lacks, beyond the batches still queued (RoomHeal).
+        var heal: @MainActor @Sendable ([Data]) -> [Data] = { _ in [] }
     }
 
     private struct PendingPush {
@@ -195,6 +205,7 @@ actor ChatRoomClient {
                 let seq = (ack["seq"] as? NSNumber)?.uint64Value
             {
                 pending.removeAll { $0.batchId == push.batchId }
+                await delegate.ledgerNote(seq, push.bytes)
                 // A Chat2 ACK is not permission to skip an interleaved row.
                 let cursor = await delegate.cursor()
                 if seq == cursor + 1 {
@@ -259,13 +270,19 @@ actor ChatRoomClient {
         if plannedAfter != after {
             await delegate.setCursor(plannedAfter)
         }
+        // The pull read rows after `after`; the ledger knows the room only
+        // if it needs none before that.
+        let ledgerFrom = await delegate.ledgerRebase(state, stateFrame.payload)
         guard !life.closed else { return }
         pulling = true
         await reportCatchUp()
+        var done = false
         for frame in frames.dropFirst()
         where frame.kind == ChatFrameType.row || frame.kind == ChatFrameType.rowsDone {
             await applyPullFrame(frame)
+            if frame.kind == ChatFrameType.rowsDone { done = true }
         }
+        if done, ledgerFrom >= after { await queueHeal() }
         pulling = false
         await reportCatchUp()
     }
@@ -274,6 +291,7 @@ actor ChatRoomClient {
         switch frame.kind {
         case ChatFrameType.row:
             guard let seq = (frame.header["seq"] as? NSNumber)?.uint64Value else { return }
+            await delegate.ledgerNote(seq, frame.payload)
             let cursor = await delegate.cursor()
             if seq > cursor + 1 {
                 roomLog.warning("chat2 \(self.chatId, privacy: .public): HTTPS row gap (seq=\(seq), cursor=\(cursor))")
@@ -463,6 +481,7 @@ actor ChatRoomClient {
             // racing second socket) — Loro re-import is a no-op; the cursor
             // advance is what matters.
             if backfillProgressAt != nil { backfillProgressAt = life.clock.now() }
+            await delegate.ledgerNote(seq, frame.payload)
             let cursor = await delegate.cursor()
             if seq > cursor + 1 {
                 gapRepair = true
@@ -483,6 +502,9 @@ actor ChatRoomClient {
             roomLog.info("chat2 \(self.chatId, privacy: .public): joined (converged, resumed=\(wasResumed))")
             await reportCatchUp()
             await delegate.event(.connected)
+            // What the doc holds and the room lacks goes first: queued
+            // writes may build on it.
+            await queueHeal()
             // Anything pending (offline writes, reconnect re-pushes) goes
             // now — the server's batchId dedupe makes replays exact no-ops.
             await pushPending()
@@ -492,6 +514,9 @@ actor ChatRoomClient {
             guard let batchId = frame.header["batchId"] as? String,
                 let seq = (frame.header["seq"] as? NSNumber)?.uint64Value
             else { return }
+            if let acked = pending.first(where: { $0.batchId == batchId }) {
+                await delegate.ledgerNote(seq, acked.bytes)
+            }
             pending.removeAll { $0.batchId == batchId }
             let cursor = await delegate.cursor()
             if seq > cursor + 1 {
@@ -579,10 +604,15 @@ actor ChatRoomClient {
         // A contained checkpoint can move the plan upward; amnesty/reset can
         // move it downward. Persist the plan's cursor before requesting rows.
         await delegate.setCursor(after)
+        // The ledger may need rows the doc already has (a checkpoint it
+        // hasn't seen, an upgrade): ask from there, own rows included —
+        // re-imports are no-ops.
+        let ledgerFrom = await delegate.ledgerRebase(state, frame.payload)
+        let from = min(after, ledgerFrom)
         await send(
             ChatWire.encode(
                 ChatFrameType.rowsReq,
-                header: ["after": after, "excludeOwn": resumed]))
+                header: ["after": from, "excludeOwn": resumed && from == after]))
     }
 
     /// Request rows from the last honest cursor after a row/ack gap. The
@@ -648,6 +678,21 @@ actor ChatRoomClient {
     }
 
     // MARK: Outbound
+
+    /// Queue, ahead of everything, what the doc holds and the room lacks: a
+    /// write whose push died with the app, or a row a checkpoint took out
+    /// of the room before its host could apply it. Readers park every later
+    /// write built on such an op until it arrives.
+    private func queueHeal() async {
+        let batches = await delegate.heal(pending.map(\.bytes))
+        guard !batches.isEmpty else { return }
+        let bytes = batches.reduce(0) { $0 + $1.count }
+        roomLog.notice(
+            "chat2 \(self.chatId, privacy: .public): the room lacks ops this device holds; sending them again (\(batches.count) batch(es), \(bytes)B)"
+        )
+        pending.insert(
+            contentsOf: batches.map { PendingPush(batchId: UUID().uuidString.lowercased(), bytes: $0) }, at: 0)
+    }
 
     private func pushPending() async {
         guard life.joined else { return }

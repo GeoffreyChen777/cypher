@@ -128,12 +128,24 @@ impl ChatDocSink for EngineChatSink {
         let Some(doc) = self.doc.upgrade() else {
             return;
         };
-        if let Err(err) = doc.doc().import(bytes) {
+        match doc.doc().import(bytes) {
+            // A row built on ops this doc lacks imports without error and
+            // changes nothing: Loro parks it until they arrive. Silent, it
+            // read as a healthy chat whose commands never ran (a phone's
+            // sends grey forever); say what it waits on.
+            Ok(status) => {
+                if let Some(parked) = parked_row(doc.doc(), bytes, &status) {
+                    tracing::warn!(chat = %self.chat_id, cursor, %parked,
+                        "chat2 sink: row parked until the ops it builds on arrive");
+                }
+            }
             // Malformed remote bytes cost the row, never the doc (the same
             // skip-not-fail rule as transcript reads). The cursor still
             // advances: replaying a poison row forever is the wedge class.
-            tracing::warn!(chat = %self.chat_id, error = %err,
-                "chat2 sink: row import failed; skipping row");
+            Err(err) => {
+                tracing::warn!(chat = %self.chat_id, error = %err,
+                    "chat2 sink: row import failed; skipping row");
+            }
         }
         self.persist_with_cursor(cursor);
     }
@@ -176,6 +188,33 @@ impl ChatDocSink for EngineChatSink {
     fn advance_cursor(&self, cursor: u64) {
         self.persist_with_cursor(cursor);
     }
+}
+
+/// What a row that imported into a parked state waits on, as
+/// `parked peer[start..end) …; missing peer@counter …` (the ops of its
+/// first change it lacks); `None` when the row applied.
+fn parked_row(doc: &loro::LoroDoc, bytes: &[u8], status: &loro::ImportStatus) -> Option<String> {
+    let pending = status.pending.as_ref()?;
+    let mut parked: Vec<String> = pending
+        .iter()
+        .map(|(peer, (start, end))| format!("{peer}[{start}..{end})"))
+        .collect();
+    parked.sort();
+    let have = doc.oplog_vv();
+    let missing: Vec<String> = loro::LoroDoc::decode_import_blob_meta(bytes, false)
+        .map(|meta| {
+            meta.start_frontiers
+                .iter()
+                .filter(|id| !have.includes_id(*id))
+                .map(|id| format!("{}@{}", id.peer, id.counter))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(format!(
+        "parked {}; missing {}",
+        parked.join(" "),
+        missing.join(" ")
+    ))
 }
 
 /// `GET /chat2/{chatId}/checkpoint` with Range resume — the fetcher half of
@@ -455,6 +494,39 @@ mod frontier_tests {
         peer.import(&merged).expect("import");
         assert_eq!(peer.get_text("t").to_string(), "prompt one two three");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_row_built_on_missing_ops_is_named_with_what_it_waits_on() {
+        use loro::ToJson as _;
+        let writer = loro::LoroDoc::new();
+        writer.set_peer_id(7).expect("peer");
+        writer.get_map("m").insert("lost", 1).expect("insert");
+        writer.commit();
+        let lost = writer.oplog_vv();
+        writer.get_map("m").insert("sent", 2).expect("insert");
+        writer.commit();
+        let row = writer
+            .export(loro::ExportMode::updates(&lost))
+            .expect("row");
+
+        let host = loro::LoroDoc::new();
+        let status = host.import(&row).expect("a parked row imports");
+        let parked = parked_row(&host, &row, &status).expect("the row parks");
+        assert_eq!(parked, "parked 7[1..2); missing 7@0");
+
+        let all = writer.export(loro::ExportMode::all_updates()).expect("all");
+        let status = host.import(&all).expect("import");
+        assert_eq!(
+            parked_row(&host, &all, &status),
+            None,
+            "once the lost op arrives, nothing waits"
+        );
+        assert_eq!(
+            host.get_map("m").get_deep_value().to_json_value()["sent"],
+            2,
+            "the parked op applied with it"
+        );
     }
 
     #[test]
